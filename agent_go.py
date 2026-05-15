@@ -10,6 +10,7 @@ agent_go.py — Plan Mode 增强版
 """
 
 import sys, os, subprocess, json, shutil, re, logging, time, threading, shlex
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
@@ -1098,6 +1099,15 @@ def cmd_run():
     issue_ref = ""
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv  # --yes 隐含 headless
+    parallel = 1  # 默认串行
+    if "--parallel" in sys.argv:
+        try:
+            pi = sys.argv.index("--parallel")
+            parallel = max(1, int(sys.argv[pi + 1]))
+            sys.argv.pop(pi + 1)
+            sys.argv.pop(pi)
+        except (IndexError, ValueError):
+            parallel = 3
 
     if auto_yes:
         sys.argv = [a for a in sys.argv if a not in ("--yes", "-y")]
@@ -1121,7 +1131,7 @@ def cmd_run():
             repo_idx = 2 if docs_idx > 2 else 2
 
     if len(sys.argv) < 3:
-        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--yes] [--headless] [--issue <N>]")
+        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--yes] [--headless] [--issue <N>] [--parallel N]")
         sys.exit(1)
 
     repo = Path(sys.argv[repo_idx]).resolve()
@@ -1207,43 +1217,78 @@ def cmd_run():
     }
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # 执行
-    total = len(confirmed)
+    # 执行（支持并发）
+    sub_map = {st["id"]: st for st in confirmed}    # id -> subtask
+    worktree_map = {}  # sub_id -> worktree 路径
+    results_map = {}   # sub_id -> result
+    meta_lock = threading.Lock()
     final_status = "completed"
     degraded_count = 0
-    worktree_map = {}  # sub_id → worktree 路径映射
+    total = len(confirmed)
 
-    for i, st in enumerate(confirmed):
-        # 收集上游 worktree
-        upstream = {}
-        for dep_id in st.get("depends_on", []):
-            if dep_id in worktree_map:
-                upstream[dep_id] = worktree_map[dep_id]
+    if parallel > 1 and total > 1:
+        logger.info(f"[并发] max_workers={parallel}, 拓扑调度")
 
-        result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref)
-        worktree_map[st["id"]] = task_dir / st["id"] / "work"
-        meta["results"].append(result)
-        (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    # 拓扑排序分波次: wave 0 = 无依赖, wave N = 依赖已满足
+    remaining = list(confirmed)
+    wave_num = 0
+    completed_ids = set()
 
-        if i + 1 == total:
-            print(f"\n{'='*60}\n🎉 全部完成 ({i+1}/{total})\n{'='*60}")
+    while remaining:
+        wave = [st for st in remaining
+                if all(dep in completed_ids for dep in st.get("depends_on", []))]
+        if not wave:
+            logger.error("依赖循环或无法满足的依赖！")
             break
 
-        decision = verify_subtask(i+1, total, result["summary"], logger, config)
-        if decision == "abort":
-            final_status = "aborted"
-            break
-        if result.get("status") == "degraded":
-            degraded_count += 1
-        elif decision == "retry":
-            shutil.rmtree(task_dir / st["id"], ignore_errors=True)
-            result = run_subtask(task_id, st, repo, task_dir, logger, headless=headless, issue_ref=issue_ref)
-            meta["results"][-1] = result
-        elif decision == "modify":
-            worktree = task_dir / st["id"] / "work"
-            subprocess.run(["claude", str(worktree)], cwd=str(worktree))
-            diff = subprocess.run(["git", "diff", "--stat"], cwd=str(worktree), capture_output=True, text=True)
-            meta["results"][-1]["summary"] = diff.stdout.strip() or "无文件变更"
+        logger.info(f"[Wave {wave_num}] {', '.join(st['id'] for st in wave)}")
+        actual_workers = min(parallel, len(wave)) if parallel > 1 else 1
+
+        if actual_workers == 1:
+            # 串行执行（单任务或 parallel=1）
+            for st in wave:
+                upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
+                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref)
+                with meta_lock:
+                    worktree_map[st["id"]] = task_dir / st["id"] / "work"
+                    results_map[st["id"]] = result
+                    if result.get("status") == "degraded":
+                        degraded_count += 1
+                    meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
+                    (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                completed_ids.add(st["id"])
+        else:
+            # 并发执行当前 wave
+            with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+                futures = {}
+                for st in wave:
+                    upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
+                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref)
+                    futures[fut] = st
+
+                for fut in as_completed(futures):
+                    st = futures[fut]
+                    try:
+                        result = fut.result()
+                    except Exception as e:
+                        result = {"subtask_id": st["id"], "status": "failed",
+                                  "exit_code": -1, "summary": str(e), "worktree": "",
+                                  "sandbox_type": "headless", "verify_ok": False, "duration_sec": 0}
+                        logger.error(f"并发异常 {st['id']}: {e}")
+                    with meta_lock:
+                        worktree_map[st["id"]] = task_dir / st["id"] / "work"
+                        results_map[st["id"]] = result
+                        if result.get("status") == "degraded":
+                            degraded_count += 1
+                        meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
+                        (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                    completed_ids.add(st["id"])
+
+        # 移除本 wave 已完成的子任务
+        remaining = [st for st in remaining if st["id"] not in completed_ids]
+        wave_num += 1
+
+    print(f"\n{'='*60}\n🎉 全部完成 ({total}/{total})\n{'='*60}")
 
     if final_status == "completed" and degraded_count > 0:
         final_status = "degraded"
@@ -1508,8 +1553,8 @@ def main():
     elif cmd == "clean": cmd_clean()
     elif cmd == "pr": cmd_pr()
     else:
-        print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--yes] [--headless] [--issue <N>]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）
---headless       子任务使用 claude -p 无头执行（Plan 仍可交互编辑）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
+        print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--yes] [--headless] [--issue <N>] [--parallel N]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）
+--headless       子任务使用 claude -p 无头执行（Plan 仍可交互编辑）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--parallel N     最大并发子任务数（默认 1=串行，3=推荐）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
 
 if __name__ == "__main__":
     main()
