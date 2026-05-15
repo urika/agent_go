@@ -431,20 +431,18 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
             print("无效输入")
 
 def plan_to_subtasks(plan, logger):
-    """Plan → 子任务，注入 Agent Prompt 和资源清单。"""
+    """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。"""
     subtasks = []
     shared = plan.get("shared_resources", {})
+    deps = plan.get("dependencies", {})
 
     for step in plan.get("steps", []):
         files = step.get("files", [])
         files_hint = ", ".join(files) if files else "*"
 
-        # 构建完整描述：原始描述 + Agent Prompt + 共享资源
         desc_parts = [step.get("description", "")]
-
         if step.get("agent_prompt"):
             desc_parts.append(f"\n【Agent 执行指令】\n{step['agent_prompt']}")
-
         if shared:
             resource_text = "\n".join([
                 f"Git 远程: {shared.get('git_remote', 'N/A')}" if shared.get('git_remote') else "",
@@ -456,13 +454,16 @@ def plan_to_subtasks(plan, logger):
             resource_text = "\n".join(line for line in resource_text.split("\n") if line)
             if resource_text:
                 desc_parts.append(f"\n【共享资源清单】\n{resource_text}")
-
         if step.get("verification"):
             desc_parts.append(f"\n【验证命令】\n{step['verification']}")
         if step.get("risks"):
             desc_parts.append(f"\n【风险提示】\n{'; '.join(step['risks'])}")
 
         desc = "\n".join(desc_parts)
+
+        step_id = str(step["id"])
+        upstream_ids = deps.get(step_id, [])
+        depends_on = [f"sub-{d}" for d in upstream_ids]
 
         subtasks.append({
             "id": f"sub-{step['id']}",
@@ -471,7 +472,8 @@ def plan_to_subtasks(plan, logger):
             "files_hint": files_hint,
             "agent_prompt": step.get("agent_prompt", ""),
             "verification": step.get("verification", ""),
-            "risks": step.get("risks", [])
+            "risks": step.get("risks", []),
+            "depends_on": depends_on,
         })
 
     log_event(logger, "plan_decomposed", {"count": len(subtasks)})
@@ -610,22 +612,43 @@ def verify_subtask(current, total, summary, logger, config=None):
         elif c in ("A", "ABORT"): return "abort"
         else: print("无效输入")
 
+def _merge_worktree(src, dst):
+    """将上游 worktree 的非 git 文件复制到当前 worktree。"""
+    for item in src.iterdir():
+        if item.name == ".git":
+            continue
+        target = dst / item.name
+        if item.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+
 # ────────────────────────── 核心执行 ──────────────────────────
 
-def run_subtask(task_id, subtask, repo, task_dir, logger):
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None):
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id
     worktree = sub_dir / "work"
     worktree.mkdir(parents=True)
 
     logger.info(f"【执行】{sub_id}: {subtask['title']}")
-    log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"]})
+    log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
+                "depends_on": subtask.get("depends_on", [])})
 
     clone_start = time.time()
     if (repo / ".git").exists():
         subprocess.run(["git", "clone", "--depth", "1", str(repo), str(worktree)], capture_output=True, check=True)
     else:
         shutil.copytree(repo, worktree, dirs_exist_ok=True)
+
+    # 产物传递：将上游 worktree 的代码合并到当前 worktree
+    if upstream_worktrees:
+        for up_id, up_path in upstream_worktrees.items():
+            if up_path.exists():
+                logger.info(f"产物传递: {up_id} → {sub_id}")
+                _merge_worktree(up_path, worktree)
     clone_time = time.time() - clone_start
 
     # 构建 TASK.md：包含完整 Agent Prompt 和资源清单
@@ -779,9 +802,17 @@ def cmd_run():
     # 执行
     total = len(confirmed)
     final_status = "completed"
+    worktree_map = {}  # sub_id → worktree 路径映射
 
     for i, st in enumerate(confirmed):
-        result = run_subtask(task_id, st, repo, task_dir, logger)
+        # 收集上游 worktree
+        upstream = {}
+        for dep_id in st.get("depends_on", []):
+            if dep_id in worktree_map:
+                upstream[dep_id] = worktree_map[dep_id]
+
+        result = run_subtask(task_id, st, repo, task_dir, logger, upstream)
+        worktree_map[st["id"]] = task_dir / st["id"] / "work"
         meta["results"].append(result)
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
