@@ -9,7 +9,7 @@ agent_go.py — Plan Mode 增强版
   4. 支持"默认同意"模式（通过配置或环境变量）
 """
 
-import sys, os, subprocess, json, shutil, re, logging, time, threading, shlex
+import sys, os, subprocess, json, shutil, re, logging, time, threading, shlex, signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -1217,22 +1217,39 @@ def cmd_run():
     }
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # 执行（支持并发）
-    sub_map = {st["id"]: st for st in confirmed}    # id -> subtask
-    worktree_map = {}  # sub_id -> worktree 路径
-    results_map = {}   # sub_id -> result
+    _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta)
+
+def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
+                  worktree_map=None, results_map=None, completed_ids=None):
+    """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。"""
+    worktree_map = worktree_map or {}
+    results_map = results_map or {}
+    completed_ids = completed_ids or set()
+    task_id = meta["task_id"]
     meta_lock = threading.Lock()
-    final_status = "completed"
-    degraded_count = 0
+    degraded_count = sum(1 for r in results_map.values() if r.get("status") == "degraded")
     total = len(confirmed)
 
-    if parallel > 1 and total > 1:
-        logger.info(f"[并发] max_workers={parallel}, 拓扑调度")
+    # 注册中断信号处理
+    def _on_interrupt(signum, frame):
+        meta["status"] = "paused"
+        (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
+        sys.exit(0)
+    prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
+    prev_sigterm = signal.signal(signal.SIGTERM, _on_interrupt)
 
-    # 拓扑排序分波次: wave 0 = 无依赖, wave N = 依赖已满足
-    remaining = list(confirmed)
+    # 跳过已完成的子任务
+    remaining = [st for st in confirmed if st["id"] not in completed_ids]
+    if not remaining:
+        print("所有子任务已完成，无需恢复执行")
+        meta["status"] = "completed" if degraded_count == 0 else "degraded"
+        (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        return
+
     wave_num = 0
-    completed_ids = set()
+    if parallel > 1 and total > 1:
+        logger.info(f"[并发] max_workers={parallel}, 拓扑调度，剩余 {len(remaining)} 个子任务")
 
     while remaining:
         wave = [st for st in remaining
@@ -1245,7 +1262,6 @@ def cmd_run():
         actual_workers = min(parallel, len(wave)) if parallel > 1 else 1
 
         if actual_workers == 1:
-            # 串行执行（单任务或 parallel=1）
             for st in wave:
                 upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
                 result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref)
@@ -1258,14 +1274,12 @@ def cmd_run():
                     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
                 completed_ids.add(st["id"])
         else:
-            # 并发执行当前 wave
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 futures = {}
                 for st in wave:
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
                     fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref)
                     futures[fut] = st
-
                 for fut in as_completed(futures):
                     st = futures[fut]
                     try:
@@ -1284,25 +1298,87 @@ def cmd_run():
                         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
                     completed_ids.add(st["id"])
 
-        # 移除本 wave 已完成的子任务
         remaining = [st for st in remaining if st["id"] not in completed_ids]
         wave_num += 1
 
-    print(f"\n{'='*60}\n🎉 全部完成 ({total}/{total})\n{'='*60}")
+    signal.signal(signal.SIGINT, prev_sigint)
+    signal.signal(signal.SIGTERM, prev_sigterm)
 
-    if final_status == "completed" and degraded_count > 0:
+    final_status = "completed"
+    if degraded_count > 0:
         final_status = "degraded"
     meta["status"] = final_status
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    print(f"\n{'='*60}\n🎉 全部完成 ({len(completed_ids)}/{total})\n{'='*60}")
     print("\n📦 最终报告")
     print("─" * 60)
-    for r in meta["results"]:
-        icon = {"completed": "✅", "degraded": "⚠️", "failed": "❌"}.get(r["status"], "❓")
-        print(f"{icon} {r['subtask_id']}: {r['summary']}")
+    for s in confirmed:
+        r = results_map.get(s["id"])
+        if r:
+            icon = {"completed": "✅", "degraded": "⚠️", "failed": "❌"}.get(r["status"], "❓")
+            print(f"{icon} {r['subtask_id']}: {r['summary']}")
+        else:
+            print(f"⏳ {s['id']}: 未执行")
     print("─" * 60)
     print(f"\n📁 {task_dir}")
     print(f"📝 {task_dir}/execution.log")
+
+def cmd_resume():
+    """恢复被中断的任务。"""
+    if len(sys.argv) < 3:
+        print("Usage: agent_go resume <task-id> [--yes] [--headless] [--parallel N]")
+        sys.exit(1)
+    task_id = sys.argv[2]
+    task_dir = AGENT_GO_DIR / task_id
+    if not task_dir.exists():
+        print(f"任务不存在: {task_id}")
+        sys.exit(1)
+    meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    if meta.get("status") not in ("running", "paused"):
+        print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused 状态可恢复")
+        sys.exit(1)
+
+    confirmed = meta.get("subtasks", [])
+    results = meta.get("results", [])
+    worktree_map = {}
+    results_map = {}
+    completed_ids = set()
+    for r in results:
+        wid = r["subtask_id"]
+        wt = task_dir / wid / "work"
+        if wt.exists():
+            worktree_map[wid] = wt
+        results_map[wid] = r
+        if r.get("status") in ("completed", "degraded"):
+            completed_ids.add(wid)
+
+    repo = Path(meta["repo"])
+    logger = setup_logger(task_id, task_dir)
+    config = load_config()
+
+    auto_yes = "--yes" in sys.argv or "-y" in sys.argv
+    headless = auto_yes or "--headless" in sys.argv
+    parallel = 1
+    if "--parallel" in sys.argv:
+        try:
+            pi = sys.argv.index("--parallel")
+            parallel = max(1, int(sys.argv[pi + 1]))
+        except (IndexError, ValueError):
+            parallel = 3
+    issue_ref = meta.get("issue", "")
+
+    if auto_yes:
+        config["behavior"]["auto_confirm_plan"] = True
+        config["behavior"]["auto_confirm_subtasks"] = True
+
+    logger.info(f"═══ 恢复任务 {task_id} ═══")
+    logger.info(f"已完成: {len(completed_ids)}/{len(confirmed)}, 剩余: {len(confirmed) - len(completed_ids)}")
+    meta["status"] = "running"
+    (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
+                  worktree_map, results_map, completed_ids)
 
 def cmd_list():
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
@@ -1546,6 +1622,7 @@ def cmd_clean():
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     if cmd == "run": cmd_run()
+    elif cmd == "resume": cmd_resume()
     elif cmd == "list": cmd_list()
     elif cmd == "show": cmd_show()
     elif cmd == "status": cmd_status()
