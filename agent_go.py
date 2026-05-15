@@ -235,8 +235,8 @@ def get_resource_map(repo, git_info):
 # ────────────────────────── Plan Mode（含 Agent Prompt & 资源清单） ──────────────────────────
 
 def generate_plan(task, repo, config, logger, supplement="", reference_docs="", iteration=1) -> dict:
-    logger.info("═══ PLAN MODE ═══")
-    logger.info(f" 第 {iteration} 次生成")
+    logger.info("[PLAN] ═══ PLAN MODE ═══")
+    logger.info(f"[PLAN]  第 {iteration} 次生成")
     log_event(logger, "plan_generate", {"iteration": iteration, "has_supplement": bool(supplement), "has_docs": bool(reference_docs)})
 
     project_files = analyze_project(repo)
@@ -671,6 +671,7 @@ def _git_merge_upstream(src_worktree, dst_worktree, tag, logger):
 
 def _run_headless(task_md, worktree, env, logger, sub_id):
     """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。"""
+    PFX = f"[{sub_id}]"
 
     INTERACTION_PATTERNS = [
         r"waiting for input", r"approve\s+(Write|Edit|Bash|Read)",
@@ -706,7 +707,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
             # 交互检测（stderr 文本行）
             if label == "err":
                 lines.append(f"[{ts}] {s[:200]}")
-                logger.info(f"[claude err] {s[:200]}")
+                logger.info(f"{PFX} [claude err] {s[:200]}")
                 for pat in INTERACTION_PATTERNS:
                     if re.search(pat, s, re.IGNORECASE):
                         waiting[0] = True
@@ -719,7 +720,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
             except json.JSONDecodeError:
                 # 非 JSON 输出（如纯文本），直接记录
                 lines.append(f"[{ts}] {s[:200]}")
-                logger.info(f"[claude] {s[:200]}")
+                logger.info(f"{PFX} [claude] {s[:200]}")
                 return
 
             ev_type = event.get("type", "")
@@ -735,7 +736,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
                     if tool_name:
                         current_tool[0] = tool_name
                         tool_input[0] = ""
-                        logger.info(f"[{tool_name}] 开始...")
+                        logger.info(f"{PFX} [{tool_name}] 开始...")
 
                 elif it == "content_block_delta":
                     delta = inner.get("delta", {})
@@ -745,7 +746,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
                         # 只记录非纯空白的文本
                         if text.strip():
                             lines.append(f"[{ts}] {text[:200]}")
-                            logger.info(f"[text] {text[:200]}")
+                            logger.info(f"{PFX} [text] {text[:200]}")
                     elif dt == "input_json_delta":
                         tool_input[0] += delta.get("partial_json", "")
 
@@ -753,7 +754,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
                     if current_tool[0]:
                         ti = tool_input[0]
                         preview = ti[:200] if len(ti) > 200 else ti
-                        logger.info(f"[{current_tool[0]}] 完成 {preview}")
+                        logger.info(f"{PFX} [{current_tool[0]}] 完成 {preview}")
                         current_tool[0] = None
 
             # assistant: 消息批次
@@ -765,14 +766,14 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
                             t = block.get("text", "")
                             if t.strip():
                                 lines.append(f"[{ts}] {t[:200]}")
-                                logger.info(f"[assistant] {t[:200]}")
+                                logger.info(f"{PFX} [assistant] {t[:200]}")
                         elif block.get("type") == "tool_use":
-                            logger.info(f"[tool_use] {block.get('name', '?')}")
+                            logger.info(f"{PFX} [tool_use] {block.get('name', '?')}")
 
             # result: 最终结果
             elif ev_type == "result":
                 subtype = event.get("subtype", "")
-                logger.info(f"[result] {subtype}")
+                logger.info(f"{PFX} [result] {subtype}")
 
             # user: 工具结果
             elif ev_type == "user":
@@ -781,7 +782,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
                         out = block.get("content", "")
                         if isinstance(out, str) and out.strip():
                             preview = out[:200] if len(out) > 200 else out
-                            logger.info(f"[tool_result] {preview}")
+                            logger.info(f"{PFX} [tool_result] {preview}")
 
             else:
                 # 其他事件类型，轻量记录
@@ -808,7 +809,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
                 proc.kill()
                 break
             if idle > HEARTBEAT and idle - idle_logged_at > HEARTBEAT:
-                logger.info(f"claude 等待中... (无事件 {idle:.0f}s, attempt={attempt})")
+                logger.info(f"{PFX} 等待中... (无事件 {idle:.0f}s, attempt={attempt})")
                 idle_logged_at = idle
             time.sleep(2)
 
@@ -824,7 +825,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
     )
     MAX_ATTEMPTS = 2
 
-    logger.info("无头模式: claude -p")
+    logger.info(f"{PFX} 无头模式: claude -p")
     log_event(logger, "subtask_headless_start", {"id": sub_id})
 
     all_lines = []
