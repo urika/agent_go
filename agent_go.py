@@ -9,7 +9,7 @@ agent_go.py — Plan Mode 增强版
   4. 支持"默认同意"模式（通过配置或环境变量）
 """
 
-import sys, os, subprocess, json, shutil, re, logging, time
+import sys, os, subprocess, json, shutil, re, logging, time, threading
 from pathlib import Path
 from datetime import datetime
 
@@ -625,6 +625,81 @@ def _merge_worktree(src, dst):
         else:
             shutil.copy2(item, target)
 
+def _run_headless(task_md, worktree, env, logger, sub_id):
+    """无头模式：claude -p 带实时流式输出和交互检测。"""
+    INTERACTION_PATTERNS = [
+        r"waiting for input",
+        r"approve\s+(Write|Edit|Bash|Read)",
+        r"permission required",
+        r"\[y/n\]",
+        r"press.*to continue",
+    ]
+    HEARTBEAT_INTERVAL = 30   # 每 30s 无输出则发心跳
+    IDLE_TIMEOUT = 300        # 5 分钟无输出则终止
+
+    logger.info("无头模式: claude -p")
+    log_event(logger, "subtask_headless_start", {"id": sub_id})
+
+    proc = subprocess.Popen([
+        "claude", "-p", task_md,
+        "--permission-mode", "bypassPermissions",
+        "--no-session-persistence",
+        "--output-format", "text",
+    ], env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    last_output_at = [time.time()]  # 列表便于跨线程修改
+    output_lines = []
+    interaction_detected = [False]
+
+    def read_stream(stream, label):
+        for line in iter(stream.readline, ''):
+            stripped = line.rstrip()
+            if stripped:
+                ts = datetime.now().strftime("%H:%M:%S")
+                output_lines.append(f"[{ts}] {stripped[:200]}")
+                logger.info(f"[claude {label}] {stripped[:200]}")
+                last_output_at[0] = time.time()
+                # 交互检测
+                for pat in INTERACTION_PATTERNS:
+                    if re.search(pat, stripped, re.IGNORECASE):
+                        interaction_detected[0] = True
+                        logger.error(f"⚠️ 检测到交互请求: {stripped[:200]}")
+                        break
+
+    t_out = threading.Thread(target=read_stream, args=(proc.stdout, "out"), daemon=True)
+    t_err = threading.Thread(target=read_stream, args=(proc.stderr, "err"), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    while proc.poll() is None:
+        idle = time.time() - last_output_at[0]
+        if idle > IDLE_TIMEOUT:
+            logger.error(f"无头模式: claude {idle:.0f}s 无输出，强制终止")
+            proc.kill()
+            break
+        if idle > HEARTBEAT_INTERVAL:
+            logger.info(f"claude 工作中... (无输出 {idle:.0f}s)")
+        time.sleep(5)
+
+    t_out.join(timeout=5)
+    t_err.join(timeout=5)
+    proc.wait()
+
+    if interaction_detected[0]:
+        logger.error(f"无头模式: 子任务 {sub_id} 触发了需要交互的操作，产出可能不完整")
+
+    log_event(logger, "subtask_headless_complete", {
+        "id": sub_id, "exit_code": proc.returncode,
+        "interaction_detected": interaction_detected[0],
+        "output_lines": len(output_lines),
+    })
+
+    return subprocess.CompletedProcess(
+        [], proc.returncode,
+        stdout="\n".join(output_lines),
+        stderr=""
+    )
+
 # ────────────────────────── 核心执行 ──────────────────────────
 
 def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False):
@@ -676,18 +751,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     claude_start = time.time()
 
     if headless:
-        logger.info("无头模式: claude -p")
-        result = subprocess.run([
-            "claude", "-p", task_md,
-            "--permission-mode", "bypassPermissions",
-            "--no-session-persistence",
-            "--output-format", "text",
-        ], env=env, cwd=str(worktree), capture_output=True, text=True, timeout=600)
         sandbox_type = "headless"
-        if result.returncode != 0:
-            logger.warning(f"claude -p exit={result.returncode} stderr={result.stderr[-300:]}")
-        else:
-            logger.info(f"claude -p stdout={result.stdout[-300:]}")
+        result = _run_headless(task_md, worktree, env, logger, sub_id)
     else:
         try:
             result = subprocess.run(["greywall", "--", "claude", str(worktree)], env=env, cwd=str(worktree))
