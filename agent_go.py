@@ -235,7 +235,8 @@ def get_resource_map(repo, git_info):
 # ────────────────────────── Plan Mode（含 Agent Prompt & 资源清单） ──────────────────────────
 
 def generate_plan(task, repo, config, logger, supplement="", reference_docs="", iteration=1) -> dict:
-    logger.info(f"【Plan Mode】第 {iteration} 次生成")
+    logger.info("═══ PLAN MODE ═══")
+    logger.info(f" 第 {iteration} 次生成")
     log_event(logger, "plan_generate", {"iteration": iteration, "has_supplement": bool(supplement), "has_docs": bool(reference_docs)})
 
     project_files = analyze_project(repo)
@@ -870,7 +871,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     worktree = sub_dir / "work"
     worktree.mkdir(parents=True)
 
-    logger.info(f"【执行】{sub_id}: {subtask['title']}")
+    logger.info(f"─── {sub_id} START: {subtask['title']} ───")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
                 "depends_on": subtask.get("depends_on", []), "headless": headless, "issue": issue_ref})
 
@@ -1039,6 +1040,7 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
     logger.info(f"共享上下文已更新: {len(shared_ctx.read_text().splitlines())} 行")
 
     status = "completed" if (result.returncode == 0 and verify_ok) else "failed"
+    logger.info(f"─── {sub_id} DONE: {subtask['title']} [{status}] ───")
     log_event(logger, "subtask_complete", {
         "id": sub_id, "status": status, "sandbox_type": sandbox_type,
         "clone_sec": round(clone_time, 2), "claude_sec": round(claude_time, 2),
