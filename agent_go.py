@@ -669,52 +669,147 @@ def _git_merge_upstream(src_worktree, dst_worktree, tag, logger):
         logger.warning(f"git merge {tag}: {result.stderr[:200]}")
 
 def _run_headless(task_md, worktree, env, logger, sub_id):
-    """无头模式：claude -p 带实时流式输出、交互检测和超时重试。"""
+    """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。"""
+
+    INTERACTION_PATTERNS = [
+        r"waiting for input", r"approve\s+(Write|Edit|Bash|Read)",
+        r"permission required", r"\[y/n\]", r"press.*to continue",
+    ]
+    IDLE_TIMEOUT = 600   # 10 分钟纯静默才 kill（思考阶段无任何事件）
+    HEARTBEAT = 60       # 60s 无事件发心跳
 
     def _run_one(prompt, attempt):
-        """启动 claude -p 并实时跟踪输出。返回 (proc, output_lines, interaction_detected)。"""
+        """启动 claude -p (stream-json) 并实时解析事件。"""
         proc = subprocess.Popen([
             "claude", "-p", prompt,
             "--permission-mode", "bypassPermissions",
             "--no-session-persistence",
-            "--output-format", "text",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
         ], env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         last_ts = [time.time()]
         lines = []
         waiting = [False]
+        current_tool = [None]
+        tool_input = [""]
 
-        def read(stream, label):
-            for line in iter(stream.readline, ''):
-                s = line.rstrip()
-                if s:
-                    ts = datetime.now().strftime("%H:%M:%S")
-                    lines.append(f"[{ts}] {s[:200]}")
-                    logger.info(f"[claude {label}] {s[:200]}")
-                    last_ts[0] = time.time()
-                    for pat in [r"waiting for input", r"approve\s+(Write|Edit|Bash|Read)",
-                                r"permission required", r"\[y/n\]", r"press.*to continue"]:
-                        if re.search(pat, s, re.IGNORECASE):
-                            waiting[0] = True
-                            logger.error(f"⚠️ 检测到交互请求 (attempt={attempt}): {s[:200]}")
-                            break
+        def parse_and_log(raw_line, label):
+            s = raw_line.rstrip()
+            if not s:
+                return
+            ts = datetime.now().strftime("%H:%M:%S")
+            last_ts[0] = time.time()
 
-        t_out = threading.Thread(target=read, args=(proc.stdout, "out"), daemon=True)
-        t_err = threading.Thread(target=read, args=(proc.stderr, "err"), daemon=True)
+            # 交互检测（stderr 文本行）
+            if label == "err":
+                lines.append(f"[{ts}] {s[:200]}")
+                logger.info(f"[claude err] {s[:200]}")
+                for pat in INTERACTION_PATTERNS:
+                    if re.search(pat, s, re.IGNORECASE):
+                        waiting[0] = True
+                        logger.error(f"⚠️ 交互: (attempt={attempt}): {s[:200]}")
+                return
+
+            # 尝试解析 stream-json 事件
+            try:
+                event = json.loads(s)
+            except json.JSONDecodeError:
+                # 非 JSON 输出（如纯文本），直接记录
+                lines.append(f"[{ts}] {s[:200]}")
+                logger.info(f"[claude] {s[:200]}")
+                return
+
+            ev_type = event.get("type", "")
+
+            # stream_event: 流式内容增量
+            if ev_type == "stream_event":
+                inner = event.get("event", {})
+                it = inner.get("type", "")
+
+                if it == "content_block_start":
+                    cb = inner.get("content_block", {})
+                    tool_name = cb.get("name", "")
+                    if tool_name:
+                        current_tool[0] = tool_name
+                        tool_input[0] = ""
+                        logger.info(f"[{tool_name}] 开始...")
+
+                elif it == "content_block_delta":
+                    delta = inner.get("delta", {})
+                    dt = delta.get("type", "")
+                    if dt == "text_delta":
+                        text = delta.get("text", "")
+                        # 只记录非纯空白的文本
+                        if text.strip():
+                            lines.append(f"[{ts}] {text[:200]}")
+                            logger.info(f"[text] {text[:200]}")
+                    elif dt == "input_json_delta":
+                        tool_input[0] += delta.get("partial_json", "")
+
+                elif it == "content_block_stop":
+                    if current_tool[0]:
+                        ti = tool_input[0]
+                        preview = ti[:200] if len(ti) > 200 else ti
+                        logger.info(f"[{current_tool[0]}] 完成 {preview}")
+                        current_tool[0] = None
+
+            # assistant: 消息批次
+            elif ev_type == "assistant":
+                content = event.get("message", {}).get("content", [])
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            t = block.get("text", "")
+                            if t.strip():
+                                lines.append(f"[{ts}] {t[:200]}")
+                                logger.info(f"[assistant] {t[:200]}")
+                        elif block.get("type") == "tool_use":
+                            logger.info(f"[tool_use] {block.get('name', '?')}")
+
+            # result: 最终结果
+            elif ev_type == "result":
+                subtype = event.get("subtype", "")
+                logger.info(f"[result] {subtype}")
+
+            # user: 工具结果
+            elif ev_type == "user":
+                for block in event.get("message", {}).get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        out = block.get("content", "")
+                        if isinstance(out, str) and out.strip():
+                            preview = out[:200] if len(out) > 200 else out
+                            logger.info(f"[tool_result] {preview}")
+
+            else:
+                # 其他事件类型，轻量记录
+                pass
+
+        def read_stdout():
+            for line in iter(proc.stdout.readline, ''):
+                parse_and_log(line, "out")
+
+        def read_stderr():
+            for line in iter(proc.stderr.readline, ''):
+                parse_and_log(line, "err")
+
+        t_out = threading.Thread(target=read_stdout, daemon=True)
+        t_err = threading.Thread(target=read_stderr, daemon=True)
         t_out.start()
         t_err.start()
 
         idle_logged_at = 0
         while proc.poll() is None:
             idle = time.time() - last_ts[0]
-            if idle > 300:
-                logger.error(f"claude {idle:.0f}s 无输出 (attempt={attempt})，强制终止")
+            if idle > IDLE_TIMEOUT:
+                logger.error(f"claude {idle:.0f}s 无事件 (attempt={attempt})，强制终止")
                 proc.kill()
                 break
-            if idle > 30 and idle - idle_logged_at > 30:
-                logger.info(f"claude 工作中... (无输出 {idle:.0f}s, attempt={attempt})")
+            if idle > HEARTBEAT and idle - idle_logged_at > HEARTBEAT:
+                logger.info(f"claude 等待中... (无事件 {idle:.0f}s, attempt={attempt})")
                 idle_logged_at = idle
-            time.sleep(5)
+            time.sleep(2)
 
         t_out.join()
         t_err.join()
