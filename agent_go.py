@@ -58,6 +58,14 @@ DECOMPOSE_RULES = [
     },
 ]
 
+def safe_input(prompt=""):
+    """包装 input()，在非交互模式下返回空字符串（触发默认确认路径）。"""
+    try:
+        return input(prompt)
+    except EOFError:
+        print()
+        return ""
+
 # ────────────────────────── 配置 & 日志 ──────────────────────────
 
 def load_config():
@@ -333,7 +341,7 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
         if auto_confirm and iteration == 1:
             print(f"\n⚡ 默认同意模式已开启（来自配置 behavior.auto_confirm_plan）")
             print(f"   按 Enter 直接确认，或输入任意键进入交互模式...")
-            quick = input("\n> ").strip()
+            quick = safe_input("\n> ").strip()
             if not quick:
                 logger.info("默认同意模式：自动确认 Plan")
                 log_event(logger, "plan_auto_confirmed", {"iteration": iteration})
@@ -349,7 +357,7 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
         print("  [R] 重新生成方案")
         print("  [N] 取消任务")
 
-        choice = input("\n> ").strip().upper()
+        choice = safe_input("\n> ").strip().upper()
         log_event(logger, "user_plan_choice", {"choice": choice, "iteration": iteration, "auto_confirm": auto_confirm})
 
         if choice == "Y" or (choice == "" and auto_confirm):
@@ -363,14 +371,14 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
             logger.info("用户请求重新生成")
             return None, reference_doc_paths
         elif choice == "E":
-            idx_str = input(f"编辑第几个步骤 (1-{len(plan['steps'])}): ").strip()
+            idx_str = safe_input(f"编辑第几个步骤 (1-{len(plan['steps'])}): ").strip()
             if idx_str.isdigit() and 1 <= int(idx_str) <= len(plan["steps"]):
                 idx = int(idx_str) - 1
                 step = plan["steps"][idx]
-                new_title = input(f"  标题 [{step['title']}]: ").strip()
-                new_desc = input(f"  描述 [{step['description']}]: ").strip()
-                new_files = input(f"  文件 [{', '.join(step.get('files',[]))}]: ").strip()
-                new_prompt = input(f"  Agent Prompt [{step.get('agent_prompt','')[:50]}...]: ").strip()
+                new_title = safe_input(f"  标题 [{step['title']}]: ").strip()
+                new_desc = safe_input(f"  描述 [{step['description']}]: ").strip()
+                new_files = safe_input(f"  文件 [{', '.join(step.get('files',[]))}]: ").strip()
+                new_prompt = safe_input(f"  Agent Prompt [{step.get('agent_prompt','')[:50]}...]: ").strip()
                 if new_title: step["title"] = new_title
                 if new_desc: step["description"] = new_desc
                 if new_files: step["files"] = [f.strip() for f in new_files.split(",")]
@@ -380,7 +388,7 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
             print("\n✏️  请输入补充内容（支持多行，空行结束）：")
             lines = []
             while True:
-                line = input()
+                line = safe_input()
                 if line.strip() == "" and lines and lines[-1].strip() == "":
                     break
                 lines.append(line)
@@ -400,7 +408,7 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
                 print(f"⚠️ 失败: {e}")
         elif choice == "D":
             print("\n📎 输入参考文档路径（多个逗号分隔，目录自动读 .md）：")
-            doc_input = input("\n> ").strip()
+            doc_input = safe_input("\n> ").strip()
             if not doc_input:
                 continue
             new_paths = [p.strip() for p in doc_input.split(",")]
@@ -536,7 +544,7 @@ def confirm_subtasks(subtasks, config, logger):
     if auto_confirm:
         print(f"\n⚡ 默认同意模式已开启（behavior.auto_confirm_subtasks）")
         print(f"   按 Enter 直接执行，或输入任意键进入交互...")
-        quick = input("\n> ").strip()
+        quick = safe_input("\n> ").strip()
         if not quick:
             logger.info("默认同意模式：自动确认子任务")
             log_event(logger, "subtasks_auto_confirmed", {"count": len(subtasks)})
@@ -552,35 +560,35 @@ def confirm_subtasks(subtasks, config, logger):
 
     edit_history = []
     while True:
-        choice = input("\n> ").strip().upper()
+        choice = safe_input("\n> ").strip().upper()
         log_event(logger, "user_subtask_choice", {"choice": choice})
         if choice == "Y":
             return subtasks
         elif choice == "N":
             sys.exit(0)
         elif choice == "E":
-            idx_str = input(f"编辑第几个 (1-{len(subtasks)}): ").strip()
+            idx_str = safe_input(f"编辑第几个 (1-{len(subtasks)}): ").strip()
             if idx_str.isdigit() and 1 <= int(idx_str) <= len(subtasks):
                 idx = int(idx_str) - 1
                 st = subtasks[idx]
-                t = input(f"标题 [{st['title']}]: ").strip()
-                d = input(f"描述 [{st['description'][:100]}...]: ").strip()
-                f = input(f"文件 [{st.get('files_hint','')}]: ").strip()
-                p = input(f"Agent Prompt [{st.get('agent_prompt','')[:50]}...]: ").strip()
+                t = safe_input(f"标题 [{st['title']}]: ").strip()
+                d = safe_input(f"描述 [{st['description'][:100]}...]: ").strip()
+                f = safe_input(f"文件 [{st.get('files_hint','')}]: ").strip()
+                p = safe_input(f"Agent Prompt [{st.get('agent_prompt','')[:50]}...]: ").strip()
                 if t: st["title"] = t
                 if d: st["description"] = d
                 if f: st["files_hint"] = f
                 if p: st["agent_prompt"] = p
             print_subtasks(subtasks, config)
         elif choice == "A":
-            title = input("新标题: ").strip()
-            desc = input("描述: ").strip()
-            files = input("文件: ").strip()
-            prompt = input("Agent Prompt: ").strip()
+            title = safe_input("新标题: ").strip()
+            desc = safe_input("描述: ").strip()
+            files = safe_input("文件: ").strip()
+            prompt = safe_input("Agent Prompt: ").strip()
             subtasks.append({"id": f"sub-{len(subtasks)+1}", "title": title, "description": desc, "files_hint": files, "agent_prompt": prompt})
             print_subtasks(subtasks, config)
         elif choice == "D":
-            idx_str = input(f"删除第几个 (1-{len(subtasks)}): ").strip()
+            idx_str = safe_input(f"删除第几个 (1-{len(subtasks)}): ").strip()
             if idx_str.isdigit() and 1 <= int(idx_str) <= len(subtasks):
                 del subtasks[int(idx_str)-1]
                 for i, st in enumerate(subtasks):
@@ -589,13 +597,14 @@ def confirm_subtasks(subtasks, config, logger):
         else:
             print("无效输入")
 
-def verify_subtask(current, total, summary, logger):
+def verify_subtask(current, total, summary, logger, config=None):
     print(f"\n{'='*60}\n✅ {current}/{total} 完成\n{'='*60}")
     print(f"📊 {summary}\n[C]继续 [R]重试 [M]修改 [A]中止")
+    auto_verify = config.get("behavior", {}).get("auto_confirm_plan", False) if config else False
     while True:
-        c = input("\n> ").strip().upper()
+        c = safe_input("\n> ").strip().upper()
         log_event(logger, "user_verify", {"current": current, "choice": c})
-        if c in ("C", "CONTINUE"): return "next"
+        if c in ("C", "CONTINUE") or (c == "" and auto_verify): return "next"
         elif c in ("R", "RETRY"): return "retry"
         elif c in ("M", "MODIFY"): return "modify"
         elif c in ("A", "ABORT"): return "abort"
@@ -716,6 +725,7 @@ def cmd_run():
     plan = None
     max_iter = config.get("behavior", {}).get("max_plan_iterations", 5)
     iteration = 1
+    last_error = None
 
     for attempt in range(3):
         try:
@@ -723,12 +733,11 @@ def cmd_run():
             plan["_original_task"] = task
             break
         except Exception as e:
+            last_error = e
             logger.error(f"Plan 失败 (尝试 {attempt+1}): {e}")
-            if attempt == 2:
-                print(f"\n⚠️ Plan Mode 失败: {e}")
-                subtasks = decompose_fallback(task, repo, config, logger)
-                break
-    else:
+
+    if plan is not None:
+        # API 成功 → Plan 确认流程
         confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration=1)
         while confirmed_plan is None and iteration < max_iter:
             iteration += 1
@@ -742,6 +751,10 @@ def cmd_run():
 
         subtasks = plan_to_subtasks(confirmed_plan, logger)
         doc_paths = final_doc_paths
+    else:
+        # 降级拆解
+        print(f"\n⚠️ Plan Mode 失败: {last_error}")
+        subtasks = decompose_fallback(task, repo, config, logger)
 
     # 子任务确认
     confirmed = confirm_subtasks(subtasks, config, logger)
@@ -767,7 +780,7 @@ def cmd_run():
             print(f"\n{'='*60}\n🎉 全部完成 ({i+1}/{total})\n{'='*60}")
             break
 
-        decision = verify_subtask(i+1, total, result["summary"], logger)
+        decision = verify_subtask(i+1, total, result["summary"], logger, config)
         if decision == "abort":
             final_status = "aborted"
             break
@@ -848,7 +861,7 @@ def cmd_clean():
     print(f"将清理 {len(tasks)} 个任务目录:")
     for t in tasks:
         print(f"  {t.name}")
-    confirm = input("\n确认删除? [y/N]: ").strip().lower()
+    confirm = safe_input("\n确认删除? [y/N]: ").strip().lower()
     if confirm == "y":
         for t in tasks:
             _shutil.rmtree(t, ignore_errors=True)
