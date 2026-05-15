@@ -282,6 +282,38 @@ def generate_plan(task, repo, config, logger, supplement="", reference_docs="", 
     log_event(logger, "plan_complete", {"iteration": iteration, "step_count": len(plan.get("steps", []))})
     return plan
 
+def plan_to_md(plan):
+    """将 Plan 转为 Markdown 文档。"""
+    lines = [
+        f"# 执行方案\n",
+        f"## 概述\n{plan.get('overview', 'N/A')}\n",
+        f"## 预估工作量\n{plan.get('estimated_effort', 'N/A')}\n",
+        f"## 共享资源清单\n",
+    ]
+    sr = plan.get("shared_resources", {})
+    if sr.get("git_remote"): lines.append(f"- Git 远程: {sr['git_remote']}")
+    if sr.get("git_branch"): lines.append(f"- 当前分支: {sr['git_branch']}")
+    if sr.get("directories"): lines.append(f"- 关键目录: {', '.join(sr['directories'])}")
+    if sr.get("config_files"): lines.append(f"- 配置文件: {', '.join(sr['config_files'])}")
+    if sr.get("env_vars"): lines.append(f"- 环境变量: {', '.join(sr['env_vars'])}")
+    lines.append(f"\n## 执行步骤 ({len(plan.get('steps', []))} 步)\n")
+    for step in plan.get("steps", []):
+        lines.append(f"### [{step['id']}] {step['title']}\n")
+        lines.append(f"{step.get('description', '')}\n")
+        if step.get("files"):
+            lines.append(f"- 文件: {', '.join(step['files'])}")
+        if step.get("verification"):
+            lines.append(f"- 验证: `{step['verification']}`")
+        if step.get("risks"):
+            lines.append(f"- 风险: {'; '.join(step['risks'])}")
+        lines.append("")
+    deps = plan.get("dependencies", {})
+    if deps:
+        lines.append("## 依赖关系\n")
+        for sid, prereqs in deps.items():
+            lines.append(f"- 步骤 {sid} 依赖: {prereqs}")
+    return "\n".join(lines)
+
 def print_plan(plan, config):
     """展示 Plan，包含 Agent Prompt 和资源清单。"""
     behavior = config.get("behavior", {})
@@ -1152,6 +1184,9 @@ def cmd_run():
 
         subtasks = plan_to_subtasks(confirmed_plan, logger)
         doc_paths = final_doc_paths
+        # 保存 Plan 文档
+        (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
+        logger.info("[PLAN] PLAN.md 已保存")
     else:
         # 降级拆解
         print(f"\n⚠️ Plan Mode 失败: {last_error}")
@@ -1346,11 +1381,24 @@ def cmd_status():
             return None
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         status = meta.get("status", "unknown")
+        zombie = False
+        log_path = task_dir / "execution.log"
+        ZOMBIE_TIMEOUT = 600  # 10 分钟无日志输出视为僵尸任务
+
+        # 僵尸检测：status=running 但日志已超过 ZOMBIE_TIMEOUT 未更新
+        if status == "running" and log_path.exists():
+            log_mtime = log_path.stat().st_mtime
+            if time.time() - log_mtime > ZOMBIE_TIMEOUT:
+                zombie = True
+                meta["status"] = "failed"
+                meta["_zombie_note"] = f"进程异常退出，日志于 {datetime.fromtimestamp(log_mtime).strftime('%H:%M:%S')} 停止更新"
+                meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                status = "failed"
+
         results = meta.get("results", [])
         completed = sum(1 for r in results if r.get("status") == "completed")
         total = len(meta.get("subtasks", []))
         current = ""
-        log_path = task_dir / "execution.log"
         if results and status == "running":
             last = results[-1]
             current = f"{last.get('subtask_id', '?')}: {last.get('summary', '?')[:40]}"
