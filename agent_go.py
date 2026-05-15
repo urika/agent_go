@@ -679,7 +679,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         logger.info("无头模式: claude -p")
         result = subprocess.run([
             "claude", "-p", task_md,
-            "--permission-mode", "acceptEdits",
+            "--permission-mode", "bypassPermissions",
             "--no-session-persistence",
             "--output-format", "text",
         ], env=env, cwd=str(worktree), capture_output=True, text=True, timeout=600)
