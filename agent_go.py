@@ -627,7 +627,7 @@ def _merge_worktree(src, dst):
 
 # ────────────────────────── 核心执行 ──────────────────────────
 
-def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None):
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False):
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id
     worktree = sub_dir / "work"
@@ -635,7 +635,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     logger.info(f"【执行】{sub_id}: {subtask['title']}")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
-                "depends_on": subtask.get("depends_on", [])})
+                "depends_on": subtask.get("depends_on", []), "headless": headless})
 
     clone_start = time.time()
     if (repo / ".git").exists():
@@ -653,17 +653,17 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     # 构建 TASK.md：包含完整 Agent Prompt 和资源清单
     task_md_parts = [f"# 子任务: {subtask['title']}", "", f"## 描述\n{subtask['description']}"]
-
     if subtask.get("agent_prompt"):
         task_md_parts.extend(["", "## 执行指令（Agent Prompt）", subtask["agent_prompt"]])
-
-    task_md_parts.extend([
+    exec_requirements = [
         "",
         "## 执行要求",
         "- 在此隔离 worktree 中完成修改",
-        "- 完成后退出 Claude Code（/exit 或 Ctrl+D）",
-        "- 变更保留在此目录"
-    ])
+        "- 变更保留在此目录",
+    ]
+    if not headless:
+        exec_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
+    task_md_parts.extend(exec_requirements)
 
     # 将 Agent Prompt 中的源项目路径替换为 worktree 路径，确保隔离
     task_md = "\n".join(task_md_parts).replace(str(repo), str(worktree))
@@ -674,13 +674,28 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree)})
 
     claude_start = time.time()
-    try:
-        result = subprocess.run(["greywall", "--", "claude", str(worktree)], env=env, cwd=str(worktree))
-        sandbox_type = "greywall"
-    except FileNotFoundError:
-        print("   ⚠️ Greywall 未安装，降级原生")
-        result = subprocess.run(["claude", str(worktree)], env=env, cwd=str(worktree))
-        sandbox_type = "native"
+
+    if headless:
+        logger.info("无头模式: claude -p")
+        result = subprocess.run([
+            "claude", "-p", task_md,
+            "--permission-mode", "acceptEdits",
+            "--no-session-persistence",
+            "--output-format", "text",
+        ], env=env, cwd=str(worktree), capture_output=True, text=True, timeout=600)
+        sandbox_type = "headless"
+        if result.returncode != 0:
+            logger.warning(f"claude -p exit={result.returncode} stderr={result.stderr[-300:]}")
+        else:
+            logger.info(f"claude -p stdout={result.stdout[-300:]}")
+    else:
+        try:
+            result = subprocess.run(["greywall", "--", "claude", str(worktree)], env=env, cwd=str(worktree))
+            sandbox_type = "greywall"
+        except FileNotFoundError:
+            print("   ⚠️ Greywall 未安装，降级原生")
+            result = subprocess.run(["claude", str(worktree)], env=env, cwd=str(worktree))
+            sandbox_type = "native"
 
     claude_time = time.time() - claude_start
     diff = subprocess.run(["git", "diff", "--stat"], cwd=str(worktree), capture_output=True, text=True)
@@ -811,7 +826,7 @@ def cmd_run():
             if dep_id in worktree_map:
                 upstream[dep_id] = worktree_map[dep_id]
 
-        result = run_subtask(task_id, st, repo, task_dir, logger, upstream)
+        result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=auto_yes)
         worktree_map[st["id"]] = task_dir / st["id"] / "work"
         meta["results"].append(result)
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -826,7 +841,7 @@ def cmd_run():
             break
         elif decision == "retry":
             shutil.rmtree(task_dir / st["id"], ignore_errors=True)
-            result = run_subtask(task_id, st, repo, task_dir, logger)
+            result = run_subtask(task_id, st, repo, task_dir, logger, headless=auto_yes)
             meta["results"][-1] = result
         elif decision == "modify":
             worktree = task_dir / st["id"] / "work"
