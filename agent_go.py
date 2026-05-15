@@ -242,7 +242,7 @@ def generate_plan(task, repo, config, logger, supplement="", reference_docs="", 
     git_info = get_git_info(repo)
     resource_map = get_resource_map(repo, git_info)
 
-    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "完成后如何验证",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行"""
+    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行"""
 
     user_content = f"""任务：{task}\n项目路径：{repo}\nGit 信息：远程={git_info['remote']}, 分支={git_info['branch']}, 提交={git_info['commit']}\n项目文件列表：\n{project_files}\n项目资源：\n- 目录：{', '.join(resource_map['directories'])}\n- 关键文件：{', '.join(resource_map['key_files'])}"""
 
@@ -877,9 +877,15 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     verify_ok = True
     if verification and has_changes:
         logger.info(f"执行验证: {verification}")
-        vr = subprocess.run(shlex.split(verification), cwd=str(worktree),
-                            capture_output=True, text=True, timeout=120)
-        if vr.returncode != 0:
+        try:
+            vr = subprocess.run(shlex.split(verification), cwd=str(worktree),
+                                capture_output=True, text=True, timeout=120)
+        except (FileNotFoundError, OSError):
+            # shlex 解析失败时（如中文描述），尝试 shell=True 或跳过
+            logger.info(f"验证命令非可执行文件，尝试 shell 模式")
+            vr = subprocess.run(verification, shell=True, cwd=str(worktree),
+                                capture_output=True, text=True, timeout=120)
+        if vr.returncode != 0 and vr.returncode != 127:  # 127 = command not found
             logger.warning(f"验证失败 (rc={vr.returncode}): {vr.stderr[-300:]}")
             if headless:
                 logger.info("自动重试: 注入修复指令")
@@ -898,8 +904,12 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
                 subprocess.run(["git", "tag", "-f", sub_id], cwd=str(worktree),
                                capture_output=True)
                 # 重新验证
-                vr2 = subprocess.run(shlex.split(verification), cwd=str(worktree),
-                                     capture_output=True, text=True, timeout=120)
+                try:
+                    vr2 = subprocess.run(shlex.split(verification), cwd=str(worktree),
+                                         capture_output=True, text=True, timeout=120)
+                except (FileNotFoundError, OSError):
+                    vr2 = subprocess.run(verification, shell=True, cwd=str(worktree),
+                                         capture_output=True, text=True, timeout=120)
                 verify_ok = vr2.returncode == 0
                 logger.info(f"重试验证: {'通过' if verify_ok else '仍失败'}")
                 # 更新 diff
