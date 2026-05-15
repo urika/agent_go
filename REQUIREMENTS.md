@@ -49,11 +49,11 @@ Plan Mode (DeepSeek API) → Plan 确认 → 子任务拆解 →
 
 | # | 需求 | 状态 | 说明 |
 |---|------|------|------|
-| 13 | **--issue 参数**：关联 GitHub Issue 编号 | 📋 | commit 追加 "Fixes #N"，TASK.md 注入引用 |
-| 14 | **分支命名规范**：worktree 使用 feature/fix 前缀 | 📋 | `feature/{issue}-{slug}` |
-| 15 | **Conventional Commits**：feat/fix/refactor 前缀 | 📋 | 自动格式化 commit message |
-| 16 | **agent_go pr 命令**：生成 PR 描述 + gh pr create | 📋 | 读取 meta.json + git log 渲染模板 |
-| 17 | **PR 模板自动填充**：变更摘要、关联Issue、测试结果 | 📋 | 基于 SHARED_CONTEXT.md |
+| 13 | **--issue 参数**：关联 GitHub Issue 编号 | ✅ `948ec95` | commit 追加 "Refs: #N"，meta.json 记录 issue |
+| 14 | **分支命名规范**：worktree 使用 feature/fix 前缀 | ✅ `948ec95` | `feature/{issue}-{slug}` 或 `agent_go/{task_id}/{sub_id}` |
+| 15 | **Conventional Commits**：feat/fix/refactor 前缀 | ✅ `948ec95` | `_format_commit()` 自动前缀 + Issue 尾部引用 |
+| 16 | **agent_go pr 命令**：生成 PR 描述 + gh pr create | ✅ `948ec95` | `cmd_pr()` 在线/离线双模式 |
+| 17 | **PR 模板自动填充**：变更摘要、关联Issue、测试结果 | ✅ `948ec95` | 基于 meta.json + SHARED_CONTEXT.md |
 | 18 | 中断恢复：任务重启后跳过已完成子任务 | 📋 | 读取 meta.json 恢复状态 |
 | 19 | 验证命令数组支持：多个串行检查步骤 | 📋 | `["go vet", "go test ./...", "golangci-lint"]` |
 
