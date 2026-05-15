@@ -15,6 +15,9 @@ No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `j
 export AGENT_GO_API_KEY="sk-ant-..."
 python3 agent_go.py run <repo-path> '<task-description>'
 
+# Skip all confirmations, run headless
+python3 agent_go.py run <repo-path> '<task>' --yes
+
 # Run with reference documents pre-loaded
 python3 agent_go.py run <repo-path> '<task>' --docs "README.md,docs/spec.md"
 

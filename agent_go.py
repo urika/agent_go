@@ -678,17 +678,20 @@ def cmd_run():
     repo_idx = 2
     task_idx = 3
     doc_paths = []
+    auto_yes = "--yes" in sys.argv or "-y" in sys.argv
+
+    if auto_yes:
+        sys.argv = [a for a in sys.argv if a not in ("--yes", "-y")]
 
     if "--docs" in sys.argv:
         docs_idx = sys.argv.index("--docs")
         if docs_idx + 1 < len(sys.argv):
             doc_paths = [p.strip() for p in sys.argv[docs_idx + 1].split(",")]
-        # 调整 repo/task 索引（如果 --docs 在前面）
         if docs_idx < repo_idx:
             repo_idx = 2 if docs_idx > 2 else 2
 
     if len(sys.argv) < 3:
-        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>]")
+        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--yes]")
         sys.exit(1)
 
     repo = Path(sys.argv[repo_idx]).resolve()
@@ -699,6 +702,10 @@ def cmd_run():
         sys.exit(1)
 
     config = load_config()
+
+    if auto_yes:
+        config["behavior"]["auto_confirm_plan"] = True
+        config["behavior"]["auto_confirm_subtasks"] = True
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     task_id = f"task-{ts}"
@@ -877,7 +884,7 @@ def main():
     elif cmd == "config": cmd_config()
     elif cmd == "clean": cmd_clean()
     else:
-        print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <doc1,doc2>]\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false      # true = Plan 自动确认\nbehavior.auto_confirm_subtasks: false   # true = 子任务自动确认\nbehavior.show_agent_prompt: true        # 展示 Agent Prompt\nbehavior.show_resource_map: true         # 展示共享资源清单\n环境变量:\nAGENT_GO_API_KEY=<key>       # API 密钥\nAGENT_GO_INTERACTIVE=1       # 强制交互模式（覆盖默认同意）\nExamples:\n# 基础使用\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/projects/my-app "将JWT从HS256改为RS256"\n# 带参考文档\nagent_go run ~/projects/my-app "重构认证模块" \\n--docs "README.md,docs/auth-spec.md"\n# 启用默认同意模式（非交互）\n# 编辑 config.json: behavior.auto_confirm_plan = true\n""")
+        print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <doc1,doc2>] [--yes]\n选项:\n--yes, -y        跳过所有确认，直接执行（Plan → SubTask → Verify 全自动）\n--docs <paths>    挂载参考文档（逗号分隔，支持文件和目录）\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false      # true = Plan 自动确认\nbehavior.auto_confirm_subtasks: false   # true = 子任务自动确认\nbehavior.show_agent_prompt: true        # 展示 Agent Prompt\nbehavior.show_resource_map: true         # 展示共享资源清单\n环境变量:\nAGENT_GO_API_KEY=<key>       # API 密钥\nAGENT_GO_INTERACTIVE=1       # 强制交互模式（覆盖 --yes）\nExamples:\n# 基础使用\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/projects/my-app "将JWT从HS256改为RS256"\n# 带参考文档 + 自动确认\nagent_go run ~/projects/my-app "重构认证模块" \\n--docs "README.md,docs/auth-spec.md" --yes\n# 带参考文档\nagent_go run ~/projects/my-app "重构认证模块" \\n--docs "README.md,docs/auth-spec.md"\n""")
 
 if __name__ == "__main__":
     main()

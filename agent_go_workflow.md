@@ -327,7 +327,25 @@ agent_go run ~/projects/my-app "重构认证模块"     --docs "README.md,docs/a
 
 ---
 
-## 四、默认同意模式（非交互批量执行）
+## 四、一键自动执行（--yes 标志）
+
+无需修改配置文件，命令行直接跳过所有交互确认：
+
+```bash
+AGENT_GO_API_KEY="sk-ant-..." agent_go run ~/projects/my-app "重构认证模块" --yes
+```
+
+**效果：** Plan 确认 → 子任务确认 → 进展验证全部自动通过，适合 CI/CD 或已审阅 Plan 的场景。
+
+**如需在中途强制进入交互模式：**
+
+```bash
+AGENT_GO_INTERACTIVE=1 agent_go run ~/projects/my-app "任务" --yes
+```
+
+环境变量 `AGENT_GO_INTERACTIVE=1` 优先级最高，会覆盖 `--yes`。
+
+### 配置文件方式（持久化）
 
 编辑配置文件启用：
 
@@ -507,6 +525,7 @@ AGENT_GO_INTERACTIVE=1 agent_go run ~/projects/my-app "任务"
 | 命令 | 作用 |
 |------|------|
 | `agent_go run <path> "<task>"` | 创建任务 → Plan Mode → 确认 → 执行 |
+| `agent_go run <path> "<task>" --yes` | 跳过所有确认，直接执行 |
 | `agent_go run <path> "<task>" --docs "a.md,b.md"` | 带参考文档启动 |
 | `agent_go list` | 查看所有任务摘要 |
 | `agent_go show <task-id>` | 查看任务详情和子任务进展 |
