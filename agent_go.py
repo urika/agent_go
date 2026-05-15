@@ -910,8 +910,10 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 "depends_on": subtask.get("depends_on", []), "headless": headless, "issue": issue_ref})
 
     clone_start = time.time()
-    if (repo / ".git").exists():
-        # 分支命名: feature/{issue}-{slug} 或 agent_go/{task_id}
+    if (worktree / ".git").exists():
+        # 恢复模式：worktree 已存在，跳过 clone
+        logger.info(f"worktree 已存在，跳过 clone")
+    elif (repo / ".git").exists():
         branch = f"feature/{issue_ref}-{_slugify(subtask['title'])}" if issue_ref else f"agent_go/{task_id}/{sub_id}"
         subprocess.run(["git", "clone", str(repo), str(worktree)], capture_output=True, check=True)
         subprocess.run(["git", "checkout", "-b", branch], cwd=str(worktree), capture_output=True)
