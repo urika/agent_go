@@ -67,3 +67,36 @@ cmd_run()
 - **Reference docs**: Injected into the Plan API prompt. Single file max 15000 chars, directory `.md` files max 8000 chars each. Plan iteration capped at `max_plan_iterations` (default 5).
 - **Logging**: Dual-format — INFO level human-readable lines + DEBUG level JSON events (key: `api_call`, `plan_generate`, `plan_complete`, `subtask_start`, `subtask_complete`, `user_plan_choice`, `user_verify`, etc.).
 - **Sandbox**: Prefers `greywall` wrapper, falls back to native `claude` if not installed.
+
+## Configuration Reference
+
+Config file: `~/.agent_go/config.json` (auto-created on first run). See `config.example.json` for a clean template. Env vars override config.
+
+### plan_api
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `provider` | `anthropic` | `anthropic` / `openai` / `deepseek` / `custom` |
+| `base_url` | (per provider) | API endpoint |
+| `api_key` | `""` | Leave empty; set `AGENT_GO_API_KEY` env var instead |
+| `model` | `claude-sonnet-4-20250514` | DeepSeek: `deepseek-chat`, OpenAI: `gpt-4o` |
+| `max_tokens` | `4096` | Response token limit |
+| `temperature` | `0.2` | Lower = more deterministic |
+
+### behavior
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `auto_confirm_plan` | `false` | Auto-confirm plan (skip Y/S/D/E/R/N prompt) |
+| `auto_confirm_subtasks` | `false` | Auto-confirm subtask list |
+| `show_agent_prompt` | `true` | Show agent prompt preview |
+| `show_resource_map` | `true` | Show shared resource map |
+| `max_plan_iterations` | `5` | Max plan regeneration iterations |
+
+### headless
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `idle_timeout` | `300` | Kill claude after N seconds of no output |
+| `max_retries` | `2` | Max retries on timeout |
+| `heartbeat_interval` | `30` | Log heartbeat when idle for N seconds |

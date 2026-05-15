@@ -1,0 +1,27 @@
+{
+  "plan_api": {
+    "provider": "anthropic",
+    "base_url": "https://api.anthropic.com/v1/messages",
+    "api_key": "",
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 4096,
+    "temperature": 0.2
+  },
+  "behavior": {
+    "auto_confirm_plan": false,
+    "auto_confirm_subtasks": false,
+    "show_agent_prompt": true,
+    "show_resource_map": true,
+    "max_plan_iterations": 5
+  },
+  "fallback": {
+    "local_model_url": "http://localhost:8000/v1/chat/completions",
+    "local_model_name": "qwen",
+    "enable_rules": true
+  },
+  "headless": {
+    "idle_timeout": 300,
+    "max_retries": 2,
+    "heartbeat_interval": 30
+  }
+}
