@@ -903,7 +903,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id
     worktree = sub_dir / "work"
-    worktree.mkdir(parents=True)
+    worktree.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"─── {sub_id} START: {subtask['title']} ───")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
