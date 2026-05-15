@@ -612,6 +612,20 @@ def verify_subtask(current, total, summary, logger, config=None):
         elif c in ("A", "ABORT"): return "abort"
         else: print("无效输入")
 
+def _slugify(text, max_len=30):
+    """将任务标题转为分支名适用的短标识。"""
+    slug = re.sub(r'[^a-zA-Z0-9一-鿿]+', '-', text).strip('-')
+    return slug[:max_len] if len(slug) > max_len else slug
+
+def _format_commit(title, issue_ref="", sub_id=""):
+    """生成 Conventional Commits 格式的提交消息。"""
+    prefix = "feat" if "实现" in title or "新增" in title else "chore"
+    msg = f"{prefix}: {title}"
+    if issue_ref:
+        msg += f"\n\nRefs: #{issue_ref}"
+    msg += f"\n\nagent_go: {sub_id}"
+    return msg
+
 def _git_merge_upstream(src_worktree, dst_worktree, tag, logger):
     """通过 git fetch + merge 将上游 worktree 的代码传递到当前 worktree。"""
     remote_name = f"upstream-{tag}"
@@ -732,7 +746,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
 
 # ────────────────────────── 核心执行 ──────────────────────────
 
-def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False):
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref=""):
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id
     worktree = sub_dir / "work"
@@ -740,11 +754,15 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     logger.info(f"【执行】{sub_id}: {subtask['title']}")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
-                "depends_on": subtask.get("depends_on", []), "headless": headless})
+                "depends_on": subtask.get("depends_on", []), "headless": headless, "issue": issue_ref})
 
     clone_start = time.time()
     if (repo / ".git").exists():
+        # 分支命名: feature/{issue}-{slug} 或 agent_go/{task_id}
+        branch = f"feature/{issue_ref}-{_slugify(subtask['title'])}" if issue_ref else f"agent_go/{task_id}/{sub_id}"
         subprocess.run(["git", "clone", str(repo), str(worktree)], capture_output=True, check=True)
+        subprocess.run(["git", "checkout", "-b", branch], cwd=str(worktree), capture_output=True)
+        logger.info(f"分支: {branch}")
     else:
         shutil.copytree(repo, worktree, dirs_exist_ok=True)
 
@@ -818,12 +836,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     diff = subprocess.run(["git", "diff", "--stat"], cwd=str(worktree), capture_output=True, text=True)
     summary = diff.stdout.strip() or "无文件变更"
 
-    # Git 提交 + tag，供下游子任务 merge
+    # Git 提交 + tag（Conventional Commits 格式），供下游子任务 merge
     has_changes = summary != "无文件变更"
     if has_changes:
+        commit_msg = _format_commit(subtask['title'], issue_ref, sub_id)
         subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
-        subprocess.run(["git", "commit", "-m",
-                        f"{sub_id}: {subtask['title']}"],
+        subprocess.run(["git", "commit", "-m", commit_msg],
                        cwd=str(worktree), capture_output=True)
     subprocess.run(["git", "tag", "-f", sub_id], cwd=str(worktree), capture_output=True)
     if has_changes:
@@ -910,10 +928,20 @@ def cmd_run():
     repo_idx = 2
     task_idx = 3
     doc_paths = []
+    issue_ref = ""
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
 
     if auto_yes:
         sys.argv = [a for a in sys.argv if a not in ("--yes", "-y")]
+
+    if "--issue" in sys.argv:
+        try:
+            iss_idx = sys.argv.index("--issue")
+            issue_ref = sys.argv[iss_idx + 1]
+            sys.argv.pop(iss_idx + 1)
+            sys.argv.pop(iss_idx)
+        except (IndexError, ValueError):
+            pass
 
     if "--docs" in sys.argv:
         docs_idx = sys.argv.index("--docs")
@@ -923,7 +951,7 @@ def cmd_run():
             repo_idx = 2 if docs_idx > 2 else 2
 
     if len(sys.argv) < 3:
-        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--yes]")
+        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--yes] [--issue <N>]")
         sys.exit(1)
 
     repo = Path(sys.argv[repo_idx]).resolve()
@@ -1001,7 +1029,7 @@ def cmd_run():
     meta = {
         "task_id": task_id, "task": task, "repo": str(repo),
         "created": ts, "status": "running",
-        "reference_docs": doc_paths,
+        "reference_docs": doc_paths, "issue": issue_ref,
         "subtasks": confirmed, "results": []
     }
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1018,7 +1046,7 @@ def cmd_run():
             if dep_id in worktree_map:
                 upstream[dep_id] = worktree_map[dep_id]
 
-        result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=auto_yes)
+        result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=auto_yes, issue_ref=issue_ref)
         worktree_map[st["id"]] = task_dir / st["id"] / "work"
         meta["results"].append(result)
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1033,7 +1061,7 @@ def cmd_run():
             break
         elif decision == "retry":
             shutil.rmtree(task_dir / st["id"], ignore_errors=True)
-            result = run_subtask(task_id, st, repo, task_dir, logger, headless=auto_yes)
+            result = run_subtask(task_id, st, repo, task_dir, logger, headless=auto_yes, issue_ref=issue_ref)
             meta["results"][-1] = result
         elif decision == "modify":
             worktree = task_dir / st["id"] / "work"
@@ -1095,6 +1123,72 @@ def cmd_show():
         if r:
             print(f"       📊 {r['summary']}")
 
+def cmd_pr():
+    """根据已完成任务的 meta.json + git log 生成 PR 描述。"""
+    if len(sys.argv) < 3:
+        print("Usage: agent_go pr <task-id> [--offline]")
+        sys.exit(1)
+
+    task_id = sys.argv[2]
+    offline = "--offline" in sys.argv
+    task_dir = AGENT_GO_DIR / task_id
+    if not task_dir.exists():
+        print(f"任务不存在: {task_id}")
+        sys.exit(1)
+
+    meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+
+    # 收集变更信息
+    subtask_lines = []
+    for r in meta.get("results", []):
+        icon = "✅" if r.get("status") == "completed" else "❌"
+        subtask_lines.append(f"- {icon} **{r['subtask_id']}**: {r.get('summary', 'N/A')} ({r.get('sandbox_type', '?')}, {r.get('duration_sec', 0):.0f}s)")
+
+    # 读取共享上下文
+    ctx_file = task_dir / "SHARED_CONTEXT.md"
+    context = ctx_file.read_text(encoding="utf-8") if ctx_file.exists() else ""
+
+    pr_body = f"""## Summary
+
+{meta.get('task', 'N/A')}
+
+## Subtasks
+
+{chr(10).join(subtask_lines)}
+
+## Verification
+
+{context if context else '_No verification details_'}
+"""
+
+    if meta.get("issue"):
+        pr_body = f"Fixes #{meta['issue']}\n\n{pr_body}"
+
+    if offline:
+        out = task_dir / "PR.md"
+        out.write_text(pr_body, encoding="utf-8")
+        print(f"PR 描述已写入 {out}")
+        print(f"请手动创建 PR 或稍后执行: agent_go pr {task_id}")
+    else:
+        # 在线模式：通过 gh CLI 创建 PR
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as tf:
+            tf.write(pr_body)
+            pr_file = tf.name
+        title = meta.get("task", "agent_go task")[:72]
+        base = meta.get("base_branch", "main")
+        result = subprocess.run([
+            "gh", "pr", "create", "--title", f"{title}",
+            "--body-file", pr_file, "--base", base,
+        ], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(result.stdout.strip())
+        else:
+            print(f"❌ gh pr create 失败: {result.stderr.strip()}")
+            (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
+            print(f"PR 描述已备份到 {task_dir}/PR.md")
+        os.unlink(pr_file)
+
 def cmd_config():
     config = load_config()
     print(json.dumps(config, indent=2, ensure_ascii=False))
@@ -1123,8 +1217,9 @@ def main():
     elif cmd == "show": cmd_show()
     elif cmd == "config": cmd_config()
     elif cmd == "clean": cmd_clean()
+    elif cmd == "pr": cmd_pr()
     else:
-        print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <doc1,doc2>] [--yes]\n选项:\n--yes, -y        跳过所有确认，直接执行（Plan → SubTask → Verify 全自动）\n--docs <paths>    挂载参考文档（逗号分隔，支持文件和目录）\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false      # true = Plan 自动确认\nbehavior.auto_confirm_subtasks: false   # true = 子任务自动确认\nbehavior.show_agent_prompt: true        # 展示 Agent Prompt\nbehavior.show_resource_map: true         # 展示共享资源清单\n环境变量:\nAGENT_GO_API_KEY=<key>       # API 密钥\nAGENT_GO_INTERACTIVE=1       # 强制交互模式（覆盖 --yes）\nExamples:\n# 基础使用\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/projects/my-app "将JWT从HS256改为RS256"\n# 带参考文档 + 自动确认\nagent_go run ~/projects/my-app "重构认证模块" \\n--docs "README.md,docs/auth-spec.md" --yes\n# 带参考文档\nagent_go run ~/projects/my-app "重构认证模块" \\n--docs "README.md,docs/auth-spec.md"\n""")
+        print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--yes] [--issue <N>]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（Plan → SubTask → Verify 全自动）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
 
 if __name__ == "__main__":
     main()
