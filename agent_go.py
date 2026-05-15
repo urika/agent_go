@@ -1427,7 +1427,14 @@ def cmd_status():
         if created:
             try:
                 start = datetime.strptime(created, "%Y%m%d-%H%M%S")
-                delta = datetime.now() - start
+                # 运行中=实时，已完成=冻结在最后日志时间
+                if status == "running":
+                    end = datetime.now()
+                elif log_path.exists():
+                    end = datetime.fromtimestamp(log_path.stat().st_mtime)
+                else:
+                    end = datetime.now()
+                delta = end - start
                 elapsed = f"{int(delta.total_seconds() // 60)}m{int(delta.total_seconds() % 60)}s"
             except Exception:
                 pass
