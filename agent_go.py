@@ -1072,7 +1072,11 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
     shared_ctx.write_text(existing + "\n".join(ctx_parts) + "\n", encoding="utf-8")
     logger.info(f"共享上下文已更新: {len(shared_ctx.read_text().splitlines())} 行")
 
-    status = "completed" if (result.returncode == 0 and verify_ok) else "failed"
+    # 状态判定: completed(达预期) / degraded(完成但产出不足) / failed(异常)
+    if result.returncode == 0 and verify_ok:
+        status = "degraded" if summary == "无文件变更" else "completed"
+    else:
+        status = "failed"
     logger.info(f"─── {sub_id} DONE: {subtask['title']} [{status}] ───")
     log_event(logger, "subtask_complete", {
         "id": sub_id, "status": status, "sandbox_type": sandbox_type,
@@ -1206,6 +1210,7 @@ def cmd_run():
     # 执行
     total = len(confirmed)
     final_status = "completed"
+    degraded_count = 0
     worktree_map = {}  # sub_id → worktree 路径映射
 
     for i, st in enumerate(confirmed):
@@ -1228,6 +1233,8 @@ def cmd_run():
         if decision == "abort":
             final_status = "aborted"
             break
+        if result.get("status") == "degraded":
+            degraded_count += 1
         elif decision == "retry":
             shutil.rmtree(task_dir / st["id"], ignore_errors=True)
             result = run_subtask(task_id, st, repo, task_dir, logger, headless=headless, issue_ref=issue_ref)
@@ -1238,13 +1245,15 @@ def cmd_run():
             diff = subprocess.run(["git", "diff", "--stat"], cwd=str(worktree), capture_output=True, text=True)
             meta["results"][-1]["summary"] = diff.stdout.strip() or "无文件变更"
 
+    if final_status == "completed" and degraded_count > 0:
+        final_status = "degraded"
     meta["status"] = final_status
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print("\n📦 最终报告")
     print("─" * 60)
     for r in meta["results"]:
-        icon = "✅" if r["status"] == "completed" else "❌"
+        icon = {"completed": "✅", "degraded": "⚠️", "failed": "❌"}.get(r["status"], "❓")
         print(f"{icon} {r['subtask_id']}: {r['summary']}")
     print("─" * 60)
     print(f"\n📁 {task_dir}")
@@ -1412,7 +1421,7 @@ def cmd_status():
                         pass
                     break
         progress = f"{completed}/{total}" if total > 0 else "-"
-        icon = {"completed": "✅", "running": "🔄", "failed": "❌", "aborted": "⏹️"}.get(status, "❓")
+        icon = {"completed": "✅", "degraded": "⚠️", "running": "🔄", "failed": "❌", "aborted": "⏹️"}.get(status, "❓")
         elapsed = ""
         created = meta.get("created", "")
         if created:
