@@ -1,0 +1,14 @@
+# Claude Code local settings
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
