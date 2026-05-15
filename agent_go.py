@@ -9,7 +9,7 @@ agent_go.py — Plan Mode 增强版
   4. 支持"默认同意"模式（通过配置或环境变量）
 """
 
-import sys, os, subprocess, json, shutil, re, logging, time, threading
+import sys, os, subprocess, json, shutil, re, logging, time, threading, shlex
 from pathlib import Path
 from datetime import datetime
 
@@ -71,11 +71,15 @@ def safe_input(prompt=""):
 def load_config():
     if CONFIG_PATH.exists():
         saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        # 合并默认值（新增字段兼容）
-        merged = DEFAULT_CONFIG.copy()
-        merged.update(saved)
+        merged = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+        for key, value in saved.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key].update(value)
+            else:
+                merged[key] = value
         return merged
     CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.chmod(CONFIG_PATH, 0o600)
     print(f"⚙️  已创建默认配置: {CONFIG_PATH}")
     return DEFAULT_CONFIG
 
@@ -106,9 +110,11 @@ def log_event(logger, event, data):
 def read_reference_docs(doc_paths, repo, logger):
     contents = []
     for path_str in doc_paths:
-        path = Path(path_str)
-        if not path.is_absolute():
-            path = repo / path_str
+        path = (repo / path_str).resolve()
+        # 防止路径穿越：确保路径在 repo 范围内
+        if not str(path).startswith(str(repo.resolve())):
+            logger.warning(f"路径越界，已拒绝: {path_str}")
+            continue
         if not path.exists():
             logger.warning(f"文档不存在: {path}")
             continue
@@ -181,7 +187,7 @@ def analyze_project(repo):
             result = subprocess.run(["find", ".", "-maxdepth", "2", "-type", "f"], cwd=str(repo), capture_output=True, text=True, timeout=5)
             files = result.stdout.strip().split("\n")[:30]
             return "\n".join(f.lstrip("./") for f in files)
-    except Exception:
+    except (FileNotFoundError, subprocess.SubprocessError):
         return ""
 
 def get_git_info(repo):
@@ -197,7 +203,7 @@ def get_git_info(repo):
         c = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(repo), capture_output=True, text=True, timeout=3)
         if c.returncode == 0:
             info["commit"] = c.stdout.strip()
-    except Exception:
+    except (FileNotFoundError, subprocess.SubprocessError):
         pass
     return info
 
@@ -334,6 +340,7 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
     if os.environ.get("AGENT_GO_INTERACTIVE", "").lower() == "1":
         auto_confirm = False
 
+    empty_count = 0
     while True:
         print_plan(plan, config)
 
@@ -400,8 +407,9 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
             existing_docs = read_reference_docs(reference_doc_paths, repo, logger) if reference_doc_paths else ""
             iteration += 1
             try:
-                plan = generate_plan(plan.get("_original_task", ""), repo, config, logger, supplement, existing_docs, iteration)
-                plan["_original_task"] = plan.get("_original_task", "")
+                original = plan.get("_original_task", task)
+                plan = generate_plan(original, repo, config, logger, supplement, existing_docs, iteration)
+                plan["_original_task"] = original
                 print(f"\n🔄 已重新生成（第 {iteration} 版）")
             except Exception as e:
                 logger.error(f"重新生成失败: {e}")
@@ -421,13 +429,21 @@ def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
             logger.info(f"挂载 {len(reference_doc_paths)} 个文档，重新生成")
             iteration += 1
             try:
-                plan = generate_plan(plan.get("_original_task", ""), repo, config, logger, "", docs_content, iteration)
-                plan["_original_task"] = plan.get("_original_task", "")
+                original = plan.get("_original_task", task)
+                plan = generate_plan(original, repo, config, logger, "", docs_content, iteration)
+                plan["_original_task"] = original
                 print(f"\n🔄 已重新生成（第 {iteration} 版）")
             except Exception as e:
                 logger.error(f"重新生成失败: {e}")
                 print(f"⚠️ 失败: {e}")
         else:
+            if choice == "":
+                empty_count += 1
+                if empty_count > 5:
+                    print("⚠️ 检测到非交互模式，请输入有效选项或使用 --yes 标志")
+                    sys.exit(1)
+            else:
+                empty_count = 0
             print("无效输入")
 
 def plan_to_subtasks(plan, logger):
@@ -560,7 +576,7 @@ def confirm_subtasks(subtasks, config, logger):
     print("  [A] 添加新子任务")
     print("  [D] 删除某个子任务")
 
-    edit_history = []
+    empty_count = 0
     while True:
         choice = safe_input("\n> ").strip().upper()
         log_event(logger, "user_subtask_choice", {"choice": choice})
@@ -597,6 +613,13 @@ def confirm_subtasks(subtasks, config, logger):
                     st["id"] = f"sub-{i+1}"
             print_subtasks(subtasks, config)
         else:
+            if choice == "":
+                empty_count += 1
+                if empty_count > 5:
+                    print("⚠️ 检测到非交互模式，请输入有效选项或使用 --yes 标志")
+                    sys.exit(1)
+            else:
+                empty_count = 0
             print("无效输入")
 
 def verify_subtask(current, total, summary, logger, config=None):
@@ -693,8 +716,8 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
                 idle_logged_at = idle
             time.sleep(5)
 
-        t_out.join(timeout=5)
-        t_err.join(timeout=5)
+        t_out.join()
+        t_err.join()
         proc.wait()
         return proc, lines, waiting[0]
 
@@ -854,7 +877,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     verify_ok = True
     if verification and has_changes:
         logger.info(f"执行验证: {verification}")
-        vr = subprocess.run(verification, shell=True, cwd=str(worktree),
+        vr = subprocess.run(shlex.split(verification), cwd=str(worktree),
                             capture_output=True, text=True, timeout=120)
         if vr.returncode != 0:
             logger.warning(f"验证失败 (rc={vr.returncode}): {vr.stderr[-300:]}")
@@ -875,7 +898,7 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
                 subprocess.run(["git", "tag", "-f", sub_id], cwd=str(worktree),
                                capture_output=True)
                 # 重新验证
-                vr2 = subprocess.run(verification, shell=True, cwd=str(worktree),
+                vr2 = subprocess.run(shlex.split(verification), cwd=str(worktree),
                                      capture_output=True, text=True, timeout=120)
                 verify_ok = vr2.returncode == 0
                 logger.info(f"重试验证: {'通过' if verify_ok else '仍失败'}")
