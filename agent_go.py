@@ -1321,8 +1321,21 @@ def cmd_pr():
         os.unlink(pr_file)
 
 def cmd_status():
-    """实时监控所有任务状态。--watch 持续刷新。"""
+    """实时监控所有任务状态。--watch 持续刷新，--verbose 显示 Claude 事件。"""
     watch = "--watch" in sys.argv or "-w" in sys.argv
+    verbose = "--verbose" in sys.argv or "-v" in sys.argv
+
+    def _get_task_tail_lines(log_path, count=2):
+        """从执行日志尾部提取最后 count 条 Claude 事件。"""
+        if not log_path.exists():
+            return []
+        lines = log_path.read_text(encoding="utf-8").strip().split("\n")
+        # 从最后 50 行中筛选 claude 相关行
+        tail = lines[-50:]
+        claude_lines = [l for l in tail if "[claude" in l or "[text]" in l
+                        or "[Read]" in l or "[Write]" in l or "[Bash]" in l
+                        or "[tool_result]" in l or "[result]" in l]
+        return claude_lines[-count:]
 
     def _get_task_status(task_dir):
         meta_path = task_dir / "meta.json"
@@ -1334,14 +1347,12 @@ def cmd_status():
         completed = sum(1 for r in results if r.get("status") == "completed")
         total = len(meta.get("subtasks", []))
         current = ""
+        log_path = task_dir / "execution.log"
         if results and status == "running":
             last = results[-1]
             current = f"{last.get('subtask_id', '?')}: {last.get('summary', '?')[:40]}"
-        # 尝试读取最后一条日志获取实时任务名
-        log_path = task_dir / "execution.log"
         if log_path.exists():
-            last_lines = log_path.read_text(encoding="utf-8").strip().split("\n")[-3:]
-            for line in reversed(last_lines):
+            for line in reversed(log_path.read_text(encoding="utf-8").strip().split("\n")[-10:]):
                 if "subtask_start" in line:
                     try:
                         evt = json.loads(line.split(" | ")[-1].strip())
@@ -1360,15 +1371,12 @@ def cmd_status():
                 elapsed = f"{int(delta.total_seconds() // 60)}m{int(delta.total_seconds() % 60)}s"
             except Exception:
                 pass
+        tail_lines = _get_task_tail_lines(log_path) if verbose and status == "running" else []
         return {
-            "id": task_dir.name,
-            "icon": icon,
-            "status": status,
-            "progress": progress,
-            "current": current,
-            "elapsed": elapsed,
-            "task": meta.get("task", "?")[:50],
-            "issue": meta.get("issue", ""),
+            "id": task_dir.name, "icon": icon, "status": status,
+            "progress": progress, "current": current, "elapsed": elapsed,
+            "task": meta.get("task", "?")[:50], "issue": meta.get("issue", ""),
+            "tail": tail_lines,
         }
 
     while True:
@@ -1377,24 +1385,26 @@ def cmd_status():
             print("暂无任务")
             return
 
-        rows = []
-        for td in tasks_dirs:
-            info = _get_task_status(td)
-            if info:
-                rows.append(info)
+        rows = [_get_task_status(td) for td in tasks_dirs]
+        rows = [r for r in rows if r is not None]
 
         if watch:
             os.system("clear" if os.name == "posix" else "cls")
 
-        # 表头
         print(f"{'任务ID':<24} {'状态':<6} {'进度':<8} {'耗时':<8} {'Issue':<6} {'当前子任务'}")
         print("─" * 110)
         for r in rows:
             issue_str = f"#{r['issue']}" if r['issue'] else "-"
             print(f"{r['id']:<24} {r['icon']} {r['status']:<4} {r['progress']:<8} "
                   f"{r['elapsed']:<8} {issue_str:<6} {r['current'][:50]}")
+            if r["tail"]:
+                for tl in r["tail"]:
+                    line_text = tl.split(" | ")[-1] if " | " in tl else tl
+                    print(f"  └ {line_text.strip()[:90]}")
         print("─" * 110)
-        print(f"共 {len(rows)} 个任务 | agent_go status{ ' --watch' if watch else '' } | Ctrl+C 退出\n")
+        flags = " --watch" if watch else ""
+        flags += " --verbose" if verbose else ""
+        print(f"共 {len(rows)} 个任务 | agent_go status{flags} | Ctrl+C 退出\n")
 
         if not watch:
             break
