@@ -930,9 +930,12 @@ def cmd_run():
     doc_paths = []
     issue_ref = ""
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
+    headless = auto_yes or "--headless" in sys.argv  # --yes 隐含 headless
 
     if auto_yes:
         sys.argv = [a for a in sys.argv if a not in ("--yes", "-y")]
+    if "--headless" in sys.argv:
+        sys.argv = [a for a in sys.argv if a != "--headless"]
 
     if "--issue" in sys.argv:
         try:
@@ -951,7 +954,7 @@ def cmd_run():
             repo_idx = 2 if docs_idx > 2 else 2
 
     if len(sys.argv) < 3:
-        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--yes] [--issue <N>]")
+        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--yes] [--headless] [--issue <N>]")
         sys.exit(1)
 
     repo = Path(sys.argv[repo_idx]).resolve()
@@ -1046,7 +1049,7 @@ def cmd_run():
             if dep_id in worktree_map:
                 upstream[dep_id] = worktree_map[dep_id]
 
-        result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=auto_yes, issue_ref=issue_ref)
+        result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref)
         worktree_map[st["id"]] = task_dir / st["id"] / "work"
         meta["results"].append(result)
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1061,7 +1064,7 @@ def cmd_run():
             break
         elif decision == "retry":
             shutil.rmtree(task_dir / st["id"], ignore_errors=True)
-            result = run_subtask(task_id, st, repo, task_dir, logger, headless=auto_yes, issue_ref=issue_ref)
+            result = run_subtask(task_id, st, repo, task_dir, logger, headless=headless, issue_ref=issue_ref)
             meta["results"][-1] = result
         elif decision == "modify":
             worktree = task_dir / st["id"] / "work"
@@ -1219,7 +1222,8 @@ def main():
     elif cmd == "clean": cmd_clean()
     elif cmd == "pr": cmd_pr()
     else:
-        print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--yes] [--issue <N>]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（Plan → SubTask → Verify 全自动）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
+        print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--yes] [--headless] [--issue <N>]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）
+--headless       子任务使用 claude -p 无头执行（Plan 仍可交互编辑）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
 
 if __name__ == "__main__":
     main()
