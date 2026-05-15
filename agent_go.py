@@ -1526,7 +1526,7 @@ def cmd_status():
                 status = "failed"
 
         results = meta.get("results", [])
-        completed = sum(1 for r in results if r.get("status") == "completed")
+        completed = sum(1 for r in results if r.get("status") in ("completed", "degraded"))
         total = len(meta.get("subtasks", []))
         current = ""
         if results and status == "running":
