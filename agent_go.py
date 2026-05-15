@@ -1320,6 +1320,86 @@ def cmd_pr():
             print(f"PR 描述已备份到 {task_dir}/PR.md")
         os.unlink(pr_file)
 
+def cmd_status():
+    """实时监控所有任务状态。--watch 持续刷新。"""
+    watch = "--watch" in sys.argv or "-w" in sys.argv
+
+    def _get_task_status(task_dir):
+        meta_path = task_dir / "meta.json"
+        if not meta_path.exists():
+            return None
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        status = meta.get("status", "unknown")
+        results = meta.get("results", [])
+        completed = sum(1 for r in results if r.get("status") == "completed")
+        total = len(meta.get("subtasks", []))
+        current = ""
+        if results and status == "running":
+            last = results[-1]
+            current = f"{last.get('subtask_id', '?')}: {last.get('summary', '?')[:40]}"
+        # 尝试读取最后一条日志获取实时任务名
+        log_path = task_dir / "execution.log"
+        if log_path.exists():
+            last_lines = log_path.read_text(encoding="utf-8").strip().split("\n")[-3:]
+            for line in reversed(last_lines):
+                if "subtask_start" in line:
+                    try:
+                        evt = json.loads(line.split(" | ")[-1].strip())
+                        current = evt.get("title", current)
+                    except Exception:
+                        pass
+                    break
+        progress = f"{completed}/{total}" if total > 0 else "-"
+        icon = {"completed": "✅", "running": "🔄", "failed": "❌", "aborted": "⏹️"}.get(status, "❓")
+        elapsed = ""
+        created = meta.get("created", "")
+        if created:
+            try:
+                start = datetime.strptime(created, "%Y%m%d-%H%M%S")
+                delta = datetime.now() - start
+                elapsed = f"{int(delta.total_seconds() // 60)}m{int(delta.total_seconds() % 60)}s"
+            except Exception:
+                pass
+        return {
+            "id": task_dir.name,
+            "icon": icon,
+            "status": status,
+            "progress": progress,
+            "current": current,
+            "elapsed": elapsed,
+            "task": meta.get("task", "?")[:50],
+            "issue": meta.get("issue", ""),
+        }
+
+    while True:
+        tasks_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
+        if not tasks_dirs:
+            print("暂无任务")
+            return
+
+        rows = []
+        for td in tasks_dirs:
+            info = _get_task_status(td)
+            if info:
+                rows.append(info)
+
+        if watch:
+            os.system("clear" if os.name == "posix" else "cls")
+
+        # 表头
+        print(f"{'任务ID':<24} {'状态':<6} {'进度':<8} {'耗时':<8} {'Issue':<6} {'当前子任务'}")
+        print("─" * 110)
+        for r in rows:
+            issue_str = f"#{r['issue']}" if r['issue'] else "-"
+            print(f"{r['id']:<24} {r['icon']} {r['status']:<4} {r['progress']:<8} "
+                  f"{r['elapsed']:<8} {issue_str:<6} {r['current'][:50]}")
+        print("─" * 110)
+        print(f"共 {len(rows)} 个任务 | agent_go status{ ' --watch' if watch else '' } | Ctrl+C 退出\n")
+
+        if not watch:
+            break
+        time.sleep(5)
+
 def cmd_config():
     config = load_config()
     print(json.dumps(config, indent=2, ensure_ascii=False))
@@ -1346,6 +1426,7 @@ def main():
     if cmd == "run": cmd_run()
     elif cmd == "list": cmd_list()
     elif cmd == "show": cmd_show()
+    elif cmd == "status": cmd_status()
     elif cmd == "config": cmd_config()
     elif cmd == "clean": cmd_clean()
     elif cmd == "pr": cmd_pr()
