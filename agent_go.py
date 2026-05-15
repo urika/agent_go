@@ -642,7 +642,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger):
         "- 变更保留在此目录"
     ])
 
-    (sub_dir / "TASK.md").write_text("\n".join(task_md_parts), encoding="utf-8")
+    # 将 Agent Prompt 中的源项目路径替换为 worktree 路径，确保隔离
+    task_md = "\n".join(task_md_parts).replace(str(repo), str(worktree))
+    (sub_dir / "TASK.md").write_text(task_md, encoding="utf-8")
 
     print(f"\n🚀 {sub_id}: {subtask['title']}")
     env = os.environ.copy()
