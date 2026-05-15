@@ -1,6 +1,5 @@
-# agent_go 增强版 — 设计文档（v2.0）
+# agent_go 增强版 — 设计文档
 
-> 版本: v2.0  
 > 日期: 2026-05-15  
 > 定位: MacBook 单文件快速原型，支持外接 API Plan Mode、共享资源清单、Agent Prompt、默认同意模式
 
@@ -405,19 +404,7 @@ Git 远程: git@github.com:acme/platform.git
 
 ---
 
-## 八、扩展路径
-
-| POC 现状 | 下一步 | 触发条件 |
-|----------|--------|----------|
-| 单文件脚本 | FastAPI + SQLite 编排层 | 需要任务队列和状态持久化 |
-| 单实例串行 | 端口分配器 + 多 worktree | 需要同时处理多个任务 |
-| Greywall 单后端 | 增加 Incus 后端（mini 主机） | 需要更强隔离或 Linux 服务器 |
-| 外接 API Plan | 本地缓存 Plan 结果 | 相同任务重复执行时降低成本 |
-| 结构化日志文件 | TUI 实时观测 + Web 只读台 | 需要实时监控和团队协作 |
-
----
-
-## 九、使用约束
+## 八、使用约束
 
 1. **Python >= 3.11**
 2. **Claude Code 已安装**

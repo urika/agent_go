@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""\nagent_go.py — Plan Mode 增强版\n核心增强：\n1. Plan 输出包含给执行 Agent 的完整 Prompt 模板\n2. 共享资源清单（目录结构、git 地址、依赖文件等）\n3. 用户确认界面展示这些资源，确认后注入子任务\n4. 支持"默认同意"模式（通过配置或环境变量）\n"""
+"""
+agent_go.py — Plan Mode 增强版
+
+核心增强：
+  1. Plan 输出包含给执行 Agent 的完整 Prompt 模板
+  2. 共享资源清单（目录结构、git 地址、依赖文件等）
+  3. 用户确认界面展示这些资源，确认后注入子任务
+  4. 支持"默认同意"模式（通过配置或环境变量）
+"""
 
 import sys, os, subprocess, json, shutil, re, logging, time
 from pathlib import Path
@@ -306,7 +314,10 @@ def print_plan(plan, config):
     print("=" * 70)
 
 def confirm_plan(plan, config, repo, logger, iteration=1) -> tuple:
-    """\n用户确认 Plan。支持默认同意模式。\n返回: (plan, doc_paths) 或 (None, None)\n"""
+    """
+    用户确认 Plan。支持默认同意模式。
+    返回: (plan, doc_paths) 或 (None, None)
+    """
     behavior = config.get("behavior", {})
     auto_confirm = behavior.get("auto_confirm_plan", False)
     reference_doc_paths = []
@@ -828,12 +839,30 @@ def cmd_config():
     config = load_config()
     print(json.dumps(config, indent=2, ensure_ascii=False))
 
+def cmd_clean():
+    import shutil as _shutil
+    tasks = sorted(AGENT_GO_DIR.glob("task-*"))
+    if not tasks:
+        print("暂无任务")
+        return
+    print(f"将清理 {len(tasks)} 个任务目录:")
+    for t in tasks:
+        print(f"  {t.name}")
+    confirm = input("\n确认删除? [y/N]: ").strip().lower()
+    if confirm == "y":
+        for t in tasks:
+            _shutil.rmtree(t, ignore_errors=True)
+        print(f"已清理 {len(tasks)} 个任务")
+    else:
+        print("已取消")
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     if cmd == "run": cmd_run()
     elif cmd == "list": cmd_list()
     elif cmd == "show": cmd_show()
     elif cmd == "config": cmd_config()
+    elif cmd == "clean": cmd_clean()
     else:
         print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <doc1,doc2>]\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false      # true = Plan 自动确认\nbehavior.auto_confirm_subtasks: false   # true = 子任务自动确认\nbehavior.show_agent_prompt: true        # 展示 Agent Prompt\nbehavior.show_resource_map: true         # 展示共享资源清单\n环境变量:\nAGENT_GO_API_KEY=<key>       # API 密钥\nAGENT_GO_INTERACTIVE=1       # 强制交互模式（覆盖默认同意）\nExamples:\n# 基础使用\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/projects/my-app "将JWT从HS256改为RS256"\n# 带参考文档\nagent_go run ~/projects/my-app "重构认证模块" \\n--docs "README.md,docs/auth-spec.md"\n# 启用默认同意模式（非交互）\n# 编辑 config.json: behavior.auto_confirm_plan = true\n""")
 

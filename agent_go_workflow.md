@@ -1,6 +1,6 @@
-# agent_go — 用户工作流程说明（v2.0）
+# agent_go — 用户工作流程说明
 
-> 适用版本: agent_go-api-v2.py  
+> 适用版本: agent_go.py  
 > 运行环境: macOS (MacBook Pro/Air, Apple Silicon)  
 > 核心依赖: Claude Code, Python 3.11+, 外接 API Key（可选 Greywall）  
 > 更新时间: 2026-05-15
@@ -40,7 +40,7 @@ greywall --version
 mkdir -p ~/bin
 
 # 下载脚本（替换为实际地址）
-curl -fsSL -o ~/bin/agent_go https://your-gist-url/agent_go-api-v2.py
+curl -fsSL -o ~/bin/agent_go https://your-gist-url/agent_go.py
 chmod +x ~/bin/agent_go
 
 # 加入 PATH
@@ -114,7 +114,7 @@ cd ~/projects/demo-app   # 有 Git 仓库的项目
 git status
 ```
 
-### 2.2 启动 POC 任务
+### 2.2 启动 任务
 
 ```bash
 agent_go run . "将 JWT 签名从 HS256 改为 RS256"
@@ -370,7 +370,7 @@ AGENT_GO_INTERACTIVE=1 agent_go run ~/projects/my-app "重要任务"
 [1] 进入项目目录
       cd ~/projects/my-app
 
-[2] 启动 POC 任务
+[2] 启动 任务
       agent_go run . "<具体任务描述>"
 
 [3] Plan Mode 生成方案
@@ -511,7 +511,7 @@ AGENT_GO_INTERACTIVE=1 agent_go run ~/projects/my-app "任务"
 | `agent_go list` | 查看所有任务摘要 |
 | `agent_go show <task-id>` | 查看任务详情和子任务进展 |
 | `agent_go config` | 查看当前配置 |
-| `agent_go clean` | 清理所有 POC 任务 |
+| `agent_go clean` | 清理所有任务 |
 
 ---
 
