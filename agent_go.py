@@ -626,77 +626,101 @@ def _merge_worktree(src, dst):
             shutil.copy2(item, target)
 
 def _run_headless(task_md, worktree, env, logger, sub_id):
-    """无头模式：claude -p 带实时流式输出和交互检测。"""
-    INTERACTION_PATTERNS = [
-        r"waiting for input",
-        r"approve\s+(Write|Edit|Bash|Read)",
-        r"permission required",
-        r"\[y/n\]",
-        r"press.*to continue",
-    ]
-    HEARTBEAT_INTERVAL = 30   # 每 30s 无输出则发心跳
-    IDLE_TIMEOUT = 300        # 5 分钟无输出则终止
+    """无头模式：claude -p 带实时流式输出、交互检测和超时重试。"""
+
+    def _run_one(prompt, attempt):
+        """启动 claude -p 并实时跟踪输出。返回 (proc, output_lines, interaction_detected)。"""
+        proc = subprocess.Popen([
+            "claude", "-p", prompt,
+            "--permission-mode", "bypassPermissions",
+            "--no-session-persistence",
+            "--output-format", "text",
+        ], env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        last_ts = [time.time()]
+        lines = []
+        waiting = [False]
+
+        def read(stream, label):
+            for line in iter(stream.readline, ''):
+                s = line.rstrip()
+                if s:
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    lines.append(f"[{ts}] {s[:200]}")
+                    logger.info(f"[claude {label}] {s[:200]}")
+                    last_ts[0] = time.time()
+                    for pat in [r"waiting for input", r"approve\s+(Write|Edit|Bash|Read)",
+                                r"permission required", r"\[y/n\]", r"press.*to continue"]:
+                        if re.search(pat, s, re.IGNORECASE):
+                            waiting[0] = True
+                            logger.error(f"⚠️ 检测到交互请求 (attempt={attempt}): {s[:200]}")
+                            break
+
+        t_out = threading.Thread(target=read, args=(proc.stdout, "out"), daemon=True)
+        t_err = threading.Thread(target=read, args=(proc.stderr, "err"), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        idle_logged_at = 0
+        while proc.poll() is None:
+            idle = time.time() - last_ts[0]
+            if idle > 300:
+                logger.error(f"claude {idle:.0f}s 无输出 (attempt={attempt})，强制终止")
+                proc.kill()
+                break
+            if idle > 30 and idle - idle_logged_at > 30:
+                logger.info(f"claude 工作中... (无输出 {idle:.0f}s, attempt={attempt})")
+                idle_logged_at = idle
+            time.sleep(5)
+
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+        proc.wait()
+        return proc, lines, waiting[0]
+
+    RETRY_SUFFIX = (
+"\n\n【系统指令】你必须立即完成上述所有任务，直接执行文件创建和修改操作。"
+"不要询问任何问题，不要等待确认，不要输出中间讨论。"
+"完成后输出简洁的状态报告和变更摘要。"
+    )
+    MAX_ATTEMPTS = 2
 
     logger.info("无头模式: claude -p")
     log_event(logger, "subtask_headless_start", {"id": sub_id})
 
-    proc = subprocess.Popen([
-        "claude", "-p", task_md,
-        "--permission-mode", "bypassPermissions",
-        "--no-session-persistence",
-        "--output-format", "text",
-    ], env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    all_lines = []
+    final_rc = -1
+    interaction = False
 
-    last_output_at = [time.time()]  # 列表便于跨线程修改
-    output_lines = []
-    interaction_detected = [False]
+    for attempt in range(MAX_ATTEMPTS):
+        if attempt == 0:
+            prompt = task_md
+        else:
+            logger.warning(f"超时重试 (attempt={attempt+1})，注入催促指令")
+            log_event(logger, "subtask_headless_retry", {"id": sub_id, "attempt": attempt + 1})
+            prompt = task_md + RETRY_SUFFIX
 
-    def read_stream(stream, label):
-        for line in iter(stream.readline, ''):
-            stripped = line.rstrip()
-            if stripped:
-                ts = datetime.now().strftime("%H:%M:%S")
-                output_lines.append(f"[{ts}] {stripped[:200]}")
-                logger.info(f"[claude {label}] {stripped[:200]}")
-                last_output_at[0] = time.time()
-                # 交互检测
-                for pat in INTERACTION_PATTERNS:
-                    if re.search(pat, stripped, re.IGNORECASE):
-                        interaction_detected[0] = True
-                        logger.error(f"⚠️ 检测到交互请求: {stripped[:200]}")
-                        break
+        proc, lines, waiting = _run_one(prompt, attempt + 1)
+        all_lines.extend(lines)
+        all_lines.append(f"--- attempt={attempt+1} exit_code={proc.returncode} ---")
+        interaction = interaction or waiting
+        final_rc = proc.returncode
 
-    t_out = threading.Thread(target=read_stream, args=(proc.stdout, "out"), daemon=True)
-    t_err = threading.Thread(target=read_stream, args=(proc.stderr, "err"), daemon=True)
-    t_out.start()
-    t_err.start()
-
-    while proc.poll() is None:
-        idle = time.time() - last_output_at[0]
-        if idle > IDLE_TIMEOUT:
-            logger.error(f"无头模式: claude {idle:.0f}s 无输出，强制终止")
-            proc.kill()
+        if final_rc == 0:
             break
-        if idle > HEARTBEAT_INTERVAL:
-            logger.info(f"claude 工作中... (无输出 {idle:.0f}s)")
-        time.sleep(5)
-
-    t_out.join(timeout=5)
-    t_err.join(timeout=5)
-    proc.wait()
-
-    if interaction_detected[0]:
-        logger.error(f"无头模式: 子任务 {sub_id} 触发了需要交互的操作，产出可能不完整")
+        if not waiting:
+            break  # 非交互超时（如 API 超时），不重试
 
     log_event(logger, "subtask_headless_complete", {
-        "id": sub_id, "exit_code": proc.returncode,
-        "interaction_detected": interaction_detected[0],
-        "output_lines": len(output_lines),
+        "id": sub_id, "exit_code": final_rc,
+        "interaction_detected": interaction,
+        "attempts": attempt + 1,
+        "output_lines": len(all_lines),
     })
 
     return subprocess.CompletedProcess(
-        [], proc.returncode,
-        stdout="\n".join(output_lines),
+        [], final_rc,
+        stdout="\n".join(all_lines),
         stderr=""
     )
 
