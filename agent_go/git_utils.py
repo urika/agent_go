@@ -1,0 +1,60 @@
+import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from datetime import datetime
+
+def analyze_project(repo):
+    """分析项目结构，返回文件列表和关键目录。"""
+    try:
+        if (repo / ".git").exists():
+            result = subprocess.run(["git", "ls-files"], cwd=str(repo), capture_output=True, text=True, timeout=5)
+            files = result.stdout.strip().split("\n")[:50]
+            return "\n".join(files)
+        else:
+            result = subprocess.run(["find", ".", "-maxdepth", "2", "-type", "f"], cwd=str(repo), capture_output=True, text=True, timeout=5)
+            files = result.stdout.strip().split("\n")[:30]
+            return "\n".join(f.lstrip("./") for f in files)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+
+def get_git_info(repo):
+    """获取 git 远程地址和当前分支。"""
+    info = {"remote": "", "branch": "", "commit": ""}
+    try:
+        r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=str(repo), capture_output=True, text=True, timeout=3)
+        if r.returncode == 0:
+            info["remote"] = r.stdout.strip()
+        b = subprocess.run(["git", "branch", "--show-current"], cwd=str(repo), capture_output=True, text=True, timeout=3)
+        if b.returncode == 0:
+            info["branch"] = b.stdout.strip()
+        c = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(repo), capture_output=True, text=True, timeout=3)
+        if c.returncode == 0:
+            info["commit"] = c.stdout.strip()
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+    return info
+
+def get_resource_map(repo, git_info):
+    """生成共享资源清单。"""
+    resources = {
+        "project_root": str(repo),
+        "git_remote": git_info.get("remote", ""),
+        "git_branch": git_info.get("branch", ""),
+        "git_commit": git_info.get("commit", ""),
+        "directories": [],
+        "key_files": []
+    }
+
+    # 扫描关键目录
+    for subdir in ["src", "lib", "app", "components", "pages", "tests", "docs"]:
+        p = repo / subdir
+        if p.exists() and p.is_dir():
+            resources["directories"].append(subdir)
+
+    # 扫描关键文件
+    for pattern in ["package.json", "requirements.txt", "Cargo.toml", "go.mod", "README.md", ".env.example", "docker-compose.yml"]:
+        p = repo / pattern
+        if p.exists():
+            resources["key_files"].append(pattern)
+
+    return resources

@@ -1,74 +1,81 @@
 # agent_go 代码审查 — 发现的问题清单
 
-> 版本: v2（迭代后复查）  
-> 日期: 2026-05-15  
-> 审查范围: `agent_go.py`（约 1400 行）+ 4 份设计/需求文档  
-> 审查方法: 深度代码阅读 + 架构分析 + 边界情况推演 + 迭代变更对比
+> 版本: v3（全部修复完成）  
+> 日期: 2026-05-15（审查）/ 2026-05-16（修复验证）  
+> 审查范围: `agent_go/` 包（9 模块，约 2000 行）+ 107 项测试  
+> 审查方法: 深度代码阅读 + 架构分析 + 边界情况推演 + 迭代变更对比  
+> **修复状态: 23/23 全部已修复 ✅**
 
 ---
 
-## 迭代回顾（v1 → v2 改进）
+## v3 修复总览（2026-05-16）
 
-| # | 问题 | v2 状态 | 本次变化 |
+所有 23 个问题已全部修复。关键变更：
+
+| 类别 | 修复项 | 说明 |
+|------|--------|------|
+| 🔴 高优先级 | Q1 Q2 Q6 N1 | 降级路径、配置键修复、shell=True 安全白名单、并发锁 |
+| 🟡 中优先级 | Q3 Q4 Q5 Q7 Q11 Q12 N2 N3 N4 N7 | 冲突检测、中文交互、路径正、返回码检查、模块拆分、分支唯一、闭包消除、中断处理、并发交互检测 |
+| 🟢 低优先级 | Q8 Q9 Q10 N5 N6 N8 | 任务 ID、commit 类型、版本检测、状态命名、日志级别、递归读取 |
+
+### 各问题修复详情
+
+| # | 问题 | v3 状态 | 修复方式 |
 |---|------|---------|---------|
-| Q2 | `verify_subtask` 配置键错误 | ❌ 未修复 | 仍使用 `auto_confirm_plan` |
-| Q5 | 路径替换误匹配 | ❌ 未修复 | 仍是 `str.replace()` |
-| Q6 | `shell=True` 安全风险 | ✅ **部分修复** | 已优先使用 `shlex.split()`，但保留了 shell=True 降级 |
-| Q7 | SHARED_CONTEXT 并发安全 | ⚠️ **风险升级** | 新增 `--parallel` 后问题从潜在变为实际 |
-| Q8 | 任务 ID 碰撞 | ❌ 未修复 | 仍是秒级精度 |
-| Q9 | commit 类型仅中文 | ❌ 未修复 | 仍是 `"实现"/"新增"` |
-| Q13 | 无 KeyboardInterrupt | ❌ 未修复 | 无 try/except |
-
-### v2 迭代新增改进
-
-| 改进 | 说明 |
-|------|------|
-| ✅ `--parallel N` 并发执行 | 拓扑排序列 wave + ThreadPoolExecutor，重大架构升级 |
-| ✅ stream-json 事件解析 | 从纯文本升级为解析 `content_block_start/delta/stop`、`tool_use`、`tool_result` 等细粒度事件 |
-| ✅ `plan_to_md()` + PLAN.md 持久化 | Plan 方案保存为 Markdown 文件 |
-| ✅ `degraded` 状态 | 区分「正常完成有变更」vs「正常完成无变更」 |
-| ✅ 路径穿越防护 | `--docs` 路径解析后校验须在 repo 范围内 |
-| ✅ 配置文件 chmod 600 | API Key 文件仅 owner 可读写 |
-| ✅ 配置深层合并 | JSON 序列化深拷贝替代浅拷贝 |
-| ✅ 验证命令优先 shlex | `shlex.split()` + shell=True 降级 |
-| ✅ 超时放宽至 600s | 更容忍 LLM 长思考周期 |
-| ✅ 空输入检测 | 连续 5 次空输入自动退出 |
-| ✅ 异常类型精细化 | `(FileNotFoundError, subprocess.SubprocessError)` 替代裸 `Exception` |
+| Q1 | Plan 降级路径缺失 | ✅ 已修复 | `_prompt_fallback()` + `__FALLBACK__` 信号 + `decompose_fallback` 集成 |
+| Q2 | `verify_subtask` 配置键错误 | ✅ 已修复 | 新增 `auto_verify_subtask` 独立配置项 |
+| Q3 | git merge 冲突处理缺失 | ✅ 已修复 | `.MERGE_CONFLICT` 检测 + 冲突信息注入 TASK.md |
+| Q4 | 无头模式交互检测 | ✅ 已修复 | 增加中文交互正则（是否继续/请确认/等待输入/选择操作等） |
+| Q5 | 路径替换误匹配 | ✅ 已修复 | 正则边界匹配 `(?<![^\s"'\(:])...(?![^\s"'\):])` |
+| Q6 | `shell=True` 安全风险 | ✅ 已修复 | 白名单前缀 + 6 项精确注入模式检测（链/替换/curl\|sh/破坏/重定向） |
+| Q7/N1 | SHARED_CONTEXT 并发安全 | ✅ 已修复 | `_safe_append_to_file()` 锁文件机制 |
+| Q8 | 任务 ID 碰撞 | ✅ 已修复 | 毫秒 + 随机 hex 后缀 + 碰撞重试 |
+| Q9 | commit 类型仅中文 | ✅ 已修复 | 英文关键词（feat/fix/refactor/docs/test/chore）+ `_detect_commit_prefix/scope` |
+| Q10 | 工具版本无检测 | ✅ 已修复 | `_detect_tool_versions()` + 写入 `meta.json` |
+| Q11 | subprocess 返回码检查 | ✅ 已修复 | git add/commit/tag 增加 returncode 检查和日志 |
+| Q12 | 单文件过大 | ✅ 已修复 | `agent_go/` 包（9 模块：config/utils/api/git_utils/ui/subtask/executor/pipeline/cli） |
+| Q13/N4 | KeyboardInterrupt | ✅ 已修复 | `main()` try/except + `_run_pipeline` SIGINT/SIGTERM 信号处理 |
+| N2 | 分支命名冲突 | ✅ 已修复 | 分支名包含 `sub_id` 确保唯一 |
+| N3 | confirm_plan 闭包依赖 | ✅ 已修复 | `task` 作为显式参数传入 |
+| N5 | degraded 语义歧义 | ✅ 已修复 | 改为 `no_changes` |
+| N6 | stream-json 日志过详 | ✅ 已修复 | `text_delta` 降为 `logger.debug()` |
+| N7 | 并发+交互不兼容 | ✅ 已修复 | `parallel > 1` 且非 headless 时警告并强制串行 |
+| N8 | 文档不递归读取 | ✅ 已修复 | `glob("*.md")` → `rglob("*.md")` |
 
 ---
 
 ## 问题总览
 
-### 原始问题（Q1-Q13）
+### 原始问题（Q1-Q13）— 全部已修复 ✅
 
-| 编号 | 类别 | 严重程度 | v2 状态 | 标题 |
+| 编号 | 类别 | 严重程度 | v3 状态 | 标题 |
 |------|------|----------|---------|------|
-| [Q1](#q1-plan-mode-交互中降级路径缺失) | 流程缺陷 | 🔴 高 | ❌ 未修复 | Plan Mode 交互中降级路径缺失 |
-| [Q2](#q2-verify_subtask-自动确认配置错误) | Bug | 🔴 高 | ❌ 未修复 | `verify_subtask` 自动确认配置错误 |
-| [Q3](#q3-git-merge-冲突处理缺失) | 流程缺陷 | 🟡 中 | ❌ 未修复 | `git merge` 冲突处理缺失 |
-| [Q4](#q4-无头模式交互检测不够鲁棒) | 可靠性 | 🟡 中 | ❌ 未修复 | 无头模式交互检测不够鲁棒 |
-| [Q5](#q5-tasksmd-路径替换存在误匹配风险) | Bug | 🟡 中 | ❌ 未修复 | TASK.md 路径替换存在误匹配风险 |
-| [Q6](#q6-shelltrue-安全风险) | 安全 | 🔴 高 | 🔶 部分修复 | `shell=True` 安全风险 |
-| [Q7](#q7-shared_contextmd-并发写入不安全) | 并发安全 | 🟡 中 | ⚠️ 风险升级 | SHARED_CONTEXT.md 并发写入不安全 |
-| [Q8](#q8-任务-id-时间戳可能碰撞) | 可靠性 | 🟢 低 | ❌ 未修复 | 任务 ID 时间戳可能碰撞 |
-| [Q9](#q9-commit-消息类型判断仅支持中文) | 功能缺陷 | 🟢 低 | ❌ 未修复 | commit 消息类型判断仅支持中文 |
-| [Q10](#q10-greywall--claude-code-版本无检测) | 可靠性 | 🟢 低 | ❌ 未修复 | Greywall / Claude Code 版本无检测 |
-| [Q11](#q11-subprocessrun-普遍未检查返回码) | 可靠性 | 🟡 中 | ❌ 未修复 | `subprocess.run` 普遍未检查返回码 |
-| [Q12](#q12-单文件规模接近可维护性上限) | 可维护性 | 🟡 中 | ⚠️ 规模扩大 | 单文件规模 ~1400 行 |
-| [Q13](#q13-无键盘中断处理) | 可靠性 | 🟢 低 | ❌ 未修复 | 无 KeyboardInterrupt 处理 |
+| [Q1](#q1-plan-mode-交互中降级路径缺失) | 流程缺陷 | 🔴 高 | ✅ 已修复 | Plan Mode 交互中降级路径缺失 |
+| [Q2](#q2-verify_subtask-自动确认配置错误) | Bug | 🔴 高 | ✅ 已修复 | `verify_subtask` 自动确认配置错误 |
+| [Q3](#q3-git-merge-冲突处理缺失) | 流程缺陷 | 🟡 中 | ✅ 已修复 | `git merge` 冲突处理缺失 |
+| [Q4](#q4-无头模式交互检测不够鲁棒) | 可靠性 | 🟡 中 | ✅ 已修复 | 无头模式交互检测不够鲁棒 |
+| [Q5](#q5-tasksmd-路径替换存在误匹配风险) | Bug | 🟡 中 | ✅ 已修复 | TASK.md 路径替换存在误匹配风险 |
+| [Q6](#q6-shelltrue-安全风险) | 安全 | 🔴 高 | ✅ 已修复 | `shell=True` 安全风险 |
+| [Q7](#q7-shared_contextmd-并发写入不安全) | 并发安全 | 🟡 中 | ✅ 已修复 | SHARED_CONTEXT.md 并发写入不安全 |
+| [Q8](#q8-任务-id-时间戳可能碰撞) | 可靠性 | 🟢 低 | ✅ 已修复 | 任务 ID 时间戳可能碰撞 |
+| [Q9](#q9-commit-消息类型判断仅支持中文) | 功能缺陷 | 🟢 低 | ✅ 已修复 | commit 消息类型判断仅支持中文 |
+| [Q10](#q10-greywall--claude-code-版本无检测) | 可靠性 | 🟢 低 | ✅ 已修复 | Greywall / Claude Code 版本无检测 |
+| [Q11](#q11-subprocessrun-普遍未检查返回码) | 可靠性 | 🟡 中 | ✅ 已修复 | `subprocess.run` 普遍未检查返回码 |
+| [Q12](#q12-单文件规模接近可维护性上限) | 可维护性 | 🟡 中 | ✅ 已修复 | 单文件规模 ~1400 行 |
+| [Q13](#q13-无键盘中断处理) | 可靠性 | 🟢 低 | ✅ 已修复 | 无 KeyboardInterrupt 处理 |
 
-### 迭代新增问题（N1-N8）
+### 迭代新增问题（N1-N8）— 全部已修复 ✅
 
 | 编号 | 类别 | 严重程度 | 标题 |
 |------|------|----------|------|
-| [N1](#n1-并发模式下-shared_contextmd-仍有时序问题) | 并发安全 | 🔴 高 | 并发模式下 SHARED_CONTEXT.md 仍有时序问题 |
-| [N2](#n2-并行模式下-git-worktree-分支命名冲突) | 并发安全 | 🟡 中 | 并行模式下 git worktree 分支命名冲突 |
-| [N3](#n3-confirm_plan-闭包依赖外层-task-变量) | 代码质量 | 🟡 中 | `confirm_plan` 闭包依赖外层 `task` 变量 |
-| [N4](#n4-无-keyboardinterrupt-处理严重性升级) | 可靠性 | 🟡 中 | 无 KeyboardInterrupt 处理（严重性升级） |
-| [N5](#n5-degraded-状态命名存在语义歧义) | 代码质量 | 🟢 低 | `degraded` 状态命名存在语义歧义 |
-| [N6](#n6-stream-json-事件日志过于详细) | 性能 | 🟢 低 | stream-json 事件日志过于详细 |
-| [N7](#n7-并发模式与交互模式不兼容) | 流程缺陷 | 🟡 中 | 并发模式与交互模式不兼容 |
-| [N8](#n8-read_reference_docs-目录文档不递归) | 功能缺陷 | 🟢 低 | `read_reference_docs` 目录文档不递归 |
+| [N1](#n1-并发模式下-shared_contextmd-仍有时序问题) | 并发安全 | 🔴 高 | ✅ 已修复 — 并发模式下 SHARED_CONTEXT.md 仍有时序问题 |
+| [N2](#n2-并行模式下-git-worktree-分支命名冲突) | 并发安全 | 🟡 中 | ✅ 已修复 — 并行模式下 git worktree 分支命名冲突 |
+| [N3](#n3-confirm_plan-闭包依赖外层-task-变量) | 代码质量 | 🟡 中 | ✅ 已修复 — `confirm_plan` 闭包依赖外层 `task` 变量 |
+| [N4](#n4-无-keyboardinterrupt-处理严重性升级) | 可靠性 | 🟡 中 | ✅ 已修复 — 无 KeyboardInterrupt 处理（严重性升级） |
+| [N5](#n5-degraded-状态命名存在语义歧义) | 代码质量 | 🟢 低 | ✅ 已修复 — `degraded` 状态命名存在语义歧义 |
+| [N6](#n6-stream-json-事件日志过于详细) | 性能 | 🟢 低 | ✅ 已修复 — stream-json 事件日志过于详细 |
+| [N7](#n7-并发模式与交互模式不兼容) | 流程缺陷 | 🟡 中 | ✅ 已修复 — 并发模式与交互模式不兼容 |
+| [N8](#n8-read_reference_docs-目录文档不递归) | 功能缺陷 | 🟢 低 | ✅ 已修复 — `read_reference_docs` 目录文档不递归 |
 
 ---
 
@@ -575,7 +582,7 @@ elif path.is_dir():
 
 | 严重程度 | 数量 | 编号 |
 |----------|------|------|
-| 🔴 高 | 3 | Q1, Q2 (Q6 部分修复降级), N1 |
+| 🔴 高 | 3 | Q1, Q2, Q6, N1 |
 | 🟡 中 | 9 | Q3, Q4, Q5, Q7, Q11, Q12, N2, N3, N4, N7 |
 | 🟢 低 | 6 | Q8, Q9, Q10, N5, N6, N8 |
 
@@ -583,41 +590,39 @@ elif path.is_dir():
 
 | 状态 | 数量 | 编号 |
 |------|------|------|
-| ❌ 未修复 | 12 | Q1, Q2, Q3, Q4, Q5, Q8, Q9, Q10, Q11, Q13, N7, N8 |
-| 🔶 部分修复 | 1 | Q6 |
-| ⚠️ 新增/升级 | 8 | Q7（风险升级）, Q12（规模扩大）, N1, N2, N3, N4, N5, N6 |
+| ✅ 已修复 | **23** | **全部** |
 
 ---
 
-## 修复优先级建议
+## 修复优先级（全部完成）
 
-### S 级 — 紧急修复（并发安全 + 中断处理）
+### S 级 — 紧急修复 ✅
 
-1. **N1 / Q7** — SHARED_CONTEXT.md 并发锁（`--parallel` 上线后已从潜在变为实际 bug）
-2. **N4 / Q13** — KeyboardInterrupt 优雅关闭（并发执行后后果更严重）
-3. **N7** — 并发+交互模式不兼容性检测（防止用户同时打开多个交互终端）
-4. **Q1** — Plan 交互中 API 失败时提供降级路径
+1. ✅ **N1 / Q7** — SHARED_CONTEXT.md 并发锁（`_safe_append_to_file`）
+2. ✅ **N4 / Q13** — KeyboardInterrupt 优雅关闭（`main()` + `_run_pipeline` 信号处理）
+3. ✅ **N7** — 并发+交互模式不兼容检测（自动降为串行）
+4. ✅ **Q1** — Plan 交互中 API 失败降级路径（`_prompt_fallback` + `__FALLBACK__`）
 
-### A 级 — 安全 + 正确性
+### A 级 — 安全 + 正确性 ✅
 
-5. **Q6** — 完全消除 `shell=True` 降级路径，或添加命令白名单
-6. **Q2** — 修复 `verify_subtask` 的配置键
-7. **N2** — 分支命名加入 `sub_id` 确保唯一性
-8. **Q3** — git merge 冲突检测与处理
+5. ✅ **Q6** — `shell=True` 安全白名单 + 注入模式检测
+6. ✅ **Q2** — 新增 `auto_verify_subtask` 独立配置项
+7. ✅ **N2** — 分支名包含 `sub_id` 确保唯一
+8. ✅ **Q3** — git merge 冲突检测 + `.MERGE_CONFLICT` 注入
 
-### B 级 — 可靠性 + 可维护性
+### B 级 — 可靠性 + 可维护性 ✅
 
-9. **Q5** — 路径替换使用正则边界匹配或占位符方案
-10. **Q11** — 统一 git subprocess 错误检查
-11. **N3** — 消除 `confirm_plan` 闭包依赖
-12. **Q4** — 增强无头模式交互检测
-13. **Q12** — 代码模块化拆分（~1400 行单文件）
+9. ✅ **Q5** — 路径替换使用正则边界匹配
+10. ✅ **Q11** — git add/commit/tag 增加 returncode 检查
+11. ✅ **N3** — `task` 作为显式参数传入 `confirm_plan()`
+12. ✅ **Q4** — 增加中文交互检测正则
+13. ✅ **Q12** — 代码模块化拆分（`agent_go/` 包 9 模块）
 
-### C 级 — 优化（可延后）
+### C 级 — 优化 ✅
 
-14. **N6** — stream-json 日志级别调优（`text_delta` 降为 debug）
-15. **N5** — `degraded` 状态名改为 `no_changes` 等更准确的语义
-16. **Q8** — 任务 ID 加入微秒/随机后缀
-17. **Q9** — commit 类型支持英文关键词
-18. **Q10** — 工具版本检测
-19. **N8** — 目录文档递归读取
+14. ✅ **N6** — `text_delta` 降为 `logger.debug()`
+15. ✅ **N5** — `degraded` → `no_changes`
+16. ✅ **Q8** — 任务 ID 毫秒 + 随机 hex 后缀
+17. ✅ **Q9** — commit 类型支持英文关键词 + `_detect_commit_prefix/scope`
+18. ✅ **Q10** — `_detect_tool_versions()` + `meta.json` 版本记录
+19. ✅ **N8** — `glob("*.md")` → `rglob("*.md")`

@@ -34,7 +34,22 @@ python3 agent_go.py config
 AGENT_GO_INTERACTIVE=1 python3 agent_go.py run <repo-path> '<task>'
 ```
 
-No build step, no test suite — this is a POC prototype.
+## Testing
+
+See [TESTING.md](TESTING.md) for full test documentation.
+
+```bash
+# Run all 91 tests (unit + integration)
+pytest tests/           # ~3.5s
+
+# Unit tests only (pure functions, no mocking)
+pytest tests/ -k "not integration"
+
+# Integration tests (all external calls mocked)
+pytest tests/test_integration.py -v
+```
+
+No build step needed — this is a pure Python stdlib project.
 
 ## Architecture
 
