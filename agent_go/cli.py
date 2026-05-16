@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
-from .config import load_config, safe_input, setup_logger
+from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR
 from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
