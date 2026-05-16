@@ -284,6 +284,8 @@ def plan_to_subtasks(plan, logger):
             "verification": step.get("verification", ""),
             "risks": step.get("risks", []),
             "depends_on": depends_on,
+            "skills": step.get("skills", []),
+            "agent_type": step.get("agent_type", "developer"),
         })
 
     log_event(logger, "plan_decomposed", {"count": len(subtasks)})

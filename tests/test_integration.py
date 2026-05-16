@@ -735,3 +735,73 @@ class TestBranchPrefix:
             assert prefix == expected, f"{title} → 期望 {expected}, 实际 {prefix}"
             expected_branch = "feature" if expected == "feat" else expected
             assert branch_prefix == expected_branch, f"{title} → 分支前缀 {expected_branch}"
+
+
+class TestSkillInjection:
+    """测试 12: Skill 注入到 TASK.md"""
+
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    def test_skill_injected_into_task_md(self, mock_subprocess, mock_headless,
+                                         temp_repo, task_dir, fast_logger):
+        """验证 subtask 的 skills 字段内容被写入 TASK.md"""
+        from agent_go.executor import run_subtask
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock()
+
+        subtask = {
+            "id": "sub-1", "title": "安全审查",
+            "description": "审查 JWT 安全性",
+            "files_hint": "src/auth/**",
+            "agent_prompt": "请审查认证代码的安全性",
+            "verification": "",
+            "risks": [],
+            "depends_on": [],
+            "skills": ["security-review"],
+            "agent_type": "reviewer",
+        }
+
+        with patch("shutil.copytree") as mock_copy:
+            mock_copy.return_value = None
+            run_subtask("test-task", subtask, temp_repo, task_dir,
+                       fast_logger, headless=True)
+
+        # 读取生成的 TASK.md
+        task_md_path = task_dir / "sub-1" / "TASK.md"
+        assert task_md_path.exists(), "TASK.md 应存在"
+        content = task_md_path.read_text(encoding="utf-8")
+
+        # 验证 Skill 注入标记
+        assert "Skill 知识注入" in content, (
+            f"TASK.md 应包含 Skill 注入标记，实际内容前500字符:\n{content[:500]}"
+        )
+
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    def test_no_skill_when_empty(self, mock_subprocess, mock_headless,
+                                 temp_repo, task_dir, fast_logger):
+        """无 skills 字段时 TASK.md 不应包含 Skill 注入标记"""
+        from agent_go.executor import run_subtask
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock()
+
+        subtask = {
+            "id": "sub-2", "title": "普通任务",
+            "description": "无 Special Skill",
+            "files_hint": "*",
+            "agent_prompt": "do work",
+            "verification": "",
+            "risks": [],
+            "depends_on": [],
+            "skills": [],
+            "agent_type": "developer",
+        }
+
+        with patch("shutil.copytree") as mock_copy:
+            mock_copy.return_value = None
+            run_subtask("test-task", subtask, temp_repo, task_dir,
+                       fast_logger, headless=True)
+
+        task_md_path = task_dir / "sub-2" / "TASK.md"
+        content = task_md_path.read_text(encoding="utf-8")
+        assert "Skill 知识注入" not in content, "无 skills 时不应有 Skill 标记"

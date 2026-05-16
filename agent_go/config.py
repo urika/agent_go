@@ -28,6 +28,13 @@ DEFAULT_CONFIG = {
         "local_model_url": "http://localhost:8000/v1/chat/completions",
         "local_model_name": "qwen",
         "enable_rules": True
+    },
+    "skills": {
+        "auto_discover": False,     # 是否自动匹配 Skill（基于任务描述）
+        "max_auto_skills": 3       # 自动匹配时最多加载 N 个 Skill
+    },
+    "agents": {
+        "default": "developer"      # 默认 Agent 类型
     }
 }
 

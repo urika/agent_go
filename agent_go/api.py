@@ -37,16 +37,22 @@ def call_api(config, messages, logger):
         log_event(logger, "api_call", {"provider": provider, "latency_ms": round(latency*1000, 2), "response_len": len(content)})
         return content
 
-def generate_plan(task, repo, config, logger, supplement="", reference_docs="", iteration=1) -> dict:
+def generate_plan(task, repo, config, logger, supplement="", reference_docs="", iteration=1, skill_context="") -> dict:
     logger.info("[PLAN] ═══ PLAN MODE ═══")
     logger.info(f"[PLAN]  第 {iteration} 次生成")
-    log_event(logger, "plan_generate", {"iteration": iteration, "has_supplement": bool(supplement), "has_docs": bool(reference_docs)})
+    log_event(logger, "plan_generate", {"iteration": iteration, "has_supplement": bool(supplement), "has_docs": bool(reference_docs), "has_skills": bool(skill_context)})
 
     project_files = analyze_project(repo)
     git_info = get_git_info(repo)
     resource_map = get_resource_map(repo, git_info)
 
-    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行"""
+    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件",\n"skills": ["可用的领域Skill名称（可选）"],\n"agent_type": "推荐的Agent类型（可选，如 developer/architect/reviewer/tester）"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行"""
+
+    # 如果有 Skill 上下文，注入到 system prompt
+    if skill_context:
+        system_prompt += f"\n## 可用领域知识（Skill）\n以下是项目/用户提供的领域知识，可在制定方案时参考：\n{skill_context}\n请在 plan 的 steps 中使用 skills 字段引用相关的 Skill 名称。"""
+
+    system_prompt += "\n## 可用 Agent 类型\n- developer: 开发者（编写代码）\n- architect: 架构师（设计分析，只读）\n- reviewer: 审查者（代码审查）\n- tester: 测试者（编写测试）\n可在 steps 中使用 agent_type 字段为每个步骤推荐合适的 Agent 类型。"
 
     user_content = f"""任务：{task}\n项目路径：{repo}\nGit 信息：远程={git_info['remote']}, 分支={git_info['branch']}, 提交={git_info['commit']}\n项目文件列表：\n{project_files}\n项目资源：\n- 目录：{', '.join(resource_map['directories'])}\n- 关键文件：{', '.join(resource_map['key_files'])}"""
 

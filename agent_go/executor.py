@@ -6,6 +6,7 @@ from datetime import datetime
 from .config import log_event
 from .utils import _format_commit, _safe_append_to_file, _is_safe_verification_command, _slugify
 from .subtask import _git_merge_upstream, _run_headless
+from .agents import load_agent_type, get_claude_command, get_agent_env
 
 def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref=""):
     sub_id = subtask["id"]
@@ -99,6 +100,18 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         exec_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
     task_md_parts.extend(exec_requirements)
 
+    # ── Skill 知识注入 ──
+    skill_names = subtask.get("skills", [])
+    if skill_names:
+        from .skills import load_skill, render_skill_for_execution
+        task_md_parts.append("")
+        for sn in skill_names:
+            sk = load_skill(sn, repo)
+            if sk:
+                task_md_parts.append(render_skill_for_execution(sk))
+                task_md_parts.append("")
+                logger.info(f"Skill 注入: {sn} → TASK.md")
+
     # 将 Agent Prompt 中的源项目路径替换为 worktree 路径，确保隔离
     # 使用正则边界匹配，防止误匹配子路径（如 /project 匹配到 /project-legacy）
     # 注意：Python < 3.11 不支持变长 lookbehind，使用否定字符类代替
@@ -117,15 +130,35 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     env = os.environ.copy()
     env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree)})
 
+    # ── Agent 类型配置 ──
+    agent_type_name = subtask.get("agent_type", "developer")
+    agent = load_agent_type(agent_type_name, repo)
+    if agent:
+        env.update(get_agent_env(agent))
+        logger.info(f"Agent: {agent.type_name}")
+
     claude_start = time.time()
 
     if headless:
         sandbox_type = "headless"
         result = _run_headless(task_md, worktree, env, logger, sub_id)
     else:
+        # 根据 Agent 类型构建 Claude 命令
+        if agent:
+            claude_cmd = get_claude_command(agent, worktree, headless=False)
+        else:
+            claude_cmd = ["claude", str(worktree)]
+
         try:
-            result = subprocess.run(["greywall", "--", "claude", str(worktree)], env=env, cwd=str(worktree))
-            sandbox_type = "greywall"
+            # 尝试先匹配 greywall 包装
+            import shutil as _shutil
+            greywall_bin = _shutil.which("greywall")
+            if greywall_bin:
+                result = subprocess.run([greywall_bin, "--"] + claude_cmd, env=env, cwd=str(worktree))
+                sandbox_type = "greywall"
+            else:
+                result = subprocess.run(claude_cmd, env=env, cwd=str(worktree))
+                sandbox_type = "native"
         except FileNotFoundError:
             print("   ⚠️ Greywall 未安装，降级原生")
             result = subprocess.run(["claude", str(worktree)], env=env, cwd=str(worktree))

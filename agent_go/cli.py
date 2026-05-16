@@ -8,6 +8,8 @@ from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
 from .pipeline import _run_pipeline
+from .skills import load_skill, load_skills, discover_skills, render_skill_for_plan, render_skill_for_execution, list_skills
+from .agents import load_agent_type, list_agent_types
 
 def cmd_run():
     # 解析参数
@@ -15,6 +17,8 @@ def cmd_run():
     task_idx = 3
     doc_paths = []
     issue_ref = ""
+    skill_names = []
+    agent_type_name = ""
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv  # --yes 隐含 headless
     parallel = 1  # 默认串行
@@ -53,8 +57,26 @@ def cmd_run():
         if docs_idx < repo_idx:
             repo_idx = 2 if docs_idx > 2 else 2
 
+    if "--skill" in sys.argv:
+        try:
+            sk_idx = sys.argv.index("--skill")
+            skill_names = [s.strip() for s in sys.argv[sk_idx + 1].split(",") if s.strip()]
+            sys.argv.pop(sk_idx + 1)
+            sys.argv.pop(sk_idx)
+        except (IndexError, ValueError):
+            pass
+
+    if "--agent-type" in sys.argv:
+        try:
+            ag_idx = sys.argv.index("--agent-type")
+            agent_type_name = sys.argv[ag_idx + 1].strip()
+            sys.argv.pop(ag_idx + 1)
+            sys.argv.pop(ag_idx)
+        except (IndexError, ValueError):
+            pass
+
     if len(sys.argv) < 3:
-        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--yes] [--headless] [--issue <N>] [--parallel N]")
+        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N]")
         sys.exit(1)
 
     repo = Path(sys.argv[repo_idx]).resolve()
@@ -96,6 +118,32 @@ def cmd_run():
     if tool_versions:
         logger.info(f"工具版本: {tool_versions}")
 
+    # ── Skill 加载 ──
+    skills = []
+    if skill_names:
+        skills = load_skills(skill_names, repo)
+        if skills:
+            logger.info(f"已加载 Skill: {[s.name for s in skills]}")
+        else:
+            print(f"⚠️  未找到 Skill: {skill_names}")
+    elif config.get("skills", {}).get("auto_discover", False):
+        max_auto = config.get("skills", {}).get("max_auto_skills", 3)
+        skills = discover_skills(task, repo, max_auto)
+        if skills:
+            logger.info(f"自动匹配 Skill: {[s.name for s in skills]}")
+
+    # ── Agent 类型加载 ──
+    agent_type = None
+    agent_type_name = agent_type_name or config.get("agents", {}).get("default", "developer")
+    agent_type = load_agent_type(agent_type_name, repo)
+    if agent_type:
+        logger.info(f"Agent 类型: {agent_type.type_name}")
+
+    # 将 Skill 注入 Plan prompt（如果有）
+    skill_plan_context = ""
+    if skills:
+        skill_plan_context = "\n\n".join(render_skill_for_plan(s) for s in skills)
+
     print(f"\n🔧 主任务: {task}")
     print(f"📁 项目: {repo}")
     print(f"🆔 任务ID: {task_id}")
@@ -113,7 +161,7 @@ def cmd_run():
 
     for attempt in range(3):
         try:
-            plan = generate_plan(task, repo, config, logger, "", initial_docs, iteration)
+            plan = generate_plan(task, repo, config, logger, "", initial_docs, iteration, skill_plan_context)
             plan["_original_task"] = task
             break
         except Exception as e:
@@ -133,7 +181,7 @@ def cmd_run():
             while confirmed_plan is None and iteration < max_iter:
                 iteration += 1
                 try:
-                    plan = generate_plan(task, repo, config, logger, "", "", iteration)
+                    plan = generate_plan(task, repo, config, logger, "", "", iteration, skill_plan_context)
                 except Exception as e:
                     logger.error(f"重试生成 Plan 失败: {e}")
                     print(f"\n⚠️ 重试失败: {e}")
@@ -173,7 +221,9 @@ def cmd_run():
         "created": ts, "status": "running",
         "reference_docs": doc_paths, "issue": issue_ref,
         "subtasks": confirmed, "results": [],
-        "tool_versions": tool_versions
+        "tool_versions": tool_versions,
+        "skills": [s.name for s in skills],
+        "agent_type": agent_type.type_name if agent_type else "developer",
     }
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -475,6 +525,31 @@ def cmd_clean():
     else:
         print("已取消")
 
+def cmd_skills():
+    """列出所有可用的 Skill。"""
+    skills = list_skills()
+    if not skills:
+        print("\n暂无可用 Skill。在 ~/.agent_go/skills/<name>/SKILL.md 创建。")
+        print("示例 Skill 格式: YAML frontmatter + Markdown body")
+        return
+    print(f"\n📚 可用 Skill ({len(skills)} 个)")
+    print("─" * 55)
+    for s in skills:
+        desc = s["description"][:45] + "..." if len(s["description"]) > 45 else s["description"]
+        print(f"  {s['name']:<30} {desc}")
+    print("─" * 55)
+
+def cmd_agents():
+    """列出所有可用的 Agent 类型。"""
+    agents = list_agent_types()
+    print(f"\n🤖 Agent 类型 ({len(agents)} 种)")
+    print("─" * 55)
+    for a in agents:
+        src = "内置" if a.get("source") == "builtin" else "用户"
+        desc = a["description"][:40] + "..." if len(a["description"]) > 40 else a["description"]
+        print(f"  {a['type']:<25} [{src}] {desc}")
+    print("─" * 55)
+
 def main():
     try:
         cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
@@ -486,9 +561,11 @@ def main():
         elif cmd == "config": cmd_config()
         elif cmd == "clean": cmd_clean()
         elif cmd == "pr": cmd_pr()
+        elif cmd == "skills": cmd_skills()
+        elif cmd == "agents": cmd_agents()
         else:
-            print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--yes] [--headless] [--issue <N>] [--parallel N]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）
---headless       子任务使用 claude -p 无头执行（Plan 仍可交互编辑）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--parallel N     最大并发子任务数（默认 1=串行，3=推荐）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
+            print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）
+--headless       子任务使用 claude -p 无头执行（Plan 仍可交互编辑）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--parallel N     最大并发子任务数（默认 1=串行，3=推荐）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\nagent_go skills                列出所有 Skill\nagent_go agents                列出所有 Agent 类型\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
     except KeyboardInterrupt:
         print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)
