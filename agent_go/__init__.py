@@ -71,3 +71,4 @@ from .agents import load_agent_type, list_agent_types
 from .role_skill_map import load_role_skill_map, apply_rules
 from .metrics import collect_timing, collect_change_stats, collect_merge_result, extract_usage
 from .eval import analyze_quality, analyze_performance, aggregate_quality, aggregate_performance, cmd_eval
+from .tui import cmd_status_tui

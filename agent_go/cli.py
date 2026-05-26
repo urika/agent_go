@@ -11,6 +11,7 @@ from .pipeline import _run_pipeline
 from .skills import load_skill, load_skills, discover_skills, render_skill_for_plan, render_skill_for_execution, list_skills
 from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
+from .tui import cmd_status_tui
 
 def cmd_run():
     # 解析参数
@@ -441,7 +442,15 @@ def cmd_pr():
         os.unlink(pr_file)
 
 def cmd_status():
-    """实时监控所有任务状态。--watch 持续刷新，--verbose 显示 Claude 事件。"""
+    """实时监控所有任务状态。默认 TUI 模式。--no-tui 回退文本模式。"""
+    if "--no-tui" in sys.argv:
+        _cmd_status_text()
+    else:
+        cmd_status_tui()
+
+
+def _cmd_status_text():
+    """文本模式（原有实现）。--watch 持续刷新，--verbose 显示 Claude 事件。"""
     watch = "--watch" in sys.argv or "-w" in sys.argv
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
 
