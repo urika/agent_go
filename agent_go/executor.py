@@ -72,15 +72,21 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             "",
         ])
 
-    # 注入上游子任务的共享上下文
-    shared_ctx = (task_dir / "SHARED_CONTEXT.md")
-    if shared_ctx.exists():
-        ctx = shared_ctx.read_text(encoding="utf-8")
-        if ctx.strip():
+    # 注入直接上游子任务的共享上下文（仅依赖图中的直接上游）
+    upstream_ids = subtask.get("depends_on", [])
+    if upstream_ids:
+        ctx_parts = []
+        for up_id in upstream_ids:
+            ctx_file = task_dir / up_id / "context.md"
+            if ctx_file.exists():
+                ctx = ctx_file.read_text(encoding="utf-8")
+                if ctx.strip():
+                    ctx_parts.append(ctx)
+        if ctx_parts:
             task_md_parts.extend([
-                "## 上游子任务上下文",
-                "以下是前面子任务的关键信息，请先理解再开始操作：",
-                ctx,
+                "## 上游子任务上下文（仅直接依赖）",
+                "以下是直接上游子任务的关键信息：",
+                "\n".join(ctx_parts),
                 "",
             ])
 
@@ -147,7 +153,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     print(f"\n🚀 {sub_id}: {subtask['title']}")
     env = os.environ.copy()
-    env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree)})
+    loaded_skill_names = [sn for sn in skill_names if sn not in unresolved_skills]
+    env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree), "AGENT_GO_SKILLS": ",".join(loaded_skill_names)})
 
     # ── Agent 类型配置 ──
     agent_type_name = subtask.get("agent_type", "developer")
@@ -226,62 +233,72 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     else:
         logger.info(f"已打 tag (无新增变更): {tag_name}")
 
-    # 验证执行
+    # 验证执行（支持单条命令或命令数组）
     verification = subtask.get("verification", "")
     verify_ok = True
     if verification and has_changes:
-        logger.info(f"执行验证: {verification}")
-        try:
-            vr = subprocess.run(shlex.split(verification), cwd=str(worktree),
-                                capture_output=True, text=True, timeout=120)
-        except (FileNotFoundError, OSError):
-            if _is_safe_verification_command(verification):
-                vr = subprocess.run(verification, shell=True, cwd=str(worktree),
-                                    capture_output=True, text=True, timeout=120)
-            else:
-                logger.warning(f"验证命令不安全 (shell=True 拒绝): {verification[:100]}")
-                verify_ok = True  # 跳过不安全命令的验证
-                vr = None
-        if vr is not None and vr.returncode != 0 and vr.returncode != 127:  # 127 = command not found
-            logger.warning(f"验证失败 (rc={vr.returncode}): {vr.stderr[-300:]}")
-            if headless:
-                logger.info("自动重试: 注入修复指令")
-                fix_prompt = task_md + (
-"\n\n【验证失败】以下命令执行失败:\n"
-f"  {verification}\n"
-f"错误输出:\n{vr.stderr[-500:]}\n"
-"请修复上述问题，确保验证命令通过。直接修改文件，不要询问。"
-                )
-                _run_headless(fix_prompt, worktree, env, logger, f"{sub_id}-fix", active_pids=active_pids)
-                # 重新提交
-                subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
-                subprocess.run(["git", "commit", "-m",
-                                f"{sub_id} (fix): 验证修复"], cwd=str(worktree),
-                               capture_output=True)
-                subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree),
-                               capture_output=True)
-                # 重新验证
-                try:
-                    vr2 = subprocess.run(shlex.split(verification), cwd=str(worktree),
-                                         capture_output=True, text=True, timeout=120)
-                except (FileNotFoundError, OSError):
-                    if _is_safe_verification_command(verification):
-                        vr2 = subprocess.run(verification, shell=True, cwd=str(worktree),
-                                             capture_output=True, text=True, timeout=120)
-                    else:
-                        logger.warning(f"修复重试验证命令不安全 (跳过): {verification[:100]}")
-                        verify_ok = True
-                        vr2 = None
-                verify_ok = vr2.returncode == 0 if vr2 is not None else verify_ok
-                logger.info(f"重试验证: {'通过' if verify_ok else '仍失败'}")
-                # 更新 diff
-                diff2 = subprocess.run(["git", "diff", "--stat", "HEAD~1"], cwd=str(worktree),
-                                       capture_output=True, text=True)
-                summary = diff2.stdout.strip() or summary
-            else:
-                verify_ok = False
+        # 统一为数组
+        if isinstance(verification, str):
+            cmds = [verification]
         else:
-            logger.info("验证通过")
+            cmds = verification
+        for vi, vcmd in enumerate(cmds):
+            logger.info(f"执行验证 [{vi+1}/{len(cmds)}]: {vcmd}")
+            vr = None
+            try:
+                vr = subprocess.run(shlex.split(vcmd), cwd=str(worktree),
+                                    capture_output=True, text=True, timeout=120)
+            except (FileNotFoundError, OSError):
+                if _is_safe_verification_command(vcmd):
+                    vr = subprocess.run(vcmd, shell=True, cwd=str(worktree),
+                                        capture_output=True, text=True, timeout=120)
+                else:
+                    logger.warning(f"验证命令不安全 (shell=True 拒绝): {vcmd[:100]}")
+                    continue
+            if vr is not None and vr.returncode != 0 and vr.returncode != 127:
+                logger.warning(f"验证失败 (rc={vr.returncode}): {vr.stderr[-300:]}")
+                verify_ok = False
+                if headless:
+                    logger.info("自动重试: 注入修复指令")
+                    failed_cmds = "\n".join(f"  {c}" for c in cmds)
+                    fix_prompt = task_md + (
+"\n\n【验证失败】以下验证命令执行失败:\n"
+f"{failed_cmds}\n\n"
+f"最后失败命令: {vcmd}\n"
+f"错误输出:\n{vr.stderr[-500:]}\n"
+"请修复上述问题，确保所有验证命令通过。直接修改文件，不要询问。"
+                    )
+                    _run_headless(fix_prompt, worktree, env, logger, f"{sub_id}-fix", active_pids=active_pids)
+                    subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+                    subprocess.run(["git", "commit", "-m",
+                                    f"{sub_id} (fix): 验证修复"], cwd=str(worktree),
+                                   capture_output=True)
+                    subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree),
+                                   capture_output=True)
+                    # 重新验证所有命令
+                    for vj, vcmd2 in enumerate(cmds):
+                        try:
+                            vr2 = subprocess.run(shlex.split(vcmd2), cwd=str(worktree),
+                                                 capture_output=True, text=True, timeout=120)
+                        except (FileNotFoundError, OSError):
+                            if _is_safe_verification_command(vcmd2):
+                                vr2 = subprocess.run(vcmd2, shell=True, cwd=str(worktree),
+                                                     capture_output=True, text=True, timeout=120)
+                            else:
+                                continue
+                        if vr2.returncode != 0 and vr2.returncode != 127:
+                            verify_ok = False
+                            break
+                        verify_ok = True
+                    logger.info(f"重试验证: {'通过' if verify_ok else '仍失败'}")
+                    diff2 = subprocess.run(["git", "diff", "--stat", "HEAD~1"], cwd=str(worktree),
+                                           capture_output=True, text=True)
+                    summary = diff2.stdout.strip() or summary
+                    break  # 重试后跳出循环
+                else:
+                    break  # 交互模式，遇到失败即停止
+            else:
+                logger.info(f"验证 [{vi+1}/{len(cmds)}] 通过")
 
     # 生成共享上下文（供下游子任务使用）
     ctx_parts = [
@@ -301,10 +318,11 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
             ctx_parts.append(f"- 关键决策: {'; '.join(decisions[:3])}")
     ctx_parts.append("")
     # 线程安全地追加共享上下文
-    shared_ctx_file = (task_dir / "SHARED_CONTEXT.md")
-    _safe_append_to_file(shared_ctx_file, "\n".join(ctx_parts) + "\n", logger)
-    line_count = len(shared_ctx_file.read_text(encoding="utf-8").splitlines()) if shared_ctx_file.exists() else 0
-    logger.info(f"共享上下文已更新: {line_count} 行")
+    # 写入独立上下文文件（仅被直接下游子任务读取）
+    ctx_file = sub_dir / "context.md"
+    ctx_file.write_text("\n".join(ctx_parts) + "\n", encoding="utf-8")
+    line_count = len("\n".join(ctx_parts).splitlines())
+    logger.info(f"上下文已写入: {line_count} 行")
 
     # 状态判定: completed(有变更) / no_changes(完成但无变更) / failed(异常)
     if result.returncode == 0 and verify_ok:

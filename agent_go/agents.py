@@ -138,40 +138,39 @@ def get_claude_command(
     worktree: Path,
     headless: bool = False,
 ) -> list[str]:
-    """根据 Agent 类型构建 claude CLI 参数列表。
+    """根据 Agent 类型构建 claude CLI 参数列表。"""
 
-    当前 Claude Code CLI 不支持原生 agent 角色切换，通过以下方式模拟：
-    - permission_mode → --permission-mode bypassPermissions
-    - 如果指定了 preload_skills，追加 --instructions 参数
-    - 未来如 Claude Code 支持 agent 模式，在此适配
-    """
-    # 基础命令
-    sandbox_path = None
     import shutil
     greywall = shutil.which("greywall")
-    if greywall:
-        cmd = ["greywall", "--"]
-    else:
-        cmd = []
 
-    cmd.extend(["claude", str(worktree)])
-
-    # 无头模式
     if headless:
+        agent_mode = agent.claude_config.get("permission_mode", "")
+        mode = agent_mode if agent_mode in ("bypassPermissions", "acceptEdits") else "bypassPermissions"
         cmd = [
-            "claude", "-p", "",  # prompt 将在以下参数中注入
-            "--permission-mode", "bypassPermissions",
+            "claude", "-p", "",
+            "--permission-mode", mode,
             "--no-session-persistence",
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
         ]
-    else:
-        permission_mode = agent.claude_config.get("permission_mode", "default")
-        if permission_mode == "bypassPermissions":
-            cmd.extend(["--permission-mode", "bypassPermissions"])
-        elif permission_mode == "acceptEdits":
-            cmd.extend(["--permission-mode", "acceptEdits"])
+        allowed = agent.claude_config.get("allowed_tools", [])
+        if allowed:
+            cmd.extend(["--allowedTools", ",".join(allowed)])
+        return cmd
+
+    cmd = (["greywall", "--"] if greywall else [])
+    cmd.extend(["claude", str(worktree)])
+
+    permission_mode = agent.claude_config.get("permission_mode", "default")
+    if permission_mode == "bypassPermissions":
+        cmd.extend(["--permission-mode", "bypassPermissions"])
+    elif permission_mode == "acceptEdits":
+        cmd.extend(["--permission-mode", "acceptEdits"])
+
+    allowed = agent.claude_config.get("allowed_tools", [])
+    if allowed:
+        cmd.extend(["--allowedTools", ",".join(allowed)])
 
     return cmd
 
