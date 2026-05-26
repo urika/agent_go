@@ -34,6 +34,45 @@ def get_git_info(repo):
         pass
     return info
 
+def _worktree_create(repo, branch, worktree_path):
+    result = subprocess.run(
+        ["git", "worktree", "add", "-b", branch, str(worktree_path), "HEAD"],
+        cwd=str(repo), capture_output=True
+    )
+    return result.returncode == 0
+
+
+def _worktree_remove(repo, worktree_path):
+    if not worktree_path.exists():
+        return True
+    result = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_path)],
+        cwd=str(repo), capture_output=True
+    )
+    return result.returncode == 0
+
+
+def _worktree_prune(repo):
+    result = subprocess.run(
+        ["git", "worktree", "prune"],
+        cwd=str(repo), capture_output=True
+    )
+    return result.returncode == 0
+
+
+def _set_gc_auto(repo, value="0"):
+    orig = subprocess.run(
+        ["git", "config", "gc.auto"],
+        cwd=str(repo), capture_output=True, text=True
+    )
+    original = orig.stdout.strip() or "1"
+    set_result = subprocess.run(
+        ["git", "config", "gc.auto", value],
+        cwd=str(repo), capture_output=True
+    )
+    return original, set_result.returncode == 0
+
+
 def get_resource_map(repo, git_info):
     """生成共享资源清单。"""
     resources = {

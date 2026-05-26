@@ -442,8 +442,10 @@ class TestResume:
         (task_dir / "meta.json").write_text(
             json.dumps(meta, indent=2), encoding="utf-8")
 
-        # 创建 sub-1 worktree 目录（模拟已完成）
-        (task_dir / "sub-1" / "work").mkdir(parents=True)
+        # 创建 sub-1 worktree 目录（模拟 worktree 已存在）
+        wt_dir = task_dir / "sub-1" / "work"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / ".git").write_text("gitdir: /fake/.git/worktrees/sub-1\n")
 
         # 手动调用 _run_pipeline 的恢复逻辑
         with patch("sys.argv", ["agent_go", "resume", task_dir.name]):
@@ -457,7 +459,7 @@ class TestResume:
                         from agent_go import AGENT_GO_DIR as real_dir
                         pass
 
-        # 直接验证恢复逻辑
+        # 直接验证恢复逻辑（与 cli.py cmd_resume 一致）
         results = meta.get("results", [])
         worktree_map = {}
         results_map = {}
@@ -465,10 +467,10 @@ class TestResume:
         for r in results:
             wid = r["subtask_id"]
             wt = task_dir / wid / "work"
-            if wt.exists():
+            if wt.exists() and (wt / ".git").exists():
                 worktree_map[wid] = wt
             results_map[wid] = r
-            if r.get("status") in ("completed", "no_changes"):
+            if r.get("status") in ("completed", "no_changes", "degraded"):
                 completed_ids.add(wid)
 
         assert "sub-1" in completed_ids
@@ -509,22 +511,20 @@ class TestSubtaskExecution:
         mock_subprocess.return_value = make_subprocess_mock()
         mock_headless.return_value = make_subprocess_mock()
 
-        with patch("shutil.copytree") as mock_copy:
-            mock_copy.return_value = None
-            subtask = {
-                "id": "sub-1", "title": "测试", "description": "desc",
-                "files_hint": "*", "agent_prompt": "do work",
-                "verification": "", "risks": [], "depends_on": [],
-            }
-            result = run_subtask(
-                "test-task", subtask, temp_repo, task_dir, fast_logger,
-                headless=True, issue_ref=""
-            )
-            # 验证结果结构
-            assert result["subtask_id"] == "sub-1"
-            assert result["status"] in ("completed", "no_changes", "failed")
-            assert "worktree" in result
-            assert "summary" in result
+        subtask = {
+            "id": "sub-1", "title": "测试", "description": "desc",
+            "files_hint": "*", "agent_prompt": "do work",
+            "verification": "", "risks": [], "depends_on": [],
+        }
+        result = run_subtask(
+            "test-task", subtask, temp_repo, task_dir, fast_logger,
+            headless=True, issue_ref=""
+        )
+        # 验证结果结构
+        assert result["subtask_id"] == "sub-1"
+        assert result["status"] in ("completed", "no_changes", "failed")
+        assert "worktree" in result
+        assert "summary" in result
 
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
@@ -534,24 +534,22 @@ class TestSubtaskExecution:
         mock_subprocess.return_value = make_subprocess_mock()
         mock_headless.return_value = make_subprocess_mock()
 
-        with patch("shutil.copytree") as mock_copy:
-            mock_copy.return_value = None
-            results = []
-            for i in range(3):
-                subtask = {
-                    "id": f"sub-{i+1}", "title": f"步骤{i+1}",
-                    "description": f"desc{i}", "files_hint": "*",
-                    "agent_prompt": f"work{i}", "verification": "",
-                    "risks": [], "depends_on": [],
-                }
-                r = run_subtask("test-task", subtask, temp_repo, task_dir, fast_logger,
-                               headless=True)
-                results.append(r)
-                assert r["subtask_id"] == f"sub-{i+1}"
+        results = []
+        for i in range(3):
+            subtask = {
+                "id": f"sub-{i+1}", "title": f"步骤{i+1}",
+                "description": f"desc{i}", "files_hint": "*",
+                "agent_prompt": f"work{i}", "verification": "",
+                "risks": [], "depends_on": [],
+            }
+            r = run_subtask("test-task", subtask, temp_repo, task_dir, fast_logger,
+                           headless=True)
+            results.append(r)
+            assert r["subtask_id"] == f"sub-{i+1}"
 
-            # worktree 路径应不同
-            worktrees = [r["worktree"] for r in results]
-            assert len(set(worktrees)) == 3
+        # worktree 路径应不同
+        worktrees = [r["worktree"] for r in results]
+        assert len(set(worktrees)) == 3
 
 
 class TestMergeConflict:
@@ -565,19 +563,13 @@ class TestMergeConflict:
         # 模拟 git merge 失败 + 冲突文件
         def side_effect(args, **kwargs):
             m = MagicMock()
-            cmd_str = " ".join(args) if isinstance(args, list) else args
-            if "remote" in cmd_str and "add" in cmd_str.split():
-                m.returncode = 0
-            elif "fetch" in cmd_str:
-                m.returncode = 0
-            elif "merge" in cmd_str:
+            cmd_str = " ".join(args) if isinstance(args, list) else str(args)
+            if "merge" in cmd_str and "--abort" not in cmd_str:
                 m.returncode = 1
                 m.stderr = "CONFLICT in main.py"
-            elif "diff" in cmd_str:
+            elif "diff" in cmd_str and "U" in cmd_str:
                 m.returncode = 0
                 m.stdout = "main.py\nutils.py\n"
-            elif "remote" in cmd_str and "remove" in cmd_str.split():
-                m.returncode = 0
             elif "commit" in cmd_str:
                 m.returncode = 0
             elif "abort" in cmd_str:
@@ -696,31 +688,11 @@ class TestNoChangesStatus:
         assert meta["results"][0]["status"] == "no_changes"
 
 
-class TestBranchPrefix:
-    """测试 11: 分支前缀自动检测"""
-
-    @patch("agent_go._detect_commit_prefix")
-    @patch("shutil.copytree")
-    @patch("subprocess.run")
-    def test_feat_branch_prefix(self, mock_subprocess, mock_copytree,
-                                 mock_prefix, temp_repo, task_dir, fast_logger):
-        """feat 类型 → feature/ 前缀"""
-        mock_subprocess.return_value = MagicMock(returncode=0)
-        mock_copytree.return_value = None
-        mock_prefix.return_value = "feat"
-
-        subtask = {
-            "id": "sub-1", "title": "新增用户登录",
-            "description": "desc", "files_hint": "*",
-            "agent_prompt": "work", "verification": "",
-            "risks": [], "depends_on": [],
-        }
-        # 直接验证前缀检测
-        prefix = _detect_commit_prefix(subtask["title"])
-        assert prefix in ("feat", "fix", "refactor", "docs", "test", "chore")
+class TestCommitPrefix:
+    """测试 11: commit 前缀自动检测（用于 Conventional Commits）"""
 
     def test_detect_prefixes(self):
-        """验证不同标题类型对应的分支前缀"""
+        """验证不同标题类型对应的 commit 前缀"""
         cases = [
             ("新增用户登录", "feat"),
             ("修复空指针", "fix"),
@@ -731,10 +703,7 @@ class TestBranchPrefix:
         ]
         for title, expected in cases:
             prefix = _detect_commit_prefix(title)
-            branch_prefix = "feature" if prefix == "feat" else prefix
             assert prefix == expected, f"{title} → 期望 {expected}, 实际 {prefix}"
-            expected_branch = "feature" if expected == "feat" else expected
-            assert branch_prefix == expected_branch, f"{title} → 分支前缀 {expected_branch}"
 
 
 class TestSkillInjection:
@@ -761,10 +730,8 @@ class TestSkillInjection:
             "agent_type": "reviewer",
         }
 
-        with patch("shutil.copytree") as mock_copy:
-            mock_copy.return_value = None
-            run_subtask("test-task", subtask, temp_repo, task_dir,
-                       fast_logger, headless=True)
+        run_subtask("test-task", subtask, temp_repo, task_dir,
+                   fast_logger, headless=True)
 
         # 读取生成的 TASK.md
         task_md_path = task_dir / "sub-1" / "TASK.md"
@@ -797,10 +764,8 @@ class TestSkillInjection:
             "agent_type": "developer",
         }
 
-        with patch("shutil.copytree") as mock_copy:
-            mock_copy.return_value = None
-            run_subtask("test-task", subtask, temp_repo, task_dir,
-                       fast_logger, headless=True)
+        run_subtask("test-task", subtask, temp_repo, task_dir,
+                   fast_logger, headless=True)
 
         task_md_path = task_dir / "sub-2" / "TASK.md"
         content = task_md_path.read_text(encoding="utf-8")

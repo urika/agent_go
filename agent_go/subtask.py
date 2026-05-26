@@ -6,44 +6,30 @@ from datetime import datetime
 from .config import log_event
 
 def _git_merge_upstream(src_worktree, dst_worktree, tag, logger):
-    """通过 git fetch + merge 将上游 worktree 的代码传递到当前 worktree。
-    检测冲突并写入冲突清单，供下游子任务处理。"""
-    remote_name = f"upstream-{tag}"
-    # 添加上游 worktree 为临时 remote
-    add_result = subprocess.run(["git", "remote", "add", remote_name, str(src_worktree)],
-                                cwd=str(dst_worktree), capture_output=True)
-    if add_result.returncode != 0:
-        logger.warning(f"添加临时 remote 失败: {add_result.stderr[:200]}")
-    fetch_result = subprocess.run(["git", "fetch", remote_name, f"refs/tags/{tag}:refs/tags/{tag}"],
-                                  cwd=str(dst_worktree), capture_output=True)
-    if fetch_result.returncode != 0:
-        logger.warning(f"fetch tag {tag} 失败: {fetch_result.stderr[:200]}")
-    # 使用 --no-commit 先做合并但不提交，方便检测冲突
+    """将上游 worktree 的 tag 合并到当前 worktree。
+    worktree 共享对象库，tag 在所有 worktree 间直接可见，无需 fetch。"""
     result = subprocess.run(
-        ["git", "merge", tag, "--allow-unrelated-histories",
-         "--no-commit"],
+        ["git", "merge", tag, "--no-commit"],
         cwd=str(dst_worktree), capture_output=True, text=True)
-    subprocess.run(["git", "remote", "remove", remote_name],
-                   cwd=str(dst_worktree), capture_output=True)
     if result.returncode == 0:
-        # 无冲突，提交合并
-        commit_result = subprocess.run(["git", "commit", "--no-edit", "-m", f"merge upstream {tag}"],
-                                       cwd=str(dst_worktree), capture_output=True)
+        commit_result = subprocess.run(
+            ["git", "commit", "--no-edit", "-m", f"merge upstream {tag}"],
+            cwd=str(dst_worktree), capture_output=True)
         if commit_result.returncode != 0:
             logger.warning(f"merge commit 失败: {commit_result.stderr[:200]}")
         logger.info(f"git merge {tag} 成功")
     else:
-        # 检测冲突文件
         conflict_result = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=U"],
             cwd=str(dst_worktree), capture_output=True, text=True)
         conflict_files = [f for f in conflict_result.stdout.strip().split("\n") if f]
-        conflict_info = f"merge {tag} 冲突文件:\n" + "\n".join(f"- {f}" for f in conflict_files) if conflict_files else "未知冲突"
+        conflict_info = (
+            f"merge {tag} 冲突文件:\n" + "\n".join(f"- {f}" for f in conflict_files)
+            if conflict_files else "未知冲突"
+        )
         logger.warning(f"git merge {tag} 冲突: {', '.join(conflict_files)}")
-        # 将冲突清单写入文件，供下游 TASK.md 引用
         conflict_file = dst_worktree / ".MERGE_CONFLICT"
         conflict_file.write_text(conflict_info, encoding="utf-8")
-        # 中止合并，让下游子任务处理冲突
         subprocess.run(["git", "merge", "--abort"],
                        cwd=str(dst_worktree), capture_output=True)
 

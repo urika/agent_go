@@ -34,6 +34,10 @@ from .git_utils import (
     analyze_project,
     get_git_info,
     get_resource_map,
+    _worktree_create,
+    _worktree_remove,
+    _worktree_prune,
+    _set_gc_auto,
 )
 from .ui import (
     plan_to_md,

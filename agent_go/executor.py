@@ -1,4 +1,4 @@
-import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
+import sys, os, subprocess, json, re, time, threading, shlex, signal, logging, shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -7,12 +7,13 @@ from .config import log_event
 from .utils import _format_commit, _safe_append_to_file, _is_safe_verification_command, _slugify
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
+from .git_utils import _worktree_create
 
 def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref=""):
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id
+    sub_dir.mkdir(parents=True, exist_ok=True)
     worktree = sub_dir / "work"
-    worktree.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"─── {sub_id} START: {subtask['title']} ───")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
@@ -20,22 +21,22 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     clone_start = time.time()
     if (worktree / ".git").exists():
-        # 恢复模式：worktree 已存在，跳过 clone
-        logger.info(f"worktree 已存在，跳过 clone")
+        logger.info(f"worktree 已存在，跳过创建")
     elif (repo / ".git").exists():
-        # 包含 sub_id 确保并行模式下分支名唯一
-        # 分支前缀自动匹配 commit type：feat→feature, fix→fix, refactor→refactor, docs→docs, test→test, chore→chore
-        from .utils import _detect_commit_prefix as _detect_type
-        branch_type = _detect_type(subtask['title'])
-        branch_prefix = "feature" if branch_type == "feat" else branch_type
-        branch = f"{branch_prefix}/{issue_ref}-{sub_id}-{_slugify(subtask['title'])}" if issue_ref else f"agent_go/{task_id}/{sub_id}"
-        subprocess.run(["git", "clone", str(repo), str(worktree)], capture_output=True, check=True)
-        checkout_result = subprocess.run(["git", "checkout", "-b", branch], cwd=str(worktree), capture_output=True)
-        if checkout_result.returncode != 0:
-            logger.warning(f"分支创建失败: {checkout_result.stderr.strip()}")
-        logger.info(f"分支: {branch}")
+        branch = f"agent_go/{task_id}/{sub_id}"
+        ok = _worktree_create(repo, branch, worktree)
+        if ok:
+            logger.info(f"worktree 创建: 分支={branch}")
+        else:
+            logger.warning(f"worktree add 失败，回退到 git clone")
+            worktree.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "clone", str(repo), str(worktree)], capture_output=True, check=True)
+            checkout_result = subprocess.run(["git", "checkout", "-b", branch], cwd=str(worktree), capture_output=True)
+            if checkout_result.returncode != 0:
+                logger.warning(f"分支创建失败: {checkout_result.stderr.strip()}")
     else:
-        shutil.copytree(repo, worktree, dirs_exist_ok=True)
+        worktree.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(str(repo), str(worktree), dirs_exist_ok=True)
 
     # 产物传递：通过 git merge 将上游代码合并到当前 worktree
     merge_conflicts = {}
@@ -151,8 +152,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
         try:
             # 尝试先匹配 greywall 包装
-            import shutil as _shutil
-            greywall_bin = _shutil.which("greywall")
+            greywall_bin = shutil.which("greywall")
             if greywall_bin:
                 result = subprocess.run([greywall_bin, "--"] + claude_cmd, env=env, cwd=str(worktree))
                 sandbox_type = "greywall"

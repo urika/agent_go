@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import datetime
 
 from .executor import run_subtask
+from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 
 def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
                   worktree_map=None, results_map=None, completed_ids=None):
@@ -15,6 +16,15 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
     meta_lock = threading.Lock()
     degraded_count = sum(1 for r in results_map.values() if r.get("status") in ("no_changes", "degraded"))
     total = len(confirmed)
+
+    # 禁用 git gc.auto — worktree 并发操作共享对象库时避免竞态
+    original_gc_value = None
+    gc_disabled = False
+    if (repo / ".git").exists():
+        original_gc_value, ok = _set_gc_auto(repo, "0")
+        if ok:
+            gc_disabled = True
+            logger.info(f"[worktree] gc.auto 已禁用 (原值: {original_gc_value})")
 
     # 注册中断信号处理
     def _on_interrupt(signum, frame):
@@ -89,6 +99,22 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
 
     signal.signal(signal.SIGINT, prev_sigint)
     signal.signal(signal.SIGTERM, prev_sigterm)
+
+    # ── Worktree 清理 ──
+    if (repo / ".git").exists():
+        errors = 0
+        for st in confirmed:
+            wt_path = task_dir / st["id"] / "work"
+            if wt_path.exists():
+                if _worktree_remove(repo, wt_path):
+                    logger.info(f"[worktree] removed: {st['id']}")
+                else:
+                    errors += 1
+                    logger.warning(f"[worktree] 无法移除: {st['id']}")
+        _worktree_prune(repo)
+        logger.info(f"[worktree] cleanup ({errors} errors)")
+        if gc_disabled and original_gc_value is not None:
+            _set_gc_auto(repo, original_gc_value)
 
     # 如果有子任务 failed 则整体为 failed，否则为 completed
     has_failed = any(r.get("status") == "failed" for r in results_map.values())

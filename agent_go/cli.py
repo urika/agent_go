@@ -252,7 +252,7 @@ def cmd_resume():
     for r in results:
         wid = r["subtask_id"]
         wt = task_dir / wid / "work"
-        if wt.exists():
+        if wt.exists() and (wt / ".git").exists():
             worktree_map[wid] = wt
         results_map[wid] = r
         if r.get("status") in ("completed", "no_changes", "degraded"):
@@ -519,8 +519,21 @@ def cmd_clean():
         print(f"  {t.name}")
     confirm = safe_input("\n确认删除? [y/N]: ").strip().lower()
     if confirm == "y":
+        repos_to_prune = set()
+        for t in tasks:
+            meta_path = t / "meta.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    repo_str = meta.get("repo", "")
+                    if repo_str and Path(repo_str).exists():
+                        repos_to_prune.add(repo_str)
+                except (json.JSONDecodeError, OSError):
+                    pass
         for t in tasks:
             _shutil.rmtree(t, ignore_errors=True)
+        for repo_path in repos_to_prune:
+            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, capture_output=True)
         print(f"已清理 {len(tasks)} 个任务")
     else:
         print("已取消")
