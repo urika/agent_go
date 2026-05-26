@@ -10,6 +10,7 @@ from .utils import read_reference_docs, _detect_tool_versions
 from .pipeline import _run_pipeline
 from .skills import load_skill, load_skills, discover_skills, render_skill_for_plan, render_skill_for_execution, list_skills
 from .agents import load_agent_type, list_agent_types
+from .eval import cmd_eval
 
 def cmd_run():
     # 解析参数
@@ -635,9 +636,10 @@ def main():
         elif cmd == "pr": cmd_pr()
         elif cmd == "skills": cmd_skills()
         elif cmd == "agents": cmd_agents()
+        elif cmd == "eval": cmd_eval()
         else:
             print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）
---headless       子任务使用 claude -p 无头执行（Plan 仍可交互编辑）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--parallel N     最大并发子任务数（默认 1=串行，3=推荐）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\nagent_go skills                列出所有 Skill\nagent_go agents                列出所有 Agent 类型\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
+--headless       子任务使用 claude -p 无头执行（Plan 仍可交互编辑）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--parallel N     最大并发子任务数（默认 1=串行，3=推荐）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\nagent_go skills                列出所有 Skill\nagent_go agents                列出所有 Agent 类型\nagent_go eval quality [task-id|--all]    执行质量报告\nagent_go eval perf [task-id|--all]       性能分析报告\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
     except KeyboardInterrupt:
         print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)
