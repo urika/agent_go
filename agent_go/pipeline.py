@@ -15,6 +15,7 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
     task_id = meta["task_id"]
     meta_lock = threading.Lock()
     active_pids = set()
+    active_pids_lock = threading.Lock()
     degraded_count = sum(1 for r in results_map.values() if r.get("status") in ("no_changes", "degraded"))
     total = len(confirmed)
 
@@ -22,7 +23,7 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
     original_gc_value = None
     gc_disabled = False
     if (repo / ".git").exists():
-        original_gc_value, ok = _set_gc_auto(repo, "0")
+        original_gc_value, ok, _ = _set_gc_auto(repo, "0")
         if ok:
             gc_disabled = True
             logger.info(f"[worktree] gc.auto 已禁用 (原值: {original_gc_value})")
@@ -31,7 +32,9 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
     def _on_interrupt(signum, frame):
         meta["status"] = "paused"
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-        for pid in list(active_pids):
+        with active_pids_lock:
+            pids_to_kill = list(active_pids)
+        for pid in pids_to_kill:
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
@@ -66,7 +69,7 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
         if actual_workers == 1:
             for st in wave:
                 upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids)
+                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock)
                 with meta_lock:
                     worktree_map[st["id"]] = task_dir / st["id"] / "work"
                     results_map[st["id"]] = result
@@ -82,7 +85,7 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
                 futures = {}
                 for st in wave:
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids)
+                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids, active_pids_lock)
                     futures[fut] = st
                 for fut in as_completed(futures):
                     st = futures[fut]
@@ -140,12 +143,15 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
         for st in confirmed:
             wt_path = task_dir / st["id"] / "work"
             if wt_path.exists():
-                if _worktree_remove(repo, wt_path):
+                ok, err = _worktree_remove(repo, wt_path)
+                if ok:
                     logger.info(f"[worktree] removed: {st['id']}")
                 else:
                     errors += 1
-                    logger.warning(f"[worktree] 无法移除: {st['id']}")
-        _worktree_prune(repo)
+                    logger.warning(f"[worktree] 无法移除 {st['id']}: {err}")
+        ok_prune, err_prune = _worktree_prune(repo)
+        if not ok_prune:
+            logger.warning(f"[worktree] prune 失败: {err_prune}")
         logger.info(f"[worktree] cleanup ({errors} errors)")
 
         # ── Tag 清理 ──
@@ -166,7 +172,7 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
             logger.info(f"[tag] 任务 tags 已清理")
 
         if gc_disabled and original_gc_value is not None:
-            _set_gc_auto(repo, original_gc_value)
+            _, _, _ = _set_gc_auto(repo, original_gc_value)
 
     # 收集所有结果并写回 meta.json（完整版本，含 results 数组）
     meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]

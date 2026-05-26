@@ -10,7 +10,7 @@ from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 
-def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None):
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None):
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id
     sub_dir.mkdir(parents=True, exist_ok=True)
@@ -27,12 +27,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     elif (repo / ".git").exists():
         branch = f"agent_go/{task_id}/{sub_id}"
         wt_start = time.time()
-        ok = _worktree_create(repo, branch, worktree)
+        ok, err_msg = _worktree_create(repo, branch, worktree)
         worktree_create_ms = (time.time() - wt_start) * 1000
         if ok:
             logger.info(f"worktree 创建: 分支={branch}")
         else:
-            logger.warning(f"worktree add 失败，回退到 git clone")
+            logger.warning(f"worktree add 失败 ({err_msg})，回退到 git clone")
             worktree.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "clone", str(repo), str(worktree)], capture_output=True, check=True)
             checkout_result = subprocess.run(["git", "checkout", "-b", branch], cwd=str(worktree), capture_output=True)
@@ -182,7 +182,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     if headless:
         sandbox_type = "headless"
-        result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids)
+        result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids, active_pids_lock=active_pids_lock)
     else:
         # 根据 Agent 类型构建 Claude 命令
         if agent:
@@ -272,13 +272,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             try:
                 vr = subprocess.run(shlex.split(vcmd), cwd=str(worktree),
                                     capture_output=True, text=True, timeout=120)
-            except (FileNotFoundError, OSError):
-                if _is_safe_verification_command(vcmd):
-                    vr = subprocess.run(vcmd, shell=True, cwd=str(worktree),
-                                        capture_output=True, text=True, timeout=120)
-                else:
-                    logger.warning(f"验证命令不安全 (shell=True 拒绝): {vcmd[:100]}")
-                    continue
+            except (FileNotFoundError, OSError, ValueError):
+                # shlex.split 失败时不降级到 shell=True（安全策略），记录并跳过
+                logger.warning(f"验证命令无法解析为 argv (跳过): {vcmd[:100]}")
+                verification_results.append({
+                    "command": vcmd[:200], "exit_code": -1,
+                    "duration_ms": 0, "attempt": 1,
+                })
+                continue
             v_duration_ms = round((time.time() - v_start) * 1000)
             verification_ms += v_duration_ms
             verification_results.append({
@@ -299,7 +300,7 @@ f"最后失败命令: {vcmd}\n"
 f"错误输出:\n{vr.stderr[-500:]}\n"
 "请修复上述问题，确保所有验证命令通过。直接修改文件，不要询问。"
                     )
-                    _run_headless(fix_prompt, worktree, env, logger, f"{sub_id}-fix", active_pids=active_pids)
+                    _run_headless(fix_prompt, worktree, env, logger, f"{sub_id}-fix", active_pids=active_pids, active_pids_lock=active_pids_lock)
                     subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
                     subprocess.run(["git", "commit", "-m",
                                     f"{sub_id} (fix): 验证修复"], cwd=str(worktree),
@@ -313,12 +314,14 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
                         try:
                             vr2 = subprocess.run(shlex.split(vcmd2), cwd=str(worktree),
                                                  capture_output=True, text=True, timeout=120)
-                        except (FileNotFoundError, OSError):
-                            if _is_safe_verification_command(vcmd2):
-                                vr2 = subprocess.run(vcmd2, shell=True, cwd=str(worktree),
-                                                     capture_output=True, text=True, timeout=120)
-                            else:
-                                continue
+                        except (FileNotFoundError, OSError, ValueError):
+                            # shlex.split 失败时不降级到 shell=True（安全策略），记录并跳过
+                            logger.warning(f"重试验证命令无法解析 (跳过): {vcmd2[:100]}")
+                            verification_results.append({
+                                "command": vcmd2[:200], "exit_code": -1,
+                                "duration_ms": 0, "attempt": 2,
+                            })
+                            continue
                         v2_ms = round((time.time() - v2_start) * 1000)
                         verification_ms += v2_ms
                         verification_results.append({

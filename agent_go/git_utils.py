@@ -35,32 +35,42 @@ def get_git_info(repo):
     return info
 
 def _worktree_create(repo, branch, worktree_path):
+    """创建 git worktree。返回 (success: bool, error_message: str)。"""
     result = subprocess.run(
         ["git", "worktree", "add", "-b", branch, str(worktree_path), "HEAD"],
         cwd=str(repo), capture_output=True
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False, result.stderr.decode("utf-8", errors="replace").strip()[:200]
+    return True, ""
 
 
 def _worktree_remove(repo, worktree_path):
+    """移除 git worktree。返回 (success: bool, error_message: str)。"""
     if not worktree_path.exists():
-        return True
+        return True, ""
     result = subprocess.run(
         ["git", "worktree", "remove", "--force", str(worktree_path)],
         cwd=str(repo), capture_output=True
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False, result.stderr.decode("utf-8", errors="replace").strip()[:200]
+    return True, ""
 
 
 def _worktree_prune(repo):
+    """清理失效 worktree 记录。返回 (success: bool, error_message: str)。"""
     result = subprocess.run(
         ["git", "worktree", "prune"],
         cwd=str(repo), capture_output=True
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False, result.stderr.decode("utf-8", errors="replace").strip()[:200]
+    return True, ""
 
 
 def _set_gc_auto(repo, value="0"):
+    """设置 git gc.auto 值。返回 (original_value: str, success: bool, error_message: str)。"""
     orig = subprocess.run(
         ["git", "config", "gc.auto"],
         cwd=str(repo), capture_output=True, text=True
@@ -70,7 +80,8 @@ def _set_gc_auto(repo, value="0"):
         ["git", "config", "gc.auto", value],
         cwd=str(repo), capture_output=True
     )
-    return original, set_result.returncode == 0
+    err_msg = set_result.stderr.decode("utf-8", errors="replace").strip()[:200] if set_result.returncode != 0 else ""
+    return original, set_result.returncode == 0, err_msg
 
 
 def get_resource_map(repo, git_info):
