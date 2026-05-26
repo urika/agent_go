@@ -349,6 +349,17 @@ def cmd_show():
         print(f"\n{icon} [{st['id']}] {st['title']}")
         if st.get("agent_prompt"):
             print(f"       🤖 Agent Prompt: {st['agent_prompt'][:100]}...")
+        # Agent 角色和 Skill 可观测性
+        agent_type = st.get("agent_type", "developer")
+        source = r.get("agent_type_source", "default") if r else st.get("_agent_type_source", "default")
+        source_label = {"llm": "LLM", "rule": "规则", "default": "默认", "inferred": "推断"}.get(source, source)
+        print(f"       👤 Agent: {agent_type} (来源: {source_label})")
+        skills = st.get("skills", [])
+        if skills:
+            print(f"       🧠 Skill: {', '.join(skills)}")
+        unresolved = r.get("skills_unresolved", []) if r else []
+        if unresolved:
+            print(f"       ⚠️  Skill 未找到: {', '.join(unresolved)}")
         if r:
             print(f"       📊 {r['summary']}")
 
