@@ -29,6 +29,11 @@ from .api import (
     call_api,
     generate_plan,
     decompose_fallback,
+    get_cache_key,
+    load_cached_plan,
+    save_cached_plan,
+    list_cache_entries,
+    clean_expired_cache,
 )
 from .git_utils import (
     analyze_project,

@@ -3,10 +3,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
-from .config import get_api_key, log_event, DECOMPOSE_RULES
+from .config import get_api_key, log_event, DECOMPOSE_RULES, AGENT_GO_DIR
 from .git_utils import analyze_project, get_git_info, get_resource_map
 from .skills import list_skills
 from .role_skill_map import load_role_skill_map
+import hashlib
 
 def call_api(config, messages, logger):
     api_cfg = config["plan_api"]
@@ -52,11 +53,25 @@ def call_api(config, messages, logger):
         })
         raise
 
-def generate_plan(task, repo, config, logger, supplement="", reference_docs="", iteration=1, skill_context="") -> dict:
+def generate_plan(task, repo, config, logger, supplement="", reference_docs="", iteration=1, skill_context="", no_cache=False) -> dict:
     plan_start = time.time()
     logger.info("[PLAN] ═══ PLAN MODE ═══")
     logger.info(f"[PLAN]  第 {iteration} 次生成")
     log_event(logger, "plan_generate", {"iteration": iteration, "has_supplement": bool(supplement), "has_docs": bool(reference_docs), "has_skills": bool(skill_context)})
+
+    # Plan 缓存检查
+    cache_hit = False
+    if not no_cache and iteration == 1 and not supplement and not reference_docs:
+        cache_key = get_cache_key(task, repo)
+        cached = load_cached_plan(cache_key, config, logger)
+        if cached:
+            plan = cached
+            cache_hit = True
+            plan_duration_ms = round((time.time() - plan_start) * 1000)
+            log_event(logger, "plan_complete", {"iteration": iteration, "step_count": len(plan.get("steps", [])),
+                                                 "plan_duration_ms": plan_duration_ms, "cache_hit": True})
+            logger.info(f"[缓存] 使用缓存 Plan，耗时 {plan_duration_ms}ms")
+            return plan
 
     project_files = analyze_project(repo)
     git_info = get_git_info(repo)
@@ -145,7 +160,11 @@ def generate_plan(task, repo, config, logger, supplement="", reference_docs="", 
 
     plan_duration_ms = round((time.time() - plan_start) * 1000)
     log_event(logger, "plan_complete", {"iteration": iteration, "step_count": len(plan.get("steps", [])),
-                                         "plan_duration_ms": plan_duration_ms})
+                                         "plan_duration_ms": plan_duration_ms, "cache_hit": cache_hit})
+    # 写入缓存
+    if not no_cache and iteration == 1 and not cache_hit:
+        cache_key = get_cache_key(task, repo)
+        save_cached_plan(cache_key, plan, task, repo, config)
     return plan
 
 def decompose_fallback(task, repo, config, logger):
@@ -179,3 +198,135 @@ def decompose_fallback(task, repo, config, logger):
         if any(p.lower() in task_lower for p in rule["patterns"]):
             return [{"id": f"sub-{i+1}", **st} for i, st in enumerate(rule["subtasks"])]
     return [{"id": "sub-1", "title": "执行主任务", "description": task, "files_hint": "*", "agent_prompt": task}]
+
+
+# ═══════════════════════════════════════════════════════════════
+# Plan Cache
+# ═══════════════════════════════════════════════════════════════
+
+def _cache_dir():
+    d = AGENT_GO_DIR / "cache" / "plans"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_cache_key(task, repo):
+    """SHA256(task + project_files[0:100] + remote + branch)。"""
+    project_files = analyze_project(repo)
+    git_info = get_git_info(repo)
+    key_parts = [
+        task,
+        project_files[:2000] if project_files else "",
+        git_info.get("remote", ""),
+        git_info.get("branch", ""),
+        git_info.get("commit", ""),
+    ]
+    return hashlib.sha256("|".join(key_parts).encode()).hexdigest()
+
+
+def load_cached_plan(cache_key, config, logger):
+    cache_dir = _cache_dir()
+    cache_file = cache_dir / cache_key[:2] / f"{cache_key}.json"
+    if not cache_file.exists():
+        return None
+
+    try:
+        entry = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    ttl = config.get("cache", {}).get("plan_ttl", 86400)
+    created = entry.get("meta", {}).get("created_at", "")
+    if created:
+        try:
+            created_ts = datetime.strptime(created, "%Y-%m-%dT%H:%M:%S").timestamp()
+            if time.time() - created_ts > ttl:
+                cache_file.unlink(missing_ok=True)
+                logger.info(f"[缓存] 已过期，删除: {cache_key[:12]}...")
+                return None
+        except ValueError:
+            pass
+
+    plan = entry.get("plan")
+    if not plan or not plan.get("steps"):
+        return None
+
+    meta = entry["meta"]
+    meta["last_hit_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    meta["hit_count"] = meta.get("hit_count", 0) + 1
+    entry["meta"] = meta
+    cache_file.write_text(json.dumps(entry, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    cache_cfg = config.get("cache", {})
+    if cache_cfg.get("enabled", True):
+        logger.info(f"[缓存] 命中 {cache_key[:12]}... ({meta['hit_count']} 次, {_format_age(created)})")
+    return plan
+
+
+def save_cached_plan(cache_key, plan, task, repo, config):
+    cache_cfg = config.get("cache", {})
+    if not cache_cfg.get("enabled", True):
+        return
+    cache_dir = _cache_dir()
+    subdir = cache_dir / cache_key[:2]
+    subdir.mkdir(parents=True, exist_ok=True)
+
+    entry = {
+        "cache_key": cache_key,
+        "plan": plan,
+        "meta": {
+            "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "last_hit_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "hit_count": 0,
+            "task": task[:200],
+            "repo": str(repo),
+            "ttl": cache_cfg.get("plan_ttl", 86400),
+        },
+    }
+    (subdir / f"{cache_key}.json").write_text(
+        json.dumps(entry, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _format_age(iso_str):
+    try:
+        age = time.time() - datetime.strptime(iso_str, "%Y-%m-%dT%H:%M:%S").timestamp()
+        if age < 3600:
+            return f"{int(age // 60)}m前"
+        elif age < 86400:
+            return f"{int(age // 3600)}h前"
+        return f"{int(age // 86400)}d前"
+    except Exception:
+        return "?"
+
+
+def list_cache_entries():
+    entries = []
+    cache_dir = _cache_dir()
+    for subdir in sorted(cache_dir.glob("*")):
+        if subdir.is_dir():
+            for f in sorted(subdir.glob("*.json")):
+                try:
+                    e = json.loads(f.read_text(encoding="utf-8"))
+                    entries.append(e)
+                except (json.JSONDecodeError, OSError):
+                    pass
+    return sorted(entries, key=lambda e: e.get("meta", {}).get("created_at", ""), reverse=True)
+
+
+def clean_expired_cache(config):
+    ttl = config.get("cache", {}).get("plan_ttl", 86400)
+    now = time.time()
+    removed = 0
+    for entry in list_cache_entries():
+        created = entry.get("meta", {}).get("created_at", "")
+        try:
+            if now - datetime.strptime(created, "%Y-%m-%dT%H:%M:%S").timestamp() > ttl:
+                cache_dir = _cache_dir()
+                key = entry.get("cache_key", "")
+                f = cache_dir / key[:2] / f"{key}.json"
+                if f.exists():
+                    f.unlink()
+                    removed += 1
+        except ValueError:
+            pass
+    return removed

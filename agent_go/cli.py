@@ -22,6 +22,7 @@ def cmd_run():
     skill_names = []
     agent_type_name = ""
     remote_url = ""
+    no_cache = "--no-cache" in sys.argv
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv  # --yes 隐含 headless
     parallel = 1  # 默认串行
@@ -173,7 +174,7 @@ def cmd_run():
 
     for attempt in range(3):
         try:
-            plan = generate_plan(task, repo, config, logger, "", initial_docs, iteration, skill_plan_context)
+            plan = generate_plan(task, repo, config, logger, "", initial_docs, iteration, skill_plan_context, no_cache=no_cache)
             plan["_original_task"] = task
             break
         except Exception as e:
@@ -193,7 +194,7 @@ def cmd_run():
             while confirmed_plan is None and iteration < max_iter:
                 iteration += 1
                 try:
-                    plan = generate_plan(task, repo, config, logger, "", "", iteration, skill_plan_context)
+                    plan = generate_plan(task, repo, config, logger, "", "", iteration, skill_plan_context, no_cache=no_cache)
                 except Exception as e:
                     logger.error(f"重试生成 Plan 失败: {e}")
                     print(f"\n⚠️ 重试失败: {e}")
@@ -621,6 +622,66 @@ def cmd_skills():
         print(f"  {s['name']:<30} {desc}")
     print("─" * 55)
 
+def cmd_cache():
+    """Plan 缓存管理。"""
+    from .api import list_cache_entries, clean_expired_cache
+
+    if len(sys.argv) < 3:
+        print("Usage: agent_go cache <list|clean|clear|stats>")
+        return
+
+    sub = sys.argv[2]
+    config = load_config()
+
+    if sub == "list":
+        entries = list_cache_entries()
+        if not entries:
+            print("暂无缓存")
+            return
+        print(f"{'缓存键':<14} {'任务':<30} {'创建':<18} {'命中':<6}")
+        print("─" * 70)
+        for e in entries:
+            m = e.get("meta", {})
+            key = e.get("cache_key", "")[:12]
+            task = m.get("task", "?")[:30]
+            created = m.get("created_at", "?")[:16]
+            hits = m.get("hit_count", 0)
+            print(f"{key:<14} {task:<30} {created:<18} {hits:<6}")
+    elif sub == "clean":
+        removed = clean_expired_cache(config)
+        print(f"清理 {removed} 条过期缓存")
+    elif sub == "clear":
+        import shutil
+        from .api import _cache_dir
+        d = _cache_dir()
+        if d.exists():
+            shutil.rmtree(d)
+            d.mkdir(parents=True, exist_ok=True)
+        print("已清除所有缓存")
+    elif sub == "stats":
+        entries = list_cache_entries()
+        print(f"缓存条目: {len(entries)}")
+        if entries:
+            total_hits = sum(e.get("meta", {}).get("hit_count", 0) for e in entries)
+            print(f"总命中: {total_hits}")
+            print(f"磁盘: {_cache_size()}")
+    else:
+        print(f"未知子命令: {sub}。可用: list, clean, clear, stats")
+
+
+def _cache_size():
+    from .api import _cache_dir
+    d = _cache_dir()
+    total = 0
+    for f in d.rglob("*.json"):
+        total += f.stat().st_size
+    if total < 1024:
+        return f"{total}B"
+    elif total < 1024 * 1024:
+        return f"{total / 1024:.1f}KB"
+    return f"{total / 1024 / 1024:.1f}MB"
+
+
 def cmd_agents():
     """列出所有可用的 Agent 类型。"""
     agents = list_agent_types()
@@ -645,6 +706,7 @@ def main():
         elif cmd == "pr": cmd_pr()
         elif cmd == "skills": cmd_skills()
         elif cmd == "agents": cmd_agents()
+        elif cmd == "cache": cmd_cache()
         elif cmd == "eval": cmd_eval()
         else:
             print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）

@@ -35,6 +35,11 @@ DEFAULT_CONFIG = {
     },
     "agents": {
         "default": "developer"      # 默认 Agent 类型
+    },
+    "cache": {
+        "enabled": True,
+        "plan_ttl": 86400,          # Plan 缓存有效期（秒），默认 24h
+        "max_entries": 100          # 最大缓存条目数
     }
 }
 
