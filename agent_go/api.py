@@ -79,11 +79,21 @@ def generate_plan(task, repo, config, logger, supplement="", reference_docs="", 
             rule_lines.append(f"| {cond_str[:50]} | {agent} | {required} | {recommended} |")
         system_prompt += "\n" + "\n".join(rule_lines) + "\n"
 
+    # F-5: 项目级推荐 Agent 和 Skill
+    recommended_agents = role_map.get("recommended_agents", [])
+    recommended_skills = role_map.get("recommended_skills", [])
+    if recommended_agents:
+        agents_str = ", ".join(recommended_agents)
+        system_prompt += f"\n## 项目推荐的 Agent 类型\n本项目推荐使用以下 Agent 类型（优先选择）：{agents_str}\n"
+    if recommended_skills:
+        skills_str = ", ".join(recommended_skills)
+        system_prompt += f"\n## 项目推荐的 Skill\n以下 Skill 应优先在合适的步骤中引用：{skills_str}\n"
+
     # 如果有 Skill 上下文，注入到 system prompt
     if skill_context:
         system_prompt += f"\n## 可用领域知识（Skill）\n以下是项目/用户提供的领域知识，可在制定方案时参考：\n{skill_context}\n请在 plan 的 steps 中使用 skills 字段引用相关的 Skill 名称。"""
 
-    system_prompt += "\n## 可用 Agent 类型\n- developer: 开发者（编写代码）\n- architect: 架构师（设计分析，只读）\n- reviewer: 审查者（代码审查）\n- tester: 测试者（编写测试）\n可在 steps 中使用 agent_type 字段为每个步骤推荐合适的 Agent 类型。"
+    system_prompt += "\n## 可用 Agent 类型\n- developer: 开发者（编写代码）\n- architect: 架构师（设计分析，只读）\n- reviewer: 审查者（代码审查）\n- tester: 测试者（编写测试）\n必须为每个步骤指定合适的 agent_type。\n\n## 示例步骤\n以下是一个正确填写 agent_type 和 skills 的示例：\n{\n  \"id\": 2,\n  \"title\": \"编写单元测试\",\n  \"description\": \"为认证模块补充测试\",\n  \"files\": [\"tests/test_auth.py\"],\n  \"verification\": \"pytest tests/test_auth.py -v\",\n  \"risks\": [],\n  \"agent_prompt\": \"请为 src/auth.py 编写单元测试，覆盖正常和异常路径\",\n  \"agent_type\": \"tester\",\n  \"skills\": [\"tdd-workflow\"]\n}"
 
     user_content = f"""任务：{task}\n项目路径：{repo}\nGit 信息：远程={git_info['remote']}, 分支={git_info['branch']}, 提交={git_info['commit']}\n项目文件列表：\n{project_files}\n项目资源：\n- 目录：{', '.join(resource_map['directories'])}\n- 关键文件：{', '.join(resource_map['key_files'])}"""
 

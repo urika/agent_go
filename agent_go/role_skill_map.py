@@ -16,7 +16,8 @@ DEFAULT_MAP = {
         },
         {
             "match": {"keywords": ["审查", "review", "audit"]},
-            "skills": {"required": [], "recommended": ["code-review"]}
+            "skills": {"required": [], "recommended": ["code-review"]},
+            "agent_type": "reviewer"
         },
         {
             "match": {"keywords": ["架构", "设计", "architect", "design", "分析"]},
@@ -29,7 +30,9 @@ DEFAULT_MAP = {
             "agent_type": "architect"
         }
     ],
-    "default_agent_type": "developer"
+    "default_agent_type": "developer",
+    "recommended_agents": ["developer", "architect", "reviewer", "tester"],
+    "recommended_skills": []
 }
 
 
@@ -116,7 +119,8 @@ def apply_rules(step, role_map, installed_skills=None):
     has_llm_specified = bool(llm_skills)
     for sk in recommended_skills:
         if sk not in merged_skills and not has_llm_specified:
-            merged_skills.append(sk)
+            if len(merged_skills) < 2:
+                merged_skills.append(sk)
 
     agent_type = step.get("agent_type") or matched_agent_type or role_map.get("default_agent_type", "developer")
 

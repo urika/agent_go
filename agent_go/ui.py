@@ -307,15 +307,23 @@ def print_subtasks(subtasks, config):
     print("─" * 60)
     for st in subtasks:
         print(f"\n[{st['id']}] {st['title']}")
+        # 标注 Agent 角色来源
+        agent_type = st.get("agent_type", "developer")
+        source = st.get("_agent_type_source", "default")
+        source_tag = {"llm": "", "rule": " [规则匹配]", "default": "", "inferred": " [自动推断]"}.get(source, "")
+        print(f"      \U0001f464 Agent: {agent_type}{source_tag}")
+        skills = st.get("skills", [])
+        if skills:
+            print(f"      \U0001f9e0 Skill: {', '.join(skills)}")
         # 只展示描述前200字符，避免太长
         desc = st.get("description", "")
         preview = desc[:200] + "..." if len(desc) > 200 else desc
         print(f"      {preview}")
         if st.get("files_hint"):
-            print(f"      📁 涉及文件: {st['files_hint']}")
+            print(f"      \U0001f4c1 涉及文件: {st['files_hint']}")
         if behavior.get("show_agent_prompt", True) and st.get("agent_prompt"):
             prompt_preview = st["agent_prompt"][:150] + "..." if len(st["agent_prompt"]) > 150 else st["agent_prompt"]
-            print(f"      🤖 Agent Prompt: {prompt_preview}")
+            print(f"      \U0001f916 Agent Prompt: {prompt_preview}")
     print("\n" + "─" * 60)
 
 def confirm_subtasks(subtasks, config, logger):

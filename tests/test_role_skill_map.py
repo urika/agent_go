@@ -140,3 +140,9 @@ class TestLoadRoleSkillMap:
         assert "rules" in role_map
         assert len(role_map["rules"]) == 5
         assert role_map["default_agent_type"] == "developer"
+
+    def test_default_map_has_recommended_fields(self):
+        role_map = load_role_skill_map(None)
+        assert "recommended_agents" in role_map
+        assert "recommended_skills" in role_map
+        assert len(role_map["recommended_agents"]) == 4
