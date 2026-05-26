@@ -240,8 +240,9 @@ def confirm_plan(plan, config, repo, logger, iteration=1, task="") -> tuple:
                 empty_count = 0
             print("无效输入")
 
-def plan_to_subtasks(plan, logger):
-    """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。"""
+def plan_to_subtasks(plan, logger, repo=None):
+    """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。
+    同时应用角色-Skill 映射规则进行兜底匹配。"""
     subtasks = []
     shared = plan.get("shared_resources", {})
     deps = plan.get("dependencies", {})
@@ -275,6 +276,13 @@ def plan_to_subtasks(plan, logger):
         upstream_ids = deps.get(step_id, [])
         depends_on = [f"sub-{d}" for d in upstream_ids]
 
+        # 应用角色-Skill 映射规则兜底
+        from .role_skill_map import load_role_skill_map, apply_rules
+        from .skills import list_skills
+        role_map = load_role_skill_map(repo)
+        installed = list_skills(repo)
+        rule_result = apply_rules(step, role_map, installed)
+
         subtasks.append({
             "id": f"sub-{step['id']}",
             "title": step.get("title", f"步骤 {step['id']}"),
@@ -284,8 +292,9 @@ def plan_to_subtasks(plan, logger):
             "verification": step.get("verification", ""),
             "risks": step.get("risks", []),
             "depends_on": depends_on,
-            "skills": step.get("skills", []),
-            "agent_type": step.get("agent_type", "developer"),
+            "skills": rule_result["skills"],
+            "agent_type": rule_result["agent_type"],
+            "_agent_type_source": "llm" if step.get("agent_type") else ("rule" if rule_result.get("matched_rules") else "default"),
         })
 
     log_event(logger, "plan_decomposed", {"count": len(subtasks)})

@@ -68,3 +68,4 @@ from .cli import (
 )
 from .skills import load_skill, load_skills, discover_skills, list_skills, render_skill_for_plan, render_skill_for_execution
 from .agents import load_agent_type, list_agent_types
+from .role_skill_map import load_role_skill_map, apply_rules

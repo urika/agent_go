@@ -213,7 +213,7 @@ def cmd_run():
             print(f"⚠️ 达到最大迭代次数 {max_iter}，使用最后版本")
             confirmed_plan = plan
 
-        subtasks = plan_to_subtasks(confirmed_plan, logger)
+        subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)
         doc_paths = final_doc_paths
         # 保存 Plan 文档
         (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")

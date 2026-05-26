@@ -5,6 +5,8 @@ from datetime import datetime
 
 from .config import get_api_key, log_event, DECOMPOSE_RULES
 from .git_utils import analyze_project, get_git_info, get_resource_map
+from .skills import list_skills
+from .role_skill_map import load_role_skill_map
 
 def call_api(config, messages, logger):
     api_cfg = config["plan_api"]
@@ -46,7 +48,36 @@ def generate_plan(task, repo, config, logger, supplement="", reference_docs="", 
     git_info = get_git_info(repo)
     resource_map = get_resource_map(repo, git_info)
 
-    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件",\n"skills": ["可用的领域Skill名称（可选）"],\n"agent_type": "推荐的Agent类型（可选，如 developer/architect/reviewer/tester）"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行"""
+    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件",\n"skills": ["从已安装 Skill 清单中选择匹配的 Skill 名称（如无匹配则为空数组）"],\n"agent_type": "必须指定。developer=编码实现, architect=只读分析设计, reviewer=代码审查, tester=测试编写"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行\n4. agent_type 必须根据步骤性质指定合适的 Agent 类型\n5. skills 从已安装 Skill 清单中选取，不匹配则使用空数组 []"""
+
+    # F-1: 注入已安装 Skill 清单
+    installed = list_skills(repo)
+    if installed:
+        skill_table = "| Skill 名称 | 描述 |\n|------------|------|\n"
+        for s in installed[:20]:
+            desc = (s.get("description") or "-")[:80]
+            skill_table += f"| {s['name']} | {desc} |\n"
+        if len(installed) > 20:
+            skill_table += f"\n... 还有 {len(installed) - 20} 个 Skill 未展示\n"
+        system_prompt += f"\n## 项目已安装的 Skill（可在 steps[].skills 中引用）\n{skill_table}\n"
+
+    # F-1: 注入角色-Skill 映射规则摘要
+    role_map = load_role_skill_map(repo)
+    if role_map.get("rules"):
+        rule_lines = ["## Agent 角色与 Skill 分配规则（优先匹配，无匹配时自主判断）",
+                      "| 匹配条件 | Agent 类型 | 必须 Skill | 推荐 Skill |",
+                      "|----------|-----------|-----------|-----------|"]
+        for rule in role_map["rules"][:15]:
+            cond = rule.get("match", {})
+            skills = rule.get("skills", {})
+            cond_str = " + ".join(
+                f"{k}={','.join(v) if isinstance(v, list) else v}" for k, v in cond.items()
+            )
+            agent = rule.get("agent_type", "-")
+            required = ", ".join(skills.get("required", [])) or "-"
+            recommended = ", ".join(skills.get("recommended", [])) or "-"
+            rule_lines.append(f"| {cond_str[:50]} | {agent} | {required} | {recommended} |")
+        system_prompt += "\n" + "\n".join(rule_lines) + "\n"
 
     # 如果有 Skill 上下文，注入到 system prompt
     if skill_context:

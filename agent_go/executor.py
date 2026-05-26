@@ -105,8 +105,10 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     # ── Skill 知识注入 ──
     skill_names = subtask.get("skills", [])
+    unresolved_skills = []
     if skill_names:
-        from .skills import load_skill, render_skill_for_execution
+        from .skills import load_skill, render_skill_for_execution, list_skills as _list_skills
+        installed_names = [s["name"] for s in _list_skills(repo)]
         task_md_parts.append("")
         for sn in skill_names:
             sk = load_skill(sn, repo)
@@ -114,6 +116,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 task_md_parts.append(render_skill_for_execution(sk))
                 task_md_parts.append("")
                 logger.info(f"Skill 注入: {sn} → TASK.md")
+            else:
+                unresolved_skills.append(sn)
+                logger.warning(f"Skill 未找到: \"{sn}\"，已跳过。已安装: {installed_names[:10]}")
 
     # 将 Agent Prompt 中的源项目路径替换为 worktree 路径，确保隔离
     # 边界字符包含: 空白、引号、括号、冒号(含全角)、路径分隔符、中文标点
@@ -138,6 +143,10 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     if agent:
         env.update(get_agent_env(agent))
         logger.info(f"Agent: {agent.type_name}")
+    else:
+        from .agents import list_agent_types
+        available = [a["type"] for a in list_agent_types()]
+        logger.warning(f"Agent 类型 \"{agent_type_name}\" 未注册，降级为 developer。可用: {available}")
 
     claude_start = time.time()
 
@@ -286,4 +295,6 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
 
     return {"subtask_id": sub_id, "status": status, "exit_code": result.returncode,
             "summary": summary, "worktree": str(worktree), "sandbox_type": sandbox_type,
-            "verify_ok": verify_ok, "duration_sec": round(claude_time, 2)}
+            "verify_ok": verify_ok, "duration_sec": round(claude_time, 2),
+            "agent_type_source": subtask.get("_agent_type_source", "default"),
+            "skills_unresolved": unresolved_skills}
