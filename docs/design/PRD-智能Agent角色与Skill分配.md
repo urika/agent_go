@@ -3,7 +3,7 @@
 > 版本: v1.0  
 > 日期: 2026-05-26  
 > 作者: Product  
-> 状态: Draft  
+> 状态: ✅ 已实现 (v0.4 — role_skill_map.py + Plan prompt 增强)  
 > 关联: [REQUIREMENTS.md](REQUIREMENTS.md) | [agent_go-design.md](agent_go-design.md)
 
 ---
