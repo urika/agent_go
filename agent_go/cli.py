@@ -19,6 +19,7 @@ def cmd_run():
     issue_ref = ""
     skill_names = []
     agent_type_name = ""
+    remote_url = ""
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv  # --yes 隐含 headless
     parallel = 1  # 默认串行
@@ -40,6 +41,15 @@ def cmd_run():
         sys.argv = [a for a in sys.argv if a not in ("--yes", "-y")]
     if "--headless" in sys.argv:
         sys.argv = [a for a in sys.argv if a != "--headless"]
+
+    if "--remote" in sys.argv:
+        try:
+            ri = sys.argv.index("--remote")
+            remote_url = sys.argv[ri + 1]
+            sys.argv.pop(ri + 1)
+            sys.argv.pop(ri)
+        except (IndexError, ValueError):
+            pass
 
     if "--issue" in sys.argv:
         try:
@@ -76,7 +86,7 @@ def cmd_run():
             pass
 
     if len(sys.argv) < 3:
-        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N]")
+        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N] [--remote <url>]")
         sys.exit(1)
 
     repo = Path(sys.argv[repo_idx]).resolve()
@@ -224,15 +234,16 @@ def cmd_run():
         "tool_versions": tool_versions,
         "skills": [s.name for s in skills],
         "agent_type": agent_type.type_name if agent_type else "developer",
+        "remote_url": remote_url,
     }
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta)
+    _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta, remote_url=remote_url)
 
 def cmd_resume():
     """恢复被中断的任务。"""
     if len(sys.argv) < 3:
-        print("Usage: agent_go resume <task-id> [--yes] [--headless] [--parallel N]")
+        print("Usage: agent_go resume <task-id> [--yes] [--headless] [--parallel N] [--remote <url>]")
         sys.exit(1)
     task_id = sys.argv[2]
     task_dir = AGENT_GO_DIR / task_id
@@ -265,12 +276,19 @@ def cmd_resume():
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv
     parallel = 1
+    remote_url = ""
     if "--parallel" in sys.argv:
         try:
             pi = sys.argv.index("--parallel")
             parallel = max(1, int(sys.argv[pi + 1]))
         except (IndexError, ValueError):
             parallel = 3
+    if "--remote" in sys.argv:
+        try:
+            ri = sys.argv.index("--remote")
+            remote_url = sys.argv[ri + 1]
+        except (IndexError, ValueError):
+            pass
     issue_ref = meta.get("issue", "")
 
     if auto_yes:
@@ -278,13 +296,19 @@ def cmd_resume():
         config["behavior"]["auto_confirm_subtasks"] = True
         config["behavior"]["auto_verify_subtask"] = True
 
+    # 恢复时优先使用命令行 --remote，其次 meta.json 中记录的
+    remote_url = remote_url or meta.get("remote_url", "")
+    meta["remote_url"] = remote_url
+
     logger.info(f"═══ 恢复任务 {task_id} ═══")
     logger.info(f"已完成: {len(completed_ids)}/{len(confirmed)}, 剩余: {len(confirmed) - len(completed_ids)}")
+    if remote_url:
+        logger.info(f"远程推送: {remote_url}")
     meta["status"] = "running"
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
-                  worktree_map, results_map, completed_ids)
+                  worktree_map, results_map, completed_ids, remote_url=remote_url)
 
 def cmd_list():
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))

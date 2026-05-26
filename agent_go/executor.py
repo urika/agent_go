@@ -39,12 +39,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         shutil.copytree(str(repo), str(worktree), dirs_exist_ok=True)
 
     # 产物传递：通过 git merge 将上游代码合并到当前 worktree
+    # Tag 使用完整路径 task_id/sub_id 避免跨任务冲突
     merge_conflicts = {}
     if upstream_worktrees:
         for up_id, up_path in upstream_worktrees.items():
             if up_path.exists():
-                logger.info(f"产物传递 (git merge): {up_id} → {sub_id}")
-                _git_merge_upstream(up_path, worktree, up_id, logger)
+                upstream_tag = f"{task_id}/{up_id}"
+                logger.info(f"产物传递 (git merge): {up_id} → {sub_id} (tag={upstream_tag})")
+                _git_merge_upstream(up_path, worktree, upstream_tag, logger, headless=headless)
                 # 检测上游 merge 是否产生冲突
                 conflict_file = worktree / ".MERGE_CONFLICT"
                 if conflict_file.exists():
@@ -170,6 +172,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     summary = diff.stdout.strip() or "无文件变更"
 
     # Git 提交 + tag（Conventional Commits 格式），供下游子任务 merge
+    # Tag 包含 task_id 前缀，避免跨任务冲突
+    tag_name = f"{task_id}/{sub_id}"
     has_changes = summary != "无文件变更"
     if has_changes:
         commit_msg = _format_commit(subtask['title'], issue_ref, sub_id)
@@ -180,13 +184,13 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                                        cwd=str(worktree), capture_output=True)
         if commit_result.returncode != 0:
             logger.warning(f"git commit 失败: {commit_result.stderr.strip()[:200]}")
-    tag_result = subprocess.run(["git", "tag", "-f", sub_id], cwd=str(worktree), capture_output=True)
+    tag_result = subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True)
     if tag_result.returncode != 0:
         logger.warning(f"git tag 失败: {tag_result.stderr.strip()[:200]}")
     if has_changes:
-        logger.info(f"已提交并打 tag: {sub_id}")
+        logger.info(f"已提交并打 tag: {tag_name}")
     else:
-        logger.info(f"已打 tag (无新增变更): {sub_id}")
+        logger.info(f"已打 tag (无新增变更): {tag_name}")
 
     # 验证执行
     verification = subtask.get("verification", "")
@@ -220,7 +224,7 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
                 subprocess.run(["git", "commit", "-m",
                                 f"{sub_id} (fix): 验证修复"], cwd=str(worktree),
                                capture_output=True)
-                subprocess.run(["git", "tag", "-f", sub_id], cwd=str(worktree),
+                subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree),
                                capture_output=True)
                 # 重新验证
                 try:

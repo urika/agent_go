@@ -5,9 +5,13 @@ from datetime import datetime
 
 from .config import log_event
 
-def _git_merge_upstream(src_worktree, dst_worktree, tag, logger):
+def _git_merge_upstream(src_worktree, dst_worktree, tag, logger, headless=False):
     """将上游 worktree 的 tag 合并到当前 worktree。
-    worktree 共享对象库，tag 在所有 worktree 间直接可见，无需 fetch。"""
+    worktree 共享对象库，tag 在所有 worktree 间直接可见，无需 fetch。
+
+    在 headless 模式下，冲突不会 abort，而是保留冲突标记状态，
+    让 Claude Code 直接面对冲突现场并自动解决。
+    """
     result = subprocess.run(
         ["git", "merge", tag, "--no-commit"],
         cwd=str(dst_worktree), capture_output=True, text=True)
@@ -28,10 +32,18 @@ def _git_merge_upstream(src_worktree, dst_worktree, tag, logger):
             if conflict_files else "未知冲突"
         )
         logger.warning(f"git merge {tag} 冲突: {', '.join(conflict_files)}")
+
         conflict_file = dst_worktree / ".MERGE_CONFLICT"
         conflict_file.write_text(conflict_info, encoding="utf-8")
-        subprocess.run(["git", "merge", "--abort"],
-                       cwd=str(dst_worktree), capture_output=True)
+
+        if headless:
+            # Headless 模式: 保留冲突状态，让 Claude Code 现场解决
+            # 不执行 merge --abort，工作区保持冲突标记 (<<<<<<<)
+            logger.info(f"headless 模式: 保留冲突标记，Claude Code 将自动解决")
+        else:
+            # 交互模式: abort，让用户手动重新 merge
+            subprocess.run(["git", "merge", "--abort"],
+                           cwd=str(dst_worktree), capture_output=True)
 
 def _run_headless(task_md, worktree, env, logger, sub_id):
     """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。"""

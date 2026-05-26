@@ -7,7 +7,7 @@ from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 
 def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
-                  worktree_map=None, results_map=None, completed_ids=None):
+                  worktree_map=None, results_map=None, completed_ids=None, remote_url=""):
     """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。"""
     worktree_map = worktree_map or {}
     results_map = results_map or {}
@@ -100,6 +100,30 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
     signal.signal(signal.SIGINT, prev_sigint)
     signal.signal(signal.SIGTERM, prev_sigterm)
 
+    # ── 远程推送 worktree 分支（可选）──
+    if remote_url and (repo / ".git").exists():
+        logger.info(f"[remote] 推送 worktree 分支到 {remote_url}")
+        push_errors = 0
+        for st in confirmed:
+            branch = f"agent_go/{task_id}/{st['id']}"
+            # 检查分支是否存在（可能 worktree 创建失败走了 clone 降级）
+            branch_check = subprocess.run(
+                ["git", "branch", "--list", branch],
+                cwd=str(repo), capture_output=True, text=True)
+            if branch_check.stdout.strip():
+                push_result = subprocess.run(
+                    ["git", "push", remote_url, f"{branch}:{branch}"],
+                    cwd=str(repo), capture_output=True)
+                if push_result.returncode == 0:
+                    logger.info(f"[remote] pushed: {branch}")
+                else:
+                    push_errors += 1
+                    logger.warning(f"[remote] 推送失败 {branch}: {push_result.stderr.strip()[:200]}")
+        if push_errors == 0:
+            logger.info(f"[remote] 所有分支推送成功")
+        else:
+            logger.warning(f"[remote] {push_errors} 个分支推送失败")
+
     # ── Worktree 清理 ──
     if (repo / ".git").exists():
         errors = 0
@@ -113,6 +137,24 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
                     logger.warning(f"[worktree] 无法移除: {st['id']}")
         _worktree_prune(repo)
         logger.info(f"[worktree] cleanup ({errors} errors)")
+
+        # ── Tag 清理 ──
+        tag_errors = 0
+        for st in confirmed:
+            tag_name = f"{task_id}/{st['id']}"
+            tag_result = subprocess.run(
+                ["git", "tag", "-d", tag_name],
+                cwd=str(repo), capture_output=True)
+            if tag_result.returncode == 0:
+                logger.debug(f"[tag] deleted: {tag_name}")
+            else:
+                tag_errors += 1
+                logger.debug(f"[tag] 删除失败 {tag_name}: {tag_result.stderr.strip()[:100]}")
+        if tag_errors:
+            logger.warning(f"[tag] {tag_errors} 个 tag 删除失败")
+        else:
+            logger.info(f"[tag] 任务 tags 已清理")
+
         if gc_disabled and original_gc_value is not None:
             _set_gc_auto(repo, original_gc_value)
 
