@@ -12,6 +12,7 @@ from .skills import load_skill, load_skills, discover_skills, render_skill_for_p
 from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .tui import cmd_status_tui
+from .workflow_gen import cmd_ci
 
 def cmd_run():
     # 解析参数
@@ -376,6 +377,39 @@ def cmd_show():
         if r:
             print(f"       📊 {r['summary']}")
 
+def cmd_review():
+    """代码审查：使用 Claude 审查项目变更。"""
+    if len(sys.argv) < 3:
+        print("Usage: agent_go review <repo-path> [--pr <N>] [--yes]")
+        return
+    repo = Path(sys.argv[2]).resolve()
+    if not repo.exists():
+        print(f"路径不存在: {repo}")
+        return
+
+    headless = "--yes" in sys.argv or "-y" in sys.argv
+    pr_ref = ""
+    if "--pr" in sys.argv:
+        try:
+            pr_ref = sys.argv[sys.argv.index("--pr") + 1]
+        except (IndexError, ValueError):
+            pass
+
+    prompt = "请审查当前项目的代码变更，输出审查报告。重点检查：安全性、错误处理、代码质量、潜在bug。"
+    if pr_ref:
+        prompt = f"请审查 PR #{pr_ref} 的代码变更，输出审查报告。重点检查：安全性、错误处理、代码质量、潜在bug、API设计。"
+
+    if headless:
+        import subprocess
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--permission-mode", "bypassPermissions", "--no-session-persistence"],
+            cwd=str(repo))
+        print(f"\n审查完成 (exit: {result.returncode})")
+    else:
+        import subprocess
+        subprocess.run(["claude", str(repo)])
+
+
 def cmd_pr():
     """根据已完成任务的 meta.json + git log 生成 PR 描述。"""
     if len(sys.argv) < 3:
@@ -707,6 +741,8 @@ def main():
         elif cmd == "skills": cmd_skills()
         elif cmd == "agents": cmd_agents()
         elif cmd == "cache": cmd_cache()
+        elif cmd == "ci": cmd_ci()
+        elif cmd == "review": cmd_review()
         elif cmd == "eval": cmd_eval()
         else:
             print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）
