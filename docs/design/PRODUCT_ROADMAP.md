@@ -1,7 +1,7 @@
 # agent_go 产品路线图
 
-> 版本: v0.4  
-> 日期: 2026-05-26  
+> 版本: v0.5  
+> 日期: 2026-05-27  
 > 视角: 产品经理回顾与后续规划
 
 ---
@@ -12,7 +12,7 @@
 |--------|------|--------|--------|--------|
 | P0（已实现） | 12 | 12 | — | — |
 | P1（高优先级） | 7 | 7 | 0 | 0 |
-| P2（中优先级） | 7 | 2 | 0 | 5 |
+| P2（中优先级） | 7 | 3 | 0 | 4 |
 | P3（远期） | 4 | 0 | 0 | 4 |
 
 ### P0 — 已全部实现
@@ -92,6 +92,18 @@
 | D-5: Skill 可观测性 | `AGENT_GO_SKILLS` 环境变量 + 加载/未命中追踪 |
 | D-6: 多级验证 | verification 支持命令数组，全部通过才算成功 |
 | D-8: 上下文过滤 | 独立 `context.md` + 仅注入直接上游依赖上下文 |
+
+### 增量交付（v0.5）
+
+| 功能 | 说明 |
+|------|------|
+| Phase 1 数据采集层 | metrics.py: timing/change_stats/merge/verify/token 采集 |
+| results[] 扩展 | retry_count + timing{} + change_stats{} + merge_results[] + verification_results[] |
+| api_call token 记录 | prompt_tokens/completion_tokens/model 写入 execution.log |
+| api_error 事件 | HTTP status_code 捕获记录 |
+| plan_duration_ms | Plan 耗时写入 plan_complete event |
+| Phase 2 统计分析层 | eval.py: analyze_quality/perf + aggregate + 评分算法 |
+| `agent_go eval` 命令 | eval quality/perf [--all] 质量+性能报告 |
 
 ---
 
