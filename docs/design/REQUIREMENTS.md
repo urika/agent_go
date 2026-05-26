@@ -1,6 +1,6 @@
 # agent_go 需求清单
 
-> 版本: v0.3  
+> 版本: v0.4  
 > 日期: 2026-05-26  
 > 项目: agent_go — 模块化 CLI 编排器，LLM Plan Mode + Claude Code 无头执行
 
@@ -55,7 +55,7 @@ Plan API → 规则注入 → Plan 确认 → 子任务拆解(角色-Skill匹配
 | 16 | **agent_go pr 命令**：生成 PR 描述 + gh pr create | ✅ `948ec95` | `cmd_pr()` 在线/离线双模式 |
 | 17 | **PR 模板自动填充**：变更摘要、关联Issue、测试结果 | ✅ `948ec95` | 基于 meta.json + SHARED_CONTEXT.md |
 | 18 | 中断恢复：任务重启后跳过已完成子任务 | ✅ | 支持 SIGINT 暂停 + resume 恢复 |
-| 19 | 验证命令数组支持：多个串行检查步骤 | 📋 | 当前单命令 |
+| 19 | 验证命令数组支持：多个串行检查步骤 | ✅ | 支持 `["build", "test"]` 数组 |
 
 ### P1.5 — 增量交付（超出原计划）
 
@@ -69,6 +69,14 @@ Plan API → 规则注入 → Plan 确认 → 子任务拆解(角色-Skill匹配
 | 36 | headless 冲突自动解决 | ✅ | 保留冲突标记让 Claude 现场处理 |
 | 37 | --remote 远程分支推送 | ✅ | 管线结束时推送 worktree 分支 |
 | 38 | Plan prompt 增强 | ✅ | Skill 清单 + 规则摘要 + 示例 step 注入 |
+| 39 | 变更检测修复 | ✅ v0.4 | `git status --porcelain` 识别新文件 |
+| 40 | 中断孤儿进程清理 | ✅ v0.4 | `active_pids` 追踪 + SIGKILL |
+| 41 | 验证命令路径重写 | ✅ v0.4 | 验证命令中路径替换为 worktree |
+| 42 | tag 清理 | ✅ v0.4 | `cmd_clean` 删除 task tags |
+| 43 | result.json 独立写入 | ✅ v0.4 | 每个 subtask 独立 result 文件 |
+| 44 | Agent Type 约束生效 | ✅ v0.4 | `--allowedTools` 传递 |
+| 45 | 多级验证数组 | ✅ v0.4 | verification 支持命令数组 |
+| 46 | 上下文依赖过滤 | ✅ v0.4 | 仅注入直接上游上下文 |
 
 ### P2 — 中优先级
 
