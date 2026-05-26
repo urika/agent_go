@@ -247,6 +247,164 @@ def aggregate_performance(tasks_dir):
 
 
 # ═══════════════════════════════════════════════════════════════
+# Cost
+# ═══════════════════════════════════════════════════════════════
+
+MODEL_PRICES = {
+    "claude-sonnet-4-20250514": {"prompt": 3.0, "completion": 15.0},
+    "claude-sonnet-4": {"prompt": 3.0, "completion": 15.0},
+    "gpt-4o": {"prompt": 2.5, "completion": 10.0},
+    "deepseek-chat": {"prompt": 0.27, "completion": 1.1},
+}
+
+
+def analyze_cost(tasks_dir):
+    total_calls = 0
+    total_prompt = 0
+    total_completion = 0
+    by_provider = {}
+    errors = 0
+    cache_hits = 0
+    cache_checks = 0
+
+    for td in _scan_task_dirs(tasks_dir):
+        log_path = td / "execution.log"
+        for ev in _read_log_events(log_path, "api_call"):
+            total_calls += 1
+            p = ev.get("prompt_tokens", 0)
+            c = ev.get("completion_tokens", 0)
+            total_prompt += p
+            total_completion += c
+            provider = ev.get("provider", "?")
+            if provider not in by_provider:
+                by_provider[provider] = {"calls": 0, "prompt": 0, "completion": 0}
+            by_provider[provider]["calls"] += 1
+            by_provider[provider]["prompt"] += p
+            by_provider[provider]["completion"] += c
+        for ev in _read_log_events(log_path, "api_error"):
+            errors += 1
+        for ev in _read_log_events(log_path, "plan_complete"):
+            cache_checks += 1
+            if ev.get("cache_hit"):
+                cache_hits += 1
+
+    cost = 0
+    provider_costs = {}
+    for prov, usage in by_provider.items():
+        price = MODEL_PRICES.get(prov, MODEL_PRICES.get("deepseek-chat", {}))
+        pc = usage["prompt"] / 1_000_000 * price.get("prompt", 1)
+        cc = usage["completion"] / 1_000_000 * price.get("completion", 5)
+        provider_costs[prov] = round(pc + cc, 4)
+        cost += pc + cc
+    cost = round(cost, 4)
+
+    tasks = list(_scan_task_dirs(tasks_dir))
+    subtask_total = 0
+    for td in tasks:
+        meta = _read_meta(td)
+        if meta:
+            subtask_total += len(meta.get("results", []))
+
+    return {
+        "total_calls": total_calls, "total_prompt_tokens": total_prompt, "total_completion_tokens": total_completion,
+        "estimated_cost_usd": cost,
+        "by_provider": provider_costs,
+        "errors": errors, "cache_hits": cache_hits, "cache_checks": cache_checks,
+        "cache_hit_rate": round(cache_hits / cache_checks * 100) if cache_checks else 0,
+        "avg_cost_per_task": round(cost / len(tasks), 4) if tasks else 0,
+        "avg_cost_per_subtask": round(cost / subtask_total, 4) if subtask_total else 0,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# Reliability
+# ═══════════════════════════════════════════════════════════════
+
+def analyze_reliability(tasks_dir):
+    tasks_total = 0
+    completed = 0
+    failed = 0
+    interrupted = 0
+    resumed = 0
+    greywall = 0
+    native = 0
+    headless = 0
+    total_retries = 0
+    subtask_total = 0
+
+    for td in _scan_task_dirs(tasks_dir):
+        meta = _read_meta(td)
+        if not meta:
+            continue
+        tasks_total += 1
+        status = meta.get("status", "")
+        if status == "completed":
+            completed += 1
+        elif status == "failed":
+            failed += 1
+        results = meta.get("results", [])
+        subtask_total += len(results)
+        for r in results:
+            if r.get("sandbox_type") == "greywall":
+                greywall += 1
+            elif r.get("sandbox_type") == "native":
+                native += 1
+            else:
+                headless += 1
+            total_retries += r.get("retry_count", 0)
+
+    total_sandbox = greywall + native + headless
+    return {
+        "tasks_total": tasks_total, "completed": completed, "failed": failed,
+        "success_rate": round(completed / tasks_total * 100) if tasks_total else 0,
+        "sandbox": {"greywall": greywall, "native": native, "headless": headless,
+                     "greywall_pct": round(greywall / total_sandbox * 100) if total_sandbox else 0},
+        "retries_total": total_retries,
+        "retry_rate": round(total_retries / subtask_total * 100) if subtask_total else 0,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# UX
+# ═══════════════════════════════════════════════════════════════
+
+def analyze_ux(tasks_dir):
+    total = 0
+    with_docs = 0
+    plan_iterations = []
+    agent_counts = {}
+    skill_subtasks = 0
+    subtask_total = 0
+
+    for td in _scan_task_dirs(tasks_dir):
+        meta = _read_meta(td)
+        if not meta:
+            continue
+        total += 1
+        if meta.get("reference_docs"):
+            with_docs += 1
+        for ev in _read_log_events(td / "execution.log", "plan_generate"):
+            plan_iterations.append(ev.get("iteration", 1))
+        for r in meta.get("results", []):
+            subtask_total += 1
+            at = r.get("agent_type_source", "default")
+            agent_counts[at] = agent_counts.get(at, 0) + 1
+        for st in meta.get("subtasks", []):
+            if st.get("skills"):
+                skill_subtasks += 1
+
+    non_dev = sum(c for k, c in agent_counts.items() if k != "default")
+    return {
+        "tasks_total": total,
+        "docs_usage_pct": round(with_docs / total * 100) if total else 0,
+        "avg_plan_iterations": round(sum(plan_iterations) / len(plan_iterations), 1) if plan_iterations else 0,
+        "agent_diversity_pct": round(non_dev / subtask_total * 100) if subtask_total else 0,
+        "agent_distribution": agent_counts,
+        "skill_usage_pct": round(skill_subtasks / subtask_total * 100) if subtask_total else 0,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
 # CLI output
 # ═══════════════════════════════════════════════════════════════
 
@@ -255,7 +413,7 @@ def cmd_eval():
     from .config import AGENT_GO_DIR
 
     if len(sys.argv) < 3:
-        print("Usage: agent_go eval <quality|perf> [task-id|--all]")
+        print("Usage: agent_go eval <quality|perf|cost|reliability|ux|all> [task-id|--all]")
         return
 
     sub = sys.argv[2]
@@ -280,8 +438,26 @@ def cmd_eval():
                 _print_perf_report(analyze_performance(_read_meta(td), td / "execution.log"))
             else:
                 print("暂无任务")
+    elif sub == "cost":
+        _print_cost_report(analyze_cost(AGENT_GO_DIR))
+    elif sub == "reliability":
+        _print_reliability_report(analyze_reliability(AGENT_GO_DIR))
+    elif sub == "ux":
+        _print_ux_report(analyze_ux(AGENT_GO_DIR))
+    elif sub == "all":
+        print("═" * 60)
+        agg_q = aggregate_quality(AGENT_GO_DIR)
+        if agg_q:
+            _print_aggregate_quality(agg_q)
+        agg_p = aggregate_performance(AGENT_GO_DIR)
+        if agg_p:
+            _print_aggregate_perf(agg_p)
+        _print_cost_report(analyze_cost(AGENT_GO_DIR))
+        _print_reliability_report(analyze_reliability(AGENT_GO_DIR))
+        _print_ux_report(analyze_ux(AGENT_GO_DIR))
+        print("═" * 60)
     else:
-        print(f"未知子命令: {sub}。可用: quality, perf")
+        print(f"未知子命令: {sub}。可用: quality, perf, cost, reliability, ux, all")
 
 
 def _resolve_task_dir(base_dir, task_id):
@@ -333,6 +509,45 @@ def _print_perf_report(p):
     print(f"  P6 并发效率:         {p['P6_concurrency_efficiency_pct']}%")
     print(f"  ─────────────────────────────")
     print(f"  评分: {p['score']}/100")
+    print("─" * 50)
+
+
+def _print_cost_report(c):
+    print(f"\n💰 成本报告")
+    print("─" * 50)
+    print(f"  API 调用:            {c['total_calls']} 次")
+    print(f"  Token:               {c['total_prompt_tokens']:,} in + {c['total_completion_tokens']:,} out")
+    print(f"  预估费用:            ${c['estimated_cost_usd']}")
+    if c["by_provider"]:
+        for prov, cost in c["by_provider"].items():
+            print(f"    {prov}:            ${cost}")
+    print(f"  API 错误:            {c['errors']} 次")
+    print(f"  缓存命中:            {c['cache_hits']}/{c['cache_checks']} ({c['cache_hit_rate']}%)")
+    print(f"  每任务成本:          ${c['avg_cost_per_task']}")
+    print("─" * 50)
+
+
+def _print_reliability_report(r):
+    print(f"\n🔧 可靠性报告")
+    print("─" * 50)
+    print(f"  任务完成率:          {r['success_rate']}% ({r['completed']}/{r['tasks_total']})")
+    sand = r["sandbox"]
+    print(f"  Sandbox:             greywall={sand['greywall_pct']}% native={sand['native']}/{sand['headless']}")
+    print(f"  重试次数:            {r['retries_total']}")
+    print(f"  重试率:              {r['retry_rate']}%")
+    print("─" * 50)
+
+
+def _print_ux_report(u):
+    print(f"\n📈 使用习惯报告")
+    print("─" * 50)
+    print(f"  分析任务数:          {u['tasks_total']}")
+    print(f"  文档挂载率:          {u['docs_usage_pct']}%")
+    print(f"  平均 Plan 迭代:      {u['avg_plan_iterations']}")
+    print(f"  Agent 多样性:        {u['agent_diversity_pct']}%")
+    if u["agent_distribution"]:
+        print(f"  Agent 分布:          {u['agent_distribution']}")
+    print(f"  Skill 使用率:        {u['skill_usage_pct']}%")
     print("─" * 50)
 
 
