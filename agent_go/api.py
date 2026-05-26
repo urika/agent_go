@@ -29,17 +29,31 @@ def call_api(config, messages, logger):
     else:
         payload = {"model": model, "messages": messages, "max_tokens": api_cfg.get("max_tokens", 4096), "temperature": api_cfg.get("temperature", 0.2)}
 
-    import urllib.request
+    import urllib.request, urllib.error
     req = urllib.request.Request(base_url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     start = time.time()
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        latency = time.time() - start
-        data = json.loads(resp.read())
-        content = data["content"][0]["text"] if provider == "anthropic" else data["choices"][0]["message"]["content"]
-        log_event(logger, "api_call", {"provider": provider, "latency_ms": round(latency*1000, 2), "response_len": len(content)})
-        return content
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            latency = time.time() - start
+            data = json.loads(resp.read())
+            content = data["content"][0]["text"] if provider == "anthropic" else data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+            log_event(logger, "api_call", {
+                "provider": provider, "model": model,
+                "latency_ms": round(latency * 1000, 2), "response_len": len(content),
+                "prompt_tokens": usage.get("input_tokens", 0),
+                "completion_tokens": usage.get("output_tokens", 0),
+            })
+            return content
+    except urllib.error.HTTPError as e:
+        log_event(logger, "api_error", {
+            "provider": provider, "status_code": e.code,
+            "error_message": str(e)[:200],
+        })
+        raise
 
 def generate_plan(task, repo, config, logger, supplement="", reference_docs="", iteration=1, skill_context="") -> dict:
+    plan_start = time.time()
     logger.info("[PLAN] ═══ PLAN MODE ═══")
     logger.info(f"[PLAN]  第 {iteration} 次生成")
     log_event(logger, "plan_generate", {"iteration": iteration, "has_supplement": bool(supplement), "has_docs": bool(reference_docs), "has_skills": bool(skill_context)})
@@ -129,7 +143,9 @@ def generate_plan(task, repo, config, logger, supplement="", reference_docs="", 
         if not sr.get("git_branch"):
             sr["git_branch"] = git_info["branch"]
 
-    log_event(logger, "plan_complete", {"iteration": iteration, "step_count": len(plan.get("steps", []))})
+    plan_duration_ms = round((time.time() - plan_start) * 1000)
+    log_event(logger, "plan_complete", {"iteration": iteration, "step_count": len(plan.get("steps", [])),
+                                         "plan_duration_ms": plan_duration_ms})
     return plan
 
 def decompose_fallback(task, repo, config, logger):

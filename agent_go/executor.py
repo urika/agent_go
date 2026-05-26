@@ -8,6 +8,7 @@ from .utils import _format_commit, _safe_append_to_file, _is_safe_verification_c
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
+from .metrics import collect_timing, collect_change_stats, collect_merge_result
 
 def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None):
     sub_id = subtask["id"]
@@ -20,11 +21,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 "depends_on": subtask.get("depends_on", []), "headless": headless, "issue": issue_ref})
 
     clone_start = time.time()
+    worktree_create_ms = 0
     if (worktree / ".git").exists():
         logger.info(f"worktree 已存在，跳过创建")
     elif (repo / ".git").exists():
         branch = f"agent_go/{task_id}/{sub_id}"
+        wt_start = time.time()
         ok = _worktree_create(repo, branch, worktree)
+        worktree_create_ms = (time.time() - wt_start) * 1000
         if ok:
             logger.info(f"worktree 创建: 分支={branch}")
         else:
@@ -41,17 +45,24 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     # 产物传递：通过 git merge 将上游代码合并到当前 worktree
     # Tag 使用完整路径 task_id/sub_id 避免跨任务冲突
     merge_conflicts = {}
+    merge_results = []
+    merge_upstream_ms = 0
     if upstream_worktrees:
         for up_id, up_path in upstream_worktrees.items():
             if up_path.exists():
                 upstream_tag = f"{task_id}/{up_id}"
                 logger.info(f"产物传递 (git merge): {up_id} → {sub_id} (tag={upstream_tag})")
+                m_start = time.time()
                 _git_merge_upstream(up_path, worktree, upstream_tag, logger, headless=headless)
+                merge_upstream_ms += (time.time() - m_start) * 1000
                 # 检测上游 merge 是否产生冲突
                 conflict_file = worktree / ".MERGE_CONFLICT"
-                if conflict_file.exists():
+                has_conflict = conflict_file.exists()
+                if has_conflict:
                     merge_conflicts[up_id] = conflict_file.read_text(encoding="utf-8")
-                    conflict_file.unlink()  # 读取后删除标记文件
+                    conflict_file.unlink()
+                merge_results.append(collect_merge_result(up_id, not has_conflict,
+                    merge_conflicts.get(up_id, "").split("\n") if has_conflict else None))
     clone_time = time.time() - clone_start
 
     # 构建 TASK.md：包含完整 Agent Prompt、资源清单、上游上下文
@@ -213,9 +224,16 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     else:
         summary = "无文件变更"
 
+    # 采集结构化变更统计（在 git commit 之前）
+    metrics_changes = collect_change_stats(worktree) if has_changes else {
+        "files_changed": 0, "insertions": 0, "deletions": 0,
+        "new_files": 0, "modified_files": 0, "actual_files": [],
+    }
+
     # Git 提交 + tag（Conventional Commits 格式），供下游子任务 merge
     # Tag 包含 task_id 前缀，避免跨任务冲突
     tag_name = f"{task_id}/{sub_id}"
+    git_start = time.time()
     if has_changes:
         commit_msg = _format_commit(subtask['title'], issue_ref, sub_id)
         add_result = subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
@@ -233,9 +251,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     else:
         logger.info(f"已打 tag (无新增变更): {tag_name}")
 
+    git_commit_ms = (time.time() - git_start) * 1000
+
     # 验证执行（支持单条命令或命令数组）
     verification = subtask.get("verification", "")
     verify_ok = True
+    retry_count = 0
+    verification_results = []
+    verification_ms = 0
     if verification and has_changes:
         # 统一为数组
         if isinstance(verification, str):
@@ -244,6 +267,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             cmds = verification
         for vi, vcmd in enumerate(cmds):
             logger.info(f"执行验证 [{vi+1}/{len(cmds)}]: {vcmd}")
+            v_start = time.time()
             vr = None
             try:
                 vr = subprocess.run(shlex.split(vcmd), cwd=str(worktree),
@@ -255,10 +279,17 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 else:
                     logger.warning(f"验证命令不安全 (shell=True 拒绝): {vcmd[:100]}")
                     continue
+            v_duration_ms = round((time.time() - v_start) * 1000)
+            verification_ms += v_duration_ms
+            verification_results.append({
+                "command": vcmd[:200], "exit_code": vr.returncode if vr else -1,
+                "duration_ms": v_duration_ms, "attempt": 1,
+            })
             if vr is not None and vr.returncode != 0 and vr.returncode != 127:
                 logger.warning(f"验证失败 (rc={vr.returncode}): {vr.stderr[-300:]}")
                 verify_ok = False
                 if headless:
+                    retry_count += 1
                     logger.info("自动重试: 注入修复指令")
                     failed_cmds = "\n".join(f"  {c}" for c in cmds)
                     fix_prompt = task_md + (
@@ -276,7 +307,9 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
                     subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree),
                                    capture_output=True)
                     # 重新验证所有命令
+                    retry_verify_ok = True
                     for vj, vcmd2 in enumerate(cmds):
+                        v2_start = time.time()
                         try:
                             vr2 = subprocess.run(shlex.split(vcmd2), cwd=str(worktree),
                                                  capture_output=True, text=True, timeout=120)
@@ -286,8 +319,15 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
                                                      capture_output=True, text=True, timeout=120)
                             else:
                                 continue
+                        v2_ms = round((time.time() - v2_start) * 1000)
+                        verification_ms += v2_ms
+                        verification_results.append({
+                            "command": vcmd2[:200], "exit_code": vr2.returncode,
+                            "duration_ms": v2_ms, "attempt": 2,
+                        })
                         if vr2.returncode != 0 and vr2.returncode != 127:
                             verify_ok = False
+                            retry_verify_ok = False
                             break
                         verify_ok = True
                     logger.info(f"重试验证: {'通过' if verify_ok else '仍失败'}")
@@ -336,8 +376,16 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
         "summary": summary, "verify_ok": verify_ok,
     })
 
+    metrics_timing = collect_timing(worktree_create_ms, merge_upstream_ms,
+                                     round(claude_time * 1000), verification_ms, git_commit_ms)
+
     return {"subtask_id": sub_id, "status": status, "exit_code": result.returncode,
             "summary": summary, "worktree": str(worktree), "sandbox_type": sandbox_type,
             "verify_ok": verify_ok, "duration_sec": round(claude_time, 2),
             "agent_type_source": subtask.get("_agent_type_source", "default"),
-            "skills_unresolved": unresolved_skills}
+            "skills_unresolved": unresolved_skills,
+            "retry_count": retry_count,
+            "timing": metrics_timing,
+            "change_stats": metrics_changes,
+            "merge_results": merge_results,
+            "verification_results": verification_results}
