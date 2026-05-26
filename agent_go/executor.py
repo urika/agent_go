@@ -9,7 +9,7 @@ from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 
-def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref=""):
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None):
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id
     sub_dir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +133,18 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     )
     (sub_dir / "TASK.md").write_text(task_md, encoding="utf-8")
 
+    # 重写验证命令中的路径
+    verification = subtask.get("verification", "")
+    if verification and str(repo) in verification:
+        _boundary_chars = r'\s"\'\(\):/：，。、'
+        _before = rf'(?<![^{_boundary_chars}])'
+        _after = rf'(?![^{_boundary_chars}])'
+        verification = re.sub(
+            rf'{_before}{re.escape(str(repo))}{_after}',
+            str(worktree),
+            verification
+        )
+
     print(f"\n🚀 {sub_id}: {subtask['title']}")
     env = os.environ.copy()
     env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree)})
@@ -152,7 +164,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     if headless:
         sandbox_type = "headless"
-        result = _run_headless(task_md, worktree, env, logger, sub_id)
+        result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids)
     else:
         # 根据 Agent 类型构建 Claude 命令
         if agent:
@@ -176,14 +188,27 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     claude_time = time.time() - claude_start
 
-    # 记录变更摘要
-    diff = subprocess.run(["git", "diff", "--stat"], cwd=str(worktree), capture_output=True, text=True)
-    summary = diff.stdout.strip() or "无文件变更"
+    # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
+    status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
+    has_changes = bool(status_result.stdout.strip())
+    if has_changes:
+        diff_result = subprocess.run(["git", "diff", "--stat", "HEAD"], cwd=str(worktree), capture_output=True, text=True)
+        tracked = diff_result.stdout.strip()
+        new_files = [line[3:] for line in status_result.stdout.strip().split("\n") if line.startswith("??")]
+        if tracked and new_files:
+            summary = f"{tracked}\n 新增: {', '.join(new_files)}"
+        elif tracked:
+            summary = tracked
+        elif new_files:
+            summary = f"新增: {', '.join(new_files)}"
+        else:
+            summary = f"变更: {len(status_result.stdout.strip().split(chr(10)))} 个文件"
+    else:
+        summary = "无文件变更"
 
     # Git 提交 + tag（Conventional Commits 格式），供下游子任务 merge
     # Tag 包含 task_id 前缀，避免跨任务冲突
     tag_name = f"{task_id}/{sub_id}"
-    has_changes = summary != "无文件变更"
     if has_changes:
         commit_msg = _format_commit(subtask['title'], issue_ref, sub_id)
         add_result = subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
@@ -227,7 +252,7 @@ f"  {verification}\n"
 f"错误输出:\n{vr.stderr[-500:]}\n"
 "请修复上述问题，确保验证命令通过。直接修改文件，不要询问。"
                 )
-                _run_headless(fix_prompt, worktree, env, logger, f"{sub_id}-fix")
+                _run_headless(fix_prompt, worktree, env, logger, f"{sub_id}-fix", active_pids=active_pids)
                 # 重新提交
                 subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
                 subprocess.run(["git", "commit", "-m",

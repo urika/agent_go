@@ -257,6 +257,16 @@ def cmd_resume():
 
     confirmed = meta.get("subtasks", [])
     results = meta.get("results", [])
+    # 如果 meta.json 中 results 为空，尝试从独立 result.json 文件恢复
+    if not results:
+        for st in confirmed:
+            result_file = task_dir / st["id"] / "result.json"
+            if result_file.exists():
+                try:
+                    r = json.loads(result_file.read_text(encoding="utf-8"))
+                    results.append(r)
+                except (json.JSONDecodeError, OSError):
+                    pass
     worktree_map = {}
     results_map = {}
     completed_ids = set()
@@ -566,9 +576,23 @@ def cmd_clean():
                 except (json.JSONDecodeError, OSError):
                     pass
         for t in tasks:
+            # 读取 task_id 用于清理 tag
+            meta_path = t / "meta.json"
+            task_id = t.name
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    task_id = meta.get("task_id", t.name)
+                except (json.JSONDecodeError, OSError):
+                    pass
             _shutil.rmtree(t, ignore_errors=True)
         for repo_path in repos_to_prune:
             subprocess.run(["git", "worktree", "prune"], cwd=repo_path, capture_output=True)
+            # 清理对应 task 的 tags
+            tag_list = subprocess.run(["git", "tag", "-l", f"{task_id}/*"], cwd=repo_path, capture_output=True, text=True)
+            for tag in tag_list.stdout.strip().split("\n"):
+                if tag:
+                    subprocess.run(["git", "tag", "-d", tag], cwd=repo_path, capture_output=True)
         print(f"已清理 {len(tasks)} 个任务")
     else:
         print("已取消")

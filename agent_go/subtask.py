@@ -45,9 +45,11 @@ def _git_merge_upstream(src_worktree, dst_worktree, tag, logger, headless=False)
             subprocess.run(["git", "merge", "--abort"],
                            cwd=str(dst_worktree), capture_output=True)
 
-def _run_headless(task_md, worktree, env, logger, sub_id):
+def _run_headless(task_md, worktree, env, logger, sub_id, active_pids=None):
     """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。"""
     PFX = f"[{sub_id}]"
+    if active_pids is None:
+        active_pids = set()
 
     # 交互检测模式（中英文）
     INTERACTION_PATTERNS = [
@@ -72,6 +74,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
             "--include-partial-messages",
         ], env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
+        active_pids.add(proc.pid)
         last_ts = [time.time()]
         lines = []
         waiting = [False]
@@ -197,6 +200,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id):
         t_out.join()
         t_err.join()
         proc.wait()
+        active_pids.discard(proc.pid)
         return proc, lines, waiting[0]
 
     RETRY_SUFFIX = (

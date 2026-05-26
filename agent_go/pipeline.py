@@ -14,6 +14,7 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
     completed_ids = completed_ids or set()
     task_id = meta["task_id"]
     meta_lock = threading.Lock()
+    active_pids = set()
     degraded_count = sum(1 for r in results_map.values() if r.get("status") in ("no_changes", "degraded"))
     total = len(confirmed)
 
@@ -30,6 +31,11 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
     def _on_interrupt(signum, frame):
         meta["status"] = "paused"
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        for pid in list(active_pids):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
         sys.exit(0)
     prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
@@ -60,21 +66,23 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
         if actual_workers == 1:
             for st in wave:
                 upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref)
+                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids)
                 with meta_lock:
                     worktree_map[st["id"]] = task_dir / st["id"] / "work"
                     results_map[st["id"]] = result
                     if result.get("status") == "degraded":
                         degraded_count += 1
-                    meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
-                    (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                    # 每个 subtask 独立写 result.json，减少全量覆写
+                    result_file = task_dir / st["id"] / "result.json"
+                    result_file.parent.mkdir(parents=True, exist_ok=True)
+                    result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
                 completed_ids.add(st["id"])
         else:
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 futures = {}
                 for st in wave:
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref)
+                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids)
                     futures[fut] = st
                 for fut in as_completed(futures):
                     st = futures[fut]
@@ -90,8 +98,10 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
                         results_map[st["id"]] = result
                         if result.get("status") == "degraded":
                             degraded_count += 1
-                        meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
-                        (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                        # 每个 subtask 独立写 result.json
+                        result_file = task_dir / st["id"] / "result.json"
+                        result_file.parent.mkdir(parents=True, exist_ok=True)
+                        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
                     completed_ids.add(st["id"])
 
         remaining = [st for st in remaining if st["id"] not in completed_ids]
@@ -158,7 +168,8 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
         if gc_disabled and original_gc_value is not None:
             _set_gc_auto(repo, original_gc_value)
 
-    # 如果有子任务 failed 则整体为 failed，否则为 completed
+    # 收集所有结果并写回 meta.json（完整版本，含 results 数组）
+    meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
     has_failed = any(r.get("status") == "failed" for r in results_map.values())
     meta["status"] = "failed" if has_failed else "completed"
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
