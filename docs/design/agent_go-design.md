@@ -1,7 +1,8 @@
 # agent_go 增强版 — 设计文档
 
-> 日期: 2026-05-15  
-> 定位: MacBook 单文件快速原型，支持外接 API Plan Mode、共享资源清单、Agent Prompt、默认同意模式
+> 日期: 2026-05-26（更新）  
+> 版本: v0.3  
+> 定位: 模块化 CLI 编排器，支持 Plan Mode、并发执行、Skill/Agent 角色路由、worktree 隔离
 
 ---
 
@@ -406,7 +407,7 @@ Git 远程: git@github.com:acme/platform.git
 
 ## 八、使用约束
 
-1. **Python >= 3.11**
+1. **Python >= 3.9**
 2. **Claude Code 已安装**
 3. **外接 API Key**（Plan Mode 需要，降级模式不需要）
 4. **Greywall 可选**

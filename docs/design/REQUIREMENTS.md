@@ -1,26 +1,26 @@
 # agent_go 需求清单
 
-> 版本: v0.1  
-> 日期: 2026-05-15  
-> 项目: agent_go — 单文件 Python 原型，LLM Plan Mode + Claude Code 无头执行编排器
+> 版本: v0.3  
+> 日期: 2026-05-26  
+> 项目: agent_go — 模块化 CLI 编排器，LLM Plan Mode + Claude Code 无头执行
 
 ---
 
 ## 一、项目现状
 
-**代码规模**: 1129 行 Python (agent_go.py) + 3 份文档 (1255 行 md)  
-**Git 历史**: 11 commits，从初始化到无头模式全自动执行  
-**技术栈**: Python 3.11+, stdlib only，无外部 Python 依赖
+**代码规模**: ~2900 行 Python (13 modules) + 文档  
+**Git 历史**: 30+ commits，v0.1 → v0.3  
+**技术栈**: Python 3.9+, stdlib only，无外部 Python 依赖
 
 **已实现的核心管线**:
 
 ```
-Plan Mode (DeepSeek API) → Plan 确认 → 子任务拆解 → 
-执行 (claude -p 无头模式) → Git commit + tag → 验证执行 →
-失败自动重试 → 共享上下文生成 → 产物传递 (git merge) → 归档
+Plan API → 规则注入 → Plan 确认 → 子任务拆解(角色-Skill匹配) →
+执行 (claude -p 无头模式) → 并发执行(拓扑分波) → Git commit + tag(命名空间) →
+产物传递(git merge) → 验证执行 → 失败自动重试 → 远程推送 → 清理 → 归档
 ```
 
-**SnippetHub 验证**: 4 个子任务、42 个文件、1897 行代码、10 个 API 端点全部通过。
+**验证**: 150 测试（12 test files），SnippetHub 项目实战验证。
 
 ---
 
@@ -54,20 +54,33 @@ Plan Mode (DeepSeek API) → Plan 确认 → 子任务拆解 →
 | 15 | **Conventional Commits**：feat/fix/refactor 前缀 | ✅ `948ec95` | `_format_commit()` 自动前缀 + Issue 尾部引用 |
 | 16 | **agent_go pr 命令**：生成 PR 描述 + gh pr create | ✅ `948ec95` | `cmd_pr()` 在线/离线双模式 |
 | 17 | **PR 模板自动填充**：变更摘要、关联Issue、测试结果 | ✅ `948ec95` | 基于 meta.json + SHARED_CONTEXT.md |
-| 18 | 中断恢复：任务重启后跳过已完成子任务 | 📋 | 读取 meta.json 恢复状态 |
-| 19 | 验证命令数组支持：多个串行检查步骤 | 📋 | `["go vet", "go test ./...", "golangci-lint"]` |
+| 18 | 中断恢复：任务重启后跳过已完成子任务 | ✅ | 支持 SIGINT 暂停 + resume 恢复 |
+| 19 | 验证命令数组支持：多个串行检查步骤 | 📋 | 当前单命令 |
+
+### P1.5 — 增量交付（超出原计划）
+
+| # | 需求 | 状态 | 说明 |
+|---|------|------|------|
+| 31 | 模块化拆分 | ✅ | 单文件 → 13 模块 |
+| 32 | Skill 类型系统 | ✅ | YAML frontmatter + Markdown，项目/用户级 |
+| 33 | Agent 类型系统 | ✅ | developer/architect/reviewer/tester |
+| 34 | git worktree 替代 clone | ✅ | 共享对象库，tag 命名空间化 |
+| 35 | 角色-Skill 映射配置 | ✅ | `role_skill_map.json` 驱动匹配 |
+| 36 | headless 冲突自动解决 | ✅ | 保留冲突标记让 Claude 现场处理 |
+| 37 | --remote 远程分支推送 | ✅ | 管线结束时推送 worktree 分支 |
+| 38 | Plan prompt 增强 | ✅ | Skill 清单 + 规则摘要 + 示例 step 注入 |
 
 ### P2 — 中优先级
 
 | # | 需求 | 状态 | 说明 |
 |---|------|------|------|
-| 20 | **GitHub Actions 工作流生成** | 📋 | 生成 `.github/workflows/test.yml` |
-| 21 | **Projects 看板联动** | 📋 | `gh pr create --project --label --milestone` |
-| 22 | 多任务并行执行 | 📋 | 端口分配器 + 多 worktree |
+| 22 | 多任务并行执行 | ✅ | 拓扑调度 + ThreadPoolExecutor |
+| 26 | Sandbox 增强：Greywall | ✅ | 已集成 |
+| 20 | GitHub Actions 工作流生成 | 📋 | 生成 `.github/workflows/test.yml` |
+| 21 | Projects 看板联动 | 📋 | `gh pr create --project --label --milestone` |
 | 23 | Plan 结果缓存 | 📋 | 相同任务降低 API 成本 |
-| 24 | `agent_go review` 命令 | 📋 | Claude 审查 PR 变更，输出审查报告 |
+| 24 | `agent_go review` 命令 | 📋 | Claude 审查 PR 变更 |
 | 25 | TASK.md 文件覆盖检查 | 📋 | 验证 Planned files vs 实际产出 |
-| 26 | Sandbox 增强：Greywall Incus 后端 | 📋 | Linux mini 主机容器级隔离 |
 
 ### P3 — 远期
 

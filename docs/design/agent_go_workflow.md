@@ -1,9 +1,9 @@
 # agent_go — 用户工作流程说明
 
-> 适用版本: agent_go.py  
-> 运行环境: macOS (MacBook Pro/Air, Apple Silicon)  
-> 核心依赖: Claude Code, Python 3.11+, 外接 API Key（可选 Greywall）  
-> 更新时间: 2026-05-15
+> 适用版本: agent_go v0.3  
+> 运行环境: macOS / Linux  
+> 核心依赖: Claude Code, Python 3.9+, API Key（可选 Greywall）  
+> 更新时间: 2026-05-26
 
 ---
 
@@ -526,11 +526,18 @@ AGENT_GO_INTERACTIVE=1 agent_go run ~/projects/my-app "任务"
 |------|------|
 | `agent_go run <path> "<task>"` | 创建任务 → Plan Mode → 确认 → 执行 |
 | `agent_go run <path> "<task>" --yes` | 跳过所有确认，直接执行 |
+| `agent_go run <path> "<task>" --parallel 3` | 并发执行（最多 3 worker） |
+| `agent_go run <path> "<task>" --skill <name>` | 加载指定 Skill |
 | `agent_go run <path> "<task>" --docs "a.md,b.md"` | 带参考文档启动 |
+| `agent_go run <path> "<task>" --remote origin` | 执行后推送分支到远程 |
+| `agent_go resume <task-id>` | 恢复被中断的任务 |
+| `agent_go status --watch` | 实时监控任务状态 |
 | `agent_go list` | 查看所有任务摘要 |
-| `agent_go show <task-id>` | 查看任务详情和子任务进展 |
+| `agent_go show <task-id>` | 查看任务详情（含角色来源和 Skill 命中） |
 | `agent_go config` | 查看当前配置 |
 | `agent_go clean` | 清理所有任务 |
+| `agent_go skills` | 列出可用 Skill |
+| `agent_go agents` | 列出可用 Agent 类型 |
 
 ---
 
