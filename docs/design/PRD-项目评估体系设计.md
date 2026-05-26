@@ -367,7 +367,207 @@ agent_go eval all                      # 综合报告（所有维度）
 
 ---
 
-## 五、实施计划
+## 五、指标与维度设计（存储层明细）
+
+### 5.1 事实-维度-度量模型
+
+系统产生 5 类事实记录。每类记录包含维度（分组/过滤依据）、度量（可聚合数值）、元数据（drill-down 上下文）。
+
+### 5.2 事实记录 1：plan_generation（计划生成）
+
+**粒度**: 每次 `generate_plan()` 调用产生 1 条。同一 task 可能多条（迭代）。
+
+**存储**: plan_complete log event（结构化 JSON）
+
+| 字段 | 类型 | 分类 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 维度 | 关联任务 |
+| `iteration` | int | 维度 | 第几次生成（1=首次, >1=迭代） |
+| `provider` | string | 维度 | anthropic / openai / deepseek |
+| `model` | string | 维度 | claude-sonnet-4-20250514 |
+| `cache_hit` | bool | 维度 | 是否命中缓存 |
+| `plan_duration_ms` | int | 度量 | Plan 阶段耗时 |
+| `prompt_tokens` | int | 度量 | 输入 token |
+| `completion_tokens` | int | 度量 | 输出 token |
+| `step_count` | int | 度量 | 生成的步骤数 |
+| `has_supplement` | bool | 维度 | 是否有用户补充 |
+| `has_docs` | bool | 维度 | 是否有参考文档 |
+| `has_skills` | bool | 维度 | 是否有 Skill 上下文 |
+
+**支持指标**: P2, C1-C3, U1, R2
+
+**Drill-down 示例**: "cost by provider → 谁最贵?" | "duration by iteration → 补充输入会让plan变慢吗?"
+
+---
+
+### 5.3 事实记录 2：subtask_execution（子任务执行）
+
+**粒度**: 每个 subtask 产生 1 条。含 retry 计数但不含单次 retry 细节。
+
+**存储**: result.json（per subtask）
+
+| 字段 | 类型 | 分类 | 说明 |
+|------|------|------|------|
+| `subtask_id` | string | 维度 | sub-1, sub-2... |
+| `task_id` | string | 维度 | 关联任务 |
+| `status` | string | 维度 | completed / no_changes / failed / degraded |
+| `agent_type` | string | 维度 | developer / architect / reviewer / tester |
+| `agent_type_source` | string | 维度 | llm / rule / default |
+| `sandbox_type` | string | 维度 | headless / greywall / native |
+| `skills` | string[] | 维度 | 已加载的 Skill 名称列表 |
+| `skills_unresolved` | string[] | 元数据 | 未找到的 Skill |
+| `retry_count` | int | 度量 | 验证失败重试次数 |
+| `duration_sec` | float | 度量 | 总耗时 |
+| `verify_ok` | bool | 维度 | 验证是否通过 |
+
+**timing 子对象**（度量组）:
+
+| 字段 | 类型 | 度量粒度 |
+|------|------|---------|
+| `worktree_create_ms` | int | git worktree add 耗时 |
+| `merge_upstream_ms` | int | 所有上游 merge 总耗时 |
+| `claude_execute_ms` | int | Claude 进程存活时间 |
+| `verification_ms` | int | 所有验证命令总耗时 |
+| `git_commit_ms` | int | git add + commit + tag 耗时 |
+
+**change_stats 子对象**（度量组）:
+
+| 字段 | 类型 | 度量粒度 |
+|------|------|---------|
+| `files_changed` | int | 变更文件总数 |
+| `insertions` | int | 新增行数 |
+| `deletions` | int | 删除行数 |
+| `new_files` | int | 新建文件数（untracked → staged） |
+| `modified_files` | int | 修改文件数（tracked + modified） |
+| `actual_files` | string[] | 实际被修改的文件路径列表（元数据） |
+
+**merge_results 子对象**（数组，每项为）:
+
+| 字段 | 类型 | 分类 |
+|------|------|------|
+| `upstream` | string | 上游 subtask_id（维度） |
+| `status` | string | success / conflict（维度） |
+| `conflict_files` | string[] | 冲突文件列表（元数据） |
+
+**支持指标**: Q1-Q8, P3-P7, R8, U5, U6
+
+**Drill-down 示例**:
+- "P5 阶段占比 by agent_type → tester 的 verify 占比是否更高?" → `agent_type` × `timing.verification_ms`
+- "Q5 新文件遗漏 by status → no_changes 的 new_files 分布?" → `status` × `change_stats.new_files`
+- "Q3 重试率 by skills → 有 tdd-workflow 的 subtask 重试更少?" → `skills` × `retry_count`
+
+---
+
+### 5.4 事实记录 3：api_call（API 调用）
+
+**粒度**: 每次 LLM API 调用产生 1 条。包括 Plan 生成和降级拆解。
+
+**存储**: api_call / api_error log event（结构化 JSON）
+
+| 字段 | 类型 | 分类 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 维度 | 关联任务 |
+| `call_type` | string | 维度 | plan_generate / decompose_fallback |
+| `provider` | string | 维度 | anthropic / openai / deepseek |
+| `model` | string | 维度 | 模型名 |
+| `status_code` | int | 维度 | 200 / 429 / 500... |
+| `latency_ms` | int | 度量 | 响应耗时 |
+| `prompt_tokens` | int | 度量 | 输入 token |
+| `completion_tokens` | int | 度量 | 输出 token |
+| `response_len` | int | 度量 | 响应体长度(bytes) |
+| `error_message` | string | 元数据 | 仅 status_code != 200 |
+
+**支持指标**: C1-C3, R3
+
+**Drill-down 示例**:
+- "R3 API 错误 by hour → 什么时候限流?" → `status_code` × 时间
+- "C1 日均调用 by provider → 增长趋势?" → `provider` × 时间
+
+---
+
+### 5.5 事实记录 4：verification_run（验证执行）
+
+**粒度**: 每个验证命令产生 1 条。一个 subtask 可能多条（数组验证）。
+
+**存储**: result.json 的 verification_results 子数组
+
+| 字段 | 类型 | 分类 | 说明 |
+|------|------|------|------|
+| `command` | string | 元数据 | 完整命令文本（截断至 200 字符） |
+| `exit_code` | int | 度量 | 0=成功 |
+| `duration_ms` | int | 度量 | 命令执行耗时 |
+| `stderr_tail` | string | 元数据 | 失败时 stderr 最后 200 字符 |
+| `attempt` | int | 维度 | 1=首次, 2=重试 |
+
+**支持指标**: Q4（验证通过率）, P5（verification_ms 占比）
+
+**Drill-down 示例**:
+- "哪些验证命令最慢?" → `command` × `duration_ms`
+- "首次失败 vs 重试成功的分布?" → `attempt` × `exit_code`
+
+---
+
+### 5.6 事实记录 5：task_session（任务会话，择机 B1）
+
+**粒度**: 每个 task 产生 1 条摘要记录。
+
+**存储**: meta.json 扩展
+
+| 字段 | 类型 | 分类 | 说明 |
+|------|------|------|------|
+| `task_id` | string | 维度 | — |
+| `repo` | string | 维度 | 项目路径 |
+| `task` | string | 元数据 | 任务描述 |
+| `status` | string | 维度 | completed / failed / paused |
+| `created` | string | 维度 | 创建时间 (YYYYMMDD-HHMMSS) |
+| `parallel` | int | 维度 | 并发 worker 数 |
+| `headless` | bool | 维度 | 是否 headless 模式 |
+| `remote_url` | string | 维度 | 远程推送地址 |
+| `issue` | string | 维度 | GitHub issue |
+| `reference_docs` | string[] | 维度 | 参考文档列表 |
+| `total_subtasks` | int | 度量 | — |
+| `completed_subtasks` | int | 度量 | — |
+| `failed_subtasks` | int | 度量 | — |
+| `total_duration_sec` | float | 度量 | 端到端耗时 |
+| `interrupted` | bool | 维度 | 是否被中断过 |
+| `resumed` | bool | 维度 | 是否恢复执行 |
+
+**支持指标**: P1, U2-U4, U7, R1
+
+---
+
+### 5.7 维度和度量的交叉分析矩阵
+
+纵向=维度（分组/过滤），横向=度量（聚合值），交叉点=可回答的问题：
+
+```
+                 token    duration  files    retry   verify  cost
+                 ─────    ────────  ─────    ─────   ──────  ────
+agent_type        ✅        ✅        ✅       ✅      ✅      ✅
+skills            -         ✅        ✅       ✅      ✅      -
+provider          ✅        ✅        -        -       -       ✅
+sandbox_type      -         ✅        -        ✅      -       -
+status            -         -         ✅       -       -       -
+agent_type_source -         -         -        ✅      ✅      -
+task_id           ✅        ✅        ✅       ✅      ✅      ✅
+hour/day          ✅        ✅        -        -       ✅      ✅
+```
+
+### 5.8 存储位置总览
+
+| 记录 | 文件 | 粒度 | 条数 |
+|------|------|------|------|
+| task_session | `meta.json` | 1 per task | N tasks |
+| subtask_execution | `<sub_id>/result.json` | 1 per subtask | N×M subtasks |
+| plan_generation | `execution.log` (plan_complete event) | 1 per plan | N tasks × iterations |
+| api_call | `execution.log` (api_call event) | 1 per API 调用 | ~N tasks × (1 plan + optional) |
+| verification_run | `result.json` 子数组 | 1 per 验证命令 | N×M×K commands |
+
+**无需新增文件**：所有新增字段嵌入现有 result.json、meta.json、execution.log 中。
+
+---
+
+## 六、实施计划
 
 ### Phase 1：采集层 + 存储层（立即）
 
@@ -398,29 +598,31 @@ agent_go eval all                      # 综合报告（所有维度）
 
 ---
 
-## 六、指标-采集-分析 完整映射
+## 七、指标-采集-分析 完整映射
 
-| 指标 | 数据来源 | 采集状态 | 采集层函数 | 分析层函数 |
-|------|---------|---------|-----------|-----------|
-| Q1 任务成功率 | meta.json.status | ✅ 已有 | — | analyze_quality |
-| Q2 Subtask成功率 | result.status | ✅ 已有 | — | analyze_quality |
-| Q3 首次通过率 | result.retry_count | ✅ A2 | 内联计数 | analyze_quality |
-| Q4 验证通过率 | result.verify_ok | ✅ 已有 | — | analyze_quality |
-| Q5 新文件遗漏率 | result.change_stats.new_files | ✅ A3 | collect_change_stats | analyze_quality |
-| Q6 产物传递 | result.merge_results | ✅ A5 | collect_merge_result | analyze_quality |
-| Q7 计划准确性 | plan.steps.files vs change_stats.actual_files | ✅ A3 | — | analyze_quality |
-| Q8 变更规模 | result.change_stats | ✅ A3 | collect_change_stats | analyze_quality |
-| P1 端到端耗时 | meta + log | ⚠️ | plan_duration_ms(A6) | analyze_performance |
-| P2 Plan耗时 | plan_complete event | ✅ A6 | 内联计时 | analyze_performance |
-| P3 平均耗时 | result.duration_sec | ✅ 已有 | — | analyze_performance |
-| P4 耗时分布 | result.duration_sec | ✅ 已有 | — | analyze_performance |
-| P5 阶段占比 | result.timing | ✅ A1 | collect_timing | analyze_performance |
-| P6 并发效率 | result.duration_sec | ✅ 已有 | — | analyze_performance |
-| C1-C3 Token/费用 | api_call event | ✅ A4 | extract_usage | analyze_cost |
-| C4-C5 缓存 | plan_complete.cache_hit | ⚠️ B1 | — | analyze_cost |
-| R1 中断恢复 | session_stats | ⚠️ B1 | — | analyze_reliability |
-| R3 API错误 | api_error event | ✅ A7 | 内联捕获 | analyze_reliability |
-| R8 重试率 | result.retry_count | ✅ A2 | — | analyze_reliability |
+| 指标 | 事实记录 (5.2-5.6) | 主维度 | 主度量 | 采集 | 分析函数 |
+|------|-------------------|--------|--------|------|---------|
+| Q1 任务成功率 | task_session | status | count | 已有 | analyze_quality |
+| Q2 Subtask成功率 | subtask_execution | status | count | 已有 | analyze_quality |
+| Q3 首次通过率 | subtask_execution | agent_type, skills | retry_count=0 count | A2 | analyze_quality |
+| Q4 验证通过率 | subtask_execution + verification_run | agent_type | exit_code | 已有 | analyze_quality |
+| Q5 新文件遗漏率 | subtask_execution | status, agent_type | change_stats.new_files | A3 | analyze_quality |
+| Q6 产物传递 | subtask_execution.merge_results | upstream | status=success count | A5 | analyze_quality |
+| Q7 计划准确性 | subtask_execution.change_stats | — | actual_files vs plan.files | A3 | analyze_quality |
+| Q8 变更规模 | subtask_execution.change_stats | agent_type, skills | files/insertions/deletions | A3 | analyze_quality |
+| P1 端到端耗时 | task_session | — | total_duration_sec | 已有 | analyze_performance |
+| P2 Plan耗时 | plan_generation | provider, cache_hit | plan_duration_ms | A6 | analyze_performance |
+| P3 平均耗时 | subtask_execution | agent_type | duration_sec avg | 已有 | analyze_performance |
+| P4 耗时分布 | subtask_execution | agent_type | duration_sec P50/95/99 | 已有 | analyze_performance |
+| P5 阶段占比 | subtask_execution.timing | agent_type, sandbox_type | 各阶段 ms | A1 | analyze_performance |
+| P6 并发效率 | subtask_execution + task_session | parallel | wall_time / sum(duration) | 已有 | analyze_performance |
+| C1 API调用 | api_call | provider, call_type | count | A4 | analyze_cost |
+| C2 Token | api_call + plan_generation | provider, model | prompt+completion sum | A4 | analyze_cost |
+| C3 费用 | api_call + plan_generation | provider | tokens × price | A4 | analyze_cost |
+| C4 缓存命中 | plan_generation | — | cache_hit count | B1 | analyze_cost |
+| R1 中断恢复 | task_session | — | interrupted/resumed | B1 | analyze_reliability |
+| R3 API错误 | api_call | provider, status_code | status_code≠200 count | A7 | analyze_reliability |
+| R8 重试率 | subtask_execution | agent_type, skills | retry_count>0 count | A2 | analyze_reliability |
 
 ---
 
