@@ -114,14 +114,13 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 logger.info(f"Skill 注入: {sn} → TASK.md")
 
     # 将 Agent Prompt 中的源项目路径替换为 worktree 路径，确保隔离
-    # 使用正则边界匹配，防止误匹配子路径（如 /project 匹配到 /project-legacy）
-    # 注意：Python < 3.11 不支持变长 lookbehind，使用否定字符类代替
+    # 边界字符包含: 空白、引号、括号、冒号(含全角)、路径分隔符、中文标点
     task_md_text = "\n".join(task_md_parts)
-    escaped_repo = re.escape(str(repo))
-    # (?<![^\s"\'\(:]) == 前面是空白/引号/括号/冒号 或 字符串开头
-    # (?![^\s"\'\):])  == 后面是空白/引号/括号/冒号 或 字符串结尾
+    _boundary_chars = r'\s"\'\(\):/：，。、'
+    _before = rf'(?<![^{_boundary_chars}])'
+    _after = rf'(?![^{_boundary_chars}])'
     task_md = re.sub(
-        rf'(?<![^\s"\'\(:]){escaped_repo}(?![^\s"\'\):])',
+        rf'{_before}{re.escape(str(repo))}{_after}',
         str(worktree),
         task_md_text
     )
