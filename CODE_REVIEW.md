@@ -21,9 +21,11 @@
 
 ---
 
-## 🔴 严重问题 (CRITICAL)
+> **修复状态**: C1/C2/H1/H2/H3 在 v0.9 已修复。M/L 级问题见 GitHub Issues #1~#6。
 
-### C1. `active_pids` 并发竞态 — 可能导致进程泄漏或 kill 错误进程
+## 🔴 严重问题 (CRITICAL) — ✅ 已修复 (v0.9)
+
+### C1. `active_pids` 并发竞态 — ✅ v0.9 (active_pids_lock)
 
 | 项目 | 说明 |
 |------|------|
@@ -52,7 +54,7 @@ for pid in pids_to_kill:
 
 ---
 
-### C2. `shell=True` 降级路径存在命令注入风险
+### C2. `shell=True` 降级路径 — ✅ v0.9 (已移除)
 
 | 项目 | 说明 |
 |------|------|
@@ -72,7 +74,7 @@ for pid in pids_to_kill:
 
 ## 🟠 高优先级问题 (HIGH)
 
-### H1. `call_api()` 仅捕获 `HTTPError`，其他网络异常未处理
+### H1. `call_api()` 仅捕获 `HTTPError` — ✅ v0.9 (URLError/JSONDecodeError/KeyError全覆盖)
 
 | 项目 | 说明 |
 |------|------|
@@ -101,7 +103,7 @@ except (KeyError, IndexError) as e:
     raise RuntimeError(f"API 响应结构异常: {e}") from e
 ```
 
-### H2. Git 操作返回码未强制检查，静默失败传播
+### H2. Git 操作返回码未强制 — ✅ v0.9 ((bool, error_msg)元组返回)
 
 | 项目 | 说明 |
 |------|------|
@@ -116,7 +118,7 @@ except (KeyError, IndexError) as e:
 - `executor.py` 中 tag 创建失败时应设置 `status = "degraded"` 并阻断依赖链
 - 增加 `--strict` 模式使任何 git 操作失败时中止管线
 
-### H3. Plan 生成 Prompt 无 Token 长度检查
+### H3. Plan 生成 Prompt 无 Token 长度检查 — ✅ v0.9 (预算控制: system 6k/user 12k)
 
 | 项目 | 说明 |
 |------|------|
