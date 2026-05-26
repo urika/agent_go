@@ -1,6 +1,6 @@
 # agent_go 产品路线图
 
-> 版本: v0.5  
+> 版本: v0.7  
 > 日期: 2026-05-27  
 > 视角: 产品经理回顾与后续规划
 
@@ -12,7 +12,7 @@
 |--------|------|--------|--------|--------|
 | P0（已实现） | 12 | 12 | — | — |
 | P1（高优先级） | 7 | 7 | 0 | 0 |
-| P2（中优先级） | 7 | 3 | 0 | 4 |
+| P2（中优先级） | 7 | 7 | 0 | 0 |
 | P3（远期） | 4 | 0 | 0 | 4 |
 
 ### P0 — 已全部实现
@@ -50,10 +50,10 @@
 |---|------|------|
 | 22 | 多任务并行执行 | ✅ 超出预期（拓扑调度+ThreadPoolExecutor） |
 | 26 | Sandbox 增强：Greywall Incus 后端 | ✅ 已集成 |
-| 20 | GitHub Actions 工作流生成 | 📋 待开始 |
+| 20 | GitHub Actions 工作流生成 | ✅ v0.7 |
 | 21 | Projects 看板联动 | 📋 待开始 |
-| 23 | Plan 结果缓存 | 📋 待开始 |
-| 24 | agent_go review 命令 | 📋 待开始 |
+| 23 | Plan 结果缓存 | ✅ v0.6 |
+| 24 | agent_go review 命令 | ✅ v0.7 |
 | 25 | TASK.md 文件覆盖检查 | 📋 待开始 |
 
 ### P3 — 远期
@@ -104,6 +104,23 @@
 | plan_duration_ms | Plan 耗时写入 plan_complete event |
 | Phase 2 统计分析层 | eval.py: analyze_quality/perf + aggregate + 评分算法 |
 | `agent_go eval` 命令 | eval quality/perf [--all] 质量+性能报告 |
+
+### 增量交付（v0.6）
+
+| 功能 | 说明 |
+|------|------|
+| Status TUI | curses 多面板实时监控面板 |
+| Plan 缓存 | SHA256 缓存键 + 24h TTL + cache 管理命令 |
+
+### 增量交付（v0.7）
+
+| 功能 | 说明 |
+|------|------|
+| Phase 3 评估全维度 | eval cost/reliability/ux/all 命令 |
+| CI 工作流生成 | `agent_go ci` 5 种语言自动检测 |
+| `agent_go review` | Claude 代码审查命令 |
+
+**P0+P1+P2 全部完成** (19+8+7=34 项)。P3 4 项远期。
 
 ---
 

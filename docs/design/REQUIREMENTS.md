@@ -1,7 +1,7 @@
 # agent_go 需求清单
 
-> 版本: v0.4  
-> 日期: 2026-05-26  
+> 版本: v0.7  
+> 日期: 2026-05-27  
 > 项目: agent_go — 模块化 CLI 编排器，LLM Plan Mode + Claude Code 无头执行
 
 ---
@@ -77,6 +77,11 @@ Plan API → 规则注入 → Plan 确认 → 子任务拆解(角色-Skill匹配
 | 44 | Agent Type 约束生效 | ✅ v0.4 | `--allowedTools` 传递 |
 | 45 | 多级验证数组 | ✅ v0.4 | verification 支持命令数组 |
 | 46 | 上下文依赖过滤 | ✅ v0.4 | 仅注入直接上游上下文 |
+| 47 | Status TUI | ✅ v0.6 | curses 多面板实时监控 |
+| 48 | Plan 缓存 | ✅ v0.6 | SHA256 键 + 24h TTL |
+| 49 | eval 全维度 | ✅ v0.7 | cost/reliability/ux/all |
+| 50 | CI 工作流生成 | ✅ v0.7 | 5 种语言检测 |
+| 51 | agent_go review | ✅ v0.7 | Claude 代码审查 |
 
 ### P2 — 中优先级
 

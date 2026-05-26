@@ -1,7 +1,7 @@
 # agent_go
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-150%20passed-green)](tests/)
+[![Tests](https://img.shields.io/badge/tests-163%20passed-green)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stdlib Only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)]()
 
@@ -18,6 +18,8 @@ Give Claude Code a complex task — refactoring auth, upgrading dependencies, ad
 - **Interrupt & resume** — SIGINT pauses, `agent_go resume` picks up where you left off
 - **Remote push** — push worktree branches to a remote for CI/CD integration
 - **Zero dependencies** — pure Python stdlib
+- **Plan cache** — SHA256 cache key + 24h TTL reduces API costs
+- **Evaluation** — `eval quality/perf/cost/reliability/ux` built-in analytics
 
 ## Quick Start
 
@@ -51,6 +53,10 @@ python3 agent_go.py run ~/my-project "安全审查" --skill security-review --do
 | `clean` | Remove all task data |
 | `skills` | List available Skills |
 | `agents` | List available Agent types |
+| `ci` | Generate GitHub Actions workflow |
+| `review` | Code review with Claude |
+| `cache` | Plan cache management |
+| `eval` | Quality/performance/cost evaluation |
 
 ### Options
 
@@ -63,7 +69,8 @@ python3 agent_go.py run ~/my-project "安全审查" --skill security-review --do
 | `--issue <N>` | Link GitHub issue (injected into commits) |
 | `--skill <names>` | Load Skills by name (comma-separated) |
 | `--agent-type <type>` | Set default Agent type for all subtasks |
-| `--remote <url>` | Push worktree branches to remote on completion |
+| `--remote <url>` | Push worktree branches to remote |
+| `--no-cache` | Skip Plan cache lookup |
 
 ## Architecture
 
@@ -82,8 +89,12 @@ agent_go/
 ├── skills.py            # Skill loading, discovery, rendering
 ├── agents.py            # Agent type definitions
 ├── role_skill_map.py    # Config-driven role->skill matching rules
+├── metrics.py           # Data collection (timing/change_stats/token)
+├── eval.py              # Quality/perf/cost/reliability/ux analysis
+├── tui.py               # Curses status dashboard
+├── workflow_gen.py      # CI workflow auto-generation
 agent_go.py               # Entry-point wrapper
-tests/                    # 150 tests across 12 test files
+tests/                    # 163 tests across 13 test files
 ```
 
 ## Configuration
@@ -118,7 +129,7 @@ Config at `~/.agent_go/config.json` (auto-created). See [`config.example.json`](
 ```bash
 pip3 install pytest pytest-mock
 
-pytest tests/              # 150 tests (~4s)
+pytest tests/              # 163 tests (~4s)
 pytest tests/ -q           # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 ```
