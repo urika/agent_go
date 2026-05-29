@@ -1,6 +1,6 @@
 """Tests for _is_safe_verification_command in agent_go.utils."""
 
-from agent_go import _is_safe_verification_command
+from agent_go.utils import _is_safe_verification_command
 
 
 class TestIsSafeVerificationCommand:
