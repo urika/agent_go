@@ -104,8 +104,9 @@ def _safe_append_to_file(filepath, text, logger, max_retries=10):
     else:
         logger.warning(f"无法获取文件锁: {lock_path}，直接写入")
     try:
-        existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
-        filepath.write_text(existing + text, encoding="utf-8")
+        # 使用原子追加方式，避免读取-修改-写入的竞态条件
+        with open(filepath, 'a', encoding='utf-8') as f:
+            f.write(text)
     finally:
         lock_path.unlink(missing_ok=True)
 
