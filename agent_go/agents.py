@@ -15,11 +15,14 @@ Agent 配置文件：~/.agent_go/agents/<type>.json
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
 
 __all__ = ["load_agent_type", "list_agent_types"]
+
+logger = logging.getLogger(__name__)
 
 AGENT_GO_AGENTS_DIR = Path.home() / ".agent_go" / "agents"
 AGENT_GO_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -90,8 +93,8 @@ def load_agent_type(name: str, project_root: Optional[Path] = None) -> Optional[
                     claude_config=data.get("claude_config", {}),
                     preload_skills=data.get("preload_skills", []),
                 )
-            except (json.JSONDecodeError, Exception):
-                pass
+            except (json.JSONDecodeError, OSError, KeyError) as e:
+                logger.debug("Failed to load agent type from %s: %s", path, e)
 
     # 降级到内置类型
     builtin = _BUILTIN_AGENTS.get(name)
@@ -129,8 +132,8 @@ def list_agent_types() -> list[dict]:
                         "source": "user",
                     })
                     seen.add(name)
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    logger.debug("Invalid JSON in agent file %s: %s", f, e)
 
     return result
 

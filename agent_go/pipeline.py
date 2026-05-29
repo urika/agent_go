@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 
@@ -40,6 +42,7 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
+                # Process may have already exited between enumerate and kill
                 pass
         logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
         sys.exit(0)

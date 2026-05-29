@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
 from .config import get_api_key, log_event, DECOMPOSE_RULES, AGENT_GO_DIR
 from .git_utils import analyze_project, get_git_info, get_resource_map
 from .skills import list_skills
@@ -74,7 +76,8 @@ def call_api(config, messages, logger):
     except urllib.error.HTTPError as e:
         try:
             err_body = e.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to read HTTP error body: %s", exc)
             err_body = str(e)
         log_event(logger, "api_error", {
             "provider": provider, "status_code": e.code,
@@ -312,7 +315,8 @@ def load_cached_plan(cache_key, task, config, logger):
 
     try:
         entry = json.loads(cache_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug("Corrupt or missing cache file %s: %s", cache_file, e)
         return None
 
     ttl = config.get("cache", {}).get("plan_ttl", 86400)
@@ -324,8 +328,8 @@ def load_cached_plan(cache_key, task, config, logger):
                 cache_file.unlink(missing_ok=True)
                 logger.info(f"[缓存] 已过期，删除: {cache_key[:12]}...")
                 return None
-        except ValueError:
-            pass
+        except ValueError as e:
+            logger.debug("Invalid cache timestamp in %s: %s", cache_key[:12], e)
 
     plan = entry.get("plan")
     if not plan or not plan.get("steps"):
@@ -381,7 +385,8 @@ def _format_age(iso_str):
         elif age < 86400:
             return f"{int(age // 3600)}h前"
         return f"{int(age // 86400)}d前"
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to format age for '%s': %s", iso_str, e)
         return "?"
 
 
@@ -394,8 +399,8 @@ def list_cache_entries():
                 try:
                     e = json.loads(f.read_text(encoding="utf-8"))
                     entries.append(e)
-                except (json.JSONDecodeError, OSError):
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.debug("Failed to read cache entry %s: %s", f, e)
     return sorted(entries, key=lambda e: e.get("meta", {}).get("created_at", ""), reverse=True)
 
 
@@ -413,6 +418,6 @@ def clean_expired_cache(config):
                 if f.exists():
                     f.unlink()
                     removed += 1
-        except ValueError:
-            pass
+        except ValueError as e:
+            logger.debug("Invalid timestamp in cache entry: %s", e)
     return removed
