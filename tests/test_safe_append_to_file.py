@@ -3,7 +3,7 @@
 import time
 import threading
 from pathlib import Path
-from agent_go import _safe_append_to_file
+from agent_go.utils import _safe_append_to_file
 
 
 class TestSafeAppendToFile:

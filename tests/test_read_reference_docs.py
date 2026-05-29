@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from agent_go import read_reference_docs
+from agent_go.utils import read_reference_docs
 
 
 class TestReadReferenceDocs:

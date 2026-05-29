@@ -18,15 +18,13 @@ from unittest.mock import patch, MagicMock, PropertyMock
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from agent_go import (
-    AGENT_GO_DIR, DEFAULT_CONFIG,
-    cmd_run, cmd_resume, cmd_list, cmd_show,
-    _run_pipeline, run_subtask,
-    generate_plan, plan_to_subtasks, decompose_fallback,
-    confirm_plan, confirm_subtasks, verify_subtask,
-    load_config, setup_logger, log_event,
-    _detect_commit_prefix,
-)
+from agent_go.config import AGENT_GO_DIR, DEFAULT_CONFIG, load_config, setup_logger, log_event
+from agent_go.cli import cmd_run, cmd_resume, cmd_list, cmd_show
+from agent_go.pipeline import _run_pipeline
+from agent_go.executor import run_subtask
+from agent_go.api import generate_plan, decompose_fallback
+from agent_go.ui import plan_to_subtasks, confirm_plan, confirm_subtasks, verify_subtask
+from agent_go.utils import _detect_commit_prefix
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -241,7 +239,7 @@ class TestFullPipeline:
         subtasks = plan_to_subtasks(sample_plan, fast_logger)
 
         # 写入 PLAN.md
-        from agent_go import plan_to_md
+        from agent_go.ui import plan_to_md
         plan_md = plan_to_md(sample_plan)
         (task_dir / "PLAN.md").write_text(plan_md, encoding="utf-8")
 
@@ -408,11 +406,11 @@ class TestConcurrentExecution:
 class TestResume:
     """测试 4: 任务中断恢复"""
 
-    @patch("agent_go._run_pipeline")
+    @patch("agent_go.cli._run_pipeline")
     def test_resume_detects_completed(self, mock_pipeline,
                                       temp_repo, task_dir, fast_logger):
         """恢复时应跳过已完成子任务，只执行未完成的"""
-        from agent_go import cmd_resume
+        from agent_go.cli import cmd_resume
 
         # 创建 meta.json（sub-1 已完成，sub-2 未完成）
         meta = {
@@ -446,12 +444,12 @@ class TestResume:
         with patch("sys.argv", ["agent_go", "resume", task_dir.name]):
             with patch("agent_go.load_config") as mock_load:
                 mock_load.return_value = auto_config
-                with patch("agent_go.setup_logger") as mock_log:
+                with patch("agent_go.cli.setup_logger") as mock_log:
                     mock_log.return_value = fast_logger
                     with patch("agent_go.AGENT_GO_DIR", task_dir.parent):
                         # cmd_resume 会读取 meta.json 并调用 _run_pipeline
                         # 我们直接验证恢复逻辑
-                        from agent_go import AGENT_GO_DIR as real_dir
+                        from agent_go.config import AGENT_GO_DIR as real_dir
                         pass
 
         # 直接验证恢复逻辑（与 cli.py cmd_resume 一致）
@@ -478,7 +476,7 @@ class TestVerifySubtask:
 
     def test_verify_auto_confirm(self, fast_logger):
         """auto_verify_subtask=True 时无需交互直接返回 'next'"""
-        from agent_go import verify_subtask
+        from agent_go.ui import verify_subtask
         config = {"behavior": {"auto_verify_subtask": True}}
 
         # 自动确认模式下，safe_input 返回空字符串即触发自动通过
@@ -553,7 +551,7 @@ class TestMergeConflict:
     @patch("subprocess.run")
     def test_merge_conflict_detection(self, mock_subprocess, temp_repo, task_dir, fast_logger):
         """merge 冲突时生成 .MERGE_CONFLICT 文件"""
-        from agent_go import _git_merge_upstream
+        from agent_go.subtask import _git_merge_upstream
 
         # 模拟 git merge 失败 + 冲突文件
         def side_effect(args, **kwargs):

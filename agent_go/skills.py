@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
 
+__all__ = [
+    "load_skill", "load_skills", "discover_skills", "list_skills",
+    "render_skill_for_plan", "render_skill_for_execution",
+]
+
 AGENT_GO_SKILLS_DIR = Path.home() / ".agent_go" / "skills"
 AGENT_GO_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 

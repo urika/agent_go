@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
 
+__all__ = ["load_agent_type", "list_agent_types"]
+
 AGENT_GO_AGENTS_DIR = Path.home() / ".agent_go" / "agents"
 AGENT_GO_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
 

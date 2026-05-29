@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
+__all__ = ["analyze_project", "get_git_info", "get_resource_map"]
+
 def analyze_project(repo):
     """分析项目结构，返回文件列表和关键目录。"""
     try:

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from agent_go import analyze_project, get_git_info, get_resource_map
+from agent_go.git_utils import analyze_project, get_git_info, get_resource_map
 
 
 class TestAnalyzeProject:

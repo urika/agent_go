@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
+__all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES"]
+
 def read_reference_docs(doc_paths, repo, logger):
     contents = []
     for path_str in doc_paths:
