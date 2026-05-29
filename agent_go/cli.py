@@ -2,6 +2,7 @@ import sys, os, subprocess, json, re, time, threading, shlex, signal, logging, a
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +375,7 @@ def cmd_resume(args=None):
     _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
                   worktree_map, results_map, completed_ids, remote_url=remote_url)
 
-def cmd_list():
+def cmd_list() -> None:
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
     if not tasks:
         print("暂无任务")
@@ -558,7 +559,7 @@ def _cmd_status_text(args=None):
         watch = "--watch" in sys.argv or "-w" in sys.argv
         verbose = "--verbose" in sys.argv or "-v" in sys.argv
 
-    def _get_task_tail_lines(log_path, count=2):
+    def _get_task_tail_lines(log_path: Path, count: int = 2) -> list[str]:
         """从执行日志尾部提取最后 count 条 Claude 事件。"""
         if not log_path.exists():
             return []
@@ -570,7 +571,7 @@ def _cmd_status_text(args=None):
                         or "[tool_result]" in l or "[result]" in l]
         return claude_lines[-count:]
 
-    def _get_task_status(task_dir):
+    def _get_task_status(task_dir: Path) -> Optional[dict[str, Any]]:
         meta_path = task_dir / "meta.json"
         if not meta_path.exists():
             return None
@@ -663,11 +664,11 @@ def _cmd_status_text(args=None):
             break
         time.sleep(5)
 
-def cmd_config():
+def cmd_config() -> None:
     config = load_config()
     print(json.dumps(config, indent=2, ensure_ascii=False))
 
-def cmd_clean():
+def cmd_clean() -> None:
     import shutil as _shutil
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
     if not tasks:
@@ -711,7 +712,7 @@ def cmd_clean():
     else:
         print("已取消")
 
-def cmd_skills():
+def cmd_skills() -> None:
     """列出所有可用的 Skill。"""
     skills = list_skills()
     if not skills:
@@ -774,7 +775,7 @@ def cmd_cache(args=None):
         print(f"未知子命令: {sub}。可用: list, clean, clear, stats")
 
 
-def _cache_size():
+def _cache_size() -> str:
     from .api import _cache_dir
     d = _cache_dir()
     total = 0
@@ -787,7 +788,7 @@ def _cache_size():
     return f"{total / 1024 / 1024:.1f}MB"
 
 
-def cmd_agents():
+def cmd_agents() -> None:
     """列出所有可用的 Agent 类型。"""
     agents = list_agent_types()
     print(f"\n🤖 Agent 类型 ({len(agents)} 种)")
@@ -798,7 +799,7 @@ def cmd_agents():
         print(f"  {a['type']:<25} [{src}] {desc}")
     print("─" * 55)
 
-def main():
+def main() -> None:
     try:
         parser = _build_parser()
         args = parser.parse_args()

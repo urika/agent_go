@@ -2,6 +2,7 @@ import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ __all__ = [
     "list_cache_entries", "clean_expired_cache",
 ]
 
-def call_api(config, messages, logger):
+def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: logging.Logger) -> str:
     api_cfg = config["plan_api"]
     provider = api_cfg.get("provider", "anthropic")
     base_url = api_cfg["base_url"]
@@ -97,7 +98,7 @@ def call_api(config, messages, logger):
         })
         raise RuntimeError(f"连接超时或 IO 错误 ({provider}): {e}") from e
 
-def generate_plan(task, repo, config, logger, supplement="", reference_docs="", iteration=1, skill_context="", no_cache=False) -> dict:
+def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging.Logger, supplement: str = "", reference_docs: str = "", iteration: int = 1, skill_context: str = "", no_cache: bool = False) -> dict[str, Any]:
     plan_start = time.time()
     logger.info("[PLAN] ═══ PLAN MODE ═══")
     logger.info(f"[PLAN]  第 {iteration} 次生成")
@@ -250,7 +251,7 @@ def generate_plan(task, repo, config, logger, supplement="", reference_docs="", 
         save_cached_plan(cache_key, plan, task, repo, config)
     return plan
 
-def decompose_fallback(task, repo, config, logger):
+def decompose_fallback(task: str, repo: Path, config: dict[str, Any], logger: logging.Logger) -> list[dict[str, Any]]:
     logger.warning("Plan Mode 失败，降级")
     local_url = config.get("fallback", {}).get("local_model_url", "http://localhost:8000/v1/chat/completions")
     local_name = config.get("fallback", {}).get("local_model_name", "qwen")
@@ -287,13 +288,13 @@ def decompose_fallback(task, repo, config, logger):
 # Plan Cache
 # ═══════════════════════════════════════════════════════════════
 
-def _cache_dir():
+def _cache_dir() -> Path:
     d = AGENT_GO_DIR / "cache" / "plans"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def get_cache_key(task, repo):
+def get_cache_key(task: str, repo: Path) -> str:
     """SHA256(task + project_files[0:100] + remote + branch)。"""
     project_files = analyze_project(repo)
     git_info = get_git_info(repo)
@@ -307,7 +308,7 @@ def get_cache_key(task, repo):
     return hashlib.sha256("|".join(key_parts).encode()).hexdigest()
 
 
-def load_cached_plan(cache_key, task, config, logger):
+def load_cached_plan(cache_key: str, task: str, config: dict[str, Any], logger: logging.Logger) -> Optional[dict[str, Any]]:
     cache_dir = _cache_dir()
     cache_file = cache_dir / cache_key[:2] / f"{cache_key}.json"
     if not cache_file.exists():
@@ -353,7 +354,7 @@ def load_cached_plan(cache_key, task, config, logger):
     return plan
 
 
-def save_cached_plan(cache_key, plan, task, repo, config):
+def save_cached_plan(cache_key: str, plan: dict[str, Any], task: str, repo: Path, config: dict[str, Any]) -> None:
     cache_cfg = config.get("cache", {})
     if not cache_cfg.get("enabled", True):
         return
@@ -377,7 +378,7 @@ def save_cached_plan(cache_key, plan, task, repo, config):
         json.dumps(entry, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def _format_age(iso_str):
+def _format_age(iso_str: str) -> str:
     try:
         age = time.time() - datetime.strptime(iso_str, "%Y-%m-%dT%H:%M:%S").timestamp()
         if age < 3600:
@@ -390,7 +391,7 @@ def _format_age(iso_str):
         return "?"
 
 
-def list_cache_entries():
+def list_cache_entries() -> list[dict[str, Any]]:
     entries = []
     cache_dir = _cache_dir()
     for subdir in sorted(cache_dir.glob("*")):
@@ -404,7 +405,7 @@ def list_cache_entries():
     return sorted(entries, key=lambda e: e.get("meta", {}).get("created_at", ""), reverse=True)
 
 
-def clean_expired_cache(config):
+def clean_expired_cache(config: dict[str, Any]) -> int:
     ttl = config.get("cache", {}).get("plan_ttl", 86400)
     now = time.time()
     removed = 0

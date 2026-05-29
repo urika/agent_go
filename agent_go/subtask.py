@@ -2,12 +2,13 @@ import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
 
 from .config import log_event
 
 __all__: list[str] = []
 
-def _git_merge_upstream(src_worktree, dst_worktree, tag, logger, headless=False):
+def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger: logging.Logger, headless: bool = False) -> None:
     """将上游 worktree 的 tag 合并到当前 worktree。
     worktree 共享对象库，tag 在所有 worktree 间直接可见，无需 fetch。
 
@@ -47,7 +48,7 @@ def _git_merge_upstream(src_worktree, dst_worktree, tag, logger, headless=False)
             subprocess.run(["git", "merge", "--abort"],
                            cwd=str(dst_worktree), capture_output=True)
 
-def _run_headless(task_md, worktree, env, logger, sub_id, active_pids=None, active_pids_lock=None):
+def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None) -> subprocess.CompletedProcess:
     """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。"""
     PFX = f"[{sub_id}]"
     if active_pids is None:
@@ -65,7 +66,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id, active_pids=None, acti
     IDLE_TIMEOUT = 600   # 10 分钟纯静默才 kill（思考阶段无任何事件）
     HEARTBEAT = 60       # 60s 无事件发心跳
 
-    def _run_one(prompt, attempt):
+    def _run_one(prompt: str, attempt: int) -> tuple[subprocess.Popen, list[str], bool]:
         """启动 claude -p (stream-json) 并实时解析事件。"""
         proc = subprocess.Popen([
             "claude", "-p", prompt,
@@ -87,7 +88,7 @@ def _run_headless(task_md, worktree, env, logger, sub_id, active_pids=None, acti
         current_tool = [None]
         tool_input = [""]
 
-        def parse_and_log(raw_line, label):
+        def parse_and_log(raw_line: str, label: str) -> None:
             s = raw_line.rstrip()
             if not s:
                 return
@@ -178,11 +179,11 @@ def _run_headless(task_md, worktree, env, logger, sub_id, active_pids=None, acti
                 # 其他事件类型，轻量记录
                 pass
 
-        def read_stdout():
+        def read_stdout() -> None:
             for line in iter(proc.stdout.readline, ''):
                 parse_and_log(line, "out")
 
-        def read_stderr():
+        def read_stderr() -> None:
             for line in iter(proc.stderr.readline, ''):
                 parse_and_log(line, "err")
 

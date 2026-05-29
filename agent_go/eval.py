@@ -2,23 +2,23 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "analyze_quality", "analyze_performance",
     "aggregate_quality", "aggregate_performance", "cmd_eval",
 ]
 
-logger = logging.getLogger(__name__)
-
-
-def _read_meta(task_dir):
+def _read_meta(task_dir: Path) -> Optional[dict[str, Any]]:
     path = Path(task_dir) / "meta.json"
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _read_log_events(log_path, event_name):
+def _read_log_events(log_path: Path, event_name: str) -> list[dict[str, Any]]:
     events = []
     if not log_path.exists():
         return events
@@ -36,7 +36,7 @@ def _read_log_events(log_path, event_name):
 # Quality
 # ═══════════════════════════════════════════════════════════════
 
-def analyze_quality(meta):
+def analyze_quality(meta: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     if meta is None:
         return None
     results = meta.get("results", [])
@@ -118,7 +118,7 @@ def analyze_quality(meta):
 # Performance
 # ═══════════════════════════════════════════════════════════════
 
-def analyze_performance(meta, log_path=None):
+def analyze_performance(meta: Optional[dict[str, Any]], log_path: Optional[Path] = None) -> Optional[dict[str, Any]]:
     if meta is None:
         return None
     results = meta.get("results", [])
@@ -177,7 +177,7 @@ def analyze_performance(meta, log_path=None):
     }
 
 
-def _perf_score(p1, p95, p6):
+def _perf_score(p1: float, p95: float, p6: float) -> float:
     if p1 <= 0:
         return 50
     p1_score = max(0, min(100, 100 - p1 / 3))
@@ -186,7 +186,7 @@ def _perf_score(p1, p95, p6):
     return round(p1_score * 0.3 + p95_score * 0.3 + p6_score * 0.4)
 
 
-def _percentiles(data, percents):
+def _percentiles(data: list[float], percents: list[int]) -> dict[int, float]:
     if not data:
         return {p: 0 for p in percents}
     s = sorted(data)
@@ -203,11 +203,11 @@ def _percentiles(data, percents):
 # Aggregation
 # ═══════════════════════════════════════════════════════════════
 
-def _scan_task_dirs(base_dir):
+def _scan_task_dirs(base_dir: Path) -> list[Path]:
     return sorted(Path(base_dir).glob("task-*"), reverse=True)
 
 
-def aggregate_quality(tasks_dir):
+def aggregate_quality(tasks_dir: Path) -> Optional[dict[str, Any]]:
     items = []
     for td in _scan_task_dirs(tasks_dir):
         meta = _read_meta(td)
@@ -227,7 +227,7 @@ def aggregate_quality(tasks_dir):
     }
 
 
-def aggregate_performance(tasks_dir):
+def aggregate_performance(tasks_dir: Path) -> Optional[dict[str, Any]]:
     all_durations = []
     p1_values = []
     for td in _scan_task_dirs(tasks_dir):
@@ -266,7 +266,7 @@ MODEL_PRICES = {
 }
 
 
-def analyze_cost(tasks_dir):
+def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     total_calls = 0
     total_prompt = 0
     total_completion = 0
@@ -328,7 +328,7 @@ def analyze_cost(tasks_dir):
 # Reliability
 # ═══════════════════════════════════════════════════════════════
 
-def analyze_reliability(tasks_dir):
+def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
     tasks_total = 0
     completed = 0
     failed = 0
@@ -376,7 +376,7 @@ def analyze_reliability(tasks_dir):
 # UX
 # ═══════════════════════════════════════════════════════════════
 
-def analyze_ux(tasks_dir):
+def analyze_ux(tasks_dir: Path) -> dict[str, Any]:
     total = 0
     with_docs = 0
     plan_iterations = []
@@ -416,7 +416,7 @@ def analyze_ux(tasks_dir):
 # CLI output
 # ═══════════════════════════════════════════════════════════════
 
-def cmd_eval():
+def cmd_eval() -> None:
     import sys
     from .config import AGENT_GO_DIR
 
@@ -468,7 +468,7 @@ def cmd_eval():
         print(f"未知子命令: {sub}。可用: quality, perf, cost, reliability, ux, all")
 
 
-def _resolve_task_dir(base_dir, task_id):
+def _resolve_task_dir(base_dir: Path, task_id: str) -> Optional[Path]:
     if task_id:
         td = Path(base_dir) / task_id
         return td if td.exists() else None
@@ -476,7 +476,7 @@ def _resolve_task_dir(base_dir, task_id):
     return tasks[0] if tasks else None
 
 
-def _print_quality_report(q):
+def _print_quality_report(q: Optional[dict[str, Any]]) -> None:
     if q is None:
         print("无数据")
         return
@@ -498,7 +498,7 @@ def _print_quality_report(q):
     print("─" * 50)
 
 
-def _print_perf_report(p):
+def _print_perf_report(p: Optional[dict[str, Any]]) -> None:
     if p is None:
         print("无数据")
         return
@@ -520,7 +520,7 @@ def _print_perf_report(p):
     print("─" * 50)
 
 
-def _print_cost_report(c):
+def _print_cost_report(c: dict[str, Any]) -> None:
     print(f"\n💰 成本报告")
     print("─" * 50)
     print(f"  API 调用:            {c['total_calls']} 次")
@@ -535,7 +535,7 @@ def _print_cost_report(c):
     print("─" * 50)
 
 
-def _print_reliability_report(r):
+def _print_reliability_report(r: dict[str, Any]) -> None:
     print(f"\n🔧 可靠性报告")
     print("─" * 50)
     print(f"  任务完成率:          {r['success_rate']}% ({r['completed']}/{r['tasks_total']})")
@@ -546,7 +546,7 @@ def _print_reliability_report(r):
     print("─" * 50)
 
 
-def _print_ux_report(u):
+def _print_ux_report(u: dict[str, Any]) -> None:
     print(f"\n📈 使用习惯报告")
     print("─" * 50)
     print(f"  分析任务数:          {u['tasks_total']}")
@@ -559,7 +559,7 @@ def _print_ux_report(u):
     print("─" * 50)
 
 
-def _print_aggregate_quality(agg):
+def _print_aggregate_quality(agg: Optional[dict[str, Any]]) -> None:
     if agg is None:
         print("无历史数据")
         return
@@ -574,7 +574,7 @@ def _print_aggregate_quality(agg):
     print("─" * 50)
 
 
-def _print_aggregate_perf(agg):
+def _print_aggregate_perf(agg: Optional[dict[str, Any]]) -> None:
     if agg is None or agg["tasks_analyzed"] == 0:
         print("无历史数据")
         return

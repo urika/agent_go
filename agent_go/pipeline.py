@@ -2,6 +2,7 @@ import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -10,8 +11,8 @@ from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 
 __all__: list[str] = []
 
-def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
-                  worktree_map=None, results_map=None, completed_ids=None, remote_url=""):
+def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
+                  worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "") -> None:
     """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。"""
     worktree_map = worktree_map or {}
     results_map = results_map or {}
@@ -33,7 +34,7 @@ def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel,
             logger.info(f"[worktree] gc.auto 已禁用 (原值: {original_gc_value})")
 
     # 注册中断信号处理
-    def _on_interrupt(signum, frame):
+    def _on_interrupt(signum: int, frame: Any) -> None:
         meta["status"] = "paused"
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         with active_pids_lock:

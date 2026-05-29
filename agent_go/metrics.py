@@ -1,12 +1,14 @@
 import subprocess
+from pathlib import Path
+from typing import Any, Optional
 
 __all__ = [
     "collect_timing", "collect_change_stats",
     "collect_merge_result", "extract_usage",
 ]
 
-def collect_timing(worktree_create_ms, merge_upstream_ms, claude_execute_ms,
-                   verification_ms, git_commit_ms):
+def collect_timing(worktree_create_ms: float, merge_upstream_ms: float, claude_execute_ms: float,
+                   verification_ms: float, git_commit_ms: float) -> dict[str, float]:
     return {
         "worktree_create_ms": round(worktree_create_ms),
         "merge_upstream_ms": round(merge_upstream_ms),
@@ -16,7 +18,7 @@ def collect_timing(worktree_create_ms, merge_upstream_ms, claude_execute_ms,
     }
 
 
-def collect_change_stats(worktree_path):
+def collect_change_stats(worktree_path: Path) -> dict[str, Any]:
     files_changed = 0
     insertions = 0
     deletions = 0
@@ -57,14 +59,14 @@ def collect_change_stats(worktree_path):
     }
 
 
-def collect_merge_result(upstream_id, success, conflict_files=None):
+def collect_merge_result(upstream_id: str, success: bool, conflict_files: Optional[list[str]] = None) -> dict[str, Any]:
     result = {"upstream": upstream_id, "status": "success" if success else "conflict"}
     if conflict_files:
         result["conflict_files"] = conflict_files
     return result
 
 
-def extract_usage(api_response, provider, model):
+def extract_usage(api_response: dict[str, Any], provider: str, model: str) -> dict[str, Any]:
     usage = api_response.get("usage", {})
     return {
         "prompt_tokens": usage.get("input_tokens", 0),
