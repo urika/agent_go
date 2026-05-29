@@ -169,7 +169,7 @@ def _run_claude(subtask, worktree, task_dir, headless, env, logger, agent, repo,
     return result, sandbox_type, claude_time
 
 
-def _verify_changes(worktree, sub_id, subtask, logger, headless, active_pids, active_pids_lock):
+def _verify_changes(task_id, worktree, sub_id, subtask, logger, headless, active_pids, active_pids_lock):
     """Verify changes made by Claude"""
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
@@ -197,7 +197,7 @@ def _verify_changes(worktree, sub_id, subtask, logger, headless, active_pids, ac
 
     # Git 提交 + tag（Conventional Commits 格式），供下游子任务 merge
     # Tag 包含 task_id 前缀，避免跨任务冲突
-    tag_name = f"{subtask['task_id']}/{sub_id}"
+    tag_name = f"{task_id}/{sub_id}"
     git_start = time.time()
     if has_changes:
         commit_msg = _format_commit(subtask['title'], issue_ref, sub_id)
@@ -313,6 +313,7 @@ def _verify_changes(worktree, sub_id, subtask, logger, headless, active_pids, ac
         "summary": summary,
         "metrics_changes": metrics_changes,
         "git_commit_ms": git_commit_ms,
+        "verification_ms": verification_ms,
         "verification": verification,
         "verify_ok": verify_ok,
         "retry_count": retry_count,
@@ -320,7 +321,7 @@ def _verify_changes(worktree, sub_id, subtask, logger, headless, active_pids, ac
     }
 
 
-def _generate_context(subtask, worktree, sub_id, logger, headless, result):
+def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary, verification):
     """Generate shared context for downstream tasks"""
     # 生成共享上下文（供下游子任务使用）
     ctx_parts = [
@@ -404,10 +405,10 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     result, sandbox_type, claude_time = _run_claude(subtask, worktree, task_dir, headless, env, logger, agent, repo, sub_id, active_pids, active_pids_lock)
 
     # Verify changes
-    verify_results = _verify_changes(worktree, sub_id, subtask, logger, headless, active_pids, active_pids_lock)
+    verify_results = _verify_changes(task_id, worktree, sub_id, subtask, logger, headless, active_pids, active_pids_lock)
     
     # Generate context
-    _generate_context(subtask, worktree, sub_id, logger, headless, result)
+    _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_results["verify_ok"], verify_results["summary"], verify_results.get("verification", ""))
 
     # 状态判定: completed(有变更) / no_changes(完成但无变更) / failed(异常)
     if result.returncode == 0 and verify_results["verify_ok"]:
