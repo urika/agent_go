@@ -1,4 +1,4 @@
-import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
+from .common_imports import *
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -16,8 +16,8 @@ from .workflow_gen import cmd_ci
 
 def cmd_run():
     # 解析参数
-    repo_idx = 2
-    task_idx = 3
+    # This will be replaced by argparse
+    pass
     doc_paths = []
     issue_ref = ""
     skill_names = []

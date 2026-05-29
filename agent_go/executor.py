@@ -1,4 +1,5 @@
-import sys, os, subprocess, json, re, time, threading, shlex, signal, logging, shutil
+from .common_imports import *
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -10,16 +11,8 @@ from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 
-def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None):
-    sub_id = subtask["id"]
-    sub_dir = task_dir / sub_id
-    sub_dir.mkdir(parents=True, exist_ok=True)
-    worktree = sub_dir / "work"
-
-    logger.info(f"─── {sub_id} START: {subtask['title']} ───")
-    log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
-                "depends_on": subtask.get("depends_on", []), "headless": headless, "issue": issue_ref})
-
+def _create_worktree(repo, task_id, sub_id, worktree, logger):
+    """Create worktree for subtask"""
     clone_start = time.time()
     worktree_create_ms = 0
     if (worktree / ".git").exists():
@@ -40,35 +33,29 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 logger.warning(f"分支创建失败: {checkout_result.stderr.strip()}")
     else:
         worktree.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(str(repo), str(worktree), dirs_exist_ok=True)
+        shutil.copytree(str(repo), str(worktree), dirs_exist_ok=True
+    )
+    clone_time = time.time() - clone_start
+    return clone_time, worktree_create_ms
 
-    # 产物传递：通过 git merge 将上游代码合并到当前 worktree
-    # Tag 使用完整路径 task_id/sub_id 避免跨任务冲突
+
+def _build_task_md(task_id, subtask, task_dir, upstream_worktrees, logger, repo, worktree):
+    """Build TASK.md file with context and information"""
+    # 构建 TASK.md：包含完整 Agent Prompt、资源清单、上游上下文
+    task_md_parts = [f"# 子任务: {subtask['title']}", ""]
+
+    # 注入 git merge 冲突信息（如有）
     merge_conflicts = {}
-    merge_results = []
-    merge_upstream_ms = 0
     if upstream_worktrees:
         for up_id, up_path in upstream_worktrees.items():
             if up_path.exists():
                 upstream_tag = f"{task_id}/{up_id}"
-                logger.info(f"产物传递 (git merge): {up_id} → {sub_id} (tag={upstream_tag})")
-                m_start = time.time()
-                _git_merge_upstream(up_path, worktree, upstream_tag, logger, headless=headless)
-                merge_upstream_ms += (time.time() - m_start) * 1000
-                # 检测上游 merge 是否产生冲突
                 conflict_file = worktree / ".MERGE_CONFLICT"
                 has_conflict = conflict_file.exists()
                 if has_conflict:
                     merge_conflicts[up_id] = conflict_file.read_text(encoding="utf-8")
                     conflict_file.unlink()
-                merge_results.append(collect_merge_result(up_id, not has_conflict,
-                    merge_conflicts.get(up_id, "").split("\n") if has_conflict else None))
-    clone_time = time.time() - clone_start
 
-    # 构建 TASK.md：包含完整 Agent Prompt、资源清单、上游上下文
-    task_md_parts = [f"# 子任务: {subtask['title']}", ""]
-
-    # 注入 git merge 冲突信息（如有）
     if merge_conflicts:
         task_md_parts.extend([
             "## ⚠️ 上游合并冲突（需手动解决）",
@@ -116,8 +103,6 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     if verification:
         exec_requirements.append(f"- **必须执行验证**: `{verification}`，确保通过后再完成")
         exec_requirements.append("- 如验证失败，请修复问题后重新验证，直到通过")
-    if not headless:
-        exec_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
     task_md_parts.extend(exec_requirements)
 
     # ── Skill 知识注入 ──
@@ -148,41 +133,17 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         str(worktree),
         task_md_text
     )
-    (sub_dir / "TASK.md").write_text(task_md, encoding="utf-8")
+    (task_dir / subtask["id"] / "TASK.md").write_text(task_md, encoding="utf-8")
+    return unresolved_skills
 
-    # 重写验证命令中的路径
-    verification = subtask.get("verification", "")
-    if verification and str(repo) in verification:
-        _boundary_chars = r'\s"\'\(\):/：，。、'
-        _before = rf'(?<![^{_boundary_chars}])'
-        _after = rf'(?![^{_boundary_chars}])'
-        verification = re.sub(
-            rf'{_before}{re.escape(str(repo))}{_after}',
-            str(worktree),
-            verification
-        )
 
-    print(f"\n🚀 {sub_id}: {subtask['title']}")
-    env = os.environ.copy()
-    loaded_skill_names = [sn for sn in skill_names if sn not in unresolved_skills]
-    env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree), "AGENT_GO_SKILLS": ",".join(loaded_skill_names)})
-
-    # ── Agent 类型配置 ──
-    agent_type_name = subtask.get("agent_type", "developer")
-    agent = load_agent_type(agent_type_name, repo)
-    if agent:
-        env.update(get_agent_env(agent))
-        logger.info(f"Agent: {agent.type_name}")
-    else:
-        from .agents import list_agent_types
-        available = [a["type"] for a in list_agent_types()]
-        logger.warning(f"Agent 类型 \"{agent_type_name}\" 未注册，降级为 developer。可用: {available}")
-
+def _run_claude(subtask, worktree, task_dir, headless, env, logger, agent, repo, sub_id, active_pids, active_pids_lock):
+    """Run Claude for the subtask"""
     claude_start = time.time()
 
     if headless:
         sandbox_type = "headless"
-        result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids, active_pids_lock=active_pids_lock)
+        result = _run_headless(task_dir / subtask["id"] / "TASK.md", worktree, env, logger, sub_id, active_pids=active_pids, active_pids_lock=active_pids_lock)
     else:
         # 根据 Agent 类型构建 Claude 命令
         if agent:
@@ -205,7 +166,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             sandbox_type = "native"
 
     claude_time = time.time() - claude_start
+    return result, sandbox_type, claude_time
 
+
+def _verify_changes(worktree, sub_id, subtask, logger, headless, active_pids, active_pids_lock):
+    """Verify changes made by Claude"""
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
     has_changes = bool(status_result.stdout.strip())
@@ -232,7 +197,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     # Git 提交 + tag（Conventional Commits 格式），供下游子任务 merge
     # Tag 包含 task_id 前缀，避免跨任务冲突
-    tag_name = f"{task_id}/{sub_id}"
+    tag_name = f"{subtask['task_id']}/{sub_id}"
     git_start = time.time()
     if has_changes:
         commit_msg = _format_commit(subtask['title'], issue_ref, sub_id)
@@ -294,11 +259,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                     logger.info("自动重试: 注入修复指令")
                     failed_cmds = "\n".join(f"  {c}" for c in cmds)
                     fix_prompt = task_md + (
-"\n\n【验证失败】以下验证命令执行失败:\n"
-f"{failed_cmds}\n\n"
-f"最后失败命令: {vcmd}\n"
-f"错误输出:\n{vr.stderr[-500:]}\n"
-"请修复上述问题，确保所有验证命令通过。直接修改文件，不要询问。"
+    "\n\n【验证失败】以下验证命令执行失败:\n"
+    f"{failed_cmds}\n\n"
+    f"最后失败命令: {vcmd}\n"
+    f"错误输出:\n{vr.stderr[-500:]}\n"
+    "请修复上述问题，确保所有验证命令通过。直接修改文件，不要询问。"
                     )
                     _run_headless(fix_prompt, worktree, env, logger, f"{sub_id}-fix", active_pids=active_pids, active_pids_lock=active_pids_lock)
                     subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
@@ -343,6 +308,20 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
             else:
                 logger.info(f"验证 [{vi+1}/{len(cmds)}] 通过")
 
+    return {
+        "has_changes": has_changes,
+        "summary": summary,
+        "metrics_changes": metrics_changes,
+        "git_commit_ms": git_commit_ms,
+        "verification": verification,
+        "verify_ok": verify_ok,
+        "retry_count": retry_count,
+        "verification_results": verification_results
+    }
+
+
+def _generate_context(subtask, worktree, sub_id, logger, headless, result):
+    """Generate shared context for downstream tasks"""
     # 生成共享上下文（供下游子任务使用）
     ctx_parts = [
         f"### {sub_id}: {subtask['title']}",
@@ -362,33 +341,96 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
     ctx_parts.append("")
     # 线程安全地追加共享上下文
     # 写入独立上下文文件（仅被直接下游子任务读取）
-    ctx_file = sub_dir / "context.md"
+    ctx_file = task_dir / sub_id / "context.md"
     ctx_file.write_text("\n".join(ctx_parts) + "\n", encoding="utf-8")
     line_count = len("\n".join(ctx_parts).splitlines())
     logger.info(f"上下文已写入: {line_count} 行")
 
+
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None):
+    sub_id = subtask["id"]
+    sub_dir = task_dir / sub_id
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    worktree = sub_dir / "work"
+
+    logger.info(f"─── {sub_id} START: {subtask['title']} ───")
+    log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
+                "depends_on": subtask.get("depends_on", []), "headless": headless, "issue": issue_ref})
+
+    # Create worktree
+    clone_time, worktree_create_ms = _create_worktree(repo, task_id, sub_id, worktree, logger)
+
+    # Merge upstream
+    merge_conflicts = {}
+    merge_results = []
+    merge_upstream_ms = 0
+    if upstream_worktrees:
+        for up_id, up_path in upstream_worktrees.items():
+            if up_path.exists():
+                upstream_tag = f"{task_id}/{up_id}"
+                logger.info(f"产物传递 (git merge): {up_id} → {sub_id} (tag={upstream_tag})")
+                m_start = time.time()
+                _git_merge_upstream(up_path, worktree, upstream_tag, logger, headless=headless)
+                merge_upstream_ms += (time.time() - m_start) * 1000
+                # 检测上游 merge 是否产生冲突
+                conflict_file = worktree / ".MERGE_CONFLICT"
+                has_conflict = conflict_file.exists()
+                if has_conflict:
+                    merge_conflicts[up_id] = conflict_file.read_text(encoding="utf-8")
+                    conflict_file.unlink()
+                merge_results.append(collect_merge_result(up_id, not has_conflict,
+                    merge_conflicts.get(up_id, "").split("\n") if has_conflict else None))
+
+    # Build task markdown file
+    unresolved_skills = _build_task_md(task_id, subtask, task_dir, upstream_worktrees, logger, repo, worktree)
+
+    # Prepare env
+    env = os.environ.copy()
+    loaded_skill_names = [sn for sn in subtask.get("skills", []) if sn not in unresolved_skills]
+    env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree), "AGENT_GO_SKILLS": ",".join(loaded_skill_names)})
+
+    # Agent type
+    agent_type_name = subtask.get("agent_type", "developer")
+    agent = load_agent_type(agent_type_name, repo)
+    if agent:
+        env.update(get_agent_env(agent))
+        logger.info(f"Agent: {agent.type_name}")
+    else:
+        from .agents import list_agent_types
+        available = [a["type"] for a in list_agent_types()]
+        logger.warning(f"Agent 类型 \"{agent_type_name}\" 未注册，降级为 developer。可用: {available}")
+
+    # Run Claude
+    result, sandbox_type, claude_time = _run_claude(subtask, worktree, task_dir, headless, env, logger, agent, repo, sub_id, active_pids, active_pids_lock)
+
+    # Verify changes
+    verify_results = _verify_changes(worktree, sub_id, subtask, logger, headless, active_pids, active_pids_lock)
+    
+    # Generate context
+    _generate_context(subtask, worktree, sub_id, logger, headless, result)
+
     # 状态判定: completed(有变更) / no_changes(完成但无变更) / failed(异常)
-    if result.returncode == 0 and verify_ok:
-        status = "no_changes" if summary == "无文件变更" else "completed"
+    if result.returncode == 0 and verify_results["verify_ok"]:
+        status = "no_changes" if verify_results["summary"] == "无文件变更" else "completed"
     else:
         status = "failed"
     logger.info(f"─── {sub_id} DONE: {subtask['title']} [{status}] ───")
     log_event(logger, "subtask_complete", {
         "id": sub_id, "status": status, "sandbox_type": sandbox_type,
         "clone_sec": round(clone_time, 2), "claude_sec": round(claude_time, 2),
-        "summary": summary, "verify_ok": verify_ok,
+        "summary": verify_results["summary"], "verify_ok": verify_results["verify_ok"],
     })
 
     metrics_timing = collect_timing(worktree_create_ms, merge_upstream_ms,
-                                     round(claude_time * 1000), verification_ms, git_commit_ms)
+                                     round(claude_time * 1000), verify_results["verification_ms"], verify_results["git_commit_ms"])
 
     return {"subtask_id": sub_id, "status": status, "exit_code": result.returncode,
-            "summary": summary, "worktree": str(worktree), "sandbox_type": sandbox_type,
-            "verify_ok": verify_ok, "duration_sec": round(claude_time, 2),
+            "summary": verify_results["summary"], "worktree": str(worktree), "sandbox_type": sandbox_type,
+            "verify_ok": verify_results["verify_ok"], "duration_sec": round(claude_time, 2),
             "agent_type_source": subtask.get("_agent_type_source", "default"),
             "skills_unresolved": unresolved_skills,
-            "retry_count": retry_count,
+            "retry_count": verify_results["retry_count"],
             "timing": metrics_timing,
-            "change_stats": metrics_changes,
+            "change_stats": verify_results["metrics_changes"],
             "merge_results": merge_results,
-            "verification_results": verification_results}
+            "verification_results": verify_results["verification_results"]}
