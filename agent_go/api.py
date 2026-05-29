@@ -98,7 +98,7 @@ def generate_plan(task, repo, config, logger, supplement="", reference_docs="", 
     cache_hit = False
     if not no_cache and iteration == 1 and not supplement and not reference_docs:
         cache_key = get_cache_key(task, repo)
-        cached = load_cached_plan(cache_key, config, logger)
+        cached = load_cached_plan(cache_key, task, config, logger)
         if cached:
             plan = cached
             cache_hit = True
@@ -298,7 +298,7 @@ def get_cache_key(task, repo):
     return hashlib.sha256("|".join(key_parts).encode()).hexdigest()
 
 
-def load_cached_plan(cache_key, config, logger):
+def load_cached_plan(cache_key, task, config, logger):
     cache_dir = _cache_dir()
     cache_file = cache_dir / cache_key[:2] / f"{cache_key}.json"
     if not cache_file.exists():
@@ -323,6 +323,12 @@ def load_cached_plan(cache_key, config, logger):
 
     plan = entry.get("plan")
     if not plan or not plan.get("steps"):
+        return None
+
+    # 校验 task 描述是否匹配，避免缓存键碰撞导致的不匹配
+    cached_task = entry.get("meta", {}).get("task", "")
+    if cached_task and cached_task != task[:200]:
+        logger.warning(f"[缓存] task 不匹配 (缓存: {cached_task[:50]}..., 当前: {task[:50]}...)，跳过缓存")
         return None
 
     meta = entry["meta"]
