@@ -6,6 +6,8 @@ from datetime import datetime
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 
+__all__: list[str] = []
+
 def _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
                   worktree_map=None, results_map=None, completed_ids=None, remote_url=""):
     """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。"""

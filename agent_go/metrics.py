@@ -1,5 +1,9 @@
 import subprocess
 
+__all__ = [
+    "collect_timing", "collect_change_stats",
+    "collect_merge_result", "extract_usage",
+]
 
 def collect_timing(worktree_create_ms, merge_upstream_ms, claude_execute_ms,
                    verification_ms, git_commit_ms):

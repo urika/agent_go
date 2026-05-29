@@ -1,6 +1,6 @@
 """测试 _slugify — 生成分支名适用的短标识"""
 
-from agent_go import _slugify
+from agent_go.utils import _slugify
 
 
 class TestSlugify:

@@ -9,6 +9,12 @@ from .skills import list_skills
 from .role_skill_map import load_role_skill_map
 import hashlib
 
+__all__ = [
+    "call_api", "generate_plan", "decompose_fallback",
+    "get_cache_key", "load_cached_plan", "save_cached_plan",
+    "list_cache_entries", "clean_expired_cache",
+]
+
 def call_api(config, messages, logger):
     api_cfg = config["plan_api"]
     provider = api_cfg.get("provider", "anthropic")

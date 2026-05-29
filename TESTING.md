@@ -220,12 +220,18 @@ def test_concurrent_safety(self, temp_dir, logger):
 将测试文件放入 `tests/` 目录，直接导入函数并断言：
 
 ```python
-from agent_go import my_function
+from agent_go.module_name import my_function
 
 class TestMyFunction:
     def test_basic(self):
         assert my_function("input") == "expected"
 ```
+
+### 导入约定
+
+- **顶层 API**: `from agent_go import main, cmd_run, load_config` — 仅有 CLI 入口和核心配置
+- **模块级导入**: `from agent_go.api import call_api, generate_plan` — 推荐，IDE 可直接跳转
+- **私有函数（仅测试）**: `from agent_go.utils import _slugify` — 可访问但标记为内部实现
 
 ### 测试涉及 mock 的函数
 

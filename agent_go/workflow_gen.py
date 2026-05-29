@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+__all__ = ["cmd_ci"]
+
 TEMPLATES = {
     "python": {
         "detect": ["requirements.txt", "setup.py", "pyproject.toml", "setup.cfg"],

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from agent_go import load_config, get_api_key, AGENT_GO_DIR, CONFIG_PATH, DEFAULT_CONFIG
+from agent_go.config import load_config, get_api_key, AGENT_GO_DIR, CONFIG_PATH, DEFAULT_CONFIG
 
 
 class TestLoadConfig:

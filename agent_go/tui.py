@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import datetime
 from .config import AGENT_GO_DIR
 
+__all__ = ["cmd_status_tui"]
 
 def _get_task_status(task_dir):
     meta_path = task_dir / "meta.json"

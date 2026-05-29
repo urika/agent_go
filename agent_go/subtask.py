@@ -5,6 +5,8 @@ from datetime import datetime
 
 from .config import log_event
 
+__all__: list[str] = []
+
 def _git_merge_upstream(src_worktree, dst_worktree, tag, logger, headless=False):
     """将上游 worktree 的 tag 合并到当前 worktree。
     worktree 共享对象库，tag 在所有 worktree 间直接可见，无需 fetch。

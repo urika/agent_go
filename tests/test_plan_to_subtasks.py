@@ -1,6 +1,6 @@
 """测试 plan_to_subtasks — Plan → 子任务转换"""
 
-from agent_go import plan_to_subtasks
+from agent_go.ui import plan_to_subtasks
 
 
 class TestPlanToSubtasks:

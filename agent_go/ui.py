@@ -7,6 +7,12 @@ from .config import safe_input, log_event
 from .utils import read_reference_docs
 from .api import generate_plan
 
+__all__ = [
+    "plan_to_md", "print_plan", "confirm_plan",
+    "plan_to_subtasks", "print_subtasks", "confirm_subtasks",
+    "verify_subtask",
+]
+
 def plan_to_md(plan):
     """将 Plan 转为 Markdown 文档。"""
     lines = [

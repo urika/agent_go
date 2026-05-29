@@ -1,6 +1,6 @@
 """测试 _format_commit — Conventional Commits 格式生成"""
 
-from agent_go import _format_commit, _detect_commit_prefix, _detect_commit_scope
+from agent_go.utils import _format_commit, _detect_commit_prefix, _detect_commit_scope
 
 
 class TestFormatCommitChinese:

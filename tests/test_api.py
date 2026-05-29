@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from agent_go import call_api, get_api_key
+from agent_go.api import call_api
+from agent_go.config import get_api_key
 
 
 class MockResponse:

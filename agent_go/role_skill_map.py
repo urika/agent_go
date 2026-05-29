@@ -4,6 +4,8 @@ from fnmatch import fnmatch
 
 from .config import AGENT_GO_DIR
 
+__all__ = ["load_role_skill_map", "apply_rules"]
+
 DEFAULT_MAP = {
     "rules": [
         {

@@ -2,6 +2,10 @@ import json
 from pathlib import Path
 from datetime import datetime
 
+__all__ = [
+    "analyze_quality", "analyze_performance",
+    "aggregate_quality", "aggregate_performance", "cmd_eval",
+]
 
 def _read_meta(task_dir):
     path = Path(task_dir) / "meta.json"

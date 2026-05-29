@@ -10,6 +10,8 @@ from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 
+__all__ = ["run_subtask"]
+
 def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None):
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id

@@ -14,6 +14,11 @@ from .eval import cmd_eval
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
 
+__all__ = [
+    "main", "cmd_run", "cmd_resume", "cmd_list", "cmd_show",
+    "cmd_status", "cmd_config", "cmd_clean", "cmd_pr", "cmd_review",
+]
+
 def cmd_run():
     # 解析参数
     repo_idx = 2
