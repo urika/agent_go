@@ -5,6 +5,8 @@ from datetime import datetime
 
 __all__ = ["analyze_project", "get_git_info", "get_resource_map"]
 
+logger = logging.getLogger(__name__)
+
 def analyze_project(repo):
     """分析项目结构，返回文件列表和关键目录。"""
     try:
@@ -16,7 +18,8 @@ def analyze_project(repo):
             result = subprocess.run(["find", ".", "-maxdepth", "2", "-type", "f"], cwd=str(repo), capture_output=True, text=True, timeout=5)
             files = result.stdout.strip().split("\n")[:30]
             return "\n".join(f.lstrip("./") for f in files)
-    except (FileNotFoundError, subprocess.SubprocessError):
+    except (FileNotFoundError, subprocess.SubprocessError) as e:
+        logger.debug("Failed to analyze project: %s", e)
         return ""
 
 def get_git_info(repo):
@@ -32,8 +35,8 @@ def get_git_info(repo):
         c = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(repo), capture_output=True, text=True, timeout=3)
         if c.returncode == 0:
             info["commit"] = c.stdout.strip()
-    except (FileNotFoundError, subprocess.SubprocessError):
-        pass
+    except (FileNotFoundError, subprocess.SubprocessError) as e:
+        logger.debug("Failed to get git info: %s", e)
     return info
 
 def _worktree_create(repo, branch, worktree_path):

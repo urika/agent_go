@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 from datetime import datetime
 
@@ -6,6 +7,9 @@ __all__ = [
     "analyze_quality", "analyze_performance",
     "aggregate_quality", "aggregate_performance", "cmd_eval",
 ]
+
+logger = logging.getLogger(__name__)
+
 
 def _read_meta(task_dir):
     path = Path(task_dir) / "meta.json"
@@ -23,8 +27,8 @@ def _read_log_events(log_path, event_name):
             try:
                 json_part = line.split(" | ")[-1]
                 events.append(json.loads(json_part))
-            except (json.JSONDecodeError, IndexError):
-                pass
+            except (json.JSONDecodeError, IndexError) as e:
+                logger.debug("Failed to parse log event line: %s", e)
     return events
 
 
@@ -156,8 +160,8 @@ def analyze_performance(meta, log_path=None):
             first_ts = datetime.strptime(lines[0].split(" | ")[0], "%Y-%m-%d %H:%M:%S")
             last_ts = datetime.strptime(lines[-1].split(" | ")[0], "%Y-%m-%d %H:%M:%S")
             p1 = round((last_ts - first_ts).total_seconds(), 1)
-        except (ValueError, IndexError):
-            pass
+        except (ValueError, IndexError) as e:
+            logger.debug("Failed to parse log timestamps: %s", e)
     if p1 > 0:
         p6 = round(sum_duration / p1 * 100)
 

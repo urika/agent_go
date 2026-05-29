@@ -15,6 +15,7 @@ allowed-tools: Read, Write
 
 import re
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ __all__ = [
     "load_skill", "load_skills", "discover_skills", "list_skills",
     "render_skill_for_plan", "render_skill_for_execution",
 ]
+
+logger = logging.getLogger(__name__)
 
 AGENT_GO_SKILLS_DIR = Path.home() / ".agent_go" / "skills"
 AGENT_GO_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,8 +79,8 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
             elif value.startswith("[") and value.endswith("]"):
                 try:
                     value = json.loads(value)
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    logger.debug("Failed to parse JSON list in frontmatter key '%s': %s", key, e)
             frontmatter[key] = value
     return frontmatter, body.strip()
 

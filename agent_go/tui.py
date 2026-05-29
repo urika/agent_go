@@ -1,7 +1,10 @@
 import json
+import logging
 import time
 from pathlib import Path
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 from .config import AGENT_GO_DIR
 
 __all__ = ["cmd_status_tui"]
@@ -26,8 +29,9 @@ def _get_task_status(task_dir):
         if "subtask_start" in line:
             try:
                 current = json.loads(line.split(" | ")[-1]).get("title", "")
-            except Exception:
-                pass
+            except (json.JSONDecodeError, IndexError, KeyError):
+                # TUI log parsing — malformed lines are expected
+                logger.debug("Failed to parse subtask title from log line")
             break
 
     elapsed = ""
@@ -38,8 +42,9 @@ def _get_task_status(task_dir):
             end = datetime.now() if status == "running" else datetime.fromtimestamp(log_path.stat().st_mtime) if log_path.exists() else datetime.now()
             delta = end - start
             elapsed = f"{int(delta.total_seconds() // 60)}m{int(delta.total_seconds() % 60)}s"
-        except Exception:
-            pass
+        except ValueError:
+            # TUI timestamp parsing — invalid format expected in some entries
+            logger.debug("Failed to parse elapsed time from created timestamp")
 
     return {
         "id": task_dir.name, "status": status, "task": meta.get("task", "?")[:50],
@@ -181,6 +186,7 @@ def _safe_addstr(win, y, x, text, attr=0):
     try:
         win.addstr(y, x, text, attr)
     except Exception:
+        # curses addstr throws on boundary/resize — intentionally silent
         pass
 
 

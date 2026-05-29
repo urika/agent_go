@@ -1,6 +1,9 @@
 import json
+import logging
 from pathlib import Path
 from fnmatch import fnmatch
+
+logger = logging.getLogger(__name__)
 
 from .config import AGENT_GO_DIR
 
@@ -52,8 +55,8 @@ def _load_json(path):
     if path and path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug("Failed to load JSON from %s: %s", path, e)
     return None
 
 

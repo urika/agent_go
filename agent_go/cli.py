@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
 from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR
 from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
@@ -39,6 +41,7 @@ def cmd_run():
             sys.argv.pop(pi + 1)
             sys.argv.pop(pi)
         except (IndexError, ValueError):
+            logger.debug("Invalid --parallel value, defaulting to 3")
             parallel = 3
 
     # 并发模式要求 headless（避免同时打开多个交互式 Claude Code 终端）
@@ -58,7 +61,7 @@ def cmd_run():
             sys.argv.pop(ri + 1)
             sys.argv.pop(ri)
         except (IndexError, ValueError):
-            pass
+            logger.debug("Invalid --remote flag value, ignoring")
 
     if "--issue" in sys.argv:
         try:
@@ -67,7 +70,7 @@ def cmd_run():
             sys.argv.pop(iss_idx + 1)
             sys.argv.pop(iss_idx)
         except (IndexError, ValueError):
-            pass
+            logger.debug("Invalid --issue flag value, ignoring")
 
     if "--docs" in sys.argv:
         docs_idx = sys.argv.index("--docs")
@@ -83,7 +86,7 @@ def cmd_run():
             sys.argv.pop(sk_idx + 1)
             sys.argv.pop(sk_idx)
         except (IndexError, ValueError):
-            pass
+            logger.debug("Invalid --skill flag value, ignoring")
 
     if "--agent-type" in sys.argv:
         try:
@@ -92,7 +95,7 @@ def cmd_run():
             sys.argv.pop(ag_idx + 1)
             sys.argv.pop(ag_idx)
         except (IndexError, ValueError):
-            pass
+            logger.debug("Invalid --agent-type flag value, ignoring")
 
     if len(sys.argv) < 3:
         print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N] [--remote <url>]")
@@ -122,6 +125,7 @@ def cmd_run():
             task_dir.mkdir(parents=True, exist_ok=False)
             break
         except FileExistsError:
+            # 任务 ID 碰撞，重试下一轮
             time.sleep(0.01)
     else:
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -274,8 +278,8 @@ def cmd_resume():
                 try:
                     r = json.loads(result_file.read_text(encoding="utf-8"))
                     results.append(r)
-                except (json.JSONDecodeError, OSError):
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.debug("Failed to read result for %s: %s", st["id"], e)
     worktree_map = {}
     results_map = {}
     completed_ids = set()
@@ -301,13 +305,14 @@ def cmd_resume():
             pi = sys.argv.index("--parallel")
             parallel = max(1, int(sys.argv[pi + 1]))
         except (IndexError, ValueError):
+            logger.debug("Invalid --parallel value, defaulting to 3")
             parallel = 3
     if "--remote" in sys.argv:
         try:
             ri = sys.argv.index("--remote")
             remote_url = sys.argv[ri + 1]
         except (IndexError, ValueError):
-            pass
+            logger.debug("Invalid --remote flag value, ignoring")
     issue_ref = meta.get("issue", "")
 
     if auto_yes:
@@ -398,7 +403,7 @@ def cmd_review():
         try:
             pr_ref = sys.argv[sys.argv.index("--pr") + 1]
         except (IndexError, ValueError):
-            pass
+            logger.debug("Invalid --pr flag value, ignoring")
 
     prompt = "请审查当前项目的代码变更，输出审查报告。重点检查：安全性、错误处理、代码质量、潜在bug。"
     if pr_ref:
@@ -539,8 +544,8 @@ def _cmd_status_text():
                     try:
                         evt = json.loads(line.split(" | ")[-1].strip())
                         current = evt.get("title", current)
-                    except Exception:
-                        pass
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        logger.debug("Failed to parse subtask_start event from log")
                     break
         progress = f"{completed}/{total}" if total > 0 else "-"
         icon = {"completed": "✅", "degraded": "⚠️", "running": "🔄", "failed": "❌", "aborted": "⏹️"}.get(status, "❓")
@@ -558,8 +563,8 @@ def _cmd_status_text():
                     end = datetime.now()
                 delta = end - start
                 elapsed = f"{int(delta.total_seconds() // 60)}m{int(delta.total_seconds() % 60)}s"
-            except Exception:
-                pass
+            except ValueError:
+                logger.debug("Failed to parse elapsed time from created timestamp")
         tail_lines = _get_task_tail_lines(log_path) if verbose and status == "running" else []
         return {
             "id": task_dir.name, "icon": icon, "status": status,
@@ -623,8 +628,8 @@ def cmd_clean():
                     repo_str = meta.get("repo", "")
                     if repo_str and Path(repo_str).exists():
                         repos_to_prune.add(repo_str)
-                except (json.JSONDecodeError, OSError):
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.debug("Failed to read meta for %s: %s", t.name, e)
         for t in tasks:
             # 读取 task_id 用于清理 tag
             meta_path = t / "meta.json"
@@ -633,8 +638,8 @@ def cmd_clean():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     task_id = meta.get("task_id", t.name)
-                except (json.JSONDecodeError, OSError):
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.debug("Failed to read task_id from %s: %s", meta_path, e)
             _shutil.rmtree(t, ignore_errors=True)
         for repo_path in repos_to_prune:
             subprocess.run(["git", "worktree", "prune"], cwd=repo_path, capture_output=True)
