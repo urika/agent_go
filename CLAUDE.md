@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (17 files, ~4200 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, and remote branch push.
+agent_go is a modular Python CLI tool (17 modules, ~4330 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, and remote branch push.
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -63,7 +63,7 @@ cmd_run()
         └── final report
 ```
 
-## Key Modules (13 files, ~2900 lines)
+## Key Modules (17 modules, ~4330 lines)
 
 | Module | Purpose |
 |--------|---------|
@@ -96,16 +96,17 @@ cmd_run()
 ## Testing
 
 ```bash
-pytest tests/           # 150 tests (~4s)
+pytest tests/           # 163 tests (~4s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
+pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 ```
 
 ## File Organization
 
 ```
-agent_go/           # 13 Python modules (~2900 lines)
-tests/              # 12 test files, 150 tests
+agent_go/           # 17 Python modules (~4330 lines)
+tests/              # 15 test files, 163 tests
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records
 ```
