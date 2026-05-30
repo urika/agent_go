@@ -43,7 +43,7 @@ def _create_worktree(task_id, sub_id, repo, task_dir, logger):
     return worktree, worktree_create_ms
 
 
-def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, upstream_worktrees=None, merge_conflicts=None):
+def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_conflicts=None):
     """Build TASK.md content. Returns (task_md, verification, skill_names, unresolved_skills)."""
     task_md_parts = [f"# 子任务: {subtask['title']}", ""]
 
@@ -163,8 +163,8 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
     return result, sandbox_type, claude_time
 
 
-def _verify_changes(task_id, subtask, worktree, has_changes, headless, task_md, env, tag_name,
-                    active_pids, active_pids_lock, logger):
+def _verify_changes(task_id, subtask, worktree, headless, task_md, env, tag_name,
+                    active_pids, active_pids_lock, logger, issue_ref=""):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
@@ -193,7 +193,6 @@ def _verify_changes(task_id, subtask, worktree, has_changes, headless, task_md, 
     # Git 提交 + tag（Conventional Commits 格式），供下游子任务 merge
     # Tag 包含 task_id 前缀，避免跨任务冲突
     git_start = time.time()
-    issue_ref = ""  # Not available in this context, will be handled by caller if needed
     if has_changes:
         commit_msg = _format_commit(subtask['title'], issue_ref, subtask["id"])
         add_result = subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
@@ -381,12 +380,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     # 3. Build TASK.md
     task_md, verification, skill_names, unresolved_skills = _build_task_md(
         subtask, repo, task_dir, worktree, logger, headless,
-        upstream_worktrees=upstream_worktrees, merge_conflicts=merge_conflicts
+        merge_conflicts=merge_conflicts
     )
 
     # Write TASK.md to disk
     (sub_dir / "TASK.md").write_text(task_md, encoding="utf-8")
 
+    # Save original verification before path rewriting (for context.md)
+    original_verification = verification
     # Rewrite verification command paths
     if verification and str(repo) in verification:
         _boundary_chars = r'\s"\'\(\):/：，。、'
@@ -422,8 +423,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     # 6. Verify changes
     tag_name = f"{task_id}/{sub_id}"
     verify_results = _verify_changes(
-        task_id, subtask, worktree, True, headless, task_md, env, tag_name,
-        active_pids, active_pids_lock, logger
+        task_id, subtask, worktree, headless, task_md, env, tag_name,
+        active_pids, active_pids_lock, logger, issue_ref=issue_ref
     )
     has_changes = verify_results["has_changes"]
     summary = verify_results["summary"]
@@ -434,8 +435,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     retry_count = verify_results["retry_count"]
     verification_results = verify_results["verification_results"]
 
-    # 7. Generate context
-    _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary, verification)
+    # 7. Generate context (use original verification, not path-rewritten)
+    _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary, original_verification)
 
     # 状态判定: completed(有变更) / no_changes(完成但无变更) / failed(异常)
     if result.returncode == 0 and verify_ok:
