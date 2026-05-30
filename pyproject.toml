@@ -3,8 +3,9 @@ target-version = "py39"
 line-length = 120
 
 [tool.ruff.lint]
+# E: pycodestyle  F: Pyflakes (含 F401 unused-import)  W: pycodestyle warnings
 select = ["E", "F", "W"]
-ignore = ["E501"]
+ignore = ["E501"]  # 行长度由 formatter 管理
 
 [tool.mypy]
 python_version = "3.9"

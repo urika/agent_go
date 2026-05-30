@@ -1,15 +1,15 @@
+import hashlib
 import json, re, time, logging
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
-
 from .config import get_api_key, log_event, DECOMPOSE_RULES, AGENT_GO_DIR
 from .git_utils import analyze_project, get_git_info, get_resource_map
 from .skills import list_skills
 from .role_skill_map import load_role_skill_map
-import hashlib
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "call_api", "generate_plan", "decompose_fallback",

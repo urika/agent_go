@@ -4,9 +4,10 @@ from pathlib import Path
 from fnmatch import fnmatch
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
 
 from .config import AGENT_GO_DIR
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["load_role_skill_map", "apply_rules"]
 

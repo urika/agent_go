@@ -3,10 +3,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
 
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
+
+logger = logging.getLogger(__name__)
 
 __all__: list[str] = []
 
