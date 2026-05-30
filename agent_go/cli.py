@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 
 from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR
+from .console import Console, set_default_console
 from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
@@ -39,6 +40,8 @@ def _build_parser():
     run_parser.add_argument("--agent-type", dest="agent_type", help="Default agent type for all subtasks")
     run_parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmations (headless mode)")
     run_parser.add_argument("--headless", action="store_true", help="Run subtasks in headless mode")
+    run_parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output")
+    run_parser.add_argument("--verbose", action="store_true", help="Show debug/diagnostic output")
     run_parser.add_argument("--issue", type=int, dest="issue_ref", help="GitHub issue number to link")
     run_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks (default: 1)")
     run_parser.add_argument("--remote", help="Push worktree branches to remote URL")
@@ -49,6 +52,7 @@ def _build_parser():
     resume_parser.add_argument("task_id", help="Task ID to resume")
     resume_parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmations")
     resume_parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+    resume_parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output")
     resume_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks")
     resume_parser.add_argument("--remote", help="Push worktree branches to remote URL")
 
@@ -131,14 +135,20 @@ def cmd_run(args=None):
     auto_yes = args.yes
     headless = auto_yes or args.headless
     parallel = args.parallel
+    quiet = getattr(args, "quiet", False)
+    verbose = getattr(args, "verbose", False)
+
+    # 初始化 Console 实例（headless / --yes 隐含 quiet 模式）
+    console = Console(quiet=quiet or headless, verbose=verbose)
+    set_default_console(console)
 
     # 并发模式要求 headless（避免同时打开多个交互式 Claude Code 终端）
     if parallel > 1 and not headless:
-        print("⚠️  并发模式 (--parallel) 需要无头模式 (--headless / --yes)，已自动切换到串行执行。")
+        console.warning("并发模式 (--parallel) 需要无头模式 (--headless / --yes)，已自动切换到串行执行。")
         parallel = 1
 
     if not repo.exists():
-        print(f"❌ 路径不存在: {repo}")
+        console.error(f"路径不存在: {repo}")
         sys.exit(1)
 
     config = load_config()
@@ -181,7 +191,7 @@ def cmd_run(args=None):
         if skills:
             logger.info(f"已加载 Skill: {[s.name for s in skills]}")
         else:
-            print(f"⚠️  未找到 Skill: {skill_names}")
+            console.print(f"⚠️  未找到 Skill: {skill_names}")
     elif config.get("skills", {}).get("auto_discover", False):
         max_auto = config.get("skills", {}).get("max_auto_skills", 3)
         skills = discover_skills(task, repo, max_auto)
@@ -200,14 +210,14 @@ def cmd_run(args=None):
     if skills:
         skill_plan_context = "\n\n".join(render_skill_for_plan(s) for s in skills)
 
-    print(f"\n🔧 主任务: {task}")
-    print(f"📁 项目: {repo}")
-    print(f"🆔 任务ID: {task_id}")
+    console.print(f"\n🔧 主任务: {task}")
+    console.print(f"📁 项目: {repo}")
+    console.print(f"🆔 任务ID: {task_id}")
     if doc_paths:
-        print(f"📎 参考文档: {', '.join(doc_paths)}")
+        console.print(f"📎 参考文档: {', '.join(doc_paths)}")
 
     # Plan Mode
-    print("\n🤖 进入 Plan Mode...")
+    console.print("\n🤖 进入 Plan Mode...")
     initial_docs = read_reference_docs(doc_paths, repo, logger) if doc_paths else ""
 
     plan = None
@@ -229,7 +239,7 @@ def cmd_run(args=None):
         confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration=1, task=task)
         # 检查降级信号
         if confirmed_plan == "__FALLBACK__":
-            print(f"\n⚠️ 降级到本地规则拆解...")
+            console.print(f"\n⚠️ 降级到本地规则拆解...")
             subtasks = decompose_fallback(task, repo, config, logger)
             doc_paths = []
             confirmed_plan = None  # 跳过下方 subtasks 赋值
@@ -240,8 +250,8 @@ def cmd_run(args=None):
                     plan = generate_plan(task, repo, config, logger, "", "", iteration, skill_plan_context, no_cache=no_cache)
                 except Exception as e:
                     logger.error(f"重试生成 Plan 失败: {e}")
-                    print(f"\n⚠️ 重试失败: {e}")
-                    print("\n⚠️ 降级到本地规则拆解...")
+                    console.print(f"\n⚠️ 重试失败: {e}")
+                    console.print("\n⚠️ 降级到本地规则拆解...")
                     subtasks = decompose_fallback(task, repo, config, logger)
                     doc_paths = []
                     confirmed_plan = None
@@ -249,14 +259,14 @@ def cmd_run(args=None):
                 plan["_original_task"] = task
                 confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration, task=task)
                 if confirmed_plan == "__FALLBACK__":
-                    print(f"\n⚠️ 降级到本地规则拆解...")
+                    console.print(f"\n⚠️ 降级到本地规则拆解...")
                     subtasks = decompose_fallback(task, repo, config, logger)
                     doc_paths = []
                     confirmed_plan = None
                     break
 
         if confirmed_plan is None and 'subtasks' not in locals():
-            print(f"⚠️ 达到最大迭代次数 {max_iter}，使用最后版本")
+            console.print(f"⚠️ 达到最大迭代次数 {max_iter}，使用最后版本")
             confirmed_plan = plan
 
         subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)
@@ -266,7 +276,7 @@ def cmd_run(args=None):
         logger.info("[PLAN] PLAN.md 已保存")
     else:
         # 降级拆解
-        print(f"\n⚠️ Plan Mode 失败: {last_error}")
+        console.print(f"\n⚠️ Plan Mode 失败: {last_error}")
         subtasks = decompose_fallback(task, repo, config, logger)
 
     # 子任务确认

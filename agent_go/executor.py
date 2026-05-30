@@ -1,5 +1,6 @@
 import os, subprocess, re, time, shlex, shutil
 
+from .console import get_default_console
 from .config import log_event
 from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command
 from .subtask import _git_merge_upstream, _run_headless
@@ -154,6 +155,8 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
     """Run Claude in headless or interactive mode. Returns (result, sandbox_type, claude_time)."""
     claude_start = time.time()
 
+    console = get_default_console()
+
     if headless:
         sandbox_type = "headless"
         result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids, active_pids_lock=active_pids_lock)
@@ -174,7 +177,7 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
                 result = subprocess.run(claude_cmd, env=env, cwd=str(worktree))
                 sandbox_type = "native"
         except FileNotFoundError:
-            print("   ⚠️ Greywall 未安装，降级原生")
+            console.print("   ⚠️ Greywall 未安装，降级原生")
             result = subprocess.run(["claude", str(worktree)], env=env, cwd=str(worktree))
             sandbox_type = "native"
 
@@ -387,6 +390,7 @@ def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verif
 
 def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None):
     sub_id = subtask["id"]
+    console = get_default_console()
     sub_dir = task_dir / sub_id
     sub_dir.mkdir(parents=True, exist_ok=True)
 
@@ -443,7 +447,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             verification
         )
 
-    print(f"\n🚀 {sub_id}: {subtask['title']}")
+    console.print(f"\n🚀 {sub_id}: {subtask['title']}")
     env = os.environ.copy()
     loaded_skill_names = [sn for sn in skill_names if sn not in unresolved_skills]
     env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree), "AGENT_GO_SKILLS": ",".join(loaded_skill_names)})

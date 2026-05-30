@@ -3,6 +3,10 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any
 
+from .console import get_default_console
+
+console = get_default_console()
+
 __all__ = [
     "AGENT_GO_DIR", "CONFIG_PATH", "DEFAULT_CONFIG", "DECOMPOSE_RULES",
     "safe_input", "load_config", "get_api_key", "setup_logger", "log_event",
@@ -71,7 +75,7 @@ def safe_input(prompt: str = "") -> str:
     try:
         return input(prompt)
     except EOFError:
-        print()
+        console.print()
         return ""
 
 def load_config() -> dict[str, Any]:
@@ -86,7 +90,7 @@ def load_config() -> dict[str, Any]:
         return merged
     CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False), encoding="utf-8")
     os.chmod(CONFIG_PATH, 0o600)
-    print(f"⚙️  已创建默认配置: {CONFIG_PATH}")
+    console.print(f"⚙️  已创建默认配置: {CONFIG_PATH}")
     return DEFAULT_CONFIG
 
 def get_api_key(config: dict[str, Any]) -> str:

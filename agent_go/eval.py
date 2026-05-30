@@ -4,7 +4,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
 
+from .console import get_default_console
+
 logger = logging.getLogger(__name__)
+
+console = get_default_console()
 
 __all__ = [
     "analyze_quality", "analyze_performance",
@@ -421,7 +425,7 @@ def cmd_eval() -> None:
     from .config import AGENT_GO_DIR
 
     if len(sys.argv) < 3:
-        print("Usage: agent_go eval <quality|perf|cost|reliability|ux|all> [task-id|--all]")
+        console.print("Usage: agent_go eval <quality|perf|cost|reliability|ux|all> [task-id|--all]")
         return
 
     sub = sys.argv[2]
@@ -436,7 +440,7 @@ def cmd_eval() -> None:
             if td:
                 _print_quality_report(analyze_quality(_read_meta(td)))
             else:
-                print("暂无任务")
+                console.print("暂无任务")
     elif sub == "perf":
         if all_mode:
             _print_aggregate_perf(aggregate_performance(AGENT_GO_DIR))
@@ -445,7 +449,7 @@ def cmd_eval() -> None:
             if td:
                 _print_perf_report(analyze_performance(_read_meta(td), td / "execution.log"))
             else:
-                print("暂无任务")
+                console.print("暂无任务")
     elif sub == "cost":
         _print_cost_report(analyze_cost(AGENT_GO_DIR))
     elif sub == "reliability":
@@ -453,7 +457,7 @@ def cmd_eval() -> None:
     elif sub == "ux":
         _print_ux_report(analyze_ux(AGENT_GO_DIR))
     elif sub == "all":
-        print("═" * 60)
+        console.print("═" * 60)
         agg_q = aggregate_quality(AGENT_GO_DIR)
         if agg_q:
             _print_aggregate_quality(agg_q)
@@ -463,9 +467,9 @@ def cmd_eval() -> None:
         _print_cost_report(analyze_cost(AGENT_GO_DIR))
         _print_reliability_report(analyze_reliability(AGENT_GO_DIR))
         _print_ux_report(analyze_ux(AGENT_GO_DIR))
-        print("═" * 60)
+        console.print("═" * 60)
     else:
-        print(f"未知子命令: {sub}。可用: quality, perf, cost, reliability, ux, all")
+        console.print(f"未知子命令: {sub}。可用: quality, perf, cost, reliability, ux, all")
 
 
 def _resolve_task_dir(base_dir: Path, task_id: str) -> Optional[Path]:
@@ -478,109 +482,109 @@ def _resolve_task_dir(base_dir: Path, task_id: str) -> Optional[Path]:
 
 def _print_quality_report(q: Optional[dict[str, Any]]) -> None:
     if q is None:
-        print("无数据")
+        console.print("无数据")
         return
-    print(f"\n质量报告 — {q['task_id']}")
-    print("─" * 50)
+    console.print(f"\n质量报告 — {q['task_id']}")
+    console.print("─" * 50)
     s = q["subtasks"]
-    print(f"  Subtask: {s['total']} total | {s['completed']} ok | {s['no_changes']} no-op | {s['failed']} fail")
-    print(f"  Q1 任务成功率:       {q['Q1_task_success_rate']}%")
-    print(f"  Q2 Subtask成功率:    {q['Q2_subtask_success_rate']}%")
-    print(f"  Q3 首次通过率:       {q['Q3_first_pass_rate']}%")
-    print(f"  Q4 验证通过率:       {q['Q4_verify_pass_rate']}%")
-    print(f"  Q5 新文件遗漏率:     {q['Q5_new_file_miss_rate']}%")
-    print(f"  Q6 产物传递成功率:   {q['Q6_merge_success_rate']}%")
-    print(f"  Q7 计划准确性:       P={q['Q7_plan_accuracy_precision']}% R={q['Q7_plan_accuracy_recall']}%")
+    console.print(f"  Subtask: {s['total']} total | {s['completed']} ok | {s['no_changes']} no-op | {s['failed']} fail")
+    console.print(f"  Q1 任务成功率:       {q['Q1_task_success_rate']}%")
+    console.print(f"  Q2 Subtask成功率:    {q['Q2_subtask_success_rate']}%")
+    console.print(f"  Q3 首次通过率:       {q['Q3_first_pass_rate']}%")
+    console.print(f"  Q4 验证通过率:       {q['Q4_verify_pass_rate']}%")
+    console.print(f"  Q5 新文件遗漏率:     {q['Q5_new_file_miss_rate']}%")
+    console.print(f"  Q6 产物传递成功率:   {q['Q6_merge_success_rate']}%")
+    console.print(f"  Q7 计划准确性:       P={q['Q7_plan_accuracy_precision']}% R={q['Q7_plan_accuracy_recall']}%")
     cs = q["Q8_change_scale"]
-    print(f"  Q8 变更规模:         avg {cs['avg_files']} files, +{cs['avg_insertions']}/-{cs['avg_deletions']}")
-    print(f"  ─────────────────────────────")
-    print(f"  评分: {q['score']}/100")
-    print("─" * 50)
+    console.print(f"  Q8 变更规模:         avg {cs['avg_files']} files, +{cs['avg_insertions']}/-{cs['avg_deletions']}")
+    console.print(f"  ─────────────────────────────")
+    console.print(f"  评分: {q['score']}/100")
+    console.print("─" * 50)
 
 
 def _print_perf_report(p: Optional[dict[str, Any]]) -> None:
     if p is None:
-        print("无数据")
+        console.print("无数据")
         return
-    print(f"\n性能报告 — {p['task_id']}")
-    print("─" * 50)
-    print(f"  P1 端到端耗时:       {p['P1_total_duration_sec']}s")
-    print(f"  P2 Plan耗时:         {p['P2_plan_duration_ms']}ms")
-    print(f"  P3 平均Subtask耗时:  {p['P3_avg_subtask_sec']}s")
+    console.print(f"\n性能报告 — {p['task_id']}")
+    console.print("─" * 50)
+    console.print(f"  P1 端到端耗时:       {p['P1_total_duration_sec']}s")
+    console.print(f"  P2 Plan耗时:         {p['P2_plan_duration_ms']}ms")
+    console.print(f"  P3 平均Subtask耗时:  {p['P3_avg_subtask_sec']}s")
     p4 = p["P4_duration_percentiles"]
-    print(f"  P4 耗时分布:         P50={p4.get(50,0)}s P95={p4.get(95,0)}s P99={p4.get(99,0)}s")
+    console.print(f"  P4 耗时分布:         P50={p4.get(50,0)}s P95={p4.get(95,0)}s P99={p4.get(99,0)}s")
     p5 = p.get("P5_phase_breakdown_pct", {})
     if p5:
         claude = p5.get("claude_execute_ms", 0)
         verify = p5.get("verification_ms", 0)
-        print(f"  P5 阶段占比:         claude={claude}% verify={verify}% other={100-claude-verify}%")
-    print(f"  P6 并发效率:         {p['P6_concurrency_efficiency_pct']}%")
-    print(f"  ─────────────────────────────")
-    print(f"  评分: {p['score']}/100")
-    print("─" * 50)
+        console.print(f"  P5 阶段占比:         claude={claude}% verify={verify}% other={100-claude-verify}%")
+    console.print(f"  P6 并发效率:         {p['P6_concurrency_efficiency_pct']}%")
+    console.print(f"  ─────────────────────────────")
+    console.print(f"  评分: {p['score']}/100")
+    console.print("─" * 50)
 
 
 def _print_cost_report(c: dict[str, Any]) -> None:
-    print(f"\n💰 成本报告")
-    print("─" * 50)
-    print(f"  API 调用:            {c['total_calls']} 次")
-    print(f"  Token:               {c['total_prompt_tokens']:,} in + {c['total_completion_tokens']:,} out")
-    print(f"  预估费用:            ${c['estimated_cost_usd']}")
+    console.print(f"\n💰 成本报告")
+    console.print("─" * 50)
+    console.print(f"  API 调用:            {c['total_calls']} 次")
+    console.print(f"  Token:               {c['total_prompt_tokens']:,} in + {c['total_completion_tokens']:,} out")
+    console.print(f"  预估费用:            ${c['estimated_cost_usd']}")
     if c["by_provider"]:
         for prov, cost in c["by_provider"].items():
-            print(f"    {prov}:            ${cost}")
-    print(f"  API 错误:            {c['errors']} 次")
-    print(f"  缓存命中:            {c['cache_hits']}/{c['cache_checks']} ({c['cache_hit_rate']}%)")
-    print(f"  每任务成本:          ${c['avg_cost_per_task']}")
-    print("─" * 50)
+            console.print(f"    {prov}:            ${cost}")
+    console.print(f"  API 错误:            {c['errors']} 次")
+    console.print(f"  缓存命中:            {c['cache_hits']}/{c['cache_checks']} ({c['cache_hit_rate']}%)")
+    console.print(f"  每任务成本:          ${c['avg_cost_per_task']}")
+    console.print("─" * 50)
 
 
 def _print_reliability_report(r: dict[str, Any]) -> None:
-    print(f"\n🔧 可靠性报告")
-    print("─" * 50)
-    print(f"  任务完成率:          {r['success_rate']}% ({r['completed']}/{r['tasks_total']})")
+    console.print(f"\n🔧 可靠性报告")
+    console.print("─" * 50)
+    console.print(f"  任务完成率:          {r['success_rate']}% ({r['completed']}/{r['tasks_total']})")
     sand = r["sandbox"]
-    print(f"  Sandbox:             greywall={sand['greywall_pct']}% native={sand['native']}/{sand['headless']}")
-    print(f"  重试次数:            {r['retries_total']}")
-    print(f"  重试率:              {r['retry_rate']}%")
-    print("─" * 50)
+    console.print(f"  Sandbox:             greywall={sand['greywall_pct']}% native={sand['native']}/{sand['headless']}")
+    console.print(f"  重试次数:            {r['retries_total']}")
+    console.print(f"  重试率:              {r['retry_rate']}%")
+    console.print("─" * 50)
 
 
 def _print_ux_report(u: dict[str, Any]) -> None:
-    print(f"\n📈 使用习惯报告")
-    print("─" * 50)
-    print(f"  分析任务数:          {u['tasks_total']}")
-    print(f"  文档挂载率:          {u['docs_usage_pct']}%")
-    print(f"  平均 Plan 迭代:      {u['avg_plan_iterations']}")
-    print(f"  Agent 多样性:        {u['agent_diversity_pct']}%")
+    console.print(f"\n📈 使用习惯报告")
+    console.print("─" * 50)
+    console.print(f"  分析任务数:          {u['tasks_total']}")
+    console.print(f"  文档挂载率:          {u['docs_usage_pct']}%")
+    console.print(f"  平均 Plan 迭代:      {u['avg_plan_iterations']}")
+    console.print(f"  Agent 多样性:        {u['agent_diversity_pct']}%")
     if u["agent_distribution"]:
-        print(f"  Agent 分布:          {u['agent_distribution']}")
-    print(f"  Skill 使用率:        {u['skill_usage_pct']}%")
-    print("─" * 50)
+        console.print(f"  Agent 分布:          {u['agent_distribution']}")
+    console.print(f"  Skill 使用率:        {u['skill_usage_pct']}%")
+    console.print("─" * 50)
 
 
 def _print_aggregate_quality(agg: Optional[dict[str, Any]]) -> None:
     if agg is None:
-        print("无历史数据")
+        console.print("无历史数据")
         return
-    print(f"\n质量聚合 — {agg['tasks_analyzed']} 个任务")
-    print("─" * 50)
-    print(f"  平均成功率:          {agg['avg_success_rate']}%")
-    print(f"  平均首次通过率:      {agg['avg_first_pass']}%")
-    print(f"  平均验证通过率:      {agg['avg_verify_pass']}%")
-    print(f"  平均新文件遗漏率:    {agg['avg_new_file_miss']}%")
-    print(f"  平均产物传递成功率:  {agg['avg_merge_success']}%")
-    print(f"  平均评分:            {agg['avg_score']}/100")
-    print("─" * 50)
+    console.print(f"\n质量聚合 — {agg['tasks_analyzed']} 个任务")
+    console.print("─" * 50)
+    console.print(f"  平均成功率:          {agg['avg_success_rate']}%")
+    console.print(f"  平均首次通过率:      {agg['avg_first_pass']}%")
+    console.print(f"  平均验证通过率:      {agg['avg_verify_pass']}%")
+    console.print(f"  平均新文件遗漏率:    {agg['avg_new_file_miss']}%")
+    console.print(f"  平均产物传递成功率:  {agg['avg_merge_success']}%")
+    console.print(f"  平均评分:            {agg['avg_score']}/100")
+    console.print("─" * 50)
 
 
 def _print_aggregate_perf(agg: Optional[dict[str, Any]]) -> None:
     if agg is None or agg["tasks_analyzed"] == 0:
-        print("无历史数据")
+        console.print("无历史数据")
         return
-    print(f"\n性能聚合 — {agg['tasks_analyzed']} 任务, {agg['subtasks_total']} subtasks")
-    print("─" * 50)
-    print(f"  平均耗时:            {agg['avg_duration_sec']}s")
-    print(f"  耗时分布:            P50={agg['P50_sec']}s P95={agg['P95_sec']}s P99={agg['P99_sec']}s")
-    print(f"  平均任务耗时:        {agg['avg_task_duration_sec']}s")
-    print("─" * 50)
+    console.print(f"\n性能聚合 — {agg['tasks_analyzed']} 任务, {agg['subtasks_total']} subtasks")
+    console.print("─" * 50)
+    console.print(f"  平均耗时:            {agg['avg_duration_sec']}s")
+    console.print(f"  耗时分布:            P50={agg['P50_sec']}s P95={agg['P95_sec']}s P99={agg['P99_sec']}s")
+    console.print(f"  平均任务耗时:        {agg['avg_task_duration_sec']}s")
+    console.print("─" * 50)
