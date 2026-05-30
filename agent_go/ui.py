@@ -112,7 +112,7 @@ def _prompt_fallback(logger: logging.Logger) -> str:
             sys.exit(0)
         print("无效输入（F=降级, R=重试, N=取消）")
 
-def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "") -> Optional[dict[str, Any]]:
+def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "") -> tuple[Optional[dict[str, Any]], Optional[list[str]]]:
     """
     用户确认 Plan。支持默认同意模式。
     返回: (plan, doc_paths) 或 (None, None) 或 ("__FALLBACK__", None)

@@ -75,7 +75,7 @@ def _worktree_prune(repo: Path) -> tuple[bool, str]:
     return True, ""
 
 
-def _set_gc_auto(repo: Path, value: str = "0") -> tuple[bool, str]:
+def _set_gc_auto(repo: Path, value: str = "0") -> tuple[str, bool, str]:
     """设置 git gc.auto 值。返回 (original_value: str, success: bool, error_message: str)。"""
     orig = subprocess.run(
         ["git", "config", "gc.auto"],
