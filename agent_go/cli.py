@@ -1,4 +1,4 @@
-import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
+import sys, os, subprocess, json, re, time, threading, shlex, signal, logging, argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -21,88 +21,120 @@ __all__ = [
     "cmd_status", "cmd_config", "cmd_clean", "cmd_pr", "cmd_review",
 ]
 
-def cmd_run():
-    # 解析参数
-    repo_idx = 2
-    task_idx = 3
-    doc_paths = []
-    issue_ref = ""
-    skill_names = []
-    agent_type_name = ""
-    remote_url = ""
-    no_cache = "--no-cache" in sys.argv
-    auto_yes = "--yes" in sys.argv or "-y" in sys.argv
-    headless = auto_yes or "--headless" in sys.argv  # --yes 隐含 headless
-    parallel = 1  # 默认串行
-    if "--parallel" in sys.argv:
-        try:
-            pi = sys.argv.index("--parallel")
-            parallel = max(1, int(sys.argv[pi + 1]))
-            sys.argv.pop(pi + 1)
-            sys.argv.pop(pi)
-        except (IndexError, ValueError):
-            logger.debug("Invalid --parallel value, defaulting to 3")
-            parallel = 3
+def _build_parser():
+    """构建 argparse parser"""
+    parser = argparse.ArgumentParser(
+        prog="agent_go",
+        description="Plan Mode orchestration tool - wraps Claude Code with structured Plan -> Decompose -> Execute workflow",
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # run 子命令
+    run_parser = subparsers.add_parser("run", help="Plan, decompose and execute a task")
+    run_parser.add_argument("repo", help="Path to the repository")
+    run_parser.add_argument("task", nargs="?", default="请根据项目情况完成改进", help="Task description")
+    run_parser.add_argument("--docs", help="Comma-separated list of reference document paths")
+    run_parser.add_argument("--skill", help="Comma-separated list of skill names to load")
+    run_parser.add_argument("--agent-type", dest="agent_type", help="Default agent type for all subtasks")
+    run_parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmations (headless mode)")
+    run_parser.add_argument("--headless", action="store_true", help="Run subtasks in headless mode")
+    run_parser.add_argument("--issue", type=int, dest="issue_ref", help="GitHub issue number to link")
+    run_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks (default: 1)")
+    run_parser.add_argument("--remote", help="Push worktree branches to remote URL")
+    run_parser.add_argument("--no-cache", action="store_true", help="Skip plan cache lookup")
+
+    # resume 子命令
+    resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
+    resume_parser.add_argument("task_id", help="Task ID to resume")
+    resume_parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmations")
+    resume_parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+    resume_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks")
+    resume_parser.add_argument("--remote", help="Push worktree branches to remote URL")
+
+    # list 子命令
+    subparsers.add_parser("list", help="List all historical tasks")
+
+    # show 子命令
+    show_parser = subparsers.add_parser("show", help="Show task details")
+    show_parser.add_argument("task_id", help="Task ID to show")
+
+    # status 子命令
+    status_parser = subparsers.add_parser("status", help="Live status monitoring")
+    status_parser.add_argument("--watch", "-w", action="store_true", help="Auto-refresh status")
+    status_parser.add_argument("--no-tui", action="store_true", help="Text mode instead of TUI")
+    status_parser.add_argument("--verbose", "-v", action="store_true", help="Show Claude events")
+
+    # clean 子命令
+    subparsers.add_parser("clean", help="Remove all task data")
+
+    # config 子命令
+    subparsers.add_parser("config", help="View current configuration")
+
+    # skills 子命令
+    subparsers.add_parser("skills", help="List available Skills")
+
+    # agents 子命令
+    subparsers.add_parser("agents", help="List available Agent types")
+
+    # pr 子命令
+    pr_parser = subparsers.add_parser("pr", help="Generate and create PR")
+    pr_parser.add_argument("task_id", help="Task ID to create PR from")
+    pr_parser.add_argument("--offline", action="store_true", help="Only generate PR.md, do not create PR")
+
+    # ci 子命令
+    ci_parser = subparsers.add_parser("ci", help="Generate GitHub Actions workflow")
+    ci_parser.add_argument("repo", nargs="?", help="Path to the repository (default: current dir)")
+    ci_parser.add_argument("--dry-run", action="store_true", help="Print workflow without writing file")
+
+    # review 子命令
+    review_parser = subparsers.add_parser("review", help="Code review with Claude")
+    review_parser.add_argument("repo", help="Path to the repository to review")
+    review_parser.add_argument("--pr", dest="pr_ref", help="PR number to review")
+    review_parser.add_argument("--yes", "-y", action="store_true", help="Run in headless mode")
+    review_parser.add_argument("--comment", action="store_true", help="Post findings as inline PR comments")
+    review_parser.add_argument("--fix", action="store_true", help="Apply fixes to working tree")
+
+    # cache 子命令
+    cache_parser = subparsers.add_parser("cache", help="Plan cache management")
+    cache_parser.add_argument("subcommand", nargs="?", choices=["list", "clean", "clear", "stats"],
+                              help="Cache operation: list|clean|clear|stats")
+
+    # eval 子命令
+    eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "all"],
+                             help="Evaluation type")
+    eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
+    eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
+
+    return parser
+
+
+def cmd_run(args=None):
+    if args is None:
+        parser = _build_parser()
+        args = parser.parse_args()
+        if args.command != "run":
+            # Fallback: dispatch non-run commands
+            main()
+            return
+
+    # 从 argparse 结果提取参数
+    repo = Path(args.repo).resolve()
+    task = args.task
+    doc_paths = [p.strip() for p in args.docs.split(",")] if args.docs else []
+    skill_names = [s.strip() for s in args.skill.split(",")] if args.skill else []
+    agent_type_name = args.agent_type or ""
+    issue_ref = str(args.issue_ref) if args.issue_ref else ""
+    remote_url = args.remote or ""
+    no_cache = args.no_cache
+    auto_yes = args.yes
+    headless = auto_yes or args.headless
+    parallel = args.parallel
 
     # 并发模式要求 headless（避免同时打开多个交互式 Claude Code 终端）
     if parallel > 1 and not headless:
         print("⚠️  并发模式 (--parallel) 需要无头模式 (--headless / --yes)，已自动切换到串行执行。")
         parallel = 1
-
-    if auto_yes:
-        sys.argv = [a for a in sys.argv if a not in ("--yes", "-y")]
-    if "--headless" in sys.argv:
-        sys.argv = [a for a in sys.argv if a != "--headless"]
-
-    if "--remote" in sys.argv:
-        try:
-            ri = sys.argv.index("--remote")
-            remote_url = sys.argv[ri + 1]
-            sys.argv.pop(ri + 1)
-            sys.argv.pop(ri)
-        except (IndexError, ValueError):
-            logger.debug("Invalid --remote flag value, ignoring")
-
-    if "--issue" in sys.argv:
-        try:
-            iss_idx = sys.argv.index("--issue")
-            issue_ref = sys.argv[iss_idx + 1]
-            sys.argv.pop(iss_idx + 1)
-            sys.argv.pop(iss_idx)
-        except (IndexError, ValueError):
-            logger.debug("Invalid --issue flag value, ignoring")
-
-    if "--docs" in sys.argv:
-        docs_idx = sys.argv.index("--docs")
-        if docs_idx + 1 < len(sys.argv):
-            doc_paths = [p.strip() for p in sys.argv[docs_idx + 1].split(",")]
-        if docs_idx < repo_idx:
-            repo_idx = 2 if docs_idx > 2 else 2
-
-    if "--skill" in sys.argv:
-        try:
-            sk_idx = sys.argv.index("--skill")
-            skill_names = [s.strip() for s in sys.argv[sk_idx + 1].split(",") if s.strip()]
-            sys.argv.pop(sk_idx + 1)
-            sys.argv.pop(sk_idx)
-        except (IndexError, ValueError):
-            logger.debug("Invalid --skill flag value, ignoring")
-
-    if "--agent-type" in sys.argv:
-        try:
-            ag_idx = sys.argv.index("--agent-type")
-            agent_type_name = sys.argv[ag_idx + 1].strip()
-            sys.argv.pop(ag_idx + 1)
-            sys.argv.pop(ag_idx)
-        except (IndexError, ValueError):
-            logger.debug("Invalid --agent-type flag value, ignoring")
-
-    if len(sys.argv) < 3:
-        print("Usage: agent_go run <repo-path> '<task>' [--docs <doc1,doc2>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N] [--remote <url>]")
-        sys.exit(1)
-
-    repo = Path(sys.argv[repo_idx]).resolve()
-    task = sys.argv[task_idx] if len(sys.argv) > task_idx else "请根据项目情况完成改进"
 
     if not repo.exists():
         print(f"❌ 路径不存在: {repo}")
@@ -253,12 +285,19 @@ def cmd_run():
 
     _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta, remote_url=remote_url)
 
-def cmd_resume():
+def cmd_resume(args=None):
     """恢复被中断的任务。"""
-    if len(sys.argv) < 3:
+    if args and hasattr(args, 'task_id'):
+        task_id = args.task_id
+        auto_yes = getattr(args, 'yes', False)
+        headless = auto_yes or getattr(args, 'headless', False)
+        parallel = getattr(args, 'parallel', 1)
+        remote_url = getattr(args, 'remote', "")
+    elif len(sys.argv) < 3:
         print("Usage: agent_go resume <task-id> [--yes] [--headless] [--parallel N] [--remote <url>]")
         sys.exit(1)
-    task_id = sys.argv[2]
+    else:
+        task_id = sys.argv[2]
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         print(f"任务不存在: {task_id}")
@@ -300,6 +339,7 @@ def cmd_resume():
     headless = auto_yes or "--headless" in sys.argv
     parallel = 1
     remote_url = ""
+    # 如果从 sys.argv 解析（非 args 模式）
     if "--parallel" in sys.argv:
         try:
             pi = sys.argv.index("--parallel")
@@ -351,11 +391,14 @@ def cmd_list():
         docs = ",".join(meta.get("reference_docs", []))[:15]
         print(f"{t.name:<25} {icon} {status:<10} {len(meta.get('subtasks',[])):<8} {docs:<12} {meta.get('task','')[:30]}")
 
-def cmd_show():
-    if len(sys.argv) < 3:
+def cmd_show(args=None):
+    if args and hasattr(args, 'task_id'):
+        task_id = args.task_id
+    elif len(sys.argv) < 3:
         print("Usage: agent_go show <task-id>")
         sys.exit(1)
-    task_id = sys.argv[2]
+    else:
+        task_id = sys.argv[2]
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         print("任务不存在")
@@ -387,23 +430,27 @@ def cmd_show():
         if r:
             print(f"       📊 {r['summary']}")
 
-def cmd_review():
+def cmd_review(args=None):
     """代码审查：使用 Claude 审查项目变更。"""
-    if len(sys.argv) < 3:
+    if args and hasattr(args, 'repo'):
+        repo = Path(args.repo).resolve()
+        headless = getattr(args, 'yes', False)
+        pr_ref = getattr(args, 'pr_ref', "") or ""
+    elif len(sys.argv) < 3:
         print("Usage: agent_go review <repo-path> [--pr <N>] [--yes]")
         return
-    repo = Path(sys.argv[2]).resolve()
-    if not repo.exists():
-        print(f"路径不存在: {repo}")
-        return
-
-    headless = "--yes" in sys.argv or "-y" in sys.argv
-    pr_ref = ""
-    if "--pr" in sys.argv:
-        try:
-            pr_ref = sys.argv[sys.argv.index("--pr") + 1]
-        except (IndexError, ValueError):
-            logger.debug("Invalid --pr flag value, ignoring")
+    else:
+        repo = Path(sys.argv[2]).resolve()
+        if not repo.exists():
+            print(f"路径不存在: {repo}")
+            return
+        headless = "--yes" in sys.argv or "-y" in sys.argv
+        pr_ref = ""
+        if "--pr" in sys.argv:
+            try:
+                pr_ref = sys.argv[sys.argv.index("--pr") + 1]
+            except (IndexError, ValueError):
+                logger.debug("Invalid --pr flag value, ignoring")
 
     prompt = "请审查当前项目的代码变更，输出审查报告。重点检查：安全性、错误处理、代码质量、潜在bug。"
     if pr_ref:
@@ -420,14 +467,17 @@ def cmd_review():
         subprocess.run(["claude", str(repo)])
 
 
-def cmd_pr():
+def cmd_pr(args=None):
     """根据已完成任务的 meta.json + git log 生成 PR 描述。"""
-    if len(sys.argv) < 3:
+    if args and hasattr(args, 'task_id'):
+        task_id = args.task_id
+        offline = getattr(args, 'offline', False)
+    elif len(sys.argv) < 3:
         print("Usage: agent_go pr <task-id> [--offline]")
         sys.exit(1)
-
-    task_id = sys.argv[2]
-    offline = "--offline" in sys.argv
+    else:
+        task_id = sys.argv[2]
+        offline = "--offline" in sys.argv
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         print(f"任务不存在: {task_id}")
@@ -486,18 +536,27 @@ def cmd_pr():
             print(f"PR 描述已备份到 {task_dir}/PR.md")
         os.unlink(pr_file)
 
-def cmd_status():
+def cmd_status(args=None):
     """实时监控所有任务状态。默认 TUI 模式。--no-tui 回退文本模式。"""
-    if "--no-tui" in sys.argv:
+    if args:
+        if getattr(args, 'no_tui', False):
+            _cmd_status_text(args)
+        else:
+            cmd_status_tui()
+    elif "--no-tui" in sys.argv:
         _cmd_status_text()
     else:
         cmd_status_tui()
 
 
-def _cmd_status_text():
+def _cmd_status_text(args=None):
     """文本模式（原有实现）。--watch 持续刷新，--verbose 显示 Claude 事件。"""
-    watch = "--watch" in sys.argv or "-w" in sys.argv
-    verbose = "--verbose" in sys.argv or "-v" in sys.argv
+    if args:
+        watch = getattr(args, 'watch', False)
+        verbose = getattr(args, 'verbose', False)
+    else:
+        watch = "--watch" in sys.argv or "-w" in sys.argv
+        verbose = "--verbose" in sys.argv or "-v" in sys.argv
 
     def _get_task_tail_lines(log_path, count=2):
         """从执行日志尾部提取最后 count 条 Claude 事件。"""
@@ -666,15 +725,17 @@ def cmd_skills():
         print(f"  {s['name']:<30} {desc}")
     print("─" * 55)
 
-def cmd_cache():
+def cmd_cache(args=None):
     """Plan 缓存管理。"""
     from .api import list_cache_entries, clean_expired_cache
 
-    if len(sys.argv) < 3:
+    if args and hasattr(args, 'subcommand'):
+        sub = args.subcommand
+    elif len(sys.argv) < 3:
         print("Usage: agent_go cache <list|clean|clear|stats>")
         return
-
-    sub = sys.argv[2]
+    else:
+        sub = sys.argv[2]
     config = load_config()
 
     if sub == "list":
@@ -739,24 +800,41 @@ def cmd_agents():
 
 def main():
     try:
-        cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
-        if cmd == "run": cmd_run()
-        elif cmd == "resume": cmd_resume()
-        elif cmd == "list": cmd_list()
-        elif cmd == "show": cmd_show()
-        elif cmd == "status": cmd_status()
-        elif cmd == "config": cmd_config()
-        elif cmd == "clean": cmd_clean()
-        elif cmd == "pr": cmd_pr()
-        elif cmd == "skills": cmd_skills()
-        elif cmd == "agents": cmd_agents()
-        elif cmd == "cache": cmd_cache()
-        elif cmd == "ci": cmd_ci()
-        elif cmd == "review": cmd_review()
-        elif cmd == "eval": cmd_eval()
-        else:
-            print("""\nagent_go — Plan Mode 增强版（支持 Agent Prompt + 资源清单 + 默认同意）\nUsage:\nagent_go run <repo> '<task>' [--docs <paths>] [--skill <name>] [--agent-type <type>] [--yes] [--headless] [--issue <N>] [--parallel N]\nagent_go pr <task-id> [--offline]\n选项:\n--yes, -y        跳过所有确认，直接执行（等同 --headless + 自动确认）
---headless       子任务使用 claude -p 无头执行（Plan 仍可交互编辑）\n--issue <N>      关联 GitHub Issue 编号（注入 commit + TASK.md）\n--parallel N     最大并发子任务数（默认 1=串行，3=推荐）\n--docs <paths>   挂载参考文档（逗号分隔，支持文件和目录）\n命令:\nagent_go list                  查看所有任务摘要\nagent_go show <task-id>        查看任务详情\nagent_go pr <task-id>          生成 PR 描述并创建 PR（需 gh CLI）\nagent_go pr <task-id> --offline 仅生成 PR.md 文件\nagent_go config                查看当前配置\nagent_go clean                 清理所有任务\nagent_go skills                列出所有 Skill\nagent_go agents                列出所有 Agent 类型\nagent_go eval quality [task-id|--all]    执行质量报告\nagent_go eval perf [task-id|--all]       性能分析报告\n配置:\n~/.agent_go/config.json\nbehavior.auto_confirm_plan: false\nbehavior.auto_confirm_subtasks: false\n环境变量:\nAGENT_GO_API_KEY=<key>       API 密钥\nAGENT_GO_INTERACTIVE=1       强制交互模式（覆盖 --yes）\nExamples:\nexport AGENT_GO_API_KEY="sk-ant-..."\nagent_go run ~/my-app "重构认证" --issue 42 --yes\nagent_go run ~/my-app "升级依赖" --docs "CHANGELOG.md" -y\nagent_go pr task-20260515-130936 --offline\n""")
+        parser = _build_parser()
+        args = parser.parse_args()
+
+        if not args.command:
+            parser.print_help()
+            return
+
+        if args.command == "run":
+            cmd_run(args)
+        elif args.command == "resume":
+            cmd_resume(args)
+        elif args.command == "list":
+            cmd_list()
+        elif args.command == "show":
+            cmd_show(args)
+        elif args.command == "status":
+            cmd_status(args)
+        elif args.command == "config":
+            cmd_config()
+        elif args.command == "clean":
+            cmd_clean()
+        elif args.command == "pr":
+            cmd_pr(args)
+        elif args.command == "skills":
+            cmd_skills()
+        elif args.command == "agents":
+            cmd_agents()
+        elif args.command == "cache":
+            cmd_cache(args)
+        elif args.command == "ci":
+            cmd_ci(args)
+        elif args.command == "review":
+            cmd_review(args)
+        elif args.command == "eval":
+            cmd_eval(args)
     except KeyboardInterrupt:
         print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)

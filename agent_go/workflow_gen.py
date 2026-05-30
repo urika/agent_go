@@ -43,12 +43,16 @@ def generate_workflow(repo):
     return lang, TEMPLATES[lang]["workflow"]
 
 
-def cmd_ci():
+def cmd_ci(args=None):
     import sys
-    dry_run = "--dry-run" in sys.argv
-    repo = Path.cwd()
-    if len(sys.argv) > 2 and not sys.argv[2].startswith("--"):
-        repo = Path(sys.argv[2]).resolve()
+    if args and hasattr(args, 'dry_run'):
+        dry_run = args.dry_run
+        repo = Path(getattr(args, 'repo', None) or Path.cwd()).resolve()
+    else:
+        dry_run = "--dry-run" in sys.argv
+        repo = Path.cwd()
+        if len(sys.argv) > 2 and not sys.argv[2].startswith("--"):
+            repo = Path(sys.argv[2]).resolve()
 
     lang, content = generate_workflow(repo)
     if lang is None:
