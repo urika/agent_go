@@ -3,6 +3,10 @@
 from pathlib import Path
 from typing import Optional
 
+from .console import get_default_console
+
+console = get_default_console()
+
 __all__ = ["cmd_ci"]
 
 TEMPLATES = {
@@ -57,20 +61,20 @@ def cmd_ci() -> None:
 
     lang, content = generate_workflow(repo)
     if lang is None:
-        print("未检测到已知项目语言。支持: python, go, node, rust, java")
+        console.print("未检测到已知项目语言。支持: python, go, node, rust, java")
         return
 
     wf_dir = repo / ".github" / "workflows"
     wf_file = wf_dir / "test.yml"
 
     if dry_run:
-        print(f"[dry-run] 语言: {lang}, 目标: {wf_file}")
-        print(content)
+        console.print(f"[dry-run] 语言: {lang}, 目标: {wf_file}")
+        console.print(content)
         return
 
     wf_dir.mkdir(parents=True, exist_ok=True)
     if wf_file.exists():
-        print(f"已存在: {wf_file}")
+        console.print(f"已存在: {wf_file}")
         return
     wf_file.write_text(content, encoding="utf-8")
-    print(f"已生成: {wf_file} ({lang})")
+    console.print(f"已生成: {wf_file} ({lang})")

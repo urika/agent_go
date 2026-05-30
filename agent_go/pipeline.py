@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+from .console import get_default_console
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 
@@ -15,6 +16,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                   worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "") -> None:
     """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。"""
     worktree_map = worktree_map or {}
+    console = get_default_console()
     results_map = results_map or {}
     completed_ids = completed_ids or set()
     task_id = meta["task_id"]
@@ -53,7 +55,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     # 跳过已完成的子任务
     remaining = [st for st in confirmed if st["id"] not in completed_ids]
     if not remaining:
-        print("所有子任务已完成，无需恢复执行")
+        console.print("所有子任务已完成，无需恢复执行")
         meta["status"] = "completed"
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         return
@@ -186,16 +188,16 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     meta["status"] = "failed" if has_failed else "completed"
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"\n{'='*60}\n🎉 全部完成 ({len(completed_ids)}/{total})\n{'='*60}")
-    print("\n📦 最终报告")
-    print("─" * 60)
+    console.print(f"\n{'='*60}\n🎉 全部完成 ({len(completed_ids)}/{total})\n{'='*60}")
+    console.print("\n📦 最终报告")
+    console.print("─" * 60)
     for s in confirmed:
         r = results_map.get(s["id"])
         if r:
             icon = {"completed": "✅", "no_changes": "⏭️", "failed": "❌"}.get(r["status"], "❓")
-            print(f"{icon} {r['subtask_id']}: {r['summary']}")
+            console.print(f"{icon} {r['subtask_id']}: {r['summary']}")
         else:
-            print(f"⏳ {s['id']}: 未执行")
-    print("─" * 60)
-    print(f"\n📁 {task_dir}")
-    print(f"📝 {task_dir}/execution.log")
+            console.print(f"⏳ {s['id']}: 未执行")
+    console.print("─" * 60)
+    console.print(f"\n📁 {task_dir}")
+    console.print(f"📝 {task_dir}/execution.log")
