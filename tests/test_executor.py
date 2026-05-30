@@ -357,7 +357,7 @@ class TestRunSubtask:
             "new_files": 0, "modified_files": 1, "actual_files": ["src/main.py"],
         }
 
-        verification_cmd = "python3 -c 'print(1)'"
+        verification_cmd = "pytest --co"
         subtask = {
             "id": "sub-1",
             "title": "验证任务",
@@ -390,7 +390,7 @@ class TestRunSubtask:
         verification_calls = [
             c for c in mock_subprocess.call_args_list
             if c.args and isinstance(c.args[0], list)
-            and "python3" in c.args[0]
+            and "pytest" in c.args[0]
         ]
         assert len(verification_calls) >= 1, "验证命令应通过 subprocess.run 执行"
         assert result["verify_ok"] is True

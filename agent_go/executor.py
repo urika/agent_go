@@ -186,7 +186,7 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
     return result, sandbox_type, claude_time
 
 
-def _verify_changes(task_id, subtask, worktree, headless, task_md, env, tag_name,
+def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref=""):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
@@ -470,7 +470,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     # 6. Verify changes
     tag_name = f"{task_id}/{sub_id}"
     verify_results = _verify_changes(
-        task_id, subtask, worktree, headless, task_md, env, tag_name,
+        task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
         active_pids, active_pids_lock, logger, issue_ref=issue_ref
     )
     has_changes = verify_results["has_changes"]
