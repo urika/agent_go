@@ -25,7 +25,7 @@ jobs:
         run: |
           pytest tests/ -q
 
-      - name: Ruff lint
+      - name: Ruff lint (includes F401 unused-import)
         run: |
           ruff check agent_go/ --select=E,F,W --ignore=E501
 

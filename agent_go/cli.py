@@ -3,7 +3,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
 
 from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR
 from .api import generate_plan, decompose_fallback
@@ -15,6 +14,8 @@ from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "main", "cmd_run", "cmd_resume", "cmd_list", "cmd_show",
