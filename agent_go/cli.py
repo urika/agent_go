@@ -1,5 +1,4 @@
-import sys, os, subprocess, json, re, time, threading, shlex, signal, logging, argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys, os, subprocess, json, time, logging, argparse
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
@@ -11,7 +10,7 @@ from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
 from .pipeline import _run_pipeline
-from .skills import load_skill, load_skills, discover_skills, render_skill_for_plan, render_skill_for_execution, list_skills
+from .skills import load_skills, discover_skills, render_skill_for_plan, list_skills
 from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .tui import cmd_status_tui
