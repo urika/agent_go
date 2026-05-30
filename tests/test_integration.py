@@ -702,14 +702,31 @@ class TestCommitPrefix:
 class TestSkillInjection:
     """测试 12: Skill 注入到 TASK.md"""
 
+    @staticmethod
+    def _make_skill_dir(tmp_path, name, description, body=""):
+        """在 tmp_path 下创建一个模拟的 skill 目录。"""
+        skill_dir = tmp_path / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n{body}",
+            encoding="utf-8",
+        )
+        return skill_dir
+
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
     def test_skill_injected_into_task_md(self, mock_subprocess, mock_headless,
-                                         temp_repo, task_dir, fast_logger):
+                                         temp_repo, task_dir, fast_logger, tmp_path):
         """验证 subtask 的 skills 字段内容被写入 TASK.md"""
         from agent_go.executor import run_subtask
         mock_subprocess.return_value = make_subprocess_mock()
         mock_headless.return_value = make_subprocess_mock()
+
+        # 创建临时 skill 目录，避免依赖全局 ~/.agent_go/skills/
+        self._make_skill_dir(tmp_path, "security-review",
+                             "安全审查 — 涉及认证、权限、加密",
+                             "# 规则\n1. 检查 JWT 密钥管理")
 
         subtask = {
             "id": "sub-1", "title": "安全审查",
@@ -723,8 +740,9 @@ class TestSkillInjection:
             "agent_type": "reviewer",
         }
 
-        run_subtask("test-task", subtask, temp_repo, task_dir,
-                   fast_logger, headless=True)
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            run_subtask("test-task", subtask, temp_repo, task_dir,
+                       fast_logger, headless=True)
 
         # 读取生成的 TASK.md
         task_md_path = task_dir / "sub-1" / "TASK.md"

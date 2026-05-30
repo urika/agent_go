@@ -2,6 +2,7 @@ import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
 
 from .config import safe_input, log_event
 from .utils import read_reference_docs
@@ -13,7 +14,7 @@ __all__ = [
     "verify_subtask",
 ]
 
-def plan_to_md(plan):
+def plan_to_md(plan: dict[str, Any]) -> str:
     """将 Plan 转为 Markdown 文档。"""
     lines = [
         f"# 执行方案\n",
@@ -45,7 +46,7 @@ def plan_to_md(plan):
             lines.append(f"- 步骤 {sid} 依赖: {prereqs}")
     return "\n".join(lines)
 
-def print_plan(plan, config):
+def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
     """展示 Plan，包含 Agent Prompt 和资源清单。"""
     behavior = config.get("behavior", {})
 
@@ -91,7 +92,7 @@ def print_plan(plan, config):
             print(f"      步骤 {sid} 依赖: {prereqs}")
     print("=" * 70)
 
-def _prompt_fallback(logger):
+def _prompt_fallback(logger: logging.Logger) -> str:
     """交互式询问用户是否降级到规则拆解。返回 True=降级, False=重试。"""
     print("\n⚠️ API 重新生成失败。请选择:")
     print("  [F] 降级到本地规则拆解（不依赖 API）")
@@ -111,7 +112,7 @@ def _prompt_fallback(logger):
             sys.exit(0)
         print("无效输入（F=降级, R=重试, N=取消）")
 
-def confirm_plan(plan, config, repo, logger, iteration=1, task="") -> tuple:
+def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "") -> tuple[Optional[dict[str, Any]], Optional[list[str]]]:
     """
     用户确认 Plan。支持默认同意模式。
     返回: (plan, doc_paths) 或 (None, None) 或 ("__FALLBACK__", None)
@@ -246,7 +247,7 @@ def confirm_plan(plan, config, repo, logger, iteration=1, task="") -> tuple:
                 empty_count = 0
             print("无效输入")
 
-def plan_to_subtasks(plan, logger, repo=None):
+def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optional[Path] = None) -> list[dict[str, Any]]:
     """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。
     同时应用角色-Skill 映射规则进行兜底匹配。"""
     subtasks = []
@@ -306,7 +307,7 @@ def plan_to_subtasks(plan, logger, repo=None):
     log_event(logger, "plan_decomposed", {"count": len(subtasks)})
     return subtasks
 
-def print_subtasks(subtasks, config):
+def print_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any]) -> None:
     behavior = config.get("behavior", {})
     print("\n" + "─" * 60)
     print("📋 子任务列表")
@@ -332,7 +333,7 @@ def print_subtasks(subtasks, config):
             print(f"      \U0001f916 Agent Prompt: {prompt_preview}")
     print("\n" + "─" * 60)
 
-def confirm_subtasks(subtasks, config, logger):
+def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], logger: logging.Logger) -> list[dict[str, Any]]:
     behavior = config.get("behavior", {})
     auto_confirm = behavior.get("auto_confirm_subtasks", False)
 
@@ -405,7 +406,7 @@ def confirm_subtasks(subtasks, config, logger):
                 empty_count = 0
             print("无效输入")
 
-def verify_subtask(current, total, summary, logger, config=None):
+def verify_subtask(current: int, total: int, summary: str, logger: logging.Logger, config: Optional[dict[str, Any]] = None) -> str:
     print(f"\n{'='*60}\n✅ {current}/{total} 完成\n{'='*60}")
     print(f"📊 {summary}\n[C]继续 [R]重试 [M]修改 [A]中止")
     auto_verify = config.get("behavior", {}).get("auto_verify_subtask", False) if config else False

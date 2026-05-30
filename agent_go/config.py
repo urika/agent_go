@@ -2,6 +2,7 @@ import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 
 __all__ = [
     "AGENT_GO_DIR", "CONFIG_PATH", "DEFAULT_CONFIG", "DECOMPOSE_RULES",
@@ -66,7 +67,7 @@ DECOMPOSE_RULES = [
     },
 ]
 
-def safe_input(prompt=""):
+def safe_input(prompt: str = "") -> str:
     """包装 input()，在非交互模式下返回空字符串（触发默认确认路径）。"""
     try:
         return input(prompt)
@@ -74,7 +75,7 @@ def safe_input(prompt=""):
         print()
         return ""
 
-def load_config():
+def load_config() -> dict[str, Any]:
     if CONFIG_PATH.exists():
         saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         merged = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
@@ -89,10 +90,10 @@ def load_config():
     print(f"⚙️  已创建默认配置: {CONFIG_PATH}")
     return DEFAULT_CONFIG
 
-def get_api_key(config):
+def get_api_key(config: dict[str, Any]) -> str:
     return os.environ.get("AGENT_GO_API_KEY", "") or config.get("plan_api", {}).get("api_key", "")
 
-def setup_logger(task_id, task_dir):
+def setup_logger(task_id: str, task_dir: Path) -> logging.Logger:
     logger = logging.getLogger(f"agent_go.{task_id}")
     logger.setLevel(logging.DEBUG)
     for h in list(logger.handlers):
@@ -108,5 +109,5 @@ def setup_logger(task_id, task_dir):
     logger.addHandler(ch)
     return logger
 
-def log_event(logger, event, data):
+def log_event(logger: logging.Logger, event: str, data: dict[str, Any]) -> None:
     logger.debug(json.dumps({"timestamp": datetime.now().isoformat(), "event": event, **data}, ensure_ascii=False))

@@ -1,6 +1,7 @@
 """GitHub Actions workflow auto-generation."""
 
 from pathlib import Path
+from typing import Any, Optional
 
 __all__ = ["cmd_ci"]
 
@@ -28,7 +29,7 @@ TEMPLATES = {
 }
 
 
-def detect_language(repo):
+def detect_language(repo: Path) -> Optional[str]:
     for lang, cfg in TEMPLATES.items():
         for f in cfg["detect"]:
             if (Path(repo) / f).exists():
@@ -36,14 +37,14 @@ def detect_language(repo):
     return None
 
 
-def generate_workflow(repo):
+def generate_workflow(repo: Path) -> tuple[Optional[str], Optional[str]]:
     lang = detect_language(repo)
     if lang is None:
         return None, None
     return lang, TEMPLATES[lang]["workflow"]
 
 
-def cmd_ci(args=None):
+def cmd_ci() -> None:
     import sys
     if args and hasattr(args, 'dry_run'):
         dry_run = args.dry_run

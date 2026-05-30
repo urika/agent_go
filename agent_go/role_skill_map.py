@@ -2,6 +2,7 @@ import json
 import logging
 from pathlib import Path
 from fnmatch import fnmatch
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +42,17 @@ DEFAULT_MAP = {
 }
 
 
-def _global_map_path():
+def _global_map_path() -> Path:
     return AGENT_GO_DIR / "role_skill_map.json"
 
 
-def _project_map_path(project_root):
+def _project_map_path(project_root: Path) -> Path:
     if project_root is None:
         return None
     return Path(project_root) / ".agent_go" / "role_skill_map.json"
 
 
-def _load_json(path):
+def _load_json(path: Path) -> Optional[dict[str, Any]]:
     if path and path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -60,14 +61,14 @@ def _load_json(path):
     return None
 
 
-def load_role_skill_map(project_root=None):
+def load_role_skill_map(project_root: Optional[Path] = None) -> dict[str, Any]:
     loaded = _load_json(_project_map_path(project_root))
     if loaded:
         return loaded
     return DEFAULT_MAP
 
 
-def _match_rule(rule, step):
+def _match_rule(rule: dict[str, Any], step: dict[str, Any]) -> bool:
     cond = rule.get("match", {})
 
     if "agent_type" in cond:
@@ -91,12 +92,12 @@ def _match_rule(rule, step):
     return True
 
 
-def match_rules(step, role_map):
+def match_rules(step: dict[str, Any], role_map: dict[str, Any]) -> list[dict[str, Any]]:
     rules = role_map.get("rules", [])
     return [r for r in rules if _match_rule(r, step)]
 
 
-def apply_rules(step, role_map, installed_skills=None):
+def apply_rules(step: dict[str, Any], role_map: dict[str, Any], installed_skills: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     installed_names = {s["name"] for s in (installed_skills or [])}
     matched = match_rules(step, role_map)
 

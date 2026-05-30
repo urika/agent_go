@@ -2,10 +2,11 @@ import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 
 __all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES"]
 
-def read_reference_docs(doc_paths, repo, logger):
+def read_reference_docs(doc_paths: list[str], repo: Path, logger: logging.Logger) -> str:
     contents = []
     for path_str in doc_paths:
         path = (repo / path_str).resolve()
@@ -143,9 +144,8 @@ _SHELL_DESTROY = re.compile(r'\brm\s+-r[^ ]*\s+[/~]')      # 危险 rm
 _SHELL_OUTPUT_REDIR = re.compile(r'(?<![12])>>?\s*\S')      # 输出重定向（排除 2>&1, 1>&2）
 _SHELL_INPUT_REDIR = re.compile(r'(?<!<\s)<\s*\S')          # 输入重定向
 
-
-def _is_safe_verification_command(command):
-    """检查验证命令是否安全（参数级白名单 + shell 注入扫描）。
+def _is_safe_verification_command(command: str) -> bool:
+    """检查验证命令在 shell=True 降级前是否安全。
 
     四阶段验证:
       1. shlex 解析 — 无法解析则拒绝
@@ -291,7 +291,7 @@ def _log_rejected_command(command, reason, logger, task_id="", sub_id=""):
         pass  # 审计写入失败不影响主流程
 
 
-def _safe_append_to_file(filepath, text, logger, max_retries=10):
+def _safe_append_to_file(filepath: Path, text: str, logger: logging.Logger, max_retries: int = 10) -> None:
     """线程安全的文件追加写入，使用锁文件机制防止并发冲突。"""
     lock_path = filepath.with_suffix(filepath.suffix + ".lock")
     for attempt in range(max_retries):
@@ -311,12 +311,12 @@ def _safe_append_to_file(filepath, text, logger, max_retries=10):
     finally:
         lock_path.unlink(missing_ok=True)
 
-def _slugify(text, max_len=30):
+def _slugify(text: str, max_len: int = 30) -> str:
     """将任务标题转为分支名适用的短标识。"""
     slug = re.sub(r'[^a-zA-Z0-9一-鿿]+', '-', text).strip('-')
     return slug[:max_len] if len(slug) > max_len else slug
 
-def _detect_commit_prefix(title):
+def _detect_commit_prefix(title: str) -> str:
     """根据标题关键词检测 Conventional Commits 类型前缀。"""
     title_lower = title.lower()
     if any(kw in title for kw in ["实现", "新增", "添加", "增加"]) or \
@@ -340,7 +340,7 @@ def _detect_commit_prefix(title):
     else:
         return "chore"
 
-def _detect_commit_scope(title):
+def _detect_commit_scope(title: str) -> str:
     """从标题中提取 scope（圆括号显式声明 或 常见模块名关键词）。"""
     scope_match = re.search(r'\((\w+)\)', title)
     if scope_match:
@@ -354,7 +354,7 @@ def _detect_commit_scope(title):
             return mod
     return ""
 
-def _format_commit(title, issue_ref="", sub_id="", scope=""):
+def _format_commit(title: str, issue_ref: str = "", sub_id: str = "", scope: str = "") -> str:
     """生成 Conventional Commits 格式的提交消息（支持中英文标题 + scope）。"""
     prefix = _detect_commit_prefix(title)
     if scope:
@@ -366,7 +366,7 @@ def _format_commit(title, issue_ref="", sub_id="", scope=""):
     msg += f"\n\nagent_go: {sub_id}"
     return msg
 
-def _detect_tool_versions(logger):
+def _detect_tool_versions(logger: logging.Logger) -> dict[str, str]:
     """检测 claude / greywall 版本并记录，返回版本信息 dict。"""
     versions = {}
     for tool in ["claude", "greywall"]:

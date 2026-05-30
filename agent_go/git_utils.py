@@ -2,12 +2,13 @@ import sys, os, subprocess, json, re, time, threading, shlex, signal, logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
-
-__all__ = ["analyze_project", "get_git_info", "get_resource_map"]
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-def analyze_project(repo):
+__all__ = ["analyze_project", "get_git_info", "get_resource_map"]
+
+def analyze_project(repo: Path) -> str:
     """分析项目结构，返回文件列表和关键目录。"""
     try:
         if (repo / ".git").exists():
@@ -22,7 +23,7 @@ def analyze_project(repo):
         logger.debug("Failed to analyze project: %s", e)
         return ""
 
-def get_git_info(repo):
+def get_git_info(repo: Path) -> dict[str, str]:
     """获取 git 远程地址和当前分支。"""
     info = {"remote": "", "branch": "", "commit": ""}
     try:
@@ -39,7 +40,7 @@ def get_git_info(repo):
         logger.debug("Failed to get git info: %s", e)
     return info
 
-def _worktree_create(repo, branch, worktree_path):
+def _worktree_create(repo: Path, branch: str, worktree_path: Path) -> tuple[bool, str]:
     """创建 git worktree。返回 (success: bool, error_message: str)。"""
     result = subprocess.run(
         ["git", "worktree", "add", "-b", branch, str(worktree_path), "HEAD"],
@@ -50,7 +51,7 @@ def _worktree_create(repo, branch, worktree_path):
     return True, ""
 
 
-def _worktree_remove(repo, worktree_path):
+def _worktree_remove(repo: Path, worktree_path: Path) -> tuple[bool, str]:
     """移除 git worktree。返回 (success: bool, error_message: str)。"""
     if not worktree_path.exists():
         return True, ""
@@ -63,7 +64,7 @@ def _worktree_remove(repo, worktree_path):
     return True, ""
 
 
-def _worktree_prune(repo):
+def _worktree_prune(repo: Path) -> tuple[bool, str]:
     """清理失效 worktree 记录。返回 (success: bool, error_message: str)。"""
     result = subprocess.run(
         ["git", "worktree", "prune"],
@@ -74,7 +75,7 @@ def _worktree_prune(repo):
     return True, ""
 
 
-def _set_gc_auto(repo, value="0"):
+def _set_gc_auto(repo: Path, value: str = "0") -> tuple[str, bool, str]:
     """设置 git gc.auto 值。返回 (original_value: str, success: bool, error_message: str)。"""
     orig = subprocess.run(
         ["git", "config", "gc.auto"],
@@ -89,7 +90,7 @@ def _set_gc_auto(repo, value="0"):
     return original, set_result.returncode == 0, err_msg
 
 
-def get_resource_map(repo, git_info):
+def get_resource_map(repo: Path, git_info: dict[str, str]) -> dict[str, Any]:
     """生成共享资源清单。"""
     resources = {
         "project_root": str(repo),

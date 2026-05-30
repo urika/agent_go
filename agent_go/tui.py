@@ -3,13 +3,14 @@ import logging
 import time
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
+from .config import AGENT_GO_DIR
 
 logger = logging.getLogger(__name__)
-from .config import AGENT_GO_DIR
 
 __all__ = ["cmd_status_tui"]
 
-def _get_task_status(task_dir):
+def _get_task_status(task_dir: Path) -> Optional[dict[str, Any]]:
     meta_path = task_dir / "meta.json"
     if not meta_path.exists():
         return None
@@ -54,7 +55,7 @@ def _get_task_status(task_dir):
     }
 
 
-def _get_tail_lines(log_path, count=10):
+def _get_tail_lines(log_path: Path, count: int = 10) -> list[str]:
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8").strip().split("\n")
@@ -66,7 +67,7 @@ STATUS_COLORS = {"completed": 2, "no_changes": 2, "degraded": 3, "running": 3, "
 ICONS = {"completed": "ok", "no_changes": "--", "degraded": "~", "running": "> ", "failed": "!!", "paused": "||", "aborted": "x "}
 
 
-def tui_main(stdscr):
+def tui_main(stdscr: Any) -> None:
     import curses
     curses.curs_set(0)
     curses.start_color()
@@ -182,7 +183,7 @@ def tui_main(stdscr):
             filter_mode = key - ord('0')
 
 
-def _safe_addstr(win, y, x, text, attr=0):
+def _safe_addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> None:
     try:
         win.addstr(y, x, text, attr)
     except Exception:
@@ -190,7 +191,7 @@ def _safe_addstr(win, y, x, text, attr=0):
         pass
 
 
-def cmd_status_tui():
+def cmd_status_tui() -> None:
     import curses
     try:
         curses.wrapper(tui_main)
