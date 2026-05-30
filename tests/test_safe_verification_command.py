@@ -5,14 +5,13 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_go import (
+from agent_go.utils import (
     _is_safe_verification_command,
     _log_rejected_command,
     _CMD_ARG_RULES,
     SAFE_VERIFICATION_PREFIXES,
-    _apply_resource_limits,
-    _build_sandbox_env,
 )
+from agent_go.executor import _apply_resource_limits, _build_sandbox_env
 
 
 # ── TestSafePrefixes: 动态生成的前缀列表 ──────────────────────

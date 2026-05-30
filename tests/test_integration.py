@@ -442,11 +442,11 @@ class TestResume:
 
         # 手动调用 _run_pipeline 的恢复逻辑
         with patch("sys.argv", ["agent_go", "resume", task_dir.name]):
-            with patch("agent_go.load_config") as mock_load:
+            with patch("agent_go.config.load_config") as mock_load:
                 mock_load.return_value = auto_config
                 with patch("agent_go.cli.setup_logger") as mock_log:
                     mock_log.return_value = fast_logger
-                    with patch("agent_go.AGENT_GO_DIR", task_dir.parent):
+                    with patch("agent_go.config.AGENT_GO_DIR", task_dir.parent):
                         # cmd_resume 会读取 meta.json 并调用 _run_pipeline
                         # 我们直接验证恢复逻辑
                         from agent_go.config import AGENT_GO_DIR as real_dir

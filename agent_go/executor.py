@@ -26,10 +26,11 @@ def _apply_resource_limits():
 
 
 def _build_sandbox_env():
-    """构建验证命令的沙箱环境，移除敏感环境变量。"""
+    """构建验证命令的沙箱环境，移除敏感环境变量（保留 AGENT_GO_ 前缀变量）。"""
     env = os.environ.copy()
     _sensitive_keywords = ["API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "PRIVATE_KEY"]
-    sensitive_keys = [k for k in env if any(s in k.upper() for s in _sensitive_keywords)]
+    sensitive_keys = [k for k in env if any(s in k.upper() for s in _sensitive_keywords)
+                      and not k.upper().startswith("AGENT_GO_")]
     for k in sensitive_keys:
         env.pop(k, None)
     return env
@@ -262,7 +263,7 @@ def _verify_changes(task_id, subtask, worktree, headless, task_md, env, tag_name
             vr = None
             try:
                 vr = subprocess.run(shlex.split(vcmd), cwd=str(worktree),
-                                    capture_output=True, text=True, timeout=60,
+                                    capture_output=True, text=True, timeout=120,
                                     preexec_fn=_apply_resource_limits,
                                     env=_build_sandbox_env())
             except (FileNotFoundError, OSError, ValueError):
@@ -316,7 +317,7 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
                         v2_start = time.time()
                         try:
                             vr2 = subprocess.run(shlex.split(vcmd2), cwd=str(worktree),
-                                                 capture_output=True, text=True, timeout=60,
+                                                 capture_output=True, text=True, timeout=120,
                                                  preexec_fn=_apply_resource_limits,
                                                  env=_build_sandbox_env())
                         except (FileNotFoundError, OSError, ValueError):

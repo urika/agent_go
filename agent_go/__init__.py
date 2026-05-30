@@ -7,6 +7,8 @@ __version__ = "2.0.0"
 #   from agent_go.api import call_api, generate_plan
 #   from agent_go.utils import _slugify, _format_commit
 #   from agent_go.ui import plan_to_subtasks, confirm_plan
+#   from agent_go.utils import _is_safe_verification_command, _log_rejected_command
+#   from agent_go.executor import _apply_resource_limits, _build_sandbox_env
 from .cli import (
     main,
     cmd_run,
