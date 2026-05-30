@@ -1,7 +1,7 @@
 """GitHub Actions workflow auto-generation."""
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 __all__ = ["cmd_ci"]
 

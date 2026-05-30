@@ -1,10 +1,7 @@
-import sys, os, subprocess, json, re, time, threading, shlex, signal, logging, shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-from datetime import datetime
+import os, subprocess, re, time, shlex, shutil
 
 from .config import log_event
-from .utils import _format_commit, _safe_append_to_file, _is_safe_verification_command, _log_rejected_command, _slugify
+from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
