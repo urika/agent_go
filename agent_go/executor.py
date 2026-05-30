@@ -4,13 +4,36 @@ from pathlib import Path
 from datetime import datetime
 
 from .config import log_event
-from .utils import _format_commit, _safe_append_to_file, _is_safe_verification_command, _slugify
+from .utils import _format_commit, _safe_append_to_file, _is_safe_verification_command, _log_rejected_command, _slugify
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 
 __all__ = ["run_subtask"]
+
+
+def _apply_resource_limits():
+    """子进程 preexec_fn: 设置 ulimit 资源限制，防止验证命令滥用系统资源。"""
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_CPU, (60, 60))                      # CPU 60s
+        resource.setrlimit(resource.RLIMIT_FSIZE, (50 * 1024 * 1024,) * 2)     # 文件 50MB
+        resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))                  # fd 256
+        resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))                     # 子进程 64
+    except (ValueError, OSError, ImportError):
+        pass  # 限制设置失败（或不支持 resource 模块）不阻塞执行
+
+
+def _build_sandbox_env():
+    """构建验证命令的沙箱环境，移除敏感环境变量（保留 AGENT_GO_ 前缀变量）。"""
+    env = os.environ.copy()
+    _sensitive_keywords = ["API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "PRIVATE_KEY"]
+    sensitive_keys = [k for k in env if any(s in k.upper() for s in _sensitive_keywords)
+                      and not k.upper().startswith("AGENT_GO_")]
+    for k in sensitive_keys:
+        env.pop(k, None)
+    return env
 
 
 def _create_worktree(task_id, sub_id, repo, task_dir, logger):
@@ -163,7 +186,7 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
     return result, sandbox_type, claude_time
 
 
-def _verify_changes(task_id, subtask, worktree, headless, task_md, env, tag_name,
+def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref=""):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
@@ -226,11 +249,23 @@ def _verify_changes(task_id, subtask, worktree, headless, task_md, env, tag_name
             cmds = verification
         for vi, vcmd in enumerate(cmds):
             logger.info(f"执行验证 [{vi+1}/{len(cmds)}]: {vcmd}")
+            # ── 安全门禁：验证命令必须通过参数级白名单校验 ──
+            safe, reason = _is_safe_verification_command(vcmd)
+            if not safe:
+                _log_rejected_command(vcmd, reason, logger, task_id, sub_id)
+                verification_results.append({
+                    "command": vcmd[:200], "exit_code": -1,
+                    "duration_ms": 0, "attempt": 1,
+                    "rejected": True, "reject_reason": reason,
+                })
+                continue
             v_start = time.time()
             vr = None
             try:
                 vr = subprocess.run(shlex.split(vcmd), cwd=str(worktree),
-                                    capture_output=True, text=True, timeout=120)
+                                    capture_output=True, text=True, timeout=120,
+                                    preexec_fn=_apply_resource_limits,
+                                    env=_build_sandbox_env())
             except (FileNotFoundError, OSError, ValueError):
                 # shlex.split 失败时不降级到 shell=True（安全策略），记录并跳过
                 logger.warning(f"验证命令无法解析为 argv (跳过): {vcmd[:100]}")
@@ -269,10 +304,22 @@ f"错误输出:\n{vr.stderr[-500:]}\n"
                     # 重新验证所有命令
                     retry_verify_ok = True
                     for vj, vcmd2 in enumerate(cmds):
+                        # ── 安全门禁（重试路径） ──
+                        safe2, reason2 = _is_safe_verification_command(vcmd2)
+                        if not safe2:
+                            _log_rejected_command(vcmd2, reason2, logger, task_id, sub_id)
+                            verification_results.append({
+                                "command": vcmd2[:200], "exit_code": -1,
+                                "duration_ms": 0, "attempt": 2,
+                                "rejected": True, "reject_reason": reason2,
+                            })
+                            continue
                         v2_start = time.time()
                         try:
                             vr2 = subprocess.run(shlex.split(vcmd2), cwd=str(worktree),
-                                                 capture_output=True, text=True, timeout=120)
+                                                 capture_output=True, text=True, timeout=120,
+                                                 preexec_fn=_apply_resource_limits,
+                                                 env=_build_sandbox_env())
                         except (FileNotFoundError, OSError, ValueError):
                             # shlex.split 失败时不降级到 shell=True（安全策略），记录并跳过
                             logger.warning(f"重试验证命令无法解析 (跳过): {vcmd2[:100]}")
@@ -423,7 +470,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     # 6. Verify changes
     tag_name = f"{task_id}/{sub_id}"
     verify_results = _verify_changes(
-        task_id, subtask, worktree, headless, task_md, env, tag_name,
+        task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
         active_pids, active_pids_lock, logger, issue_ref=issue_ref
     )
     has_changes = verify_results["has_changes"]
