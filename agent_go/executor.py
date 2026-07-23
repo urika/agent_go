@@ -1,4 +1,5 @@
-import os, subprocess, re, time, shlex, shutil
+import os, subprocess, re, time, shlex, shutil, logging
+from pathlib import Path
 
 from .console import get_default_console
 from .config import log_event
@@ -9,6 +10,43 @@ from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 
 __all__ = ["run_subtask"]
+
+# 模块级常量：路径替换时的边界字符集（在 _build_task_md 和 run_subtask 中共享）
+_BOUNDARY_CHARS = r'\s"\'\(\):/：，。、'
+_BOUNDARY_BEFORE = rf'(?<![^{_BOUNDARY_CHARS}])'
+_BOUNDARY_AFTER = rf'(?![^{_BOUNDARY_CHARS}])'
+
+
+def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, logger: logging.Logger,
+                          task_id: str = "", sub_id: str = "") -> dict:
+    """执行单条验证命令，返回结果 dict。避免 shlex.split 和安全门禁逻辑重复。"""
+    result_entry = {"command": vcmd[:200], "exit_code": -1, "duration_ms": 0, "attempt": attempt}
+
+    # ── 安全门禁 ──
+    safe, reason = _is_safe_verification_command(vcmd)
+    if not safe:
+        _log_rejected_command(vcmd, reason, logger, task_id, sub_id)
+        result_entry["rejected"] = True
+        result_entry["reject_reason"] = reason
+        return result_entry
+
+    # ── 执行命令 ──
+    try:
+        v_start = time.time()
+        vr = subprocess.run(shlex.split(vcmd), cwd=str(worktree),
+                            capture_output=True, text=True, timeout=120,
+                            preexec_fn=_apply_resource_limits,
+                            env=_build_sandbox_env())
+        result_entry["exit_code"] = vr.returncode
+        result_entry["duration_ms"] = round((time.time() - v_start) * 1000)
+    except (FileNotFoundError, OSError, ValueError):
+        logger.warning(f"验证命令无法解析为 argv (跳过): {vcmd[:100]}")
+        # 不降级到 shell=True（安全策略）
+    except subprocess.TimeoutExpired:
+        logger.warning(f"验证命令超时 (120s): {vcmd[:100]}")
+        result_entry["exit_code"] = -1
+
+    return result_entry
 
 
 def _apply_resource_limits():
@@ -31,6 +69,8 @@ def _build_sandbox_env():
                       and not k.upper().startswith("AGENT_GO_")]
     for k in sensitive_keys:
         env.pop(k, None)
+    # AGENT_GO_API_KEY 例外剔除：验证命令会执行 worktree 中 LLM 生成的代码，不得接触密钥
+    env.pop("AGENT_GO_API_KEY", None)
     return env
 
 
@@ -139,11 +179,8 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
 
     # 将 Agent Prompt 中的源项目路径替换为 worktree 路径，确保隔离
     task_md_text = "\n".join(task_md_parts)
-    _boundary_chars = r'\s"\'\(\):/：，。、'
-    _before = rf'(?<![^{_boundary_chars}])'
-    _after = rf'(?![^{_boundary_chars}])'
     task_md = re.sub(
-        rf'{_before}{re.escape(str(repo))}{_after}',
+        rf'{_BOUNDARY_BEFORE}{re.escape(str(repo))}{_BOUNDARY_AFTER}',
         str(worktree),
         task_md_text
     )
@@ -159,23 +196,21 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
 
     if headless:
         sandbox_type = "headless"
-        result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids, active_pids_lock=active_pids_lock)
+        # Agent 工具白名单（如 architect 只读）在 headless 下也必须强制生效
+        allowed_tools = agent.claude_config.get("allowed_tools", []) if agent else []
+        result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids,
+                               active_pids_lock=active_pids_lock, allowed_tools=allowed_tools)
     else:
-        # 根据 Agent 类型构建 Claude 命令
+        # greywall 包装单点完成：agent 路径由 get_claude_command 内部处理，禁止重复包装
+        greywall_bin = shutil.which("greywall")
         if agent:
             claude_cmd = get_claude_command(agent, worktree, headless=False)
         else:
-            claude_cmd = ["claude", str(worktree)]
+            claude_cmd = (["greywall", "--"] if greywall_bin else []) + ["claude", str(worktree)]
 
         try:
-            # 尝试先匹配 greywall 包装
-            greywall_bin = shutil.which("greywall")
-            if greywall_bin:
-                result = subprocess.run([greywall_bin, "--"] + claude_cmd, env=env, cwd=str(worktree))
-                sandbox_type = "greywall"
-            else:
-                result = subprocess.run(claude_cmd, env=env, cwd=str(worktree))
-                sandbox_type = "native"
+            result = subprocess.run(claude_cmd, env=env, cwd=str(worktree))
+            sandbox_type = "greywall" if greywall_bin else "native"
         except FileNotFoundError:
             console.print("   ⚠️ Greywall 未安装，降级原生")
             result = subprocess.run(["claude", str(worktree)], env=env, cwd=str(worktree))
@@ -187,7 +222,7 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
 
 
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
-                    active_pids, active_pids_lock, logger, issue_ref=""):
+                    active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
@@ -235,7 +270,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 
     git_commit_ms = (time.time() - git_start) * 1000
 
-    # 验证执行（支持单条命令或命令数组）
+    # 验证执行（支持单条命令或命令数组，使用抽取的 _run_verification_cmd 避免逻辑重复）
     verification = subtask.get("verification", "")
     verify_ok = True
     retry_count = 0
@@ -243,45 +278,19 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     verification_ms = 0
     if verification and has_changes:
         # 统一为数组
-        if isinstance(verification, str):
-            cmds = [verification]
-        else:
-            cmds = verification
+        cmds = [verification] if isinstance(verification, str) else verification
         for vi, vcmd in enumerate(cmds):
             logger.info(f"执行验证 [{vi+1}/{len(cmds)}]: {vcmd}")
-            # ── 安全门禁：验证命令必须通过参数级白名单校验 ──
-            safe, reason = _is_safe_verification_command(vcmd)
-            if not safe:
-                _log_rejected_command(vcmd, reason, logger, task_id, sub_id)
-                verification_results.append({
-                    "command": vcmd[:200], "exit_code": -1,
-                    "duration_ms": 0, "attempt": 1,
-                    "rejected": True, "reject_reason": reason,
-                })
+            vr_entry = _run_verification_cmd(vcmd, worktree, 1, env, logger, task_id, sub_id)
+            verification_results.append(vr_entry)
+            verification_ms += vr_entry.get("duration_ms", 0)
+
+            if vr_entry.get("rejected"):
+                verify_ok = False
                 continue
-            v_start = time.time()
-            vr = None
-            try:
-                vr = subprocess.run(shlex.split(vcmd), cwd=str(worktree),
-                                    capture_output=True, text=True, timeout=120,
-                                    preexec_fn=_apply_resource_limits,
-                                    env=_build_sandbox_env())
-            except (FileNotFoundError, OSError, ValueError):
-                # shlex.split 失败时不降级到 shell=True（安全策略），记录并跳过
-                logger.warning(f"验证命令无法解析为 argv (跳过): {vcmd[:100]}")
-                verification_results.append({
-                    "command": vcmd[:200], "exit_code": -1,
-                    "duration_ms": 0, "attempt": 1,
-                })
-                continue
-            v_duration_ms = round((time.time() - v_start) * 1000)
-            verification_ms += v_duration_ms
-            verification_results.append({
-                "command": vcmd[:200], "exit_code": vr.returncode if vr else -1,
-                "duration_ms": v_duration_ms, "attempt": 1,
-            })
-            if vr is not None and vr.returncode != 0 and vr.returncode != 127:
-                logger.warning(f"验证失败 (rc={vr.returncode}): {vr.stderr[-300:]}")
+
+            if vr_entry["exit_code"] not in (0, 127):
+                logger.warning(f"验证失败 (rc={vr_entry['exit_code']}): 命令={vcmd[:100]}")
                 verify_ok = False
                 if headless:
                     retry_count += 1
@@ -291,50 +300,26 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 "\n\n【验证失败】以下验证命令执行失败:\n"
 f"{failed_cmds}\n\n"
 f"最后失败命令: {vcmd}\n"
-f"错误输出:\n{vr.stderr[-500:]}\n"
 "请修复上述问题，确保所有验证命令通过。直接修改文件，不要询问。"
                     )
-                    _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix", active_pids=active_pids, active_pids_lock=active_pids_lock)
+                    _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix",
+                                  active_pids=active_pids, active_pids_lock=active_pids_lock,
+                                  allowed_tools=allowed_tools)
                     subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
-                    subprocess.run(["git", "commit", "-m",
-                                    f"{subtask['id']} (fix): 验证修复"], cwd=str(worktree),
-                                   capture_output=True)
-                    subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree),
-                                   capture_output=True)
-                    # 重新验证所有命令
+                    subprocess.run(["git", "commit", "-m", f"{subtask['id']} (fix): 验证修复"],
+                                   cwd=str(worktree), capture_output=True)
+                    subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True)
+                    # 重新验证所有命令（使用同一个 helper）
                     retry_verify_ok = True
-                    for vj, vcmd2 in enumerate(cmds):
-                        # ── 安全门禁（重试路径） ──
-                        safe2, reason2 = _is_safe_verification_command(vcmd2)
-                        if not safe2:
-                            _log_rejected_command(vcmd2, reason2, logger, task_id, sub_id)
-                            verification_results.append({
-                                "command": vcmd2[:200], "exit_code": -1,
-                                "duration_ms": 0, "attempt": 2,
-                                "rejected": True, "reject_reason": reason2,
-                            })
-                            continue
-                        v2_start = time.time()
-                        try:
-                            vr2 = subprocess.run(shlex.split(vcmd2), cwd=str(worktree),
-                                                 capture_output=True, text=True, timeout=120,
-                                                 preexec_fn=_apply_resource_limits,
-                                                 env=_build_sandbox_env())
-                        except (FileNotFoundError, OSError, ValueError):
-                            # shlex.split 失败时不降级到 shell=True（安全策略），记录并跳过
-                            logger.warning(f"重试验证命令无法解析 (跳过): {vcmd2[:100]}")
-                            verification_results.append({
-                                "command": vcmd2[:200], "exit_code": -1,
-                                "duration_ms": 0, "attempt": 2,
-                            })
-                            continue
-                        v2_ms = round((time.time() - v2_start) * 1000)
-                        verification_ms += v2_ms
-                        verification_results.append({
-                            "command": vcmd2[:200], "exit_code": vr2.returncode,
-                            "duration_ms": v2_ms, "attempt": 2,
-                        })
-                        if vr2.returncode != 0 and vr2.returncode != 127:
+                    for vcmd2 in cmds:
+                        vr2_entry = _run_verification_cmd(vcmd2, worktree, 2, env, logger, task_id, sub_id)
+                        verification_results.append(vr2_entry)
+                        verification_ms += vr2_entry.get("duration_ms", 0)
+                        if vr2_entry.get("rejected"):
+                            retry_verify_ok = False
+                            verify_ok = False
+                            break
+                        if vr2_entry["exit_code"] not in (0, 127):
                             verify_ok = False
                             retry_verify_ok = False
                             break
@@ -438,11 +423,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     original_verification = verification
     # Rewrite verification command paths
     if verification and str(repo) in verification:
-        _boundary_chars = r'\s"\'\(\):/：，。、'
-        _before = rf'(?<![^{_boundary_chars}])'
-        _after = rf'(?![^{_boundary_chars}])'
         verification = re.sub(
-            rf'{_before}{re.escape(str(repo))}{_after}',
+            rf'{_BOUNDARY_BEFORE}{re.escape(str(repo))}{_BOUNDARY_AFTER}',
             str(worktree),
             verification
         )
@@ -472,7 +454,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     tag_name = f"{task_id}/{sub_id}"
     verify_results = _verify_changes(
         task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
-        active_pids, active_pids_lock, logger, issue_ref=issue_ref
+        active_pids, active_pids_lock, logger, issue_ref=issue_ref,
+        allowed_tools=agent.claude_config.get("allowed_tools", []) if agent else None,
     )
     has_changes = verify_results["has_changes"]
     summary = verify_results["summary"]

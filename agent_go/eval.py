@@ -1,14 +1,15 @@
 import json
 import logging
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
 
-from .console import get_default_console
+from .console import _LazyConsole
 
 logger = logging.getLogger(__name__)
 
-console = get_default_console()
+console = _LazyConsole()
 
 __all__ = [
     "analyze_quality", "analyze_performance",
@@ -19,15 +20,21 @@ def _read_meta(task_dir: Path) -> Optional[dict[str, Any]]:
     path = Path(task_dir) / "meta.json"
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug("Failed to read meta.json from %s: %s", path, e)
+        return None
 
 
 def _read_log_events(log_path: Path, event_name: str) -> list[dict[str, Any]]:
     events = []
     if not log_path.exists():
         return events
+    # 匹配 JSON 中 "event":"xxx" 或 "event": "xxx"（兼容有无空格）
+    search = re.compile(rf'"event"\s*:\s*"{re.escape(event_name)}"')
     for line in log_path.read_text(encoding="utf-8").strip().split("\n"):
-        if f'"event":"{event_name}"' in line:
+        if search.search(line):
             try:
                 json_part = line.split(" | ")[-1]
                 events.append(json.loads(json_part))
@@ -269,12 +276,19 @@ MODEL_PRICES = {
     "deepseek-chat": {"prompt": 0.27, "completion": 1.1},
 }
 
+# provider → 默认模型（旧日志缺 model 字段时回退用）
+PROVIDER_DEFAULT_MODEL = {
+    "anthropic": "claude-sonnet-4-20250514",
+    "openai": "gpt-4o",
+    "deepseek": "deepseek-chat",
+}
+
 
 def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     total_calls = 0
     total_prompt = 0
     total_completion = 0
-    by_provider = {}
+    by_model = {}
     errors = 0
     cache_hits = 0
     cache_checks = 0
@@ -287,12 +301,14 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
             c = ev.get("completion_tokens", 0)
             total_prompt += p
             total_completion += c
+            # 价格表以 model 为键；旧日志缺 model 字段时回退 provider 默认模型
             provider = ev.get("provider", "?")
-            if provider not in by_provider:
-                by_provider[provider] = {"calls": 0, "prompt": 0, "completion": 0}
-            by_provider[provider]["calls"] += 1
-            by_provider[provider]["prompt"] += p
-            by_provider[provider]["completion"] += c
+            model = ev.get("model") or PROVIDER_DEFAULT_MODEL.get(provider, "deepseek-chat")
+            if model not in by_model:
+                by_model[model] = {"calls": 0, "prompt": 0, "completion": 0}
+            by_model[model]["calls"] += 1
+            by_model[model]["prompt"] += p
+            by_model[model]["completion"] += c
         for ev in _read_log_events(log_path, "api_error"):
             errors += 1
         for ev in _read_log_events(log_path, "plan_complete"):
@@ -301,12 +317,13 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
                 cache_hits += 1
 
     cost = 0
-    provider_costs = {}
-    for prov, usage in by_provider.items():
-        price = MODEL_PRICES.get(prov, MODEL_PRICES.get("deepseek-chat", {}))
+    model_costs = {}
+    for model, usage in by_model.items():
+        # 未知模型按最低价保守估算
+        price = MODEL_PRICES.get(model, MODEL_PRICES["deepseek-chat"])
         pc = usage["prompt"] / 1_000_000 * price.get("prompt", 1)
         cc = usage["completion"] / 1_000_000 * price.get("completion", 5)
-        provider_costs[prov] = round(pc + cc, 4)
+        model_costs[model] = round(pc + cc, 4)
         cost += pc + cc
     cost = round(cost, 4)
 
@@ -320,7 +337,7 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     return {
         "total_calls": total_calls, "total_prompt_tokens": total_prompt, "total_completion_tokens": total_completion,
         "estimated_cost_usd": cost,
-        "by_provider": provider_costs,
+        "by_model": model_costs,
         "errors": errors, "cache_hits": cache_hits, "cache_checks": cache_checks,
         "cache_hit_rate": round(cache_hits / cache_checks * 100) if cache_checks else 0,
         "avg_cost_per_task": round(cost / len(tasks), 4) if tasks else 0,
@@ -420,17 +437,21 @@ def analyze_ux(tasks_dir: Path) -> dict[str, Any]:
 # CLI output
 # ═══════════════════════════════════════════════════════════════
 
-def cmd_eval() -> None:
+def cmd_eval(args=None) -> None:
     import sys
     from .config import AGENT_GO_DIR
 
-    if len(sys.argv) < 3:
-        console.print("Usage: agent_go eval <quality|perf|cost|reliability|ux|all> [task-id|--all]")
-        return
-
-    sub = sys.argv[2]
-    task_id = sys.argv[3] if len(sys.argv) > 3 else ""
-    all_mode = task_id == "--all"
+    if args is not None and hasattr(args, "subcommand"):
+        sub = args.subcommand
+        task_id = getattr(args, "task_id", None) or ""
+        all_mode = bool(getattr(args, "eval_all", False)) or task_id == "--all"
+    else:
+        if len(sys.argv) < 3:
+            console.print("Usage: agent_go eval <quality|perf|cost|reliability|ux|all> [task-id|--all]")
+            return
+        sub = sys.argv[2]
+        task_id = sys.argv[3] if len(sys.argv) > 3 else ""
+        all_mode = task_id == "--all"
 
     if sub == "quality":
         if all_mode:
@@ -530,9 +551,9 @@ def _print_cost_report(c: dict[str, Any]) -> None:
     console.print(f"  API 调用:            {c['total_calls']} 次")
     console.print(f"  Token:               {c['total_prompt_tokens']:,} in + {c['total_completion_tokens']:,} out")
     console.print(f"  预估费用:            ${c['estimated_cost_usd']}")
-    if c["by_provider"]:
-        for prov, cost in c["by_provider"].items():
-            console.print(f"    {prov}:            ${cost}")
+    if c["by_model"]:
+        for model, cost in c["by_model"].items():
+            console.print(f"    {model}:  ${cost}")
     console.print(f"  API 错误:            {c['errors']} 次")
     console.print(f"  缓存命中:            {c['cache_hits']}/{c['cache_checks']} ({c['cache_hit_rate']}%)")
     console.print(f"  每任务成本:          ${c['avg_cost_per_task']}")

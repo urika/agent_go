@@ -6,10 +6,11 @@ __all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES"]
 
 def read_reference_docs(doc_paths: list[str], repo: Path, logger: logging.Logger) -> str:
     contents = []
+    repo_root = repo.resolve()
     for path_str in doc_paths:
         path = (repo / path_str).resolve()
-        # 防止路径穿越：确保路径在 repo 范围内
-        if not str(path).startswith(str(repo.resolve())):
+        # 防止路径穿越：确保路径在 repo 范围内（is_relative_to 按路径段比较，不会被兄弟前缀目录绕过）
+        if not path.is_relative_to(repo_root):
             logger.warning(f"路径越界，已拒绝: {path_str}")
             continue
         if not path.exists():
@@ -142,7 +143,7 @@ _SHELL_DESTROY = re.compile(r'\brm\s+-r[^ ]*\s+[/~]')      # 危险 rm
 _SHELL_OUTPUT_REDIR = re.compile(r'(?<![12])>>?\s*\S')      # 输出重定向（排除 2>&1, 1>&2）
 _SHELL_INPUT_REDIR = re.compile(r'(?<!<\s)<\s*\S')          # 输入重定向
 
-def _is_safe_verification_command(command: str) -> bool:
+def _is_safe_verification_command(command: str) -> tuple[bool, str]:
     """检查验证命令在 shell=True 降级前是否安全。
 
     四阶段验证:

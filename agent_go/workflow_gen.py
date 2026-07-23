@@ -3,9 +3,9 @@
 from pathlib import Path
 from typing import Optional
 
-from .console import get_default_console
+from .console import _LazyConsole
 
-console = get_default_console()
+console = _LazyConsole()
 
 __all__ = ["cmd_ci"]
 
@@ -48,12 +48,12 @@ def generate_workflow(repo: Path) -> tuple[Optional[str], Optional[str]]:
     return lang, TEMPLATES[lang]["workflow"]
 
 
-def cmd_ci() -> None:
-    import sys
+def cmd_ci(args=None) -> None:
     if args and hasattr(args, 'dry_run'):
         dry_run = args.dry_run
         repo = Path(getattr(args, 'repo', None) or Path.cwd()).resolve()
     else:
+        import sys
         dry_run = "--dry-run" in sys.argv
         repo = Path.cwd()
         if len(sys.argv) > 2 and not sys.argv[2].startswith("--"):

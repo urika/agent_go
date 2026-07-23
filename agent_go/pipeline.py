@@ -35,20 +35,21 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             gc_disabled = True
             logger.info(f"[worktree] gc.auto 已禁用 (原值: {original_gc_value})")
 
+    # ── 中断标志（信号处理器中仅设置此标志，不执行 I/O） ──
+    _interrupted = threading.Event()
+
     # 注册中断信号处理
     def _on_interrupt(signum: int, frame: Any) -> None:
-        meta["status"] = "paused"
-        (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        _interrupted.set()
+        # 立即 kill 子进程（这是 async-signal-safe 的）
         with active_pids_lock:
             pids_to_kill = list(active_pids)
         for pid in pids_to_kill:
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
-                # Process may have already exited between enumerate and kill
                 pass
-        logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
-        sys.exit(0)
+
     prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
     prev_sigterm = signal.signal(signal.SIGTERM, _on_interrupt)
 
@@ -58,6 +59,11 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         console.print("所有子任务已完成，无需恢复执行")
         meta["status"] = "completed"
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        # 恢复信号处理器与 gc.auto（与其他退出路径一致，避免仓库 config 残留 gc.auto=0）
+        signal.signal(signal.SIGINT, prev_sigint)
+        signal.signal(signal.SIGTERM, prev_sigterm)
+        if gc_disabled and original_gc_value is not None:
+            _, _, _ = _set_gc_auto(repo, original_gc_value)
         return
 
     wave_num = 0
@@ -69,6 +75,15 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                 if all(dep in completed_ids for dep in st.get("depends_on", []))]
         if not wave:
             logger.error("依赖循环或无法满足的依赖！")
+            # 将无法调度的子任务标记为失败，避免收尾时 meta 误标 completed
+            for st in remaining:
+                if st["id"] not in results_map:
+                    results_map[st["id"]] = {
+                        "subtask_id": st["id"], "status": "failed",
+                        "exit_code": -1, "summary": "依赖循环或无法满足的依赖，未执行",
+                        "worktree": "", "sandbox_type": "headless",
+                        "verify_ok": False, "duration_sec": 0,
+                    }
             break
 
         logger.info(f"[Wave {wave_num}] {', '.join(st['id'] for st in wave)}")
@@ -114,6 +129,18 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                         result_file.parent.mkdir(parents=True, exist_ok=True)
                         result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
                     completed_ids.add(st["id"])
+
+        # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
+        if _interrupted.is_set():
+            meta["status"] = "paused"
+            (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
+            signal.signal(signal.SIGINT, prev_sigint)
+            signal.signal(signal.SIGTERM, prev_sigterm)
+            # 恢复 gc.auto
+            if gc_disabled and original_gc_value is not None:
+                _, _, _ = _set_gc_auto(repo, original_gc_value)
+            sys.exit(0)
 
         remaining = [st for st in remaining if st["id"] not in completed_ids]
         wave_num += 1

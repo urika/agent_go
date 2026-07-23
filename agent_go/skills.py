@@ -28,7 +28,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 AGENT_GO_SKILLS_DIR = Path.home() / ".agent_go" / "skills"
-AGENT_GO_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass

@@ -16,7 +16,7 @@ def analyze_project(repo: Path) -> str:
         else:
             result = subprocess.run(["find", ".", "-maxdepth", "2", "-type", "f"], cwd=str(repo), capture_output=True, text=True, timeout=5)
             files = result.stdout.strip().split("\n")[:30]
-            return "\n".join(f.lstrip("./") for f in files)
+            return "\n".join(f[2:] if f.startswith("./") else f for f in files)
     except (FileNotFoundError, subprocess.SubprocessError) as e:
         logger.debug("Failed to analyze project: %s", e)
         return ""

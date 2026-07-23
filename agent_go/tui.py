@@ -180,7 +180,8 @@ def tui_main(stdscr: Any) -> None:
             tid = rows[selected_idx]["id"]
             expanded_tasks.symmetric_difference_update({tid})
         elif key in (ord('1'), ord('2'), ord('3'), ord('4')):
-            filter_mode = key - ord('0')
+            # 状态栏提示 [1]all [2]run [3]done [4]fail → filter_mode 0/1/2/3
+            filter_mode = {ord('1'): 0, ord('2'): 1, ord('3'): 2, ord('4'): 3}[key]
 
 
 def _safe_addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> None:

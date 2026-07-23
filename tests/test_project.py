@@ -135,3 +135,20 @@ class TestGetResourceMap:
         assert resources["directories"] == []
         assert resources["key_files"] == []
         assert resources["git_remote"] == ""
+
+
+class TestAnalyzeProjectFindFallback:
+    """find 回退路径的文件名处理（回归 docs/ISSUES.md ISSUE-14）"""
+
+    def test_dotfile_name_preserved(self, temp_dir):
+        """./.gitignore 不应被 lstrip 误改为 gitignore"""
+        with patch("subprocess.run") as mock_run:
+            mock_result = MagicMock()
+            mock_result.stdout = "./.gitignore\n./main.py\n"
+            mock_result.returncode = 0
+            mock_run.return_value = mock_result
+
+            result = analyze_project(temp_dir)
+
+        assert ".gitignore" in result
+        assert "main.py" in result

@@ -269,11 +269,13 @@ def cmd_run(args=None):
             console.print(f"⚠️ 达到最大迭代次数 {max_iter}，使用最后版本")
             confirmed_plan = plan
 
-        subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)
-        doc_paths = final_doc_paths
-        # 保存 Plan 文档
-        (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
-        logger.info("[PLAN] PLAN.md 已保存")
+        if confirmed_plan is not None:
+            # 正常 Plan 路径：拆解子任务并保存 PLAN.md
+            # （降级路径已在上方得到 subtasks，confirmed_plan 为 None，跳过本块）
+            subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)
+            doc_paths = final_doc_paths
+            (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
+            logger.info("[PLAN] PLAN.md 已保存")
     else:
         # 降级拆解
         console.print(f"\n⚠️ Plan Mode 失败: {last_error}")
@@ -390,7 +392,7 @@ def cmd_list() -> None:
     if not tasks:
         print("暂无任务")
         return
-    print(f"{'任务ID':<<26} {'状态':<<12} {'子任务':<<8} {'参考文档':<<12} {'描述'}")
+    print(f"{'任务ID':<26} {'状态':<12} {'子任务':<8} {'参考文档':<12} {'描述'}")
     print("─" * 90)
     for t in tasks:
         meta_path = t / "meta.json"
@@ -421,8 +423,9 @@ def cmd_show(args=None):
     print(f"📊 {meta.get('status','unknown')}")
     if meta.get("reference_docs"):
         print(f"📎 参考文档: {', '.join(meta['reference_docs'])}")
+    results = meta.get("results", [])
     for i, st in enumerate(meta.get("subtasks", [])):
-        r = meta["results"][i] if i < len(meta.get("results", [])) else None
+        r = results[i] if i < len(results) else None
         icon = "✅" if r and r["status"] == "completed" else "❌" if r else "⏳"
         print(f"\n{icon} [{st['id']}] {st['title']}")
         if st.get("agent_prompt"):
@@ -598,6 +601,17 @@ def _cmd_status_text(args=None):
                 zombie = True
                 meta["status"] = "failed"
                 meta["_zombie_note"] = f"进程异常退出，日志于 {datetime.fromtimestamp(log_mtime).strftime('%H:%M:%S')} 停止更新"
+                # 尝试终止可能残留的 claude 进程
+                try:
+                    import signal as _signal
+                    for proc_file in (task_dir / "meta.json").parent.rglob("*.pid"):
+                        try:
+                            pid = int(proc_file.read_text().strip())
+                            os.kill(pid, _signal.SIGKILL)
+                        except (ValueError, FileNotFoundError, ProcessLookupError, PermissionError):
+                            pass
+                except Exception:
+                    pass
                 meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
                 status = "failed"
 
@@ -689,35 +703,29 @@ def cmd_clean() -> None:
         print(f"  {t.name}")
     confirm = safe_input("\n确认删除? [y/N]: ").strip().lower()
     if confirm == "y":
-        repos_to_prune = set()
+        # repo → 该仓库关联的 task_id 集合（用于 worktree prune + tag 清理）
+        repo_task_ids: dict[str, set] = {}
         for t in tasks:
             meta_path = t / "meta.json"
             if meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     repo_str = meta.get("repo", "")
+                    task_id = meta.get("task_id", t.name)
                     if repo_str and Path(repo_str).exists():
-                        repos_to_prune.add(repo_str)
+                        repo_task_ids.setdefault(repo_str, set()).add(task_id)
                 except (json.JSONDecodeError, OSError) as e:
                     logger.debug("Failed to read meta for %s: %s", t.name, e)
         for t in tasks:
-            # 读取 task_id 用于清理 tag
-            meta_path = t / "meta.json"
-            task_id = t.name
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    task_id = meta.get("task_id", t.name)
-                except (json.JSONDecodeError, OSError) as e:
-                    logger.debug("Failed to read task_id from %s: %s", meta_path, e)
             _shutil.rmtree(t, ignore_errors=True)
-        for repo_path in repos_to_prune:
+        for repo_path, task_ids in repo_task_ids.items():
             subprocess.run(["git", "worktree", "prune"], cwd=repo_path, capture_output=True)
-            # 清理对应 task 的 tags
-            tag_list = subprocess.run(["git", "tag", "-l", f"{task_id}/*"], cwd=repo_path, capture_output=True, text=True)
-            for tag in tag_list.stdout.strip().split("\n"):
-                if tag:
-                    subprocess.run(["git", "tag", "-d", tag], cwd=repo_path, capture_output=True)
+            # 清理该仓库下所有关联任务的 tags
+            for tid in task_ids:
+                tag_list = subprocess.run(["git", "tag", "-l", f"{tid}/*"], cwd=repo_path, capture_output=True, text=True)
+                for tag in tag_list.stdout.strip().split("\n"):
+                    if tag:
+                        subprocess.run(["git", "tag", "-d", tag], cwd=repo_path, capture_output=True)
         print(f"已清理 {len(tasks)} 个任务")
     else:
         print("已取消")

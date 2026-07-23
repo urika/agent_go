@@ -63,10 +63,32 @@ def _load_json(path: Path) -> Optional[dict[str, Any]]:
 
 
 def load_role_skill_map(project_root: Optional[Path] = None) -> dict[str, Any]:
-    loaded = _load_json(_project_map_path(project_root))
-    if loaded:
-        return loaded
-    return DEFAULT_MAP
+    """加载角色-Skill 映射规则，三层合并：项目级 > 全局 > 内置默认。
+
+    - 项目级：`<project_root>/.agent_go/role_skill_map.json`
+    - 全局：`~/.agent_go/role_skill_map.json`
+    - 内置：`DEFAULT_MAP`
+
+    规则列表按 项目 → 全局 → 默认 顺序拼接（apply_rules 中先匹配到的
+    agent_type 优先，因此更具体的层级天然优先）；标量键
+    （default_agent_type / recommended_agents / recommended_skills）
+    由更具体的层级整体覆盖。
+    """
+    project_map = _load_json(_project_map_path(project_root))
+    global_map = _load_json(_global_map_path())
+
+    merged: dict[str, Any] = dict(DEFAULT_MAP)
+    rules: list[dict[str, Any]] = []
+    for layer in (project_map, global_map, DEFAULT_MAP):
+        if layer:
+            rules.extend(layer.get("rules", []))
+    merged["rules"] = rules
+    for layer in (global_map, project_map):
+        if layer:
+            for key in ("default_agent_type", "recommended_agents", "recommended_skills"):
+                if key in layer:
+                    merged[key] = layer[key]
+    return merged
 
 
 def _match_rule(rule: dict[str, Any], step: dict[str, Any]) -> bool:

@@ -1,5 +1,7 @@
 import sys
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -146,3 +148,43 @@ class TestLoadRoleSkillMap:
         assert "recommended_agents" in role_map
         assert "recommended_skills" in role_map
         assert len(role_map["recommended_agents"]) == 4
+
+
+class TestLoadRoleSkillMapMerge:
+    """全局/项目级规则的三层合并加载（回归 docs/ISSUES.md ISSUE-11）"""
+
+    def test_global_and_project_rules_merged(self, tmp_path):
+        """全局与项目级规则与默认规则合并，项目规则排在最前"""
+        global_file = tmp_path / "global.json"
+        global_file.write_text(json.dumps({
+            "rules": [{"match": {"keywords": ["global-kw"]},
+                       "skills": {"required": [], "recommended": []}}],
+        }), encoding="utf-8")
+        project_file = tmp_path / "project.json"
+        project_file.write_text(json.dumps({
+            "rules": [{"match": {"keywords": ["proj-kw"]},
+                       "skills": {"required": [], "recommended": []}}],
+            "default_agent_type": "reviewer",
+        }), encoding="utf-8")
+
+        with patch("agent_go.role_skill_map._global_map_path", return_value=global_file), \
+             patch("agent_go.role_skill_map._project_map_path", return_value=project_file):
+            role_map = load_role_skill_map(tmp_path)
+
+        # 三层规则合并：默认规则不丢失
+        assert len(role_map["rules"]) == len(DEFAULT_MAP["rules"]) + 2
+        # 项目规则在最前（apply_rules 中先匹配的 agent_type 优先）
+        assert role_map["rules"][0]["match"]["keywords"] == ["proj-kw"]
+        assert role_map["rules"][1]["match"]["keywords"] == ["global-kw"]
+        # 标量键由项目级覆盖
+        assert role_map["default_agent_type"] == "reviewer"
+
+    def test_no_files_returns_default(self, tmp_path):
+        """无全局/项目文件时行为与 DEFAULT_MAP 一致"""
+        with patch("agent_go.role_skill_map._global_map_path",
+                   return_value=tmp_path / "nonexistent.json"), \
+             patch("agent_go.role_skill_map._project_map_path",
+                   return_value=tmp_path / "also-nonexistent.json"):
+            role_map = load_role_skill_map(tmp_path)
+        assert role_map["rules"] == DEFAULT_MAP["rules"]
+        assert role_map["default_agent_type"] == DEFAULT_MAP["default_agent_type"]

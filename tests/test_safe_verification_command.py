@@ -346,9 +346,14 @@ class TestResourceLimits:
     """_apply_resource_limits 和 _build_sandbox_env"""
 
     def test_apply_resource_limits_no_error(self):
-        """_apply_resource_limits 在任何平台都不抛异常"""
-        # 仅在支持 resource 模块的平台上有效，但不抛异常即可
-        _apply_resource_limits()
+        """_apply_resource_limits 在任何平台都不抛异常。
+
+        注意：必须 mock resource.setrlimit — 真实调用会把 RLIMIT_NPROC=64 等限制
+        施加到 pytest 进程本身，导致后续测试无法 fork/创建线程（污染全套件）。
+        """
+        with patch("resource.setrlimit") as mock_setrlimit:
+            _apply_resource_limits()
+            assert mock_setrlimit.call_count >= 1
 
     def test_sandbox_env_removes_sensitive_keys(self):
         """_build_sandbox_env 应移除敏感环境变量"""

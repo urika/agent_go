@@ -3,9 +3,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any
 
-from .console import get_default_console
+from .console import _LazyConsole
 
-console = get_default_console()
+console = _LazyConsole()
 
 __all__ = [
     "AGENT_GO_DIR", "CONFIG_PATH", "DEFAULT_CONFIG", "DECOMPOSE_RULES",

@@ -314,19 +314,22 @@ class TestPipeline:
             assert captured_handler[0] is not None, "信号处理器应被注册"
 
             # 直接调用捕获的 _on_interrupt 闭包来测试其行为
-            # mock sys.exit 和 os.kill 以避免真实退出/杀进程
+            # 新设计：信号处理器仅设置中断标志 + kill 子进程，不执行 I/O 或 exit
+            # sys.exit 和 meta.json 写入由主循环在检测到 _interrupted 标志后执行
             with patch.object(_sys, "exit") as mock_exit, \
-                 patch("os.kill") as mock_kill:
+                 patch("os.kill") as mock_kill, \
+                 patch.object(logger, "info") as mock_log:
                 captured_handler[0](signal.SIGTERM, None)
 
-                # 验证 sys.exit(0) 被调用
-                mock_exit.assert_called_once_with(0)
+                # 验证信号处理器未调用 sys.exit（由主循环负责）
+                mock_exit.assert_not_called()
 
-                # 验证 meta.json 写入 paused
-                meta_file = task_dir / "meta.json"
-                assert meta_file.exists(), "meta.json 应被写入"
-                saved = json.loads(meta_file.read_text(encoding="utf-8"))
-                assert saved["status"] == "paused", f"status 应为 paused，实际: {saved['status']}"
+                # 验证信号处理器未写 meta.json（由主循环负责）
+                # 验证 handler 未记录 INFO 日志（日志写入也不是 async-signal-safe 的）
+                info_calls = [c for c in mock_log.call_args_list
+                              if "任务已暂停" in str(c) or "可通过" in str(c)]
+                assert len(info_calls) == 0, \
+                    "信号处理器不应执行日志记录（非 async-signal-safe）"
         finally:
             signal.signal(signal.SIGINT, saved_sigint)
 
@@ -377,3 +380,46 @@ class TestPipeline:
         removed_paths = [c.args[1] for c in mock_wt_remove.call_args_list]
         assert task_dir / "sub-1" / "work" in removed_paths
         assert task_dir / "sub-2" / "work" in removed_paths
+
+
+class TestPipelineDependencyFailure:
+    """依赖循环/不可满足时的失败标记（回归 docs/ISSUES.md ISSUE-7）"""
+
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_dependency_cycle_marks_failed(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """互相依赖导致无法调度时，子任务标记 failed，meta 不得误标 completed。"""
+        sub1 = _make_subtask("sub-1", depends_on=["sub-2"])
+        sub2 = _make_subtask("sub-2", depends_on=["sub-1"])
+        confirmed = [sub1, sub2]
+
+        repo = temp_dir / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        task_dir = temp_dir / "tasks" / "t1"
+        task_dir.mkdir(parents=True)
+
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        meta = _default_meta()
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=meta,
+        )
+
+        # 没有任何子任务被执行
+        mock_run_subtask.assert_not_called()
+        # 未执行的子任务被标记 failed，meta 不得为 completed
+        assert meta["status"] == "failed"
+        assert len(meta["results"]) == 2
+        assert all(r["status"] == "failed" for r in meta["results"])
+        # 落盘的 meta.json 同样是 failed
+        saved = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        assert saved["status"] == "failed"

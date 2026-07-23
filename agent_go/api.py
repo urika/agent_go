@@ -294,7 +294,11 @@ def _cache_dir() -> Path:
 
 
 def get_cache_key(task: str, repo: Path) -> str:
-    """SHA256(task + project_files[0:100] + remote + branch)。"""
+    """SHA256(task + project_files[:2000] + remote + branch)。
+
+    注意：不包含 commit hash——否则仓库每次提交都会使缓存 key 变化，
+    导致活跃仓库中 Plan 缓存命中率趋近于零。
+    """
     project_files = analyze_project(repo)
     git_info = get_git_info(repo)
     key_parts = [
@@ -302,12 +306,14 @@ def get_cache_key(task: str, repo: Path) -> str:
         project_files[:2000] if project_files else "",
         git_info.get("remote", ""),
         git_info.get("branch", ""),
-        git_info.get("commit", ""),
     ]
     return hashlib.sha256("|".join(key_parts).encode()).hexdigest()
 
 
 def load_cached_plan(cache_key: str, task: str, config: dict[str, Any], logger: logging.Logger) -> Optional[dict[str, Any]]:
+    # cache.enabled=false 时读缓存同样禁用（此前只禁写、不禁读）
+    if not config.get("cache", {}).get("enabled", True):
+        return None
     cache_dir = _cache_dir()
     cache_file = cache_dir / cache_key[:2] / f"{cache_key}.json"
     if not cache_file.exists():

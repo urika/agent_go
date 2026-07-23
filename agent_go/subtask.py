@@ -7,6 +7,9 @@ from .config import log_event
 
 __all__: list[str] = []
 
+# claude 进程退出码常量：130 = SIGINT（视为检测到交互）
+EXIT_CODE_INTERACTION = 130
+
 def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger: logging.Logger, headless: bool = False) -> None:
     """将上游 worktree 的 tag 合并到当前 worktree。
     worktree 共享对象库，tag 在所有 worktree 间直接可见，无需 fetch。
@@ -47,8 +50,12 @@ def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger
             subprocess.run(["git", "merge", "--abort"],
                            cwd=str(dst_worktree), capture_output=True)
 
-def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None) -> subprocess.CompletedProcess:
-    """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。"""
+def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None, allowed_tools: Optional[list] = None) -> subprocess.CompletedProcess:
+    """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。
+
+    allowed_tools: Agent 类型声明的工具白名单（如 architect 的 Read/Grep/Glob）。
+    非空时通过 --allowedTools 强制约束；None/空列表表示不限制（developer 默认）。
+    """
     PFX = f"[{sub_id}]"
     if active_pids is None:
         active_pids = set()
@@ -60,21 +67,23 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         r"是否继续", r"请确认", r"请输入", r"等待输入", r"选择操作",
         r"\[Y/n\]", r"\[y/N\]", r"是/否", r"确认.*操作",
     ]
-    # 退出码含义：130 = SIGINT（被中断），其他非零 = 错误
-    EXIT_CODE_INTERACTION = 130
+    # 退出码常量已提升至模块级（EXIT_CODE_INTERACTION）
     IDLE_TIMEOUT = 600   # 10 分钟纯静默才 kill（思考阶段无任何事件）
     HEARTBEAT = 60       # 60s 无事件发心跳
 
     def _run_one(prompt: str, attempt: int) -> tuple[subprocess.Popen, list[str], bool]:
         """启动 claude -p (stream-json) 并实时解析事件。"""
-        proc = subprocess.Popen([
+        cmd = [
             "claude", "-p", prompt,
             "--permission-mode", "bypassPermissions",
             "--no-session-persistence",
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
-        ], env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        ]
+        if allowed_tools:
+            cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+        proc = subprocess.Popen(cmd, env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         if active_pids_lock:
             with active_pids_lock:
@@ -221,6 +230,8 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     MAX_ATTEMPTS = 2
 
     logger.info(f"{PFX} 无头模式: claude -p")
+    if allowed_tools:
+        logger.info(f"{PFX} 工具白名单: {','.join(allowed_tools)}")
     log_event(logger, "subtask_headless_start", {"id": sub_id})
 
     all_lines = []

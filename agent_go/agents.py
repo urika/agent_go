@@ -25,7 +25,6 @@ __all__ = ["load_agent_type", "list_agent_types"]
 logger = logging.getLogger(__name__)
 
 AGENT_GO_AGENTS_DIR = Path.home() / ".agent_go" / "agents"
-AGENT_GO_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # 内置 Agent 类型（无需配置文件）
 _BUILTIN_AGENTS = {
@@ -110,30 +109,34 @@ def load_agent_type(name: str, project_root: Optional[Path] = None) -> Optional[
 
 
 def list_agent_types() -> list[dict]:
-    """列出所有可用的 Agent 类型。"""
+    """列出所有可用的 Agent 类型（用户定义优先，与 load_agent_type 顺序一致）。"""
     result = []
     seen = set()
 
-    # 内置类型
-    for name, cfg in _BUILTIN_AGENTS.items():
-        result.append({"type": name, "description": cfg["description"], "source": "builtin"})
-        seen.add(name)
-
-    # 用户定义类型
+    # 用户定义类型（优先；同名覆盖内置时明确标注）
     if AGENT_GO_AGENTS_DIR.exists():
         for f in sorted(AGENT_GO_AGENTS_DIR.glob("*.json")):
             name = f.stem
-            if name not in seen:
-                try:
-                    data = json.loads(f.read_text(encoding="utf-8"))
-                    result.append({
-                        "type": name,
-                        "description": data.get("description", ""),
-                        "source": "user",
-                    })
-                    seen.add(name)
-                except json.JSONDecodeError as e:
-                    logger.debug("Invalid JSON in agent file %s: %s", f, e)
+            if name in seen:
+                continue
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                logger.debug("Invalid JSON in agent file %s: %s", f, e)
+                continue
+            overrides = name in _BUILTIN_AGENTS
+            result.append({
+                "type": name,
+                "description": data.get("description", ""),
+                "source": "user (overrides builtin)" if overrides else "user",
+            })
+            seen.add(name)
+
+    # 内置类型
+    for name, cfg in _BUILTIN_AGENTS.items():
+        if name not in seen:
+            result.append({"type": name, "description": cfg["description"], "source": "builtin"})
+            seen.add(name)
 
     return result
 

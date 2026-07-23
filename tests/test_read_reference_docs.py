@@ -60,3 +60,28 @@ class TestReadReferenceDocs:
         result = read_reference_docs(["a.md", "b.md"], temp_dir, logger)
         assert "file a" in result
         assert "file b" in result
+
+
+class TestReadReferenceDocsTraversal:
+    """路径穿越防护（回归 docs/ISSUES.md ISSUE-8）"""
+
+    def test_sibling_prefix_dir_rejected(self, temp_dir, logger):
+        """兄弟前缀目录不得绕过校验：repo=/tmp/x/proj 时 ../proj-secret 应被拒绝"""
+        repo = temp_dir / "proj"
+        repo.mkdir()
+        sibling = temp_dir / "proj-secret"
+        sibling.mkdir()
+        (sibling / "leak.md").write_text("secret-content", encoding="utf-8")
+
+        result = read_reference_docs(["../proj-secret/leak.md"], repo, logger)
+        assert result == ""
+        assert "secret-content" not in result
+
+    def test_repo_file_still_allowed(self, temp_dir, logger):
+        """is_relative_to 校验下 repo 内文件仍正常读取"""
+        repo = temp_dir / "proj"
+        repo.mkdir()
+        (repo / "ok.md").write_text("inside", encoding="utf-8")
+
+        result = read_reference_docs(["ok.md"], repo, logger)
+        assert "inside" in result
