@@ -2,12 +2,12 @@
 
 > 版本: v3.0  
 > 日期: 2026-05-27  
-> 关联: [PRD-项目评估体系设计.md](PRD-项目评估体系设计.md) | [REVIEW-数据架构设计.md](REVIEW-数据架构设计.md)
+> 关联: [../prd/PRD-项目评估体系设计](../prd/PRD-项目评估体系设计.md) | [review/data-architecture-review.md](review/data-architecture-review.md)
 
 **版本标注说明**:
 - ✅ `[v0.5]` — Phase1 数据采集 (metrics/timing/change_stats/merge/verify/retry/token)
 - ✅ `[v0.6]` — Phase2+3 eval全维度 + TUI + Plan缓存
-- ✅ `[v0.7]` — P2全部完成 (CI+review)
+- ✅ `[v0.9]` — P0+P1+P2 全部完成 (34 项功能) + NFR 规约 + 文档治理
 
 ---
 

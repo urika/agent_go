@@ -2,14 +2,14 @@
 
 > 版本: v3.0  
 > 日期: 2026-05-27  
-> 审查对象: [DATA-ARCHITECTURE-数据架构设计.md](DATA-ARCHITECTURE-数据架构设计.md) v2.2  
-> 关联: [DESIGN-REVIEW-概念与机制问题.md](DESIGN-REVIEW-概念与机制问题.md) | [PRD-智能Agent角色与Skill分配.md](PRD-智能Agent角色与Skill分配.md)
+> 审查对象: [../data-architecture.md](../data-architecture.md) v2.2  
+> 关联: [design-review.md](design-review.md) | [../../prd/PRD-智能Agent角色与Skill分配](../../prd/PRD-智能Agent角色与Skill分配.md)
 
 ---
 
 ## 一、审查概述
 
-对 `DATA-ARCHITECTURE-数据架构设计.md`（下称"架构文档"）进行了三层审查：
+对 `data-architecture.md`（下称"架构文档"）进行了三层审查：
 
 1. **数据结构 vs 代码实际**：文档描述的字段/存储路径是否与代码产出一致
 2. **ER 关系 vs 实际关联**：实体间关系是否反映真实的存储和引用机制

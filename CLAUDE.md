@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (17 modules, ~4330 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, and remote branch push.
+agent_go is a modular Python CLI tool (18 source files, ~4950 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, and remote branch push.
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -32,6 +32,12 @@ python3 agent_go.py status --watch
 python3 agent_go.py list
 python3 agent_go.py show <task-id>
 python3 agent_go.py clean
+
+# Dev: lint, type-check, and test
+pip install pytest pytest-mock ruff mypy
+ruff check agent_go/ --select=E,F,W --ignore=E501
+mypy agent_go/ --ignore-missing-imports
+pytest tests/ -q
 ```
 
 ## Architecture
@@ -63,22 +69,27 @@ cmd_run()
         └── final report
 ```
 
-## Key Modules (17 modules, ~4330 lines)
+## Key Modules
 
 | Module | Purpose |
 |--------|---------|
-| `cli.py` | CLI commands: run, resume, list, show, status, pr, config, clean |
-| `api.py` | LLM API: generate_plan, call_api, decompose_fallback |
+| `cli.py` | CLI commands: run, resume, list, show, status, pr, config, clean, cache |
+| `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
 | `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
 | `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify |
-| `pipeline.py` | Wave scheduler, concurrency, worktree/tag cleanup, remote push |
+| `pipeline.py` | Wave scheduler, concurrency, worktree/tag cleanup, remote push, SIGINT |
 | `subtask.py` | Claude -p headless runner, git merge upstream |
 | `git_utils.py` | Project analysis, worktree create/remove/prune, gc.auto control |
 | `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown) |
 | `agents.py` | Agent type system: developer/architect/reviewer/tester |
 | `role_skill_map.py` | Config-driven rule matching: keywords, file patterns, agent type |
 | `config.py` | Config loading, logging, API key resolution |
-| `utils.py` | Commit formatting, slugify, shell safety, version detection |
+| `console.py` | Unified output layer: quiet/verbose modes, table/data formatting |
+| `utils.py` | Commit formatting, slugify, shell safety, version detection, doc reading |
+| `metrics.py` | Data collection: timing, change stats, token counts, merge results |
+| `eval.py` | Quality/perf/cost/reliability/ux evaluation and reporting |
+| `tui.py` | Curses-based status dashboard (live task monitoring) |
+| `workflow_gen.py` | GitHub Actions CI workflow auto-generation |
 
 ## Key Design Decisions
 
@@ -91,12 +102,14 @@ cmd_run()
 - **Config**: `~/.agent_go/config.json` (auto-created). Shallow-merged with `DEFAULT_CONFIG`.
 - **API key**: `AGENT_GO_API_KEY` env var > `config.json` `api_key`.
 - **Logging**: Dual-format — INFO human-readable + DEBUG JSON events.
+- **Output abstraction**: `Console` class (quiet/verbose modes) is injected at CLI entry and shared via module-level default. All user-facing output goes through it — no bare `print()` calls.
 - **Sandbox**: Prefers `greywall`, falls back to native `claude`.
+- **CI**: `.github/workflows/test.yml` runs pytest + ruff (E,F,W) + mypy on push/PR to main. Config in `pyproject.toml`.
 
 ## Testing
 
 ```bash
-pytest tests/           # 163 tests (~4s)
+pytest tests/           # 639 tests (~14s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -105,8 +118,26 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 ## File Organization
 
 ```
-agent_go/           # 17 Python modules (~4330 lines)
-tests/              # 15 test files, 163 tests
-docs/design/        # Design docs, requirements, product roadmap
-docs/archive/       # Historical code review records
+agent_go/           # 18 package modules (~5000 lines)
+tests/              # 33 test files, 639 tests
+docs/
+├── README.md       # 文档索引
+├── architecture.md # 核心架构、关键设计决策、数据流
+├── prd.md          # 产品定位、功能优先级、NFR KPI
+├── spec.md         # 所有模块接口速查（浓缩版）
+├── ISSUES.md       # 已知 bug 和改进项
+└── archive/        # 历史文档（旧 PRD、旧 spec、设计审查，不再维护）
+pyproject.toml
+.github/workflows/  # CI: pytest + ruff + mypy
 ```
+
+## Documentation
+
+一人项目，文档从简。核心维护 [docs/](docs/) 下 4 个文件 + [CLAUDE.md](CLAUDE.md)。
+
+| 改了什么 | 更新哪个文档 |
+|----------|-------------|
+| 公共函数签名 | [spec.md](docs/spec.md) |
+| 架构/设计决策 | [architecture.md](docs/architecture.md) |
+| 产品方向/KPI | [prd.md](docs/prd.md) |
+| CLI/命令/约定 | 本文件 (CLAUDE.md) |

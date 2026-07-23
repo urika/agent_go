@@ -2,7 +2,7 @@
 
 > 基于 `agent_go` 当前代码（模块化架构，`agent_go/` 包）分析  
 > 日期: 2026-05-26  
-> 关联文档: [设计文档](agent_go-design.md), [工作流程](agent_go_workflow.md), [Worktree 机制笔记](git%20worktree机制笔记.md)
+> 关联文档: [架构设计](../design/architecture.md), [工作流程](../design/workflow.md)
 
 ---
 

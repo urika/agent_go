@@ -4,7 +4,7 @@
 > 日期: 2026-05-26  
 > 作者: Product  
 > 状态: ✅ 已实现 (v0.6 — SHA256 缓存键 + 24h TTL + cache 管理命令)  
-> 关联: [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) M2 | [REQUIREMENTS.md](REQUIREMENTS.md) #23
+> 关联: [../design/roadmap.md](../design/roadmap.md) M2 | [../design/requirements.md](../design/requirements.md) #23
 
 ---
 

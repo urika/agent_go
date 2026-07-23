@@ -4,7 +4,7 @@
 > 日期: 2026-05-26  
 > 作者: Product  
 > 状态: ✅ 已实现 (v0.6 — tui.py curses 多面板 + 13 tests)  
-> 关联: [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) S1
+> 关联: [../design/roadmap.md](../design/roadmap.md) S1
 
 ---
 
