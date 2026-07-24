@@ -44,6 +44,14 @@ DEFAULT_CONFIG = {
         "max_turns": 20,                # 单个 goal 循环最大 tool-call 轮数
         "timeout_seconds": 600,          # goal 循环全局超时（秒）
     },
+    "evaluator": {
+        "enabled": False,               # 默认关闭（向后兼容 + 成本可控）
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "base_url": "https://api.anthropic.com/v1/messages",
+        "api_key": "",                  # 空字符串 = 复用 AGENT_GO_API_KEY
+        "prompt_template": "default",   # 可扩展 prompt 模板名
+    },
     "fallback": {
         "local_model_url": "http://localhost:8000/v1/chat/completions",
         "local_model_name": "qwen",

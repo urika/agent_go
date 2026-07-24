@@ -1,5 +1,6 @@
 import os, subprocess, re, time, shlex, shutil, logging
 from pathlib import Path
+from typing import Optional, Any
 
 from .console import get_default_console
 from .config import log_event
@@ -8,6 +9,7 @@ from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
+from .evaluator import evaluate_semantic
 
 __all__ = ["run_subtask"]
 
@@ -260,6 +262,7 @@ def _build_repair_prompt(
     attempt: int,
     max_retries: int,
     history: list[dict],
+    semantic_feedback: Optional[dict] = None,
 ) -> str:
     """构建增强的修复提示词，注入完整失败上下文（Phase 1 验证循环）。
 
@@ -267,6 +270,7 @@ def _build_repair_prompt(
     - 失败命令及其 stdout/stderr 输出
     - 当前 git diff（让 Claude 看到自己改了什么）
     - 历史修复尝试摘要（避免重复同样错误）
+    - LLM 语义评估反馈（Phase 3）
     - 剩余机会提示
     """
     parts = [task_md, "", "---", ""]
@@ -277,6 +281,16 @@ def _build_repair_prompt(
     else:
         parts.append(f"## ⚠️ 验证失败 - 第 {attempt}/{max_retries} 次修复重试")
     parts.append("")
+
+    # LLM 语义评估反馈（Phase 3）
+    if semantic_feedback and not semantic_feedback.get("passed", True):
+        parts.append("### LLM 语义评估反馈")
+        parts.append(f"**评估结果:** 未通过")
+        if semantic_feedback.get("reason"):
+            parts.append(f"**原因:** {semantic_feedback['reason']}")
+        if semantic_feedback.get("suggestions"):
+            parts.append(f"**修复建议:** {semantic_feedback['suggestions']}")
+        parts.append("")
 
     # 失败命令及输出
     parts.append("### 失败命令及输出")
@@ -444,6 +458,20 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     verification_results = []
     verification_ms = 0
     verification_history: list[dict] = []
+
+    # Phase 3: 读取 LLM 语义评估配置
+    evaluator_cfg = {}
+    evaluator_enabled = False
+    _full_cfg: dict = {}
+    try:
+        from .config import load_config
+        _full_cfg = load_config()
+        evaluator_cfg = _full_cfg.get("evaluator", {})
+        evaluator_enabled = bool(evaluator_cfg.get("enabled", False))
+    except Exception:
+        pass
+
+    semantic_feedback: dict | None = None
     if verification and has_changes:
         cmds = [verification] if isinstance(verification, str) else verification
 
@@ -476,24 +504,43 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         cmd_output = f"exit_code={vr_entry['exit_code']}"
                     failed_outputs.append(cmd_output)
 
-            # 2. 全部通过 → 退出
+            # 2. shell 验证全部通过 → 可选 LLM 语义评估（Phase 3）
+            if all_pass and evaluator_enabled and headless:
+                logger.info("shell 验证通过，执行 LLM 语义评估...")
+                semantic_feedback = evaluate_semantic(
+                    subtask, worktree, verification,
+                    verification_history, _full_cfg, logger)
+                verification_results.append({
+                    "type": "semantic",
+                    "passed": semantic_feedback.get("passed", True),
+                    "reason": semantic_feedback.get("reason", "")[:200],
+                    "cost_usd": semantic_feedback.get("cost_usd", 0.0),
+                    "latency_ms": semantic_feedback.get("latency_ms", 0.0),
+                })
+                if not semantic_feedback.get("passed", True):
+                    logger.warning(f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')[:100]}")
+                    all_pass = False
+                    failed_cmds = ["<semantic_eval>"]
+                    failed_outputs = [f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')}"]
+
+            # 3. 全部通过 → 退出
             if all_pass:
                 verify_ok = True
                 logger.info(f"验证全部通过 (attempt={attempt_label})")
                 break
 
-            # 3. 交互模式：遇到失败即停止
+            # 4. 交互模式：遇到失败即停止
             if not headless:
                 verify_ok = False
                 break
 
-            # 4. 已达最大重试次数 → 退出
+            # 5. 已达最大重试次数 → 退出
             if retry_count >= max_retries:
                 verify_ok = False
                 logger.warning(f"验证失败，已达最大重试次数 ({max_retries})")
                 break
 
-            # 5. 构建修复 prompt 并执行修复
+            # 6. 构建修复 prompt 并执行修复
             retry_count += 1
             logger.info(f"验证失败，第 {retry_count}/{max_retries} 次修复重试")
 
@@ -505,7 +552,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 
             fix_prompt = _build_repair_prompt(
                 task_md, failed_cmds, failed_outputs,
-                git_diff, retry_count, max_retries, verification_history)
+                git_diff, retry_count, max_retries, verification_history,
+                semantic_feedback=semantic_feedback)
 
             _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
                           active_pids=active_pids, active_pids_lock=active_pids_lock,
@@ -526,6 +574,9 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 "failure_summary": failed_summary,
                 "fix_summary": f"已执行修复并重新验证",
             })
+
+            # 重置语义反馈，下次重新评估
+            semantic_feedback = None
 
         # 更新 summary（如有修复）
         if retry_count > 0 and has_changes:

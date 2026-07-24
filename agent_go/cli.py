@@ -51,6 +51,10 @@ def _build_parser():
                             help="验证失败后最大修复重试次数（默认 3）")
     run_parser.add_argument("--no-goal", action="store_true",
                             help="禁用 goal 指令注入（TASK.md 不追加 /goal）")
+    run_parser.add_argument("--semantic-eval", action="store_true",
+                            help="启用 LLM 语义评估（覆盖 config）")
+    run_parser.add_argument("--no-semantic-eval", action="store_true",
+                            help="禁用 LLM 语义评估")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -157,6 +161,8 @@ def cmd_run(args=None):
     no_cache = args.no_cache
     max_retries = args.max_retries
     no_goal = args.no_goal
+    semantic_eval = args.semantic_eval
+    no_semantic_eval = args.no_semantic_eval
     auto_yes = args.yes
     headless = auto_yes or args.headless
     parallel = args.parallel
@@ -182,6 +188,10 @@ def cmd_run(args=None):
         config.setdefault("verification", {})["max_retries"] = max_retries
     if no_goal:
         config.setdefault("goal", {})["enabled"] = False
+    if semantic_eval:
+        config.setdefault("evaluator", {})["enabled"] = True
+    if no_semantic_eval:
+        config.setdefault("evaluator", {})["enabled"] = False
 
     if auto_yes:
         config["behavior"]["auto_confirm_plan"] = True
