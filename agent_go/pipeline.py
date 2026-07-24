@@ -46,8 +46,15 @@ def _notify_complete(task_id: str, total: int, completed_ids: list, has_failed: 
 
 
 def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
-                  worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "") -> None:
-    """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。"""
+                  worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "",
+                  preserve_worktrees: Optional[bool] = None) -> None:
+    """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。
+
+    preserve_worktrees:
+      None  → 默认行为：保留 failed/blocked 的 worktree，其余清理
+      True  → 保留所有 worktree
+      False → 强制清理所有 worktree
+    """
     worktree_map = worktree_map or {}
     console = get_default_console()
     results_map = results_map or {}
@@ -146,7 +153,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         if actual_workers == 1:
             for st in wave:
                 upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock)
+                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock, metering_path=config.get("_metering_path", ""))
                 with meta_lock:
                     worktree_map[st["id"]] = task_dir / st["id"] / "work"
                     results_map[st["id"]] = result
@@ -164,7 +171,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                 futures = {}
                 for st in wave:
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids, active_pids_lock)
+                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids, active_pids_lock, metering_path=config.get("_metering_path", ""))
                     futures[fut] = st
                 for fut in as_completed(futures):
                     st = futures[fut]
@@ -230,21 +237,51 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         else:
             logger.warning(f"[remote] {push_errors} 个分支推送失败")
 
-    # ── Worktree 清理 ──
+    # ── Worktree 清理（跳过保留的 worktree） ──
+    preserved_ids: list[str] = []
     if (repo / ".git").exists():
         errors = 0
         for st in confirmed:
-            wt_path = task_dir / st["id"] / "work"
-            if wt_path.exists():
-                ok, err = _worktree_remove(repo, wt_path)
-                if ok:
-                    logger.info(f"[worktree] removed: {st['id']}")
-                else:
-                    errors += 1
-                    logger.warning(f"[worktree] 无法移除 {st['id']}: {err}")
+            r = results_map.get(st["id"])
+            sid = st["id"]
+            wt_path = task_dir / sid / "work"
+            if not wt_path.exists():
+                continue
+
+            # 判定是否保留此 worktree
+            should_preserve = False
+            if preserve_worktrees is True:
+                should_preserve = True
+            elif preserve_worktrees is None:
+                if r and r.get("status") in ("failed", "blocked"):
+                    should_preserve = True
+
+            if should_preserve:
+                preserved_ids.append(sid)
+                # 写入标记文件，供 agent_go inspect 识别
+                marker = task_dir / sid / ".preserved"
+                marker.write_text(json.dumps({
+                    "subtask_id": sid,
+                    "status": r.get("status", "unknown") if r else "unknown",
+                    "failure_reason": r.get("failure_reason", "") if r else "",
+                    "branch": f"agent_go/{meta.get('task_id', '')}/{sid}",
+                }, indent=2, ensure_ascii=False), encoding="utf-8")
+                logger.info(f"[worktree] 保留 {sid} 供人工审查 ({r.get('status', '?') if r else '?'})")
+                continue
+
+            ok, err = _worktree_remove(repo, wt_path)
+            if ok:
+                logger.info(f"[worktree] removed: {sid}")
+            else:
+                errors += 1
+                logger.warning(f"[worktree] 无法移除 {sid}: {err}")
+
         ok_prune, err_prune = _worktree_prune(repo)
         if not ok_prune:
             logger.warning(f"[worktree] prune 失败: {err_prune}")
+
+        if preserved_ids:
+            logger.info(f"[worktree] 共保留 {len(preserved_ids)} 个 worktree: {', '.join(preserved_ids)}")
         logger.info(f"[worktree] cleanup ({errors} errors)")
 
         # ── Tag 清理 ──
@@ -327,6 +364,22 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
 
     console.print(f"\n📁 {task_dir}")
     console.print(f"📝 {task_dir}/execution.log")
+
+    # ── 保留 worktree 提示 ──
+    if preserved_ids:
+        console.print("\n🔍 以下 worktree 已保留供人工审查:")
+        console.print("─" * 60)
+        for sid in preserved_ids:
+            r = results_map.get(sid, {})
+            icon = {"failed": "❌", "blocked": "🔗"}.get(r.get("status", ""), "❓")
+            wt_path = task_dir / sid / "work"
+            branch = f"agent_go/{meta.get('task_id', '')}/{sid}"
+            console.print(f"  {icon} {sid}: {r.get('failure_reason', '?')}")
+            console.print(f"     📁 {wt_path}")
+            console.print(f"     🔗 git branch: {branch}")
+        console.print("─" * 60)
+        console.print("  使用 agent_go inspect <task-id> 查看详情")
+        console.print(f"  或直接 cd 到对应目录查看")
 
     # ── 任务完成通知（M1） ──
     _notify_complete(meta.get("task_id", ""), total, completed_ids, has_failed, config)

@@ -14,6 +14,8 @@ cmd_run(repo, task)
   ├── get_git_info()             → remote, branch, commit
   ├── generate_plan()            → LLM 返回结构化 JSON (plan)
   │     ├── 缓存: SHA256(task+repo) → 24h TTL
+  │     ├── 路由: router.enabled 时按 planner 角色走 primary/fallback (降级留痕)
+  │     ├── 计量: 每次 API 调用写 metering.jsonl (role/tokens/cost/latency)
   │     └── 降级: 外部API → 本地模型 → DECOMPOSE_RULES匹配 → 单任务兜底
   ├── confirm_plan()             → Y/S/D/E/R/N (--yes 跳过)
   ├── plan_to_subtasks()         → plan.steps → subtasks + 角色-Skill匹配
@@ -29,7 +31,8 @@ cmd_run(repo, task)
   │     │     ├── git commit + tag ({task_id}/{sub_id})
   │     │     └── 失败自动重试 (max 2次)
   │     ├── 远程推送 (--remote)
-  │     ├── 清理 worktree/tag + 恢复 gc.auto
+  │     ├── 清理 worktree/tag + 恢复 gc.auto (failed/blocked 的 worktree 保留待审, agent_go inspect 查看)
+  │     ├── 完成通知 (_notify_complete)
   │     └── 最终报告 + meta.json
   └── cmd_pr()                    → 生成 PR 描述
 ```
@@ -68,24 +71,24 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
 ├── cache/plans/<sha256>.json ← Plan 缓存 (24h TTL)
 ├── verification_audit.jsonl ← 被拒验证命令的审计日志
 └── task-<id>/
-    ├── meta.json            ← 任务元数据 + results 数组
+    ├── meta.json            ← 任务元数据 + results 数组 (含 failure_reason)
     ├── execution.log        ← 双格式: INFO人类可读 + DEBUG结构化JSON
+    ├── metering.jsonl       ← 结构化计量: 每 API 调用一条 (role/tokens/cost/latency/result)
     └── sub-<n>/
-        ├── work/            ← git worktree (执行后清理)
+        ├── work/            ← git worktree (执行后清理; failed/blocked 保留)
+        ├── .preserved       ← 保留标记 (subtask_id/status/failure_reason/branch)
         └── result.json      ← 单子任务结果
 ```
 
 ## 测试
 
 ```bash
-pytest tests/ -q           # 639 tests, ~14s
+pytest tests/ -q           # 694 tests, ~16s
 ```
 
 测试策略：mock 所有外部依赖 (git, claude, API)，验证逻辑正确性。NFR 专项测试在 `test_nfr_*.py`。
 
 ## 已知问题速查
 
-- `pipeline.py`: 依赖循环 break 后 meta 可能误标 `completed`
-- `api.py`: cache key 含 commit hash 导致命中率 ≈0%（单行 fix 待做）
-- `role_skill_map.py`: 全局规则文件路径函数是死代码
-- 详见 [ISSUES.md](ISSUES.md)
+- 2026-07-23 的 14 项已知问题（含下方原列的 3 项）均已修复，详见 [ISSUES.md](ISSUES.md)
+- 当前无未修复的阻塞性问题

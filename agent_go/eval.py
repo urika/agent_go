@@ -305,6 +305,7 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     total_prompt = 0
     total_completion = 0
     by_model = {}
+    by_role = {}
     errors = 0
     cache_hits = 0
     cache_checks = 0
@@ -332,6 +333,11 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
                 by_model[model]["calls"] += 1
                 by_model[model]["prompt"] += p
                 by_model[model]["completion"] += c
+                role = ev.get("role", "unknown")
+                if role not in by_role:
+                    by_role[role] = {"calls": 0, "cost_usd": 0.0}
+                by_role[role]["calls"] += 1
+                by_role[role]["cost_usd"] += ev.get("cost_usd", 0.0) or 0.0
                 if ev.get("result") in ("failed", "quality_fail"):
                     errors += 1
 
@@ -386,6 +392,7 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
         "total_calls": total_calls, "total_prompt_tokens": total_prompt, "total_completion_tokens": total_completion,
         "estimated_cost_usd": cost,
         "by_model": model_costs,
+        "by_role": {r: {"calls": v["calls"], "cost_usd": round(v["cost_usd"], 4)} for r, v in sorted(by_role.items())},
         "errors": errors, "cache_hits": cache_hits, "cache_checks": cache_checks,
         "cache_hit_rate": round(cache_hits / cache_checks * 100) if cache_checks else 0,
         "avg_cost_per_task": round(cost / len(tasks), 4) if tasks else 0,
@@ -630,6 +637,10 @@ def _print_cost_report(c: dict[str, Any]) -> None:
     if c["by_model"]:
         for model, cost in c["by_model"].items():
             console.print(f"    {model}:  ${cost}")
+    if c.get("by_role"):
+        console.print(f"  按角色:")
+        for role, v in c["by_role"].items():
+            console.print(f"    {role}:  {v['calls']} 次, ${v['cost_usd']}")
     console.print(f"  API 错误:            {c['errors']} 次")
     console.print(f"  缓存命中:            {c['cache_hits']}/{c['cache_checks']} ({c['cache_hit_rate']}%)")
     console.print(f"  每任务成本:          ${c['avg_cost_per_task']}")

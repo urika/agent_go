@@ -523,6 +523,41 @@ class TestGeneratePlan:
                 assert "extra info" in user_content
                 assert "Docs" in user_content
 
+    def test_router_enabled_uses_config_task_id(self, logger):
+        """router.enabled=true 时走 call_with_role，task_id 取自 config（回归：api.py 曾引用未定义的 task_id 变量导致 NameError）"""
+        from agent_go.api import generate_plan
+        config = {
+            "plan_api": {"api_key": "sk-test", "provider": "anthropic",
+                          "base_url": "https://api.anthropic.com/v1/messages",
+                          "model": "test", "max_tokens": 100, "temperature": 0},
+            "cache": {"enabled": False},
+            "router": {"enabled": True},
+            "_task_id": "task-xyz",
+        }
+        from types import SimpleNamespace
+        fake_route = SimpleNamespace(
+            role="planner",
+            primary=SimpleNamespace(provider="anthropic", model="test"),
+        )
+
+        with patch("agent_go.api.get_api_key", return_value="sk-test"):
+            with patch("agent_go.api.resolve_provider", return_value=fake_route):
+                with patch("agent_go.api.call_with_role") as mock_route_call:
+                    mock_route_call.return_value = ('{"overview": "routed", "steps": []}', {"role": "planner"})
+                    with patch("agent_go.api.analyze_project", return_value=""):
+                        with patch("agent_go.api.get_git_info", return_value={
+                            "remote": "", "branch": "", "commit": ""
+                        }):
+                            with patch("agent_go.api.get_resource_map", return_value={
+                                "directories": [], "key_files": []
+                            }):
+                                with patch("agent_go.api.list_skills", return_value=[]):
+                                    with patch("agent_go.api.load_role_skill_map", return_value={}):
+                                        result = generate_plan("task", Path("/tmp"), config, logger, no_cache=True)
+
+        assert result["overview"] == "routed"
+        assert mock_route_call.call_args.kwargs["task_id"] == "task-xyz"
+
 
 class TestCacheEnabledRead:
     """cache.enabled 对读取路径的约束（回归 docs/ISSUES.md ISSUE-10）"""

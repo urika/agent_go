@@ -247,7 +247,7 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
     if route:
         api_key = get_api_key(config)
         logger.info(f"[PLAN] 路由: {route.role} → {route.primary.provider}:{route.primary.model}")
-        content, metering = call_with_role(route, messages, api_key, logger, task_id=task_id, metering_path=config.get("_metering_path"))
+        content, metering = call_with_role(route, messages, api_key, logger, task_id=config.get("_task_id", ""), metering_path=config.get("_metering_path"))
         log_event(logger, "api_call", metering)
     else:
         content = call_api(config, messages, logger)

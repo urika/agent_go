@@ -266,6 +266,25 @@ class TestAnalyzeCost:
         assert result["estimated_cost_usd"] == 0
         assert result["cache_hit_rate"] == 0
 
+    def test_by_role_aggregation(self, tmp_path):
+        """metering.jsonl 的 role 字段被聚合为按角色成本拆分"""
+        task_dir = tmp_path / "task-001"
+        task_dir.mkdir(parents=True)
+        events = [
+            {"role": "planner", "actual_provider": "anthropic", "actual_model": "claude-sonnet-4",
+             "prompt_tokens": 1000, "completion_tokens": 500, "cost_usd": 0.01, "result": "success"},
+            {"role": "worker", "actual_provider": "claude-code", "actual_model": "claude-code-executor",
+             "prompt_tokens": 5000, "completion_tokens": 2000, "cost_usd": 0.05, "result": "success"},
+            {"role": "worker", "actual_provider": "claude-code", "actual_model": "claude-code-executor",
+             "prompt_tokens": 3000, "completion_tokens": 1000, "cost_usd": 0.03, "result": "success"},
+        ]
+        (task_dir / "metering.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in events), encoding="utf-8")
+        result = analyze_cost(tmp_path)
+        assert result["total_calls"] == 3
+        assert result["by_role"]["planner"] == {"calls": 1, "cost_usd": 0.01}
+        assert result["by_role"]["worker"] == {"calls": 2, "cost_usd": 0.08}
+
 
 class TestAnalyzeReliability:
     """可靠性分析"""

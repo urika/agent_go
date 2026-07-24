@@ -85,6 +85,9 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     IDLE_TIMEOUT = 600   # 10 分钟纯静默才 kill（思考阶段无任何事件）
     HEARTBEAT = 60       # 60s 无事件发心跳
 
+    # Phase 1 配套：累计所有 attempt 的 Claude usage（result 事件提取）
+    claude_usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "duration_ms": 0, "num_turns": 0}
+
     def _run_one(prompt: str, attempt: int) -> tuple[subprocess.Popen, list[str], bool]:
         """启动 claude -p (stream-json) 并实时解析事件。"""
         cmd = [
@@ -191,10 +194,23 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                         elif block.get("type") == "tool_use":
                             logger.debug(f"{PFX} [tool_use] {block.get('name', '?')}")
 
-            # result: 最终结果
+            # result: 最终结果（含 usage + cost）
             elif ev_type == "result":
                 subtype = event.get("subtype", "")
                 logger.info(f"{PFX} [result] {subtype}")
+                logger.debug(f"{PFX} [result_event] keys={list(event.keys())[:20]}")
+                logger.debug(f"{PFX} [result_usage] total_cost_usd={event.get('total_cost_usd')} usage={event.get('usage')}")
+                # Phase 1 配套：提取 Claude 执行的 token/cost，写入 metering
+                usage = event.get("usage", {}) or {}
+                claude_cost = event.get("total_cost_usd")
+                pt = usage.get("input_tokens") or usage.get("prompt_tokens", 0) or 0
+                ct = usage.get("output_tokens") or usage.get("completion_tokens", 0) or 0
+                if pt or ct or claude_cost:
+                    claude_usage_total["prompt_tokens"] += pt
+                    claude_usage_total["completion_tokens"] += ct
+                    claude_usage_total["cost_usd"] += claude_cost if claude_cost is not None else 0.0
+                    claude_usage_total["duration_ms"] += event.get("duration_ms", 0) or 0
+                    claude_usage_total["num_turns"] += event.get("num_turns", 0) or 0
 
             # user: 工具结果
             elif ev_type == "user":
@@ -302,6 +318,27 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         "attempts": attempt + 1,
         "output_lines": len(all_lines),
     })
+
+    # Phase 1 配套：记录 Claude 执行的 token/cost 到 metering.jsonl
+    metering_path = env.get("AGENT_GO_METERING_PATH", "")
+    if metering_path and (claude_usage_total["prompt_tokens"] or claude_usage_total["completion_tokens"] or claude_usage_total["cost_usd"]):
+        from .config import meter_event
+        meter_event(metering_path, {
+            "role": "worker",
+            "virtual_model": "agentgo-worker",
+            "actual_provider": "claude-code",
+            "actual_model": "claude-code-executor",
+            "prompt_tokens": claude_usage_total["prompt_tokens"],
+            "completion_tokens": claude_usage_total["completion_tokens"],
+            "cost_usd": round(claude_usage_total["cost_usd"], 6),
+            "latency_ms": claude_usage_total["duration_ms"],
+            "result": "success" if final_rc == 0 else "failed",
+            "fallback_reason": "",
+            "task_id": env.get("AGENT_GO_TASK_ID", ""),
+            "subtask_id": sub_id,
+            "num_turns": claude_usage_total["num_turns"],
+        })
+        logger.info(f"{PFX} Claude 执行计量: {claude_usage_total['prompt_tokens']}+{claude_usage_total['completion_tokens']} tokens, ${claude_usage_total['cost_usd']:.4f}")
 
     return subprocess.CompletedProcess(
         [], final_rc,

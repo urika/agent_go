@@ -108,6 +108,42 @@ class TestRunSubtask:
         call_args = mock_headless.call_args
         assert "基础任务" in call_args[0][0], "TASK.md 应包含子任务标题"
 
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_metering_path_propagated_to_env(self, mock_wt_create, mock_subprocess, mock_headless,
+                                             mock_load_agent, temp_repo, task_dir, fast_logger,
+                                             basic_subtask):
+        """metering_path 参数应通过 AGENT_GO_METERING_PATH 环境变量传给 _run_headless"""
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+
+        run_subtask("test-task", basic_subtask, temp_repo, task_dir,
+                    fast_logger, headless=True, metering_path="/tmp/x/metering.jsonl")
+
+        env = mock_headless.call_args[0][2]
+        assert env["AGENT_GO_METERING_PATH"] == "/tmp/x/metering.jsonl"
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_no_metering_path_no_env(self, mock_wt_create, mock_subprocess, mock_headless,
+                                     mock_load_agent, temp_repo, task_dir, fast_logger,
+                                     basic_subtask):
+        """未传 metering_path 时不应设置 AGENT_GO_METERING_PATH"""
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+
+        run_subtask("test-task", basic_subtask, temp_repo, task_dir,
+                    fast_logger, headless=True)
+
+        env = mock_headless.call_args[0][2]
+        assert "AGENT_GO_METERING_PATH" not in env
+
     @patch("agent_go.executor.load_agent_type")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")

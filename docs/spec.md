@@ -17,7 +17,11 @@ cmd_clean()              → 清理任务目录和 tags
 cmd_skills()             → 列出已安装 Skill
 cmd_agents()             → 列出 Agent 类型
 cmd_cache(args)          → Plan 缓存管理
+cmd_inspect(args)        → 查看保留的 worktree 现场 (failed/blocked)
+cmd_router(args)         → 角色感知模型路由配置
 ```
+`run`/`resume` 支持 `--preserve-worktrees`（保留全部）/ `--no-preserve`（强制清理），
+默认仅保留 failed/blocked 子任务的 worktree 供人工审查。
 
 ## api.py — LLM Plan 生成 + 缓存 (423 行)
 
@@ -30,30 +34,35 @@ load_cached_plan(key, task, config, logger)     → 读缓存
 save_cached_plan(key, plan, task, repo, config) → 写缓存
 ```
 
-## pipeline.py — 拓扑波次调度器 (216 行)
+## pipeline.py — 拓扑波次调度器 (386 行)
 
 ```
-_run_pipeline(confirmed, repo, task_dir, ...)   → 核心调度 (内部，cli.py 调用)
+_run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核心调度 (内部，cli.py 调用)
   ── Wave 拓扑排序 + ThreadPoolExecutor
   ── SIGINT → _interrupted → meta["status"]="paused" → sys.exit(0)
   ── 远程推送、worktree/tag 清理、gc.auto 恢复
+  ── preserve_worktrees: None=保留 failed/blocked，True=全保留，False=全清理
+_notify_complete(task_id, total, completed_ids, has_failed) → 任务完成通知 (M1)
 ```
 
-## executor.py — 子任务执行器 (496 行)
+## executor.py — 子任务执行器 (875 行)
 
 ```
-run_subtask(task_id, subtask, repo, task_dir, ...) → 单子任务端到端
+run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="") → 单子任务端到端
   ── _create_worktree() → _git_merge_upstream() → _build_task_md()
   ── _run_claude() → _verify_changes() → commit + tag
+  ── metering_path → AGENT_GO_METERING_PATH env → worker 计量写入
+  ── 失败结果含 failure_reason（验证命令 + exit code + stderr 尾部，M2）
 _build_sandbox_env()        → 净化环境变量 (敏感词剔除 + AGENT_GO_API_KEY 强制删)
 _apply_resource_limits()    → setrlimit (失败不阻塞)
 ```
 
-## subtask.py — Claude 调用原语 (273 行)
+## subtask.py — Claude 调用原语 (347 行)
 
 ```
 _run_headless(task_md, worktree, env, logger, ...) → claude -p 无头模式
   ── 交互检测 (正则 + 退出码 130) → 最多 2 次重试
+  ── stream-json result 事件提取 usage/cost → 写 metering.jsonl (worker 角色)
 _git_merge_upstream(src, dst, tag, logger, ...)   → 上游产物 merge
 ```
 
@@ -72,6 +81,7 @@ load_config()                → ~/.agent_go/config.json，浅合并 DEFAULT_CON
 get_api_key(config)          → env AGENT_GO_API_KEY > config.api_key
 setup_logger(task_id, dir)   → 双格式: INFO人类 + DEBUG JSON
 log_event(logger, event, d)  → DEBUG JSON 事件
+meter_event(path, event)     → 结构化计量事件写 metering.jsonl (role/cost/tokens)
 safe_input(prompt)           → input() 包装，EOF → ""
 ```
 
@@ -133,13 +143,29 @@ load_role_skill_map(project_root)    → 加载匹配规则
 apply_rules(step, role_map, skills)  → 注入 required/recommended skills + agent_type
 ```
 
-## metrics.py — 数据采集 (76 行)
+## metrics.py — 数据采集 (183 行)
 
 ```
 collect_timing(wt, merge, claude, verify, commit) → 5 阶段 ms 采集
 collect_change_stats(worktree)                    → git diff --numstat
 collect_merge_result(upstream, success, files)    → merge 成功/冲突
 extract_usage(api_response, provider, model)      → token 用量
+estimate_cost(provider, model, pt, ct)            → 按定价表估算美元成本
+aggregate_metering(metering_path)                 → 汇总 metering.jsonl (总量 + by_role)
+```
+
+## router.py — 角色感知模型路由
+
+```
+resolve_provider(agent_type, config)  → agent_type → planner/worker/reviewer 路由 (router.enabled 控制)
+call_with_role(route, messages, api_key, logger, ...) → primary → fallback 降级，含熔断器
+                                      → 返回 (content, metering)，降级留痕 fallback_reason
+```
+
+## evaluator.py — 验证评估
+
+```
+LLM 语义评估 + 失败原因摘要 (failure_summary)，供修复循环与 eval 指标使用
 ```
 
 ## eval.py — 离线评估 (606 行)
@@ -147,8 +173,8 @@ extract_usage(api_response, provider, model)      → token 用量
 ```
 analyze_quality(meta)           → Q1-Q8 质量指标 + 综合评分
 analyze_performance(meta, log)  → P1-P6 性能指标
-analyze_cost(tasks_dir)         → API 费用 + per-model 拆分
-analyze_reliability(tasks_dir)  → 任务完成率 + sandbox 分布
+analyze_cost(tasks_dir)         → API 费用 + per-model + per-role 拆分 + $/pass rate
+analyze_reliability(tasks_dir)  → 任务完成率 + sandbox 分布 + 阻断率
 analyze_ux(tasks_dir)           → 文档使用率 + Agent/Skill 分布
 aggregate_quality/perf(dir)     → 跨任务聚合
 cmd_eval(args)                  → eval CLI 入口

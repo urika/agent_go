@@ -135,11 +135,12 @@ result(success|fallback|quality_fail), fallback_reason
 ### 落地路径
 
 ```
-Phase 1（2-3 天）:
+Phase 1（3-4 天）:
   VerificationAgent + RepairAgent 基础循环
   → 替代现有 _verify_changes() 单次重试
   → pipeline 依赖阻断（blocked 状态）
-  → 配置 + CLI 参数
+  → 保留失败 worktree 供人工审查（agent_go inspect）
+  → 配置 + CLI 参数（--preserve-worktrees / --no-preserve）
 
 Phase 2（1-2 天）:
   GoalInjector — worktree 内注入 /goal + Stop Hook

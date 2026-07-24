@@ -55,6 +55,10 @@ def _build_parser():
                             help="启用 LLM 语义评估（覆盖 config）")
     run_parser.add_argument("--no-semantic-eval", action="store_true",
                             help="禁用 LLM 语义评估")
+    run_parser.add_argument("--preserve-worktrees", action="store_true", dest="preserve_worktrees",
+                            help="保留全部 worktree 不清除（默认仅保留 failed/blocked）")
+    run_parser.add_argument("--no-preserve", action="store_true", dest="no_preserve",
+                            help="强制清理所有 worktree，包括失败/阻断的")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -66,6 +70,10 @@ def _build_parser():
     resume_parser.add_argument("--remote", help="Push worktree branches to remote URL")
     resume_parser.add_argument("--max-retries", type=int, default=None,
                                help="验证失败后最大修复重试次数（默认 3）")
+    resume_parser.add_argument("--preserve-worktrees", action="store_true", dest="preserve_worktrees",
+                               help="保留全部 worktree 不清除")
+    resume_parser.add_argument("--no-preserve", action="store_true", dest="no_preserve",
+                               help="强制清理所有 worktree")
 
     # list 子命令
     subparsers.add_parser("list", help="List all historical tasks")
@@ -122,6 +130,12 @@ def _build_parser():
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
 
+    # inspect 子命令
+    inspect_parser = subparsers.add_parser("inspect", help="查看保留的 worktree 现场")
+    inspect_parser.add_argument("task_id", help="Task ID to inspect")
+    inspect_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    inspect_parser.add_argument("--all", action="store_true", help="Show all subtasks, not just preserved ones")
+
     # router 子命令
     router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")
     router_sub = router_parser.add_subparsers(dest="router_subcommand", help="Router operation")
@@ -163,6 +177,9 @@ def cmd_run(args=None):
     no_goal = args.no_goal
     semantic_eval = args.semantic_eval
     no_semantic_eval = args.no_semantic_eval
+    preserve_worktrees = args.preserve_worktrees or None
+    if args.no_preserve:
+        preserve_worktrees = False
     auto_yes = args.yes
     headless = auto_yes or args.headless
     parallel = args.parallel
@@ -340,7 +357,8 @@ def cmd_run(args=None):
     }
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta, remote_url=remote_url)
+    _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta, remote_url=remote_url,
+                  preserve_worktrees=preserve_worktrees)
 
 def cmd_resume(args=None):
     """恢复被中断的任务。"""
@@ -350,6 +368,9 @@ def cmd_resume(args=None):
         headless = auto_yes or getattr(args, 'headless', False)
         parallel = getattr(args, 'parallel', 1)
         remote_url = getattr(args, 'remote', "")
+        preserve_worktrees = getattr(args, 'preserve_worktrees', False) or None
+        if getattr(args, 'no_preserve', False):
+            preserve_worktrees = False
     elif len(sys.argv) < 3:
         print("Usage: agent_go resume <task-id> [--yes] [--headless] [--parallel N] [--remote <url>]")
         sys.exit(1)
@@ -391,6 +412,9 @@ def cmd_resume(args=None):
     repo = Path(meta["repo"])
     logger = setup_logger(task_id, task_dir)
     config = load_config()
+    # 与 cmd_run 一致：注入计量路径与任务 ID，否则 resume 后 planner/worker 计量丢失
+    config["_metering_path"] = str(task_dir / "metering.jsonl")
+    config["_task_id"] = task_id
 
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv
@@ -410,6 +434,14 @@ def cmd_resume(args=None):
             remote_url = sys.argv[ri + 1]
         except (IndexError, ValueError):
             logger.debug("Invalid --remote flag value, ignoring")
+    # 如果从 sys.argv 解析（非 args 模式），解析 preserve 标志
+    if not (args and hasattr(args, 'task_id')):
+        preserve_worktrees = "--preserve-worktrees" in sys.argv
+        if "--no-preserve" in sys.argv:
+            preserve_worktrees = False
+        else:
+            preserve_worktrees = preserve_worktrees or None
+
     issue_ref = meta.get("issue", "")
 
     if auto_yes:
@@ -429,7 +461,110 @@ def cmd_resume(args=None):
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
-                  worktree_map, results_map, completed_ids, remote_url=remote_url)
+                  worktree_map, results_map, completed_ids, remote_url=remote_url,
+                  preserve_worktrees=preserve_worktrees)
+
+def cmd_inspect(args) -> None:
+    """查看保留的 worktree 现场。"""
+    task_id = args.task_id
+    as_json = getattr(args, 'json', False)
+    show_all = getattr(args, 'all', False)
+    task_dir = AGENT_GO_DIR / task_id
+    if not task_dir.exists():
+        print(f"任务不存在: {task_id}")
+        return
+
+    meta_path = task_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    subtasks = meta.get("subtasks", [])
+
+    entries = []
+    for st in subtasks:
+        sid = st["id"]
+        sub_dir = task_dir / sid
+        wt_path = sub_dir / "work"
+        result_file = sub_dir / "result.json"
+        preserved_file = sub_dir / ".preserved"
+        task_file = sub_dir / "TASK.md"
+
+        # 读取 result
+        result = {}
+        if result_file.exists():
+            try:
+                result = json.loads(result_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        status = result.get("status", "unknown")
+        worktree_exists = wt_path.exists() and (wt_path / ".git").exists()
+        is_preserved = preserved_file.exists()
+
+        # 过滤：默认只显示保留的，--all 显示全部
+        if not show_all and not is_preserved and status not in ("failed", "blocked"):
+            continue
+        if not show_all and not is_preserved and not worktree_exists:
+            continue
+
+        preserved_data = {}
+        if is_preserved:
+            try:
+                preserved_data = json.loads(preserved_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        branch = preserved_data.get("branch", f"agent_go/{task_id}/{sid}")
+        failure_reason = result.get("failure_reason", preserved_data.get("failure_reason", ""))
+        summary = result.get("summary", "")
+        verify_ok = result.get("verify_ok", None)
+
+        entries.append({
+            "id": sid,
+            "title": st.get("title", ""),
+            "status": status,
+            "worktree_exists": worktree_exists,
+            "is_preserved": is_preserved,
+            "worktree_path": str(wt_path) if worktree_exists else "",
+            "branch": branch,
+            "failure_reason": failure_reason,
+            "summary": summary,
+            "verify_ok": verify_ok,
+            "has_task_md": task_file.exists(),
+        })
+
+    if as_json:
+        import json as _json
+        print(_json.dumps({"task_id": task_id, "entries": entries}, indent=2, ensure_ascii=False))
+        return
+
+    if not entries:
+        print(f"任务 {task_id} 中没有保留的 worktree（--all 可查看全部）")
+        return
+
+    print(f"\n🔍 保留现场: {task_id}")
+    print(f"📁 任务目录: {task_dir}")
+    print("─" * 70)
+    for e in entries:
+        icon_map = {"failed": "❌", "blocked": "🔗", "completed": "✅", "no_changes": "⏭️", "running": "🔄"}
+        icon = icon_map.get(e["status"], "❓")
+        preserved_tag = " [保留]" if e["is_preserved"] else ""
+        print(f"\n{icon} {e['id']}{preserved_tag}: {e['title']}")
+        print(f"   状态: {e['status']}")
+        if e["failure_reason"]:
+            print(f"   原因: {e['failure_reason']}")
+        if e["summary"]:
+            print(f"   摘要: {e['summary']}")
+        if e["verify_ok"] is not None:
+            print(f"   验证: {'通过' if e['verify_ok'] else '失败'}")
+        if e["worktree_exists"]:
+            print(f"   📁 {e['worktree_path']}")
+            print(f"   🔗 git branch: {e['branch']}")
+            if e["has_task_md"]:
+                print(f"   📝 TASK.md | result.json")
+        else:
+            print(f"   (worktree 不存在 — 已清理或未创建)")
+    print("─" * 70)
+    print(f"提示: cd 到 worktree 路径查看完整文件状态")
+
 
 def cmd_list() -> None:
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
@@ -760,7 +895,9 @@ def _cmd_status_text(args=None):
         created = meta.get("created", "")
         if created:
             try:
-                start = datetime.strptime(created, "%Y%m%d-%H%M%S")
+                # created 格式为 "20260725-030125-545"（带毫秒后缀），剥离后解析
+                created_clean = created.rsplit("-", 1)[0] if created.count("-") == 2 else created
+                start = datetime.strptime(created_clean, "%Y%m%d-%H%M%S")
                 # 运行中=实时，已完成=冻结在最后日志时间
                 if status == "running":
                     end = datetime.now()
@@ -1065,6 +1202,8 @@ def main() -> None:
             cmd_eval(args)
         elif args.command == "router":
             cmd_router(args)
+        elif args.command == "inspect":
+            cmd_inspect(args)
     except KeyboardInterrupt:
         print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)

@@ -717,7 +717,7 @@ def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verif
     logger.info(f"上下文已写入: {line_count} 行")
 
 
-def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None):
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path=""):
     sub_id = subtask["id"]
     console = get_default_console()
     sub_dir = task_dir / sub_id
@@ -777,6 +777,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     env = os.environ.copy()
     loaded_skill_names = [sn for sn in skill_names if sn not in unresolved_skills]
     env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree), "AGENT_GO_SKILLS": ",".join(loaded_skill_names)})
+    # Phase 1 配套：把计量路径传给 _run_headless，让它记录 Claude 执行成本。
+    # 注意：_metering_path 是 cmd_run/cmd_resume 运行时注入 config 的，磁盘上的
+    # config.json 没有此键，必须用参数传入，不能 load_config() 重读。
+    if metering_path:
+        env["AGENT_GO_METERING_PATH"] = str(metering_path)
 
     # 4. Agent type configuration
     agent_type_name = subtask.get("agent_type", "developer")

@@ -62,7 +62,9 @@ def _get_task_status(task_dir: Path) -> Optional[dict[str, Any]]:
     created = meta.get("created", "")
     if created:
         try:
-            start = datetime.strptime(created, "%Y%m%d-%H%M%S")
+            # created 格式为 "20260725-030125-545"（带毫秒后缀），剥离后解析
+            created_clean = created.rsplit("-", 1)[0] if created.count("-") == 2 else created
+            start = datetime.strptime(created_clean, "%Y%m%d-%H%M%S")
             end = datetime.now() if status == "running" else datetime.fromtimestamp(log_path.stat().st_mtime) if log_path.exists() else datetime.now()
             delta = end - start
             elapsed = f"{int(delta.total_seconds() // 60)}m{int(delta.total_seconds() % 60)}s"

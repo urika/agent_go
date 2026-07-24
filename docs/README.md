@@ -16,4 +16,5 @@
 | 文件 | 说明 |
 |------|------|
 | [ISSUES.md](ISSUES.md) | 已知 bug 和改进项清单 |
+| [roadmap.md](roadmap.md) | 差距分析落地的迭代排期（Q3/Q4 2026，对齐 prd.md KPI） |
 | [archive/](archive/) | 历史文档：旧 PRD、旧 spec、设计审查，不再维护 |

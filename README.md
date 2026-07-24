@@ -1,7 +1,7 @@
 # agent_go
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-163%20passed-green)](tests/)
+[![Tests](https://img.shields.io/badge/tests-694%20passed-green)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stdlib Only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)]()
 
@@ -89,12 +89,14 @@ agent_go/
 ├── skills.py            # Skill loading, discovery, rendering
 ├── agents.py            # Agent type definitions
 ├── role_skill_map.py    # Config-driven role->skill matching rules
-├── metrics.py           # Data collection (timing/change_stats/token)
+├── router.py            # Role-aware model routing (planner/worker/reviewer)
+├── metrics.py           # Data collection (timing/change_stats/token/metering)
 ├── eval.py              # Quality/perf/cost/reliability/ux analysis
+├── evaluator.py         # Verification evaluation + failure summary
 ├── tui.py               # Curses status dashboard
 ├── workflow_gen.py      # CI workflow auto-generation
 agent_go.py               # Entry-point wrapper
-tests/                    # 163 tests across 13 test files
+tests/                    # 694 tests across 36 test files
 ```
 
 ## Configuration
@@ -129,7 +131,7 @@ Config at `~/.agent_go/config.json` (auto-created). See [`config.example.json`](
 ```bash
 pip3 install pytest pytest-mock
 
-pytest tests/              # 163 tests (~4s)
+pytest tests/              # 694 tests (~16s)
 pytest tests/ -q           # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 ```

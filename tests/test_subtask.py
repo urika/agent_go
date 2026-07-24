@@ -210,6 +210,63 @@ class TestRunHeadless:
         assert result.returncode == 0
 
     @patch("subprocess.Popen")
+    def test_worker_metering_written(self, mock_popen, logger, tmp_path):
+        """result 事件中的 usage/cost 被聚合并写入 metering.jsonl（worker 角色）"""
+        metering = tmp_path / "metering.jsonl"
+        result_event = json.dumps({
+            "type": "result", "subtype": "success",
+            "total_cost_usd": 0.0123,
+            "usage": {"input_tokens": 1500, "output_tokens": 300},
+            "duration_ms": 5000, "num_turns": 4,
+        })
+        mock_proc = MagicMock()
+        mock_proc.pid = 12350
+        mock_proc.poll.return_value = 0
+        mock_proc.stdout.readline.side_effect = [result_event + "\n", "", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        result = _run_headless(
+            "task content", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering), "AGENT_GO_TASK_ID": "task-t1"},
+            logger, "sub-1"
+        )
+
+        assert result.returncode == 0
+        lines = metering.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 1
+        ev = json.loads(lines[0])
+        assert ev["role"] == "worker"
+        assert ev["actual_provider"] == "claude-code"
+        assert ev["prompt_tokens"] == 1500
+        assert ev["completion_tokens"] == 300
+        assert ev["cost_usd"] == 0.0123
+        assert ev["task_id"] == "task-t1"
+        assert ev["subtask_id"] == "sub-1"
+        assert ev["result"] == "success"
+
+    @patch("subprocess.Popen")
+    def test_worker_metering_skipped_without_path(self, mock_popen, logger, tmp_path):
+        """未设置 AGENT_GO_METERING_PATH 时不写计量文件"""
+        result_event = json.dumps({
+            "type": "result", "subtype": "success",
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+        })
+        mock_proc = MagicMock()
+        mock_proc.pid = 12351
+        mock_proc.poll.return_value = 0
+        mock_proc.stdout.readline.side_effect = [result_event + "\n", "", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        _run_headless("task content", Path("/tmp/work"), {}, logger, "sub-1")
+
+        assert not (tmp_path / "metering.jsonl").exists()
+
+    @patch("subprocess.Popen")
     def test_interaction_detected(self, mock_popen, logger):
         """检测到交互模式时应重试"""
         mock_proc = MagicMock()
