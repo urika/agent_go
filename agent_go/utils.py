@@ -168,6 +168,13 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
     if not cmd:
         return False, "空命令"
 
+    # 预处理：agent_go 已用 cwd=worktree 执行命令，剥离冗余的 cd <dir> && / cd <dir>; 前缀
+    # LLM 常生成 "cd /path && pytest ..." 这类命令，cd 多余且 && 会被注入扫描拦截
+    cd_prefix = re.compile(r'^cd\s+\S+\s*(&&|;|&)\s*')
+    cmd = cd_prefix.sub('', cmd).strip()
+    if not cmd:
+        return False, "空命令（剥离 cd 前缀后）"
+
     # Stage 1: shlex 解析
     try:
         argv = shlex.split(cmd)

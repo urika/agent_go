@@ -22,6 +22,10 @@ _BOUNDARY_AFTER = rf'(?![^{_BOUNDARY_CHARS}])'
 def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, logger: logging.Logger,
                           task_id: str = "", sub_id: str = "") -> dict:
     """执行单条验证命令，返回结果 dict。避免 shlex.split 和安全门禁逻辑重复。"""
+    # 剥离冗余的 cd <dir> && / cd <dir>; 前缀（agent_go 已用 cwd=worktree 执行）
+    import re as _re
+    vcmd = _re.sub(r'^cd\s+\S+\s*(&&|;|&)\s*', '', vcmd.strip()).strip()
+
     result_entry = {"command": vcmd[:200], "exit_code": -1, "duration_ms": 0, "attempt": attempt}
 
     # ── 安全门禁 ──
