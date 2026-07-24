@@ -148,3 +148,22 @@ def setup_logger(task_id: str, task_dir: Path) -> logging.Logger:
 
 def log_event(logger: logging.Logger, event: str, data: dict[str, Any]) -> None:
     logger.debug(json.dumps({"timestamp": datetime.now().isoformat(), "event": event, **data}, ensure_ascii=False))
+
+
+def meter_event(metering_path: Any, event: dict[str, Any]) -> None:
+    """写入结构化计量事件到 metering.jsonl（P1 配套）。
+
+    Args:
+        metering_path: Path-like 对象或字符串；为空时不写入
+        event: 计量事件字典，会被追加 ts 字段
+    """
+    if not metering_path:
+        return
+    from pathlib import Path
+    path = Path(metering_path)
+    event["ts"] = datetime.now().isoformat()
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except OSError as e:
+        logging.getLogger(__name__).debug(f"meter_event 写入失败: {e}")

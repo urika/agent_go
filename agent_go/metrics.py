@@ -1,11 +1,12 @@
 import subprocess
+import json
 from pathlib import Path
 from typing import Any, Optional
 
 __all__ = [
     "collect_timing", "collect_change_stats",
     "collect_merge_result", "extract_usage",
-    "estimate_cost", "DEFAULT_PRICING",
+    "estimate_cost", "DEFAULT_PRICING", "aggregate_metering",
 ]
 
 def collect_timing(worktree_create_ms: float, merge_upstream_ms: float, claude_execute_ms: float,
@@ -120,3 +121,61 @@ def estimate_cost(provider: str, model: str, prompt_tokens: int, completion_toke
     input_cost = (prompt_tokens / 1_000_000) * prices[0]
     output_cost = (completion_tokens / 1_000_000) * prices[1]
     return input_cost + output_cost
+
+
+def aggregate_metering(metering_path: Path) -> dict[str, Any]:
+    """汇总 metering.jsonl，返回总 token / 总成本 / 总延迟。
+
+    返回:
+        {
+            "total_calls": int,
+            "prompt_tokens": int,
+            "completion_tokens": int,
+            "total_tokens": int,
+            "cost_usd": float,
+            "latency_ms": float,
+            "by_role": {role: {"calls": int, "cost_usd": float}},
+        }
+    """
+    totals = {
+        "total_calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "latency_ms": 0.0,
+        "by_role": {},
+    }
+    if not metering_path.exists():
+        return totals
+
+    try:
+        for line in metering_path.read_text(encoding="utf-8").strip().split("\n"):
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            totals["total_calls"] += 1
+            pt = event.get("prompt_tokens", 0) or 0
+            ct = event.get("completion_tokens", 0) or 0
+            totals["prompt_tokens"] += pt
+            totals["completion_tokens"] += ct
+            totals["total_tokens"] += pt + ct
+            totals["cost_usd"] += event.get("cost_usd", 0.0) or 0.0
+            totals["latency_ms"] += event.get("latency_ms", 0.0) or 0.0
+
+            role = event.get("role", "unknown")
+            if role not in totals["by_role"]:
+                totals["by_role"][role] = {"calls": 0, "cost_usd": 0.0}
+            totals["by_role"][role]["calls"] += 1
+            totals["by_role"][role]["cost_usd"] += event.get("cost_usd", 0.0) or 0.0
+    except OSError:
+        pass
+
+    totals["cost_usd"] = round(totals["cost_usd"], 6)
+    totals["latency_ms"] = round(totals["latency_ms"], 2)
+    for role in totals["by_role"]:
+        totals["by_role"][role]["cost_usd"] = round(totals["by_role"][role]["cost_usd"], 6)
+    return totals

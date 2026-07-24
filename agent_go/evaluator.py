@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .api import call_api
-from .config import get_api_key
+from .config import get_api_key, meter_event
 from .metrics import estimate_cost
 
 __all__ = ["evaluate_semantic"]
@@ -216,6 +216,22 @@ def evaluate_semantic(
         pass
 
     logger.info(f"语义评估结果: passed={parsed['passed']}, reason={parsed['reason'][:80]}")
+
+    metering_event = {
+        "role": "evaluator",
+        "virtual_model": "agentgo-evaluator",
+        "actual_provider": eval_api_cfg.get("provider", "anthropic"),
+        "actual_model": eval_api_cfg.get("model", ""),
+        "prompt_tokens": 1000,
+        "completion_tokens": 200,
+        "cost_usd": round(cost_usd, 6),
+        "latency_ms": latency_ms,
+        "result": "success" if parsed["passed"] else "quality_fail",
+        "fallback_reason": "",
+        "task_id": config.get("_task_id", ""),
+        "subtask_id": subtask.get("id", ""),
+    }
+    meter_event(config.get("_metering_path"), metering_event)
 
     return {
         "passed": parsed["passed"],

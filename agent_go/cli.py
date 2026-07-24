@@ -213,6 +213,10 @@ def cmd_run(args=None):
     else:
         task_dir.mkdir(parents=True, exist_ok=True)
 
+    # Phase 1 配套：结构化计量日志路径
+    config["_metering_path"] = str(task_dir / "metering.jsonl")
+    config["_task_id"] = task_id
+
     logger = setup_logger(task_id, task_dir)
     logger.info("=" * 60)
     logger.info("任务启动")

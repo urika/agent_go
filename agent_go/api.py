@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
 
-from .config import get_api_key, log_event, DECOMPOSE_RULES, AGENT_GO_DIR
+from .config import get_api_key, log_event, DECOMPOSE_RULES, AGENT_GO_DIR, meter_event
 from .git_utils import analyze_project, get_git_info, get_resource_map
 from .skills import list_skills
 from .role_skill_map import load_role_skill_map
@@ -77,6 +77,23 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
                 "completion_tokens": completion_tokens,
                 "cost_usd": round(estimate_cost(provider, model, prompt_tokens, completion_tokens), 6),
             })
+            # Phase 1 配套：结构化计量日志
+            meter_event(
+                config.get("_metering_path"),
+                {
+                    "role": "planner",
+                    "virtual_model": "agentgo-planner",
+                    "actual_provider": provider,
+                    "actual_model": model,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "cost_usd": round(estimate_cost(provider, model, prompt_tokens, completion_tokens), 6),
+                    "latency_ms": round(latency * 1000, 2),
+                    "result": "success",
+                    "fallback_reason": "",
+                    "task_id": config.get("_task_id", ""),
+                }
+            )
             return content
     except urllib.error.HTTPError as e:
         try:
@@ -229,7 +246,7 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
     if route:
         api_key = get_api_key(config)
         logger.info(f"[PLAN] 路由: {route.role} → {route.primary.provider}:{route.primary.model}")
-        content, metering = call_with_role(route, messages, api_key, logger, task_id=task_id)
+        content, metering = call_with_role(route, messages, api_key, logger, task_id=task_id, metering_path=config.get("_metering_path"))
         log_event(logger, "api_call", metering)
     else:
         content = call_api(config, messages, logger)

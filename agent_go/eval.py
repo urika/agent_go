@@ -305,6 +305,32 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     cache_checks = 0
 
     for td in _scan_task_dirs(tasks_dir):
+        # Phase 1 配套：优先读取结构化的 metering.jsonl
+        metering_path = td / "metering.jsonl"
+        if metering_path.exists():
+            for line in metering_path.read_text(encoding="utf-8").strip().split("\n"):
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                total_calls += 1
+                p = ev.get("prompt_tokens", 0) or 0
+                c = ev.get("completion_tokens", 0) or 0
+                total_prompt += p
+                total_completion += c
+                provider = ev.get("actual_provider", "?")
+                model = ev.get("actual_model") or PROVIDER_DEFAULT_MODEL.get(provider, "deepseek-chat")
+                if model not in by_model:
+                    by_model[model] = {"calls": 0, "prompt": 0, "completion": 0}
+                by_model[model]["calls"] += 1
+                by_model[model]["prompt"] += p
+                by_model[model]["completion"] += c
+                if ev.get("result") in ("failed", "quality_fail"):
+                    errors += 1
+
+        # 回退：从 execution.log 读取旧的 api_call 事件
         log_path = td / "execution.log"
         for ev in _read_log_events(log_path, "api_call"):
             total_calls += 1
@@ -312,7 +338,6 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
             c = ev.get("completion_tokens", 0)
             total_prompt += p
             total_completion += c
-            # 价格表以 model 为键；旧日志缺 model 字段时回退 provider 默认模型
             provider = ev.get("provider", "?")
             model = ev.get("model") or PROVIDER_DEFAULT_MODEL.get(provider, "deepseek-chat")
             if model not in by_model:
@@ -330,7 +355,6 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     cost = 0
     model_costs = {}
     for model, usage in by_model.items():
-        # 未知模型按最低价保守估算
         price = MODEL_PRICES.get(model, MODEL_PRICES["deepseek-chat"])
         pc = usage["prompt"] / 1_000_000 * price.get("prompt", 1)
         cc = usage["completion"] / 1_000_000 * price.get("completion", 5)
@@ -340,10 +364,18 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
 
     tasks = list(_scan_task_dirs(tasks_dir))
     subtask_total = 0
+    completed_total = 0
     for td in tasks:
         meta = _read_meta(td)
         if meta:
-            subtask_total += len(meta.get("results", []))
+            results = meta.get("results", [])
+            subtask_total += len(results)
+            completed_total += sum(1 for r in results if r.get("status") == "completed")
+
+    # 北极星指标：$/pass rate
+    dollar_per_pass = None
+    if completed_total > 0:
+        dollar_per_pass = round(cost / completed_total, 4)
 
     return {
         "total_calls": total_calls, "total_prompt_tokens": total_prompt, "total_completion_tokens": total_completion,
@@ -353,6 +385,8 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
         "cache_hit_rate": round(cache_hits / cache_checks * 100) if cache_checks else 0,
         "avg_cost_per_task": round(cost / len(tasks), 4) if tasks else 0,
         "avg_cost_per_subtask": round(cost / subtask_total, 4) if subtask_total else 0,
+        "completed_subtasks": completed_total,
+        "dollar_per_pass_rate": dollar_per_pass,
     }
 
 

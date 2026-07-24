@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Any
 
 from .metrics import estimate_cost
+from .config import meter_event
 
 __all__ = [
     "ProviderConfig", "RoleRoute", "CircuitBreaker",
@@ -275,6 +276,7 @@ def call_with_role(
     logger: logging.Logger,
     task_id: str = "",
     subtask_id: str = "",
+    metering_path: Any = None,
 ) -> tuple[str, dict]:
     """按角色路由调用 LLM API。
 
@@ -357,10 +359,12 @@ def call_with_role(
     if content is not None:
         latency_ms = round((time.time() - start) * 1000, 2)
         cost = estimate_cost(actual_provider, actual_model, prompt_tokens, completion_tokens)
-        return content, _build_metering(route.role, actual_provider, actual_model,
+        metering = _build_metering(route.role, actual_provider, actual_model,
                                          prompt_tokens, completion_tokens, cost,
                                          latency_ms, result, fallback_reason,
                                          task_id, subtask_id)
+        meter_event(metering_path, metering)
+        return content, metering
 
     # 2. 质量失败：primary 重试 1 次（仅质量失败，可用性失败直接降级）
     if _quality_fail:
@@ -369,10 +373,12 @@ def call_with_role(
         if content is not None:
             latency_ms = round((time.time() - start) * 1000, 2)
             cost = estimate_cost(actual_provider, actual_model, prompt_tokens, completion_tokens)
-            return content, _build_metering(route.role, actual_provider, actual_model,
+            metering = _build_metering(route.role, actual_provider, actual_model,
                                              prompt_tokens, completion_tokens, cost,
                                              latency_ms, result, fallback_reason,
                                              task_id, subtask_id)
+            meter_event(metering_path, metering)
+            return content, metering
 
     # 3. Fallback
     if route.fallback is not None:
@@ -381,10 +387,12 @@ def call_with_role(
         if content is not None:
             latency_ms = round((time.time() - start) * 1000, 2)
             cost = estimate_cost(actual_provider, actual_model, prompt_tokens, completion_tokens)
-            return content, _build_metering(route.role, actual_provider, actual_model,
+            metering = _build_metering(route.role, actual_provider, actual_model,
                                              prompt_tokens, completion_tokens, cost,
                                              latency_ms, result, fallback_reason,
                                              task_id, subtask_id)
+            meter_event(metering_path, metering)
+            return content, metering
 
     raise RuntimeError(
         f"路由调用失败：primary {_provider_key(route.primary)} 不可用，"
