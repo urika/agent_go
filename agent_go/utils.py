@@ -57,8 +57,10 @@ _CMD_ARG_RULES = {
         "": {"flags": r'^(-v|-vv|-q|-s|-x|--tb=\S+|--tb|-k=\S+|-k|--co|--collect-only|-m=\S+|-m|-n=\S+|-N|--maxfail=\S+|-r\w?|-l|--no-header|--no-summary|-p|--rootdir=\S+|--override-ini=\S+|--failed-first|--last-failed|--new-first|--durations=\S+|--cache-show|--cache-clear|-w|--exitfirst|--ignore=\S+)$',
              "positionals": r'^[\w./\-_:]+$'},
     },
-    "python": {"-m pytest": "pytest"},
-    "python3": {"-m pytest": "pytest"},
+    "python": {"-m pytest": "pytest",
+               "-c": {"flags": r'^$', "positionals": r'^[\s\S]*$'}},
+    "python3": {"-m pytest": "pytest",
+                "-c": {"flags": r'^$', "positionals": r'^[\s\S]*$'}},
     "npm":    {"test": {"flags": r'^(--silent|--verbose)$', "positionals": r'^$'},
                "run":  {"flags": r'^(--silent|--verbose)$', "positionals": r'^[\w:_\-]+$'}},
     "npx":    {"": {"flags": r'^(-y|--yes|--no)$', "positionals": r'^[\w@./\-_]+$'}},
@@ -143,6 +145,14 @@ _SHELL_DESTROY = re.compile(r'\brm\s+-r[^ ]*\s+[/~]')      # 危险 rm
 _SHELL_OUTPUT_REDIR = re.compile(r'(?<![12])>>?\s*\S')      # 输出重定向（排除 2>&1, 1>&2）
 _SHELL_INPUT_REDIR = re.compile(r'(?<!<\s)<\s*\S')          # 输入重定向
 
+
+def _strip_quoted(cmd: str) -> str:
+    """移除命令中引号内的内容，使 shell 注入扫描只作用于引号外的真实 shell 操作符。
+
+    例：python -c "import x; assert y" → python -c（; 在引号内，安全）
+    """
+    return re.sub(r'"[^"]*"|\'[^\']*\'', '', cmd)
+
 def _is_safe_verification_command(command: str) -> tuple[bool, str]:
     """检查验证命令在 shell=True 降级前是否安全。
 
@@ -167,7 +177,9 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
     if not argv:
         return False, "空 argv"
 
-    # Stage 2: shell 注入扫描（defense-in-depth）
+    # Stage 2: shell 注入扫描（defense-in-depth，仅扫描引号外的操作符）
+    # 引号内的 ; & | 等是程序参数（如 python -c "import x; y()"），不是 shell 操作符
+    cmd_unquoted = _strip_quoted(cmd)
     _injection_checks = [
         (_SHELL_CHAIN, "命令链"),
         (_SHELL_SUBST, "命令替换"),
@@ -177,7 +189,7 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
         (_SHELL_INPUT_REDIR, "输入重定向"),
     ]
     for pattern, name in _injection_checks:
-        if pattern.search(cmd):
+        if pattern.search(cmd_unquoted):
             return False, f"shell 注入特征: {name}"
 
     # Stage 3: 命令 + 子命令查找
