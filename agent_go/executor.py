@@ -221,9 +221,145 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
     return result, sandbox_type, claude_time
 
 
+def _build_repair_prompt(
+    task_md: str,
+    failed_cmds: list[str],
+    failed_outputs: list[str],
+    git_diff: str,
+    attempt: int,
+    max_retries: int,
+    history: list[dict],
+) -> str:
+    """构建增强的修复提示词，注入完整失败上下文（Phase 1 验证循环）。
+
+    包含：
+    - 失败命令及其 stdout/stderr 输出
+    - 当前 git diff（让 Claude 看到自己改了什么）
+    - 历史修复尝试摘要（避免重复同样错误）
+    - 剩余机会提示
+    """
+    parts = [task_md, "", "---", ""]
+
+    # 失败标题
+    if attempt >= max_retries:
+        parts.append(f"## ⚠️ 验证失败 - 第 {attempt}/{max_retries} 次修复重试（最后一次）")
+    else:
+        parts.append(f"## ⚠️ 验证失败 - 第 {attempt}/{max_retries} 次修复重试")
+    parts.append("")
+
+    # 失败命令及输出
+    parts.append("### 失败命令及输出")
+    for cmd, output in zip(failed_cmds, failed_outputs):
+        parts.append(f"```")
+        parts.append(f"$ {cmd}")
+        if output:
+            # 截断过长输出
+            output_trimmed = output[:2000] + "\n... (输出过长，已截断)" if len(output) > 2000 else output
+            parts.append(output_trimmed)
+        parts.append("```")
+    parts.append("")
+
+    # 当前变更
+    if git_diff.strip():
+        diff_trimmed = git_diff[:3000] + "\n... (diff 过长，已截断)" if len(git_diff) > 3000 else git_diff
+        parts.append("### 当前变更")
+        parts.append("```diff")
+        parts.append(diff_trimmed)
+        parts.append("```")
+        parts.append("")
+
+    # 历史修复尝试
+    if history:
+        parts.append("### 历史修复尝试")
+        for h in history:
+            parts.append(f"- 第 {h['attempt']} 次: {h.get('fix_summary', '未知')} → 验证仍失败: {h.get('failure_summary', '未知')}")
+        parts.append("")
+
+    # 修复指令
+    parts.append("### 修复指令")
+    parts.append("请仔细分析上述失败原因（特别是 stdout/stderr 输出），修复代码确保所有验证命令通过。")
+    parts.append("直接修改文件，不要询问。")
+    if attempt >= max_retries:
+        parts.append(f"**这是最后一次修复机会。** 如果仍失败，此子任务将被标记为失败。")
+
+    return "\n".join(parts)
+
+
+def _assess_verification_confidence(verification: str, has_changes: bool) -> dict:
+    """评估验证命令的可信度（M5）— 区分确定性测试 vs 启发式检查。
+
+    返回 confidence dict:
+    - level: "deterministic" | "heuristic" | "manual" | "none"
+    - reason: 人类可读的评估理由
+    - warning: 如果置信度低，给出警告信息
+
+    分类逻辑：
+    - deterministic: 包含测试框架关键字（test, pytest, spec, cover, assert, unittest, prove, verify）
+    - heuristic: 仅包含 lint/check/format/build/compile 等静态检查
+    - manual: 无验证命令，依赖用户手动确认
+    - none: 无变更，无需验证
+    """
+    if not has_changes:
+        return {"level": "none", "reason": "无变更，无需验证", "warning": ""}
+
+    if not verification or not verification.strip():
+        return {
+            "level": "manual",
+            "reason": "未配置验证命令",
+            "warning": "⚠️ 无验证命令 — 结果仅经人工确认，可能存在假阳性",
+        }
+
+    v_lower = verification.lower()
+
+    # 确定性测试关键字
+    DETERMINISTIC_KEYWORDS = [
+        "test", "pytest", "unittest", "spec", "assert",
+        "cover", "coverage", "prove", "verify", "mocha",
+        "jest", "rspec", "junit", "benchmark",
+    ]
+    # 启发式检查关键字
+    HEURISTIC_KEYWORDS = [
+        "lint", "check", "fmt", "format", "build", "compile",
+        "typecheck", "analyze", "audit", "style", "audit",
+    ]
+
+    is_deterministic = any(kw in v_lower for kw in DETERMINISTIC_KEYWORDS)
+    is_heuristic = any(kw in v_lower for kw in HEURISTIC_KEYWORDS)
+
+    if is_deterministic:
+        return {
+            "level": "deterministic",
+            "reason": f"验证命令包含测试/断言关键字: {verification[:80]}",
+            "warning": "",
+        }
+
+    if is_heuristic:
+        return {
+            "level": "heuristic",
+            "reason": f"验证命令仅做静态检查: {verification[:80]}",
+            "warning": "⚠️ 仅静态检查 — 未运行测试，可能存在功能假阳性",
+        }
+
+    # 有命令但无法归类
+    return {
+        "level": "heuristic",
+        "reason": f"验证命令无法归类: {verification[:80]}",
+        "warning": "⚠️ 验证命令类型未知 — 建议使用测试框架（pytest/jest 等）",
+    }
+
+
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
+    # Phase 1: 从 config 读取 max_retries（默认 3）
+    max_retries = 3
+    try:
+        from .config import load_config
+        _cfg = load_config()
+        max_retries = _cfg.get("verification", {}).get("max_retries", 3)
+    except Exception:
+        pass  # 测试环境 config 不可用时使用默认值
+
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
     has_changes = bool(status_result.stdout.strip())
@@ -270,69 +406,114 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 
     git_commit_ms = (time.time() - git_start) * 1000
 
-    # 验证执行（支持单条命令或命令数组，使用抽取的 _run_verification_cmd 避免逻辑重复）
+    # Phase 1 验证循环：可配置的多轮修复重试
     verification = subtask.get("verification", "")
     verify_ok = True
     retry_count = 0
     verification_results = []
     verification_ms = 0
+    verification_history: list[dict] = []
     if verification and has_changes:
-        # 统一为数组
         cmds = [verification] if isinstance(verification, str) else verification
-        for vi, vcmd in enumerate(cmds):
-            logger.info(f"执行验证 [{vi+1}/{len(cmds)}]: {vcmd}")
-            vr_entry = _run_verification_cmd(vcmd, worktree, 1, env, logger, task_id, sub_id)
-            verification_results.append(vr_entry)
-            verification_ms += vr_entry.get("duration_ms", 0)
 
-            if vr_entry.get("rejected"):
-                verify_ok = False
-                continue
+        while retry_count <= max_retries:
+            # 1. 执行所有验证命令
+            all_pass = True
+            failed_cmds: list[str] = []
+            failed_outputs: list[str] = []
+            attempt_label = retry_count + 1
 
-            if vr_entry["exit_code"] not in (0, 127):
-                logger.warning(f"验证失败 (rc={vr_entry['exit_code']}): 命令={vcmd[:100]}")
+            for vcmd in cmds:
+                logger.info(f"执行验证 [{attempt_label}/{max_retries + 1}]: {vcmd}")
+                vr_entry = _run_verification_cmd(
+                    vcmd, worktree, attempt_label, env, logger, task_id, sub_id)
+                verification_results.append(vr_entry)
+                verification_ms += vr_entry.get("duration_ms", 0)
+
+                if vr_entry.get("rejected"):
+                    all_pass = False
+                    failed_cmds.append(vcmd)
+                    failed_outputs.append(f"[拒绝] {vr_entry.get('reject_reason', '')}")
+                    continue
+
+                if vr_entry["exit_code"] not in (0, 127):
+                    all_pass = False
+                    failed_cmds.append(vcmd)
+                    # 尝试获取失败命令的输出
+                    cmd_output = ""
+                    if vr_entry.get("exit_code", -1) > 0:
+                        cmd_output = f"exit_code={vr_entry['exit_code']}"
+                    failed_outputs.append(cmd_output)
+
+            # 2. 全部通过 → 退出
+            if all_pass:
+                verify_ok = True
+                logger.info(f"验证全部通过 (attempt={attempt_label})")
+                break
+
+            # 3. 交互模式：遇到失败即停止
+            if not headless:
                 verify_ok = False
-                if headless:
-                    retry_count += 1
-                    logger.info("自动重试: 注入修复指令")
-                    failed_cmds = "\n".join(f"  {c}" for c in cmds)
-                    fix_prompt = task_md + (
-"\n\n【验证失败】以下验证命令执行失败:\n"
-f"{failed_cmds}\n\n"
-f"最后失败命令: {vcmd}\n"
-"请修复上述问题，确保所有验证命令通过。直接修改文件，不要询问。"
-                    )
-                    _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix",
-                                  active_pids=active_pids, active_pids_lock=active_pids_lock,
-                                  allowed_tools=allowed_tools)
-                    subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
-                    subprocess.run(["git", "commit", "-m", f"{subtask['id']} (fix): 验证修复"],
-                                   cwd=str(worktree), capture_output=True)
-                    subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True)
-                    # 重新验证所有命令（使用同一个 helper）
-                    retry_verify_ok = True
-                    for vcmd2 in cmds:
-                        vr2_entry = _run_verification_cmd(vcmd2, worktree, 2, env, logger, task_id, sub_id)
-                        verification_results.append(vr2_entry)
-                        verification_ms += vr2_entry.get("duration_ms", 0)
-                        if vr2_entry.get("rejected"):
-                            retry_verify_ok = False
-                            verify_ok = False
-                            break
-                        if vr2_entry["exit_code"] not in (0, 127):
-                            verify_ok = False
-                            retry_verify_ok = False
-                            break
-                        verify_ok = True
-                    logger.info(f"重试验证: {'通过' if verify_ok else '仍失败'}")
-                    diff2 = subprocess.run(["git", "diff", "--stat", "HEAD~1"], cwd=str(worktree),
-                                           capture_output=True, text=True)
-                    summary = diff2.stdout.strip() or summary
-                    break  # 重试后跳出循环
-                else:
-                    break  # 交互模式，遇到失败即停止
-            else:
-                logger.info(f"验证 [{vi+1}/{len(cmds)}] 通过")
+                break
+
+            # 4. 已达最大重试次数 → 退出
+            if retry_count >= max_retries:
+                verify_ok = False
+                logger.warning(f"验证失败，已达最大重试次数 ({max_retries})")
+                break
+
+            # 5. 构建修复 prompt 并执行修复
+            retry_count += 1
+            logger.info(f"验证失败，第 {retry_count}/{max_retries} 次修复重试")
+
+            # 获取 git diff
+            diff_result = subprocess.run(
+                ["git", "diff"], cwd=str(worktree),
+                capture_output=True, text=True)
+            git_diff = diff_result.stdout
+
+            fix_prompt = _build_repair_prompt(
+                task_md, failed_cmds, failed_outputs,
+                git_diff, retry_count, max_retries, verification_history)
+
+            _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
+                          active_pids=active_pids, active_pids_lock=active_pids_lock,
+                          allowed_tools=allowed_tools)
+
+            # git add + commit + tag
+            subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+            subprocess.run(["git", "commit", "-m",
+                            f"{subtask['id']} (fix-{retry_count}): 验证修复"],
+                           cwd=str(worktree), capture_output=True)
+            subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True)
+
+            # 记录历史
+            failed_summary = "; ".join(f"{cmd[:60]}" for cmd in failed_cmds)
+            verification_history.append({
+                "attempt": retry_count,
+                "failed_cmds": failed_cmds,
+                "failure_summary": failed_summary,
+                "fix_summary": f"已执行修复并重新验证",
+            })
+
+        # 更新 summary（如有修复）
+        if retry_count > 0 and has_changes:
+            diff2 = subprocess.run(
+                ["git", "diff", "--stat", f"HEAD~{retry_count}"],
+                cwd=str(worktree), capture_output=True, text=True)
+            if diff2.stdout.strip():
+                summary = diff2.stdout.strip()
+
+    # 构建验证状态摘要
+    verification_state = {
+        "attempts": retry_count + 1,
+        "max_retries": max_retries,
+        "final_pass": verify_ok,
+        "history": verification_history,
+    }
+
+    # M5: 评估验证质量（区分确定性测试 vs 启发式检查）
+    verification_confidence = _assess_verification_confidence(verification, has_changes)
 
     return {
         "has_changes": has_changes,
@@ -344,6 +525,8 @@ f"最后失败命令: {vcmd}\n"
         "verify_ok": verify_ok,
         "retry_count": retry_count,
         "verification_results": verification_results,
+        "verification_confidence": verification_confidence,
+        "verification_state": verification_state,
     }
 
 
@@ -506,6 +689,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     metrics_timing = collect_timing(worktree_create_ms, merge_upstream_ms,
                                      round(claude_time * 1000), verification_ms, git_commit_ms)
 
+    verification_confidence = verify_results.get("verification_confidence", {})
+
     return {"subtask_id": sub_id, "status": status, "exit_code": result.returncode,
             "summary": summary, "failure_reason": failure_reason,
             "worktree": str(worktree), "sandbox_type": sandbox_type,
@@ -513,6 +698,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             "agent_type_source": subtask.get("_agent_type_source", "default"),
             "skills_unresolved": unresolved_skills,
             "retry_count": retry_count,
+            "verification_confidence": verification_confidence,
             "timing": metrics_timing,
             "change_stats": metrics_changes,
             "merge_results": merge_results,

@@ -35,6 +35,10 @@ DEFAULT_CONFIG = {
         "notify_on_complete": True,          # 任务完成时发桌面通知（macOS osascript）
         "notify_command": "",                # 自定义通知命令，如 "curl -X POST ..."
     },
+    "verification": {
+        "max_retries": 3,               # 验证失败后最大修复重试次数
+        "retry_timeout": 300,            # 每次修复重试超时（秒）
+    },
     "fallback": {
         "local_model_url": "http://localhost:8000/v1/chat/completions",
         "local_model_name": "qwen",

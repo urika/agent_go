@@ -47,6 +47,8 @@ def _build_parser():
     run_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks (default: 1)")
     run_parser.add_argument("--remote", help="Push worktree branches to remote URL")
     run_parser.add_argument("--no-cache", action="store_true", help="Skip plan cache lookup")
+    run_parser.add_argument("--max-retries", type=int, default=None,
+                            help="验证失败后最大修复重试次数（默认 3）")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -56,6 +58,8 @@ def _build_parser():
     resume_parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output")
     resume_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks")
     resume_parser.add_argument("--remote", help="Push worktree branches to remote URL")
+    resume_parser.add_argument("--max-retries", type=int, default=None,
+                               help="验证失败后最大修复重试次数（默认 3）")
 
     # list 子命令
     subparsers.add_parser("list", help="List all historical tasks")
@@ -149,6 +153,7 @@ def cmd_run(args=None):
     issue_ref = str(args.issue_ref) if args.issue_ref else ""
     remote_url = args.remote or ""
     no_cache = args.no_cache
+    max_retries = args.max_retries
     auto_yes = args.yes
     headless = auto_yes or args.headless
     parallel = args.parallel
@@ -169,6 +174,9 @@ def cmd_run(args=None):
         sys.exit(1)
 
     config = load_config()
+    config["_parallel"] = parallel  # M4: 时间预估用
+    if max_retries is not None:
+        config.setdefault("verification", {})["max_retries"] = max_retries
 
     if auto_yes:
         config["behavior"]["auto_confirm_plan"] = True
@@ -498,6 +506,81 @@ def cmd_review(args=None):
         subprocess.run(["claude", str(repo)])
 
 
+def _build_quality_dashboard(meta: dict) -> str:
+    """构建 PR 质量仪表（M3）— 回答「我该不该 merge？」。
+
+    返回 Markdown 格式的质量评估段，包含：
+    - 通过率统计（completed / total / degraded）
+    - 每子任务验证状态（verify_ok, duration, failure_reason）
+    - 合并就绪指示器（🟢 ready / 🟡 caution / 🔴 blocked）
+    """
+    results = meta.get("results", [])
+    subtasks = meta.get("subtasks", [])
+    total = len(subtasks)
+    if total == 0:
+        return ""
+
+    # 分类统计
+    completed = sum(1 for r in results if r.get("status") == "completed")
+    failed = sum(1 for r in results if r.get("status") == "failed")
+    degraded = sum(1 for r in results if r.get("status") == "degraded")
+    no_changes = sum(1 for r in results if r.get("status") == "no_changes")
+    pass_rate = round((completed / total) * 100) if total > 0 else 0
+
+    # 验证统计
+    verified = sum(1 for r in results if r.get("verify_ok"))
+    verify_rate = round((verified / total) * 100) if total > 0 else 0
+
+    # 总耗时
+    total_duration = sum(r.get("duration_sec", 0) for r in results)
+    duration_str = f"{int(total_duration // 60)}m{int(total_duration % 60)}s"
+
+    # 合并就绪判定
+    if failed > 0:
+        readiness = "🔴 **不建议合并** — 有失败子任务"
+    elif degraded > 0:
+        readiness = "🟡 **谨慎合并** — 有降级完成的子任务，需人工 Review"
+    elif completed + no_changes == total and verify_rate >= 100:
+        readiness = "🟢 **可以合并** — 全部通过验证"
+    elif completed + no_changes == total:
+        readiness = "🟡 **谨慎合并** — 全部完成但部分验证未通过"
+    else:
+        readiness = "🟡 **谨慎合并** — 部分子任务未完成"
+
+    lines = [
+        "## 📊 Quality Dashboard",
+        "",
+        f"| 指标 | 值 |",
+        f"|------|-----|",
+        f"| 通过率 | {pass_rate}% ({completed}/{total}) |",
+        f"| 验证通过率 | {verify_rate}% ({verified}/{total}) |",
+        f"| 总耗时 | {duration_str} |",
+        f"| 失败 | {failed} | 降级 | {degraded} | 无变更 | {no_changes} |",
+        "",
+        f"**合并就绪**: {readiness}",
+        "",
+    ]
+
+    # 每子任务详情
+    if results:
+        lines.append("### 子任务详情")
+        lines.append("")
+        lines.append("| 子任务 | 状态 | 验证 | 耗时 | 摘要 |")
+        lines.append("|--------|------|------|------|------|")
+        for r in results:
+            sid = r.get("subtask_id", "?")
+            status = r.get("status", "?")
+            status_icon = {"completed": "✅", "no_changes": "⏭️", "degraded": "⚠️", "failed": "❌"}.get(status, "❓")
+            verify_icon = "✅" if r.get("verify_ok") else "❌"
+            dur = f"{r.get('duration_sec', 0):.0f}s"
+            summary = (r.get("summary", "") or "")[:60]
+            failure = f" — {r.get('failure_reason', '')}" if r.get("failure_reason") else ""
+            lines.append(f"| {sid} | {status_icon} {status} | {verify_icon} | {dur} | {summary}{failure} |")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def cmd_pr(args=None):
     """根据已完成任务的 meta.json + git log 生成 PR 描述。"""
     if args and hasattr(args, 'task_id'):
@@ -526,10 +609,14 @@ def cmd_pr(args=None):
     ctx_file = task_dir / "SHARED_CONTEXT.md"
     context = ctx_file.read_text(encoding="utf-8") if ctx_file.exists() else ""
 
+    # 质量仪表（M3）
+    quality_dashboard = _build_quality_dashboard(meta)
+
     pr_body = f"""## Summary
 
 {meta.get('task', 'N/A')}
 
+{quality_dashboard}
 ## Subtasks
 
 {chr(10).join(subtask_lines)}

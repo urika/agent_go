@@ -52,6 +52,9 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     console = get_default_console()
     results_map = results_map or {}
     completed_ids = completed_ids or set()
+    # M6: 追踪失败和阻断的子任务 ID，下游依赖失败的上游时自动阻断
+    failed_ids: set = {r["subtask_id"] for r in results_map.values() if r.get("status") == "failed"}
+    blocked_ids: set = {r["subtask_id"] for r in results_map.values() if r.get("status") == "blocked"}
     task_id = meta["task_id"]
     meta_lock = threading.Lock()
     active_pids = set()
@@ -104,6 +107,24 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         logger.info(f"[并发] max_workers={parallel}, 拓扑调度，剩余 {len(remaining)} 个子任务")
 
     while remaining:
+        # M6: 分离已阻断的子任务（上游失败 → 下游不执行）
+        newly_blocked = []
+        for st in remaining:
+            deps = st.get("depends_on", [])
+            if any(dep in failed_ids or dep in blocked_ids for dep in deps):
+                newly_blocked.append(st)
+                blocked_ids.add(st["id"])
+                results_map[st["id"]] = {
+                    "subtask_id": st["id"], "status": "blocked",
+                    "exit_code": -1, "summary": f"上游失败，已阻断: {[d for d in deps if d in failed_ids or d in blocked_ids]}",
+                    "failure_reason": "上游依赖失败，级联阻断",
+                    "worktree": "", "sandbox_type": "headless",
+                    "verify_ok": False, "duration_sec": 0,
+                }
+                completed_ids.add(st["id"])
+        if newly_blocked:
+            logger.info(f"[级联阻断] {', '.join(st['id'] for st in newly_blocked)} — 上游失败，已阻断")
+
         wave = [st for st in remaining
                 if all(dep in completed_ids for dep in st.get("depends_on", []))]
         if not wave:
@@ -136,6 +157,8 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                     result_file.parent.mkdir(parents=True, exist_ok=True)
                     result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
                 completed_ids.add(st["id"])
+                if result.get("status") == "failed":
+                    failed_ids.add(st["id"])
         else:
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 futures = {}
@@ -162,6 +185,8 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                         result_file.parent.mkdir(parents=True, exist_ok=True)
                         result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
                     completed_ids.add(st["id"])
+                    if result.get("status") == "failed":
+                        failed_ids.add(st["id"])
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
         if _interrupted.is_set():
@@ -244,22 +269,37 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
 
     # 收集所有结果并写回 meta.json（完整版本，含 results 数组）
     meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
-    has_failed = any(r.get("status") == "failed" for r in results_map.values())
+    has_failed = any(r.get("status") in ("failed", "blocked") for r in results_map.values())
+    has_blocked = any(r.get("status") == "blocked" for r in results_map.values())
     meta["status"] = "failed" if has_failed else "completed"
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    blocked_count = sum(1 for r in results_map.values() if r.get("status") == "blocked")
     summary_icon = "❌" if has_failed else "🎉"
-    console.print(f"\n{'='*60}\n{summary_icon} 全部完成 ({len(completed_ids)}/{total})\n{'='*60}")
+    console.print(f"\n{'='*60}\n{summary_icon} 全部完成 ({len(completed_ids)}/{total})")
+    if has_blocked:
+        console.print(f"🔗 级联阻断: {blocked_count} 个子任务因上游失败被阻断")
+    console.print(f"{'='*60}")
     console.print("\n📦 最终报告")
     console.print("─" * 60)
     for s in confirmed:
         r = results_map.get(s["id"])
         if r:
-            icon = {"completed": "✅", "no_changes": "⏭️", "failed": "❌"}.get(r["status"], "❓")
+            icon = {"completed": "✅", "no_changes": "⏭️", "failed": "❌", "blocked": "🔗"}.get(r["status"], "❓")
             console.print(f"{icon} {r['subtask_id']}: {r['summary']}")
         else:
             console.print(f"⏳ {s['id']}: 未执行")
     console.print("─" * 60)
+
+    # ── 级联阻断摘要（M6） ──
+    if has_blocked:
+        console.print("\n🔗 级联阻断详情")
+        console.print("─" * 60)
+        for s in confirmed:
+            r = results_map.get(s["id"])
+            if r and r.get("status") == "blocked":
+                console.print(f"  {r['subtask_id']}: {r.get('failure_reason', '上游失败')}")
+        console.print("─" * 60)
 
     # ── 失败原因摘要（M2） ──
     if has_failed:
@@ -269,6 +309,20 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             r = results_map.get(s["id"])
             if r and r.get("status") == "failed" and r.get("failure_reason"):
                 console.print(f"  {r['subtask_id']}: {r['failure_reason']}")
+        console.print("─" * 60)
+
+    # ── 验证质量警告（M5） ──
+    weak_verify = [
+        r for r in results_map.values()
+        if r.get("verification_confidence", {}).get("warning")
+        and r.get("status") == "completed"
+    ]
+    if weak_verify:
+        console.print("\n⚠️  验证质量警告（可能存在假阳性）")
+        console.print("─" * 60)
+        for r in weak_verify:
+            vc = r.get("verification_confidence", {})
+            console.print(f"  {r['subtask_id']}: {vc['warning']} ({vc['level']})")
         console.print("─" * 60)
 
     console.print(f"\n📁 {task_dir}")

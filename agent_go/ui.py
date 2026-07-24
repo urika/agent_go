@@ -44,6 +44,66 @@ def plan_to_md(plan: dict[str, Any]) -> str:
             lines.append(f"- 步骤 {sid} 依赖: {prereqs}")
     return "\n".join(lines)
 
+def _estimate_duration(plan: dict[str, Any], parallel: int = 1) -> str:
+    """根据 Plan 的步骤数和依赖关系估算执行时间（M4）。
+
+    计算逻辑：
+    - 每个步骤：~180s 执行 + ~60s 验证 = ~240s
+    - 串行（parallel=1）：步骤数 × 240s
+    - 并行：依赖图的拓扑层数（waves）× 240s
+    - 返回人类可读的估算字符串，如 "约 8-12 分钟"
+    """
+    steps = plan.get("steps", [])
+    n = len(steps)
+    if n == 0:
+        return "N/A"
+
+    BASE_PER_STEP = 240  # 秒（180s 执行 + 60s 验证）
+
+    if parallel <= 1:
+        total_sec = n * BASE_PER_STEP
+    else:
+        deps = plan.get("dependencies", {})
+        step_ids = {str(s["id"]) for s in steps}
+
+        in_degree: dict[str, int] = {sid: 0 for sid in step_ids}
+        children: dict[str, list[str]] = {sid: [] for sid in step_ids}
+        for sid, prereqs in deps.items():
+            sid = str(sid)
+            if sid in step_ids:
+                for p in prereqs:
+                    p = str(p)
+                    if p in step_ids:
+                        in_degree[sid] += 1
+                        children.setdefault(p, []).append(sid)
+
+        waves = 0
+        remaining = set(step_ids)
+        while remaining:
+            ready = {sid for sid in remaining if in_degree.get(sid, 0) == 0}
+            if not ready:
+                waves += len(remaining)
+                break
+            waves += 1
+            for sid in ready:
+                remaining.discard(sid)
+                for child in children.get(sid, []):
+                    if child in in_degree:
+                        in_degree[child] -= 1
+
+        total_sec = waves * BASE_PER_STEP
+
+    minutes = total_sec / 60
+    if minutes < 1:
+        return f"约 {total_sec} 秒"
+    elif minutes < 5:
+        return f"约 {int(minutes)}-{int(minutes * 1.2)} 分钟"
+    else:
+        low = int(minutes * 0.8)
+        high = int(minutes * 1.2)
+        return f"约 {low}-{high} 分钟"
+
+
 def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
     """展示 Plan，包含 Agent Prompt 和资源清单。"""
     behavior = config.get("behavior", {})
@@ -52,7 +112,11 @@ def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
     print("📋 执行方案（Plan Mode）")
     print("=" * 70)
     print(f"\n📝 概述: {plan.get('overview', 'N/A')}")
-    print(f"⏱️  预估: {plan.get('estimated_effort', 'N/A')}")
+    print(f"⏱️  预估工作量: {plan.get('estimated_effort', 'N/A')}")
+    # 时间估算（M4）
+    parallel = config.get("_parallel", 1)
+    duration = _estimate_duration(plan, parallel)
+    print(f"⏱️  预计耗时: {duration}")
 
     # 共享资源清单
     sr = plan.get("shared_resources", {})
