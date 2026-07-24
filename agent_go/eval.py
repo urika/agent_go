@@ -286,7 +286,10 @@ MODEL_PRICES = {
     "claude-sonnet-4-20250514": {"prompt": 3.0, "completion": 15.0},
     "claude-sonnet-4": {"prompt": 3.0, "completion": 15.0},
     "gpt-4o": {"prompt": 2.5, "completion": 10.0},
+    "deepseek-v4-flash": {"prompt": 0.27, "completion": 1.1},
+    "deepseek-v4-pro": {"prompt": 0.55, "completion": 2.19},
     "deepseek-chat": {"prompt": 0.27, "completion": 1.1},
+    "deepseek-reasoner": {"prompt": 0.55, "completion": 2.19},
 }
 
 # provider → 默认模型（旧日志缺 model 字段时回退用）

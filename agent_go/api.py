@@ -68,8 +68,9 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
                 })
                 raise RuntimeError(f"API 响应结构异常 ({provider}): {e}") from e
             usage = data.get("usage", {})
-            prompt_tokens = usage.get("input_tokens", 0)
-            completion_tokens = usage.get("output_tokens", 0)
+            # 兼容 Anthropic (input_tokens/output_tokens) 和 OpenAI (prompt_tokens/completion_tokens) 格式
+            prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens", 0)
             log_event(logger, "api_call", {
                 "provider": provider, "model": model,
                 "latency_ms": round(latency * 1000, 2), "response_len": len(content),

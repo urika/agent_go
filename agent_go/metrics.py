@@ -92,9 +92,11 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, float]] = {
     # OpenAI
     ("openai", "gpt-4o"):                           (2.50, 10.0),
     ("openai", "gpt-4o-mini"):                      (0.15, 0.60),
-    # DeepSeek
-    ("deepseek", "deepseek-chat"):                  (0.27, 1.10),
+    # DeepSeek（deepseek-chat/reasoner 已于 2026-07-24 弃用，由 v4-flash 替代）
+    ("deepseek", "deepseek-v4-flash"):              (0.27, 1.10),
     ("deepseek", "deepseek-v4-pro"):                (0.55, 2.19),
+    ("deepseek", "deepseek-chat"):                  (0.27, 1.10),   # 已弃用，保留向后兼容
+    ("deepseek", "deepseek-reasoner"):              (0.55, 2.19),   # 已弃用，保留向后兼容
     # 本地模型 — 成本为 0
     ("custom", "*"):                                 (0.0, 0.0),
 }
