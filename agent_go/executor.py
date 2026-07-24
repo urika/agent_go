@@ -160,6 +160,37 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
         exec_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
     task_md_parts.extend(exec_requirements)
 
+    # Phase 2: GoalInjector — 注入目标导向指令
+    goal_enabled = True
+    try:
+        from .config import load_config
+        _cfg = load_config()
+        goal_enabled = _cfg.get("goal", {}).get("enabled", True)
+    except Exception:
+        pass
+    if verification and goal_enabled:
+        task_md_parts.extend([
+            "",
+            "## /goal: 自主验证-修复循环",
+            "",
+            "你必须在退出前确保以下验证命令全部通过。",
+            "",
+            "**验证命令:**",
+            f"```bash\n{verification}\n```",
+            "",
+            "**循环规则:**",
+            "1. 完成代码修改后，运行上述验证命令",
+            "2. 如果验证失败，仔细阅读错误输出，分析根本原因",
+            "3. 修复代码中的问题，再次运行验证",
+            "4. 重复直到所有验证命令通过",
+            "5. 全部通过后才能退出（/exit 或 Ctrl+D）",
+            "",
+            "**注意:**",
+            "- 不要跳过验证直接退出",
+            "- 每次修复后必须重新运行全部验证命令",
+            "- 如果连续 3 次修复仍失败，请在输出中说明原因后退出",
+        ])
+
     # ── Skill 知识注入 ──
     skill_names = subtask.get("skills", [])
     unresolved_skills = []

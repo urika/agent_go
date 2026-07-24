@@ -39,6 +39,11 @@ DEFAULT_CONFIG = {
         "max_retries": 3,               # 验证失败后最大修复重试次数
         "retry_timeout": 300,            # 每次修复重试超时（秒）
     },
+    "goal": {
+        "enabled": True,                # 是否在 TASK.md 注入 goal 指令
+        "max_turns": 20,                # 单个 goal 循环最大 tool-call 轮数
+        "timeout_seconds": 600,          # goal 循环全局超时（秒）
+    },
     "fallback": {
         "local_model_url": "http://localhost:8000/v1/chat/completions",
         "local_model_name": "qwen",

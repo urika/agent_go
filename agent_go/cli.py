@@ -49,6 +49,8 @@ def _build_parser():
     run_parser.add_argument("--no-cache", action="store_true", help="Skip plan cache lookup")
     run_parser.add_argument("--max-retries", type=int, default=None,
                             help="验证失败后最大修复重试次数（默认 3）")
+    run_parser.add_argument("--no-goal", action="store_true",
+                            help="禁用 goal 指令注入（TASK.md 不追加 /goal）")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -154,6 +156,7 @@ def cmd_run(args=None):
     remote_url = args.remote or ""
     no_cache = args.no_cache
     max_retries = args.max_retries
+    no_goal = args.no_goal
     auto_yes = args.yes
     headless = auto_yes or args.headless
     parallel = args.parallel
@@ -177,6 +180,8 @@ def cmd_run(args=None):
     config["_parallel"] = parallel  # M4: 时间预估用
     if max_retries is not None:
         config.setdefault("verification", {})["max_retries"] = max_retries
+    if no_goal:
+        config.setdefault("goal", {})["enabled"] = False
 
     if auto_yes:
         config["behavior"]["auto_confirm_plan"] = True

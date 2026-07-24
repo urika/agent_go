@@ -56,6 +56,20 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     allowed_tools: Agent 类型声明的工具白名单（如 architect 的 Read/Grep/Glob）。
     非空时通过 --allowedTools 强制约束；None/空列表表示不限制（developer 默认）。
     """
+    # Phase 2: GoalInjector 看门狗配置
+    GOAL_WATCHDOG_ENABLED = True
+    MAX_GOAL_TURNS = 20
+    GOAL_TIMEOUT = 600
+    try:
+        from .config import load_config
+        _cfg = load_config()
+        _goal_cfg = _cfg.get("goal", {})
+        GOAL_WATCHDOG_ENABLED = _goal_cfg.get("enabled", True)
+        MAX_GOAL_TURNS = _goal_cfg.get("max_turns", 20)
+        GOAL_TIMEOUT = _goal_cfg.get("timeout_seconds", 600)
+    except Exception:
+        pass
+
     PFX = f"[{sub_id}]"
     if active_pids is None:
         active_pids = set()
@@ -91,10 +105,13 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         else:
             active_pids.add(proc.pid)
         last_ts = [time.time()]
+        goal_start_ts = [time.time()]
         lines = []
         waiting = [False]
         current_tool = [None]
         tool_input = [""]
+        goal_turn_count = [0]
+        goal_watchdog_triggered = [False]
 
         def parse_and_log(raw_line: str, label: str) -> None:
             s = raw_line.rstrip()
@@ -136,6 +153,11 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                         current_tool[0] = tool_name
                         tool_input[0] = ""
                         logger.info(f"{PFX} [{tool_name}] ...")
+                        # Phase 2: 统计 goal 工具调用轮数
+                        if GOAL_WATCHDOG_ENABLED:
+                            goal_turn_count[0] += 1
+                            if goal_turn_count[0] % 5 == 0:
+                                logger.info(f"{PFX} goal turn count: {goal_turn_count[0]}/{MAX_GOAL_TURNS}")
 
                 elif it == "content_block_delta":
                     delta = inner.get("delta", {})
@@ -207,6 +229,21 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 logger.error(f"claude {idle:.0f}s 无事件 (attempt={attempt})，强制终止")
                 proc.kill()
                 break
+            # Phase 2: GoalInjector 看门狗
+            if GOAL_WATCHDOG_ENABLED and not goal_watchdog_triggered[0]:
+                elapsed = time.time() - goal_start_ts[0]
+                if elapsed > GOAL_TIMEOUT:
+                    logger.error(f"claude goal 循环超时 ({elapsed:.0f}s > {GOAL_TIMEOUT}s)，强制终止")
+                    log_event(logger, "goal_timeout", {"sub_id": sub_id, "elapsed": elapsed, "limit": GOAL_TIMEOUT})
+                    goal_watchdog_triggered[0] = True
+                    proc.kill()
+                    break
+                if goal_turn_count[0] >= MAX_GOAL_TURNS:
+                    logger.error(f"claude goal 轮数超限 ({goal_turn_count[0]} >= {MAX_GOAL_TURNS})，强制终止")
+                    log_event(logger, "goal_turns_exceeded", {"sub_id": sub_id, "turns": goal_turn_count[0], "limit": MAX_GOAL_TURNS})
+                    goal_watchdog_triggered[0] = True
+                    proc.kill()
+                    break
             if idle > HEARTBEAT and idle - idle_logged_at > HEARTBEAT:
                 logger.info(f"{PFX} 等待中... (无事件 {idle:.0f}s, attempt={attempt})")
                 idle_logged_at = idle
