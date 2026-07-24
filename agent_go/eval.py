@@ -108,10 +108,19 @@ def analyze_quality(meta: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
             q7_precision = round(len(inter) / len(planned) * 100)
             q7_recall = round(len(inter) / len(actual) * 100)
 
+    # Phase 4: 新增验证循环指标
+    retried = [r for r in results if r.get("retry_count", 0) > 0]
+    retry_success_rate = round(
+        sum(1 for r in retried if r.get("status") == "completed") / len(retried) * 100
+    ) if retried else 100
+
+    blocked = sum(1 for r in results if r.get("status") == "blocked")
+    blocked_rate = round(blocked / total * 100) if total else 0
+
     return {
         "task_id": meta.get("task_id", ""),
         "status": meta.get("status", ""),
-        "subtasks": {"total": total, "completed": completed, "no_changes": no_changes, "failed": failed},
+        "subtasks": {"total": total, "completed": completed, "no_changes": no_changes, "failed": failed, "blocked": blocked},
         "Q1_task_success_rate": q1,
         "Q2_subtask_success_rate": q2,
         "Q3_first_pass_rate": q3,
@@ -120,6 +129,8 @@ def analyze_quality(meta: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         "Q6_merge_success_rate": q6,
         "Q7_plan_accuracy_precision": q7_precision,
         "Q7_plan_accuracy_recall": q7_recall,
+        "Q8_retry_success_rate": retry_success_rate,
+        "Q9_blocked_rate": blocked_rate,
         "Q8_change_scale": {"avg_files": avg_files, "avg_insertions": avg_insertions, "avg_deletions": avg_deletions},
         "score": round(q1 * 0.4 + q3 * 0.3 + q4 * 0.3),
     }

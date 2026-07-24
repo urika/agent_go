@@ -1,4 +1,4 @@
-import os, subprocess, re, time, shlex, shutil, logging
+import os, subprocess, re, time, shlex, shutil, logging, json
 from pathlib import Path
 from typing import Optional, Any
 
@@ -393,8 +393,57 @@ def _assess_verification_confidence(verification: str, has_changes: bool) -> dic
     }
 
 
+def _verify_state_path(task_dir: Path, sub_id: str) -> Path:
+    """返回 verify_state.json 路径。"""
+    return task_dir / sub_id / "verify_state.json"
+
+
+def _load_verify_state(task_dir: Path, sub_id: str) -> Optional[dict]:
+    """读取已有的验证状态（用于 resume）。"""
+    path = _verify_state_path(task_dir, sub_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # 简单校验字段
+        if isinstance(data, dict) and data.get("subtask_id") == sub_id:
+            return data
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug(f"读取 verify_state.json 失败: {e}")
+    return None
+
+
+def _persist_verify_state(
+    task_dir: Path,
+    sub_id: str,
+    verification: str,
+    retry_count: int,
+    max_retries: int,
+    history: list[dict],
+    results: list[dict],
+) -> None:
+    """持久化验证状态到 verify_state.json。"""
+    from datetime import datetime
+    path = _verify_state_path(task_dir, sub_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "subtask_id": sub_id,
+        "verification": verification,
+        "attempts": retry_count + 1,
+        "max_retries": max_retries,
+        "history": history,
+        "verification_results": results,
+        "last_updated": datetime.now().isoformat(),
+    }
+    try:
+        path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        logger.debug(f"写入 verify_state.json 失败: {e}")
+
+
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
-                    active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None):
+                    active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
+                    task_dir=None):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
     # Phase 1: 从 config 读取 max_retries（默认 3）
     max_retries = 3
@@ -471,9 +520,21 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     except Exception:
         pass
 
-    semantic_feedback: dict | None = None
+    semantic_feedback: Optional[dict] = None
     if verification and has_changes:
         cmds = [verification] if isinstance(verification, str) else verification
+
+        # Phase 4: 恢复已有验证状态（resume 场景）
+        if task_dir:
+            saved_state = _load_verify_state(task_dir, sub_id)
+            if saved_state:
+                saved_attempts = saved_state.get("attempts", 1)
+                saved_history = saved_state.get("history", [])
+                saved_results = saved_state.get("verification_results", [])
+                retry_count = min(saved_attempts - 1, max_retries)
+                verification_history = saved_history[-max(0, retry_count):]
+                verification_results = saved_results
+                logger.info(f"从 verify_state.json 恢复: 已尝试 {saved_attempts} 次")
 
         while retry_count <= max_retries:
             # 1. 执行所有验证命令
@@ -504,6 +565,13 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         cmd_output = f"exit_code={vr_entry['exit_code']}"
                     failed_outputs.append(cmd_output)
 
+            # Phase 4: 持久化验证状态
+            if task_dir:
+                _persist_verify_state(
+                    task_dir, sub_id, verification,
+                    retry_count, max_retries,
+                    verification_history, verification_results)
+
             # 2. shell 验证全部通过 → 可选 LLM 语义评估（Phase 3）
             if all_pass and evaluator_enabled and headless:
                 logger.info("shell 验证通过，执行 LLM 语义评估...")
@@ -522,6 +590,13 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     all_pass = False
                     failed_cmds = ["<semantic_eval>"]
                     failed_outputs = [f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')}"]
+
+                # Phase 4: 持久化语义评估后的状态
+                if task_dir:
+                    _persist_verify_state(
+                        task_dir, sub_id, verification,
+                        retry_count, max_retries,
+                        verification_history, verification_results)
 
             # 3. 全部通过 → 退出
             if all_pass:
@@ -721,6 +796,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
         active_pids, active_pids_lock, logger, issue_ref=issue_ref,
         allowed_tools=agent.claude_config.get("allowed_tools", []) if agent else None,
+        task_dir=task_dir,
     )
     has_changes = verify_results["has_changes"]
     summary = verify_results["summary"]
