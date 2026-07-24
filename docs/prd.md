@@ -47,6 +47,8 @@
 | M2 | 失败原因摘要 — "status=failed 但不知道为什么" | 🔴 |
 | M3 | PR 质量仪表 — "我该不该 merge？" | 🟡 |
 | M4 | 时间预估 — "能在我走之前跑完吗？" | 🟡 |
+| M5 | 验证假阳性 — "验证通过了但功能不对" | 🔴 |
+| M6 | 级联失败 — "一个子任务失败拖垮全部" | 🔴 |
 
 ## P1 重点：角色感知模型路由
 
@@ -84,7 +86,85 @@ result(success|fallback|quality_fail), fallback_reason
 
 这是成本看板的数据源，也是发布门禁「$/pass rate 不劣化」的判定依据。
 
-## 产品 KPI（7 个）
+## P1 重点：验证 Agent 循环（Verification Loop）
+
+**一句话：验证一次不够就自动修，修到通过或上限；实在修不好就阻断下游，不让错误扩散。**
+
+### 核心矛盾
+
+当前验证是单向的 pass/fail + 1 次通用重试，不解决问题也不阻断扩散：
+
+```
+执行 → 验证 → 失败 → "请修复"（缺乏具体上下文）→ 重试 1 次 → 还失败 → 放弃，继续走下游
+                                                          ↓
+                                                    下游基于错误代码继续 → 级联失败
+```
+
+### 解决思路：双层验证循环
+
+借鉴 Claude Code 的 `/goal` 机制和行业"verify → fix → verify"循环模式：
+
+```
+┌── Claude Code 内部循环 ─────────────────────────┐
+│  TASK.md 末尾注入 "/goal <condition>"             │
+│  → Claude 自主迭代：编码 → Stop Hook 验证 → 再编码 │
+│  → 加速：不反复起停 claude 进程                     │
+└──────────────────────┬──────────────────────────┘
+                       ↓ Claude 退出完成主逻辑
+┌── agent_go 外部循环 ────────────────────────────┐
+│  Verification Agent                               │
+│  ├─ 安全校验（4 级命令白名单兜底）                  │
+│  ├─ 确定性验证（真实 shell exit code）             │
+│  ├─ 失败 → RepairAgent 注入完整上下文修复            │
+│  │   （含 stdout/stderr/git diff/历史摘要）         │
+│  ├─ 再验证 → 直到通过或 max_retries（可配 3-5 次）  │
+│  └─ 最终失败 → 阻断下游（blocked 状态）             │
+└──────────────────────────────────────────────────┘
+```
+
+### 关键设计
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 为什么不只用 /goal？ | 混合模式 | /goal 评估器不执行工具只读对话，agent_go 需要真实 exit code 做确定性验证 |
+| 验证失败后怎么办？ | 阻断下游 | 防止错误代码被下游继承导致不可调试的级联失败 |
+| 修复 prompt 如何构建？ | 注入完整失败上下文 | 当前"请修复"太通用，需要 stdout/stderr/git diff 让 Claude 精准定位 |
+| 最大重试次数？ | 可配置，默认 3 | 防止 token/时间爆炸 |
+| 双模式支持？ | shell exit code + LLM 语义 | shell 确定性强，LLM 能判断语义完整性（如"重构完成且风格一致"） |
+
+### 落地路径
+
+```
+Phase 1（2-3 天）:
+  VerificationAgent + RepairAgent 基础循环
+  → 替代现有 _verify_changes() 单次重试
+  → pipeline 依赖阻断（blocked 状态）
+  → 配置 + CLI 参数
+
+Phase 2（1-2 天）:
+  GoalInjector — worktree 内注入 /goal + Stop Hook
+  → TASK.md 追加 /goal condition
+  → watchdog 超时保护
+
+Phase 3（2 天）:
+  LLMEvaluator — 语义评估
+  → hybrid 模式编排
+  → 评估模型配置
+
+Phase 4（1 天）:
+  Resume 兼容 + Metrics
+  → verify_state.json 持久化
+  → eval 新指标（首次通过率、重试成功率、阻断率）
+```
+
+### 关键约束
+
+- `/goal` 是 Claude 内部的加速循环，**不替代**外部的 Verification Agent（安全兜底不能丢）
+- 验证命令必须通过 agent_go 的 4 级安全白名单，Stop Hook 脚本也需校验
+- `blocked` 状态的 subtask 保留 worktree 供人工审查，不清除
+- 每次重试验证结果记入日志，供 eval 系统分析
+
+## 产品 KPI（7 个 → 8 个）
 
 | # | KPI | 当前 | Q3 目标 | 年度 |
 |---|-----|------|---------|------|
@@ -95,6 +175,7 @@ result(success|fallback|quality_fail), fallback_reason
 | K5 | 中断恢复成功率 | 未知 | ≥99% | ≥99.9% |
 | K6 | 可观测性可回答率 | 7/9 | 8/9 | 9/9 |
 | K7 | 首次上手时间 | ~10-20min | ≤12min | ≤8min |
+| K8 | **首次验证通过率** | ~60% | ≥80% | ≥90% |
 
 ## 北极星指标
 
@@ -128,6 +209,9 @@ $$
 | Worker 本地模型质量不足 | 复杂 Worker 任务走本地模型可能拉低通过率 | 复杂度分级路由（easy→本地，hard→API）；质量门 + 定期抽样回测 |
 | 审查成本失控 | 引入 Reviewer 角色后 token 成本可能翻倍 | 审查预算上限 ≤ 被审查工作的 20%；仅对高风险子任务开启审查 |
 | 协调机制过度设计 | 小规模任务引入重机制得不偿失 | P0 仅做最简版本，按规模驱动演进 |
+| **验证循环 token 爆炸** | 多次验证-修复循环可能消耗远超预期的 token | `max_retries` 硬上限（默认 3）+ 每迭代超时控制；启用 /goal 模式减少外部循环次数 |
+| **修复 Agent 引入新问题** | 修复可能引入回归，新旧问题叠加 | 每次重试全量运行所有验证命令，不是只验上次失败的；达到上限后阻断下游 |
+| **/goal 循环不终止** | Claude 内部 goal 循环可能超出 agent_go 的控制 | 外部 watchdog（全局超时 + max_goal_turns）强制 kill 进程 |
 | 开放：跨任务记忆沉淀 | Agent 间经验随会话结束丢失，每次任务从零开始 | 远期探索 Field Guide 机制（Agent 自主维护的项目级记忆） |
 
 ## 远期方向（P2+）
@@ -140,6 +224,7 @@ $$
 | 全局决策日志 | Planner 的设计决策写入共享日志，Worker 启动时自动注入，治「脑裂」 | F4 |
 | Field Guide 共享记忆 | Agent 自主维护的项目级知识目录，跨任务沉淀经验，只记「出乎意料的情况」 | F8 |
 | 复杂度双通道 | Planner 给子任务打 `difficulty: easy/medium/hard` 标签，hard 任务自动走强模型通道 | 7.3 |
+| **验证 Agent 生态系统** | 社区贡献的验证规则包，分三阶段演进：Phase 1 复用 Skill 体系（`type: verification`），零新增基础设施；Phase 2 打包为 Claude Code Plugin 分发；Phase 3 若生态足够大则独立为 Verifier 体系 | — |
 
 ## 非目标用户
 
