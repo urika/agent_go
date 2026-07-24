@@ -31,7 +31,9 @@ DEFAULT_CONFIG = {
         "auto_verify_subtask": False,       # 默认同意子任务验证结果
         "show_agent_prompt": True,          # 展示给 Agent 的 Prompt
         "show_resource_map": True,           # 展示共享资源清单
-        "max_plan_iterations": 5             # 最大 Plan 重生成次数
+        "max_plan_iterations": 5,            # 最大 Plan 重生成次数
+        "notify_on_complete": True,          # 任务完成时发桌面通知（macOS osascript）
+        "notify_command": "",                # 自定义通知命令，如 "curl -X POST ..."
     },
     "fallback": {
         "local_model_url": "http://localhost:8000/v1/chat/completions",

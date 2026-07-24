@@ -12,6 +12,39 @@ logger = logging.getLogger(__name__)
 
 __all__: list[str] = []
 
+def _notify_complete(task_id: str, total: int, completed_ids: list, has_failed: bool, config: dict) -> None:
+    """任务完成时发送桌面通知（M1）。"""
+    behavior = config.get("behavior", {})
+    if not behavior.get("notify_on_complete", True):
+        return
+
+    status_str = "失败" if has_failed else "完成"
+    title = f"🤖 agent_go: {task_id}"
+    msg = f"全部完成 ({len(completed_ids)}/{total}) [{status_str}]"
+
+    # macOS 桌面通知
+    import shlex
+    script = f'display notification "{msg}" with title "{title}"'
+    try:
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+    except FileNotFoundError:
+        pass  # 非 macOS 环境
+    except subprocess.TimeoutExpired:
+        pass
+
+    # 自定义通知命令
+    custom_cmd = behavior.get("notify_command", "")
+    if custom_cmd:
+        try:
+            formatted = custom_cmd.format(
+                task_id=task_id, status=status_str,
+                completed=len(completed_ids), total=total,
+            )
+            subprocess.run(shlex.split(formatted), capture_output=True, timeout=10)
+        except Exception as e:
+            logger.debug("自定义通知命令失败: %s", e)
+
+
 def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
                   worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "") -> None:
     """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。"""
@@ -215,7 +248,8 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     meta["status"] = "failed" if has_failed else "completed"
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    console.print(f"\n{'='*60}\n🎉 全部完成 ({len(completed_ids)}/{total})\n{'='*60}")
+    summary_icon = "❌" if has_failed else "🎉"
+    console.print(f"\n{'='*60}\n{summary_icon} 全部完成 ({len(completed_ids)}/{total})\n{'='*60}")
     console.print("\n📦 最终报告")
     console.print("─" * 60)
     for s in confirmed:
@@ -226,5 +260,19 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         else:
             console.print(f"⏳ {s['id']}: 未执行")
     console.print("─" * 60)
+
+    # ── 失败原因摘要（M2） ──
+    if has_failed:
+        console.print("\n❌ 失败原因摘要")
+        console.print("─" * 60)
+        for s in confirmed:
+            r = results_map.get(s["id"])
+            if r and r.get("status") == "failed" and r.get("failure_reason"):
+                console.print(f"  {r['subtask_id']}: {r['failure_reason']}")
+        console.print("─" * 60)
+
     console.print(f"\n📁 {task_dir}")
     console.print(f"📝 {task_dir}/execution.log")
+
+    # ── 任务完成通知（M1） ──
+    _notify_complete(meta.get("task_id", ""), total, completed_ids, has_failed, config)

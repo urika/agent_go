@@ -472,8 +472,30 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     # 状态判定: completed(有变更) / no_changes(完成但无变更) / failed(异常)
     if result.returncode == 0 and verify_ok:
         status = "no_changes" if summary == "无文件变更" else "completed"
+        failure_reason = ""
     else:
         status = "failed"
+        # 收集失败原因
+        reasons = []
+        if result.returncode != 0:
+            if sandbox_type == "headless":
+                reasons.append("Claude 进程异常退出（headless 模式）")
+            else:
+                reasons.append("Claude 交互未正常完成")
+        if not verify_ok:
+            failed_cmds = [vr.get("command", "") for vr in verification_results
+                           if vr.get("exit_code", 0) not in (0, -1) and not vr.get("rejected")]
+            if failed_cmds:
+                reasons.append(f"验证失败: {failed_cmds[0][:80]}")
+            rejected_cmds = [vr.get("command", "") for vr in verification_results if vr.get("rejected")]
+            if rejected_cmds:
+                reasons.append(f"验证命令被拒绝: {rejected_cmds[0][:80]}")
+            if not failed_cmds and not rejected_cmds:
+                reasons.append("验证未通过（无变更或未知原因）")
+        if merge_conflicts:
+            conflicts = list(merge_conflicts.keys())
+            reasons.append(f"上游合并冲突: {', '.join(conflicts)}")
+        failure_reason = "; ".join(reasons) if reasons else "未知错误"
     logger.info(f"─── {sub_id} DONE: {subtask['title']} [{status}] ───")
     log_event(logger, "subtask_complete", {
         "id": sub_id, "status": status, "sandbox_type": sandbox_type,
@@ -485,7 +507,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                                      round(claude_time * 1000), verification_ms, git_commit_ms)
 
     return {"subtask_id": sub_id, "status": status, "exit_code": result.returncode,
-            "summary": summary, "worktree": str(worktree), "sandbox_type": sandbox_type,
+            "summary": summary, "failure_reason": failure_reason,
+            "worktree": str(worktree), "sandbox_type": sandbox_type,
             "verify_ok": verify_ok, "duration_sec": round(claude_time, 2),
             "agent_type_source": subtask.get("_agent_type_source", "default"),
             "skills_unresolved": unresolved_skills,
