@@ -131,7 +131,7 @@ def analyze_quality(meta: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         "Q7_plan_accuracy_recall": q7_recall,
         "Q8_retry_success_rate": retry_success_rate,
         "Q9_blocked_rate": blocked_rate,
-        "Q8_change_scale": {"avg_files": avg_files, "avg_insertions": avg_insertions, "avg_deletions": avg_deletions},
+        "change_scale": {"avg_files": avg_files, "avg_insertions": avg_insertions, "avg_deletions": avg_deletions},
         "score": round(q1 * 0.4 + q3 * 0.3 + q4 * 0.3),
     }
 
@@ -245,6 +245,8 @@ def aggregate_quality(tasks_dir: Path) -> Optional[dict[str, Any]]:
         "avg_verify_pass": round(sum(r["Q4_verify_pass_rate"] for r in items) / len(items)),
         "avg_new_file_miss": round(sum(r["Q5_new_file_miss_rate"] for r in items) / len(items)),
         "avg_merge_success": round(sum(r["Q6_merge_success_rate"] for r in items) / len(items)),
+        "avg_retry_success": round(sum(r["Q8_retry_success_rate"] for r in items) / len(items)),
+        "avg_blocked_rate": round(sum(r["Q9_blocked_rate"] for r in items) / len(items)),
         "avg_score": round(sum(r["score"] for r in items) / len(items)),
     }
 
@@ -405,6 +407,9 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
     headless = 0
     total_retries = 0
     subtask_total = 0
+    blocked = 0
+    retried = 0
+    retried_success = 0
 
     for td in _scan_task_dirs(tasks_dir):
         meta = _read_meta(td)
@@ -419,13 +424,28 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
         results = meta.get("results", [])
         subtask_total += len(results)
         for r in results:
+            r_status = r.get("status", "")
+            if r_status == "blocked":
+                blocked += 1
             if r.get("sandbox_type") == "greywall":
                 greywall += 1
             elif r.get("sandbox_type") == "native":
                 native += 1
             else:
                 headless += 1
-            total_retries += r.get("retry_count", 0)
+            rc = r.get("retry_count", 0)
+            total_retries += rc
+            if rc > 0:
+                retried += 1
+                if r_status == "completed":
+                    retried_success += 1
+        # 从日志统计中断/恢复
+        log_path = td / "execution.log"
+        if log_path.exists():
+            for ev in _read_log_events(log_path, "task_paused"):
+                interrupted += 1
+            for ev in _read_log_events(log_path, "subtask_resume"):
+                resumed += 1
 
     total_sandbox = greywall + native + headless
     return {
@@ -435,6 +455,11 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
                      "greywall_pct": round(greywall / total_sandbox * 100) if total_sandbox else 0},
         "retries_total": total_retries,
         "retry_rate": round(total_retries / subtask_total * 100) if subtask_total else 0,
+        "retry_success_rate": round(retried_success / retried * 100) if retried else 100,
+        "blocked": blocked,
+        "blocked_rate": round(blocked / subtask_total * 100) if subtask_total else 0,
+        "interrupted": interrupted,
+        "resumed": resumed,
     }
 
 
@@ -553,7 +578,8 @@ def _print_quality_report(q: Optional[dict[str, Any]]) -> None:
     console.print(f"\n质量报告 — {q['task_id']}")
     console.print("─" * 50)
     s = q["subtasks"]
-    console.print(f"  Subtask: {s['total']} total | {s['completed']} ok | {s['no_changes']} no-op | {s['failed']} fail")
+    blocked = s.get("blocked", 0)
+    console.print(f"  Subtask: {s['total']} total | {s['completed']} ok | {s['no_changes']} no-op | {s['failed']} fail | {blocked} blocked")
     console.print(f"  Q1 任务成功率:       {q['Q1_task_success_rate']}%")
     console.print(f"  Q2 Subtask成功率:    {q['Q2_subtask_success_rate']}%")
     console.print(f"  Q3 首次通过率:       {q['Q3_first_pass_rate']}%")
@@ -561,8 +587,10 @@ def _print_quality_report(q: Optional[dict[str, Any]]) -> None:
     console.print(f"  Q5 新文件遗漏率:     {q['Q5_new_file_miss_rate']}%")
     console.print(f"  Q6 产物传递成功率:   {q['Q6_merge_success_rate']}%")
     console.print(f"  Q7 计划准确性:       P={q['Q7_plan_accuracy_precision']}% R={q['Q7_plan_accuracy_recall']}%")
-    cs = q["Q8_change_scale"]
-    console.print(f"  Q8 变更规模:         avg {cs['avg_files']} files, +{cs['avg_insertions']}/-{cs['avg_deletions']}")
+    console.print(f"  Q8 重试修复成功率:   {q['Q8_retry_success_rate']}%")
+    console.print(f"  Q9 级联阻断率:       {q['Q9_blocked_rate']}%")
+    cs = q["change_scale"]
+    console.print(f"  变更规模:            avg {cs['avg_files']} files, +{cs['avg_insertions']}/-{cs['avg_deletions']}")
     console.print(f"  ─────────────────────────────")
     console.print(f"  评分: {q['score']}/100")
     console.print("─" * 50)
@@ -602,6 +630,11 @@ def _print_cost_report(c: dict[str, Any]) -> None:
     console.print(f"  API 错误:            {c['errors']} 次")
     console.print(f"  缓存命中:            {c['cache_hits']}/{c['cache_checks']} ({c['cache_hit_rate']}%)")
     console.print(f"  每任务成本:          ${c['avg_cost_per_task']}")
+    console.print(f"  每子任务成本:        ${c.get('avg_cost_per_subtask', 0)}")
+    console.print(f"  完成子任务:          {c.get('completed_subtasks', 0)} 个")
+    dpp = c.get('dollar_per_pass_rate')
+    dpp_str = f"${dpp}" if dpp is not None else "N/A"
+    console.print(f"  ★ $/pass rate:       {dpp_str}  (北极星)")
     console.print("─" * 50)
 
 
@@ -613,6 +646,9 @@ def _print_reliability_report(r: dict[str, Any]) -> None:
     console.print(f"  Sandbox:             greywall={sand['greywall_pct']}% native={sand['native']}/{sand['headless']}")
     console.print(f"  重试次数:            {r['retries_total']}")
     console.print(f"  重试率:              {r['retry_rate']}%")
+    console.print(f"  重试修复成功率:      {r['retry_success_rate']}%")
+    console.print(f"  阻断子任务:          {r['blocked']} 个 ({r['blocked_rate']}%)")
+    console.print(f"  中断/恢复:           {r['interrupted']}/{r['resumed']}")
     console.print("─" * 50)
 
 
@@ -640,6 +676,8 @@ def _print_aggregate_quality(agg: Optional[dict[str, Any]]) -> None:
     console.print(f"  平均验证通过率:      {agg['avg_verify_pass']}%")
     console.print(f"  平均新文件遗漏率:    {agg['avg_new_file_miss']}%")
     console.print(f"  平均产物传递成功率:  {agg['avg_merge_success']}%")
+    console.print(f"  平均重试修复成功率:  {agg['avg_retry_success']}%")
+    console.print(f"  平均级联阻断率:      {agg['avg_blocked_rate']}%")
     console.print(f"  平均评分:            {agg['avg_score']}/100")
     console.print("─" * 50)
 
