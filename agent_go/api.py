@@ -8,6 +8,8 @@ from .config import get_api_key, log_event, DECOMPOSE_RULES, AGENT_GO_DIR
 from .git_utils import analyze_project, get_git_info, get_resource_map
 from .skills import list_skills
 from .role_skill_map import load_role_skill_map
+from .metrics import estimate_cost
+from .router import resolve_provider, call_with_role
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +68,14 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
                 })
                 raise RuntimeError(f"API 响应结构异常 ({provider}): {e}") from e
             usage = data.get("usage", {})
+            prompt_tokens = usage.get("input_tokens", 0)
+            completion_tokens = usage.get("output_tokens", 0)
             log_event(logger, "api_call", {
                 "provider": provider, "model": model,
                 "latency_ms": round(latency * 1000, 2), "response_len": len(content),
-                "prompt_tokens": usage.get("input_tokens", 0),
-                "completion_tokens": usage.get("output_tokens", 0),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost_usd": round(estimate_cost(provider, model, prompt_tokens, completion_tokens), 6),
             })
             return content
     except urllib.error.HTTPError as e:
@@ -219,7 +224,15 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
         {"role": "user", "content": user_content}
     ]
 
-    content = call_api(config, messages, logger)
+    # ── 角色感知模型路由：Plan 阶段使用 architect → planner 路由 ──
+    route = resolve_provider("architect", config)
+    if route:
+        api_key = get_api_key(config)
+        logger.info(f"[PLAN] 路由: {route.role} → {route.primary.provider}:{route.primary.model}")
+        content, metering = call_with_role(route, messages, api_key, logger, task_id=task_id)
+        log_event(logger, "api_call", metering)
+    else:
+        content = call_api(config, messages, logger)
 
     try:
         plan = json.loads(content)

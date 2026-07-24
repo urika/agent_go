@@ -5,6 +5,7 @@ from typing import Any, Optional
 __all__ = [
     "collect_timing", "collect_change_stats",
     "collect_merge_result", "extract_usage",
+    "estimate_cost", "DEFAULT_PRICING",
 ]
 
 def collect_timing(worktree_create_ms: float, merge_upstream_ms: float, claude_execute_ms: float,
@@ -74,3 +75,48 @@ def extract_usage(api_response: dict[str, Any], provider: str, model: str) -> di
         "model": model,
         "provider": provider,
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# Cost Estimation
+# ═══════════════════════════════════════════════════════════════
+
+# 定价表：每百万 token 的价格（input, output），单位美元
+# 来源：各 provider 官方定价页，2026-07 采集
+DEFAULT_PRICING: dict[tuple[str, str], tuple[float, float]] = {
+    # Anthropic
+    ("anthropic", "claude-sonnet-4-20250514"):     (3.0, 15.0),
+    ("anthropic", "claude-haiku-4-5-20251001"):    (0.80, 4.0),
+    ("anthropic", "claude-opus-4-20250514"):        (15.0, 75.0),
+    # OpenAI
+    ("openai", "gpt-4o"):                           (2.50, 10.0),
+    ("openai", "gpt-4o-mini"):                      (0.15, 0.60),
+    # DeepSeek
+    ("deepseek", "deepseek-chat"):                  (0.27, 1.10),
+    ("deepseek", "deepseek-v4-pro"):                (0.55, 2.19),
+    # 本地模型 — 成本为 0
+    ("custom", "*"):                                 (0.0, 0.0),
+}
+
+
+def estimate_cost(provider: str, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """估算 API 调用成本（美元）。
+
+    按 provider + model 查找定价表，计算 input + output token 的总成本。
+    未匹配的 provider/model 组合返回 0（不阻塞流程）。
+
+    Args:
+        provider: "anthropic" | "openai" | "deepseek" | "custom"
+        model: 具体模型名
+        prompt_tokens: 输入 token 数
+        completion_tokens: 输出 token 数
+
+    Returns:
+        估算成本（美元）
+    """
+    key = (provider, model)
+    wildcard = (provider, "*")
+    prices = DEFAULT_PRICING.get(key) or DEFAULT_PRICING.get(wildcard, (0, 0))
+    input_cost = (prompt_tokens / 1_000_000) * prices[0]
+    output_cost = (completion_tokens / 1_000_000) * prices[1]
+    return input_cost + output_cost

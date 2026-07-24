@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "main", "cmd_run", "cmd_resume", "cmd_list", "cmd_show",
     "cmd_status", "cmd_config", "cmd_clean", "cmd_pr", "cmd_review",
+    "cmd_router",
 ]
 
 def _build_parser():
@@ -110,6 +111,22 @@ def _build_parser():
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
+
+    # router 子命令
+    router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")
+    router_sub = router_parser.add_subparsers(dest="router_subcommand", help="Router operation")
+    router_sub.add_parser("show", help="Show current router configuration")
+    router_sub.add_parser("enable", help="Enable role-aware routing")
+    router_sub.add_parser("disable", help="Disable role-aware routing")
+    set_role_parser = router_sub.add_parser("set-role", help="Configure a role's provider")
+    set_role_parser.add_argument("role", choices=["planner", "worker", "reviewer"],
+                                 help="Role to configure")
+    set_role_parser.add_argument("--provider", required=True, help="Provider: anthropic|openai|deepseek|custom")
+    set_role_parser.add_argument("--model", required=True, help="Model name")
+    set_role_parser.add_argument("--base-url", required=True, help="API base URL")
+    set_role_parser.add_argument("--fallback-provider", help="Fallback provider")
+    set_role_parser.add_argument("--fallback-model", help="Fallback model name")
+    set_role_parser.add_argument("--fallback-base-url", help="Fallback API base URL")
 
     return parser
 
@@ -806,6 +823,92 @@ def _cache_size() -> str:
     return f"{total / 1024 / 1024:.1f}MB"
 
 
+def cmd_router(args=None) -> None:
+    """角色感知模型路由配置管理。"""
+    from .config import CONFIG_PATH
+
+    config = load_config()
+    router_cfg = config.setdefault("router", {})
+
+    subcmd = args.router_subcommand if args else "show"
+
+    if subcmd == "show":
+        _print_router_config(router_cfg)
+        return
+
+    if subcmd == "enable":
+        router_cfg["enabled"] = True
+        CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        print("✅ 角色感知路由已启用")
+        _print_router_config(router_cfg)
+        return
+
+    if subcmd == "disable":
+        router_cfg["enabled"] = False
+        CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        print("✅ 角色感知路由已禁用（回退到 plan_api）")
+        return
+
+    if subcmd == "set-role":
+        role = args.role
+        router_cfg.setdefault("roles", {})
+        role_cfg = router_cfg["roles"].setdefault(role, {})
+        role_cfg["provider"] = args.provider
+        role_cfg["model"] = args.model
+        role_cfg["base_url"] = args.base_url
+
+        if args.fallback_provider and args.fallback_model and args.fallback_base_url:
+            role_cfg["fallback"] = {
+                "provider": args.fallback_provider,
+                "model": args.fallback_model,
+                "base_url": args.fallback_base_url,
+            }
+        elif args.fallback_provider:
+            print("⚠️  --fallback-provider 需要同时指定 --fallback-model 和 --fallback-base-url")
+
+        # Planner 铁律：不允许配置降级到弱模型
+        if role == "planner" and "fallback" in role_cfg:
+            print("⚠️  警告：Planner 角色不应配置降级（规划 token 省小钱，Worker token 数倍膨胀）")
+            print("   建议移除 fallback: agent_go router set-role planner --provider ... --model ... --base-url ...")
+
+        CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"✅ {role} 角色已配置")
+        _print_role_config(role, router_cfg)
+        return
+
+    print(f"未知操作: {subcmd}。可用: show | enable | disable | set-role")
+
+
+def _print_router_config(router_cfg: dict) -> None:
+    """打印路由器配置摘要。"""
+    enabled = router_cfg.get("enabled", False)
+    status = "🟢 启用" if enabled else "⚪ 禁用"
+    print(f"\n🔀 角色感知路由: {status}")
+    print(f"   熔断: {router_cfg.get('circuit_breaker', {}).get('failure_threshold', 5)} 次失败 → "
+          f"{router_cfg.get('circuit_breaker', {}).get('cooldown_seconds', 60)}s 冷却")
+    print(f"   Agent 映射: {json.dumps(router_cfg.get('agent_type_mapping', {}), ensure_ascii=False)}")
+
+    roles = router_cfg.get("roles", {})
+    if roles:
+        print("   角色配置:")
+        for role_name in ["planner", "worker", "reviewer"]:
+            if role_name in roles:
+                _print_role_config(role_name, router_cfg)
+    else:
+        print("   ⚠️  未配置任何角色，请使用 'agent_go router set-role' 配置")
+
+
+def _print_role_config(role_name: str, router_cfg: dict) -> None:
+    """打印单个角色配置。"""
+    roles = router_cfg.get("roles", {})
+    rc = roles.get(role_name, {})
+    provider = rc.get("provider", "?")
+    model = rc.get("model", "?")
+    fallback = rc.get("fallback")
+    fb_str = f" → fallback: {fallback['provider']}:{fallback['model']}" if fallback else " (不降级)"
+    print(f"     {role_name}: {provider}:{model}{fb_str}")
+
+
 def cmd_agents() -> None:
     """列出所有可用的 Agent 类型。"""
     agents = list_agent_types()
@@ -854,6 +957,8 @@ def main() -> None:
             cmd_review(args)
         elif args.command == "eval":
             cmd_eval(args)
+        elif args.command == "router":
+            cmd_router(args)
     except KeyboardInterrupt:
         print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)

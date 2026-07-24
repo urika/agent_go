@@ -49,7 +49,22 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "plan_ttl": 86400,          # Plan 缓存有效期（秒），默认 24h
         "max_entries": 100          # 最大缓存条目数
-    }
+    },
+    "router": {
+        "enabled": False,           # 默认关闭，向后兼容
+        "roles": {},                # 角色路由配置，格式见 docs/in/role-aware-routing-design.md
+        "agent_type_mapping": {     # Agent 类型 → 路由角色
+            "developer": "worker",
+            "architect": "planner",
+            "reviewer": "reviewer",
+            "tester": "worker",
+        },
+        "circuit_breaker": {
+            "failure_threshold": 5,         # 连续 N 次可用性失败 → 熔断
+            "cooldown_seconds": 60,          # 熔断 N 秒后半开试探
+            "half_open_requests": 2,         # 半开时允许通过的请求数
+        },
+    },
 }
 
 DECOMPOSE_RULES = [
