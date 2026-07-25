@@ -123,7 +123,7 @@ class TestCmdRouter:
         assert "fallback" not in saved["router"]["roles"]["worker"]
 
     def test_set_role_planner_fallback_warns(self, capsys, monkeypatch, tmp_path):
-        """PRD 铁律：Planner 不允许配置降级 → 警告（但仍写入，由人工决策）"""
+        """PRD 铁律：Planner 配置 fallback → 政策违规警告 + metering 标记 policy_violation"""
         from agent_go.cli import cmd_router
         cfg_path = self._stub(monkeypatch, {"router": {}}, tmp_path)
         cmd_router(self._ns(
@@ -133,7 +133,10 @@ class TestCmdRouter:
             fallback_base_url="http://b",
         ))
         out = capsys.readouterr().out
-        assert "Planner" in out and "不应配置降级" in out
+        # 政策违规提示（铁律执行力加强：从软警告升级为违规标记）
+        assert "Planner" in out
+        assert "政策违规" in out or "不应配置降级" in out
+        assert "policy_violation" in out  # metering 标记（eval 可统计违规配置）
 
     def test_unknown_subcommand(self, capsys, monkeypatch, tmp_path):
         from agent_go.cli import cmd_router

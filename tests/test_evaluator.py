@@ -130,9 +130,9 @@ class TestEvaluateSemantic:
         assert result["suggestions"] == ""
         assert result["raw_response"] == _PASS_JSON
         assert result["latency_ms"] >= 0
-        # DEFAULT evaluator = anthropic/claude-haiku-4-5（0.80/4.0 per Mtok）
-        # 1000 prompt + 200 completion → 0.0008 + 0.0008 = 0.0016
-        assert result["cost_usd"] == pytest.approx(0.0016)
+        # D3 修复后：token 由 prompt/response 长度估算（~3 字符/token），不再硬编码 1000/200。
+        # cost_usd 由估算 token × haiku-4-5 单价（0.80/4.0 per Mtok）计算。
+        assert result["cost_usd"] > 0
 
     def test_not_passed_result(self, tmp_path, logger):
         """LLM 返回 passed=false 时应透传失败原因与修复建议。"""
@@ -230,9 +230,16 @@ class TestEvaluateSemantic:
         assert event["subtask_id"] == "sub-1"
         assert event["actual_provider"] == "anthropic"
         assert event["actual_model"] == "claude-haiku-4-5-20251001"
-        assert event["prompt_tokens"] == 1000
-        assert event["completion_tokens"] == 200
-        assert event["cost_usd"] == pytest.approx(0.0016)
+        # D3 修复后：token 由 prompt/response 长度估算（~3 字符/token），不再硬编码 1000/200。
+        # 断言估算值合理（>0，prompt 远大于 completion）+ cost 与估算一致。
+        assert event["prompt_tokens"] > 0
+        assert event["completion_tokens"] > 0
+        assert event["prompt_tokens"] > event["completion_tokens"]
+        # cost_usd 与估算 token + haiku-4-5 单价（0.80/4.0 per Mtok）一致
+        expected_cost = round(
+            event["prompt_tokens"] * 0.80 / 1_000_000
+            + event["completion_tokens"] * 4.0 / 1_000_000, 6)
+        assert event["cost_usd"] == pytest.approx(expected_cost, rel=1e-3)
 
     def test_meter_event_quality_fail(self, tmp_path, logger):
         """评估不通过时应写入 result=quality_fail 的计量事件。"""
