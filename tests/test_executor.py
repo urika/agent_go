@@ -11,15 +11,25 @@
   8. Upstream merge 调用正确
   9. 验证命令执行
   10. Context 文件生成
+  11. _run_verification_cmd 安全门禁 / argv 解析失败 / 120s 超时
+  12. _load_verify_state 损坏 JSON 容错恢复
+  13. _assess_verification_confidence 各置信度分支
+  14. _is_simple_task 判定逻辑
 """
 
-import os, json, logging
+import os, json, logging, subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
 
 import pytest
 
-from agent_go.executor import run_subtask
+from agent_go.executor import (
+    run_subtask,
+    _run_verification_cmd,
+    _load_verify_state,
+    _assess_verification_confidence,
+    _is_simple_task,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -937,3 +947,286 @@ class TestRunSubtask:
         assert tag_name == "my-task/sub-1", (
             f"tag 应为 my-task/sub-1，实际: {tag_name}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════
+# _run_verification_cmd 边界：安全门禁 / argv 解析失败 / 超时
+# ═══════════════════════════════════════════════════════════════
+
+class TestRunVerificationCmd:
+    """_run_verification_cmd 单命令执行的边界分支"""
+
+    @patch("subprocess.run")
+    @patch("agent_go.executor._log_rejected_command")
+    def test_rejected_command_skips_execution(self, mock_log_rejected, mock_subprocess,
+                                              tmp_path, fast_logger):
+        """安全门禁拒绝的命令不应执行，应标记 rejected 并记录拒绝原因"""
+        result = _run_verification_cmd("rm -rf /", tmp_path, 1, {}, fast_logger,
+                                       "task-1", "sub-1")
+
+        assert result["rejected"] is True
+        assert result["reject_reason"], "拒绝时应给出诊断原因"
+        assert result["exit_code"] == -1, "被拒绝的命令不应产生真实退出码"
+        mock_subprocess.assert_not_called()
+        mock_log_rejected.assert_called_once()
+        # _log_rejected_command(vcmd, reason, logger, task_id, sub_id)
+        reject_args = mock_log_rejected.call_args[0]
+        assert reject_args[0] == "rm -rf /"
+        assert reject_args[3] == "task-1"
+        assert reject_args[4] == "sub-1"
+
+    @patch("subprocess.run")
+    @patch("agent_go.executor._log_rejected_command")
+    def test_command_chain_rejected(self, mock_log_rejected, mock_subprocess,
+                                    tmp_path, fast_logger):
+        """含 && 命令链的命令应被注入扫描拒绝"""
+        result = _run_verification_cmd("pytest -q && rm -rf x", tmp_path, 1, {},
+                                       fast_logger)
+
+        assert result["rejected"] is True
+        assert "命令链" in result["reject_reason"]
+        mock_subprocess.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_cd_prefix_stripped(self, mock_subprocess, tmp_path, fast_logger):
+        """冗余的 cd <dir> && 前缀应被剥离后再执行"""
+        mock_subprocess.return_value = make_subprocess_mock(returncode=0, stdout="ok")
+
+        result = _run_verification_cmd("cd /some/dir && pytest -q", tmp_path, 1, {},
+                                       fast_logger)
+
+        assert result["command"] == "pytest -q", (
+            f"cd 前缀应被剥离，实际: {result['command']}"
+        )
+        assert result["exit_code"] == 0
+        # 实际执行的 argv 也不应包含 cd
+        executed_argv = mock_subprocess.call_args[0][0]
+        assert executed_argv == ["pytest", "-q"]
+
+    @pytest.mark.parametrize("exc", [FileNotFoundError, OSError, ValueError])
+    @patch("subprocess.run")
+    def test_argv_parse_failure(self, mock_subprocess, tmp_path, exc):
+        """subprocess 抛出 FileNotFoundError/OSError/ValueError 时应跳过且不降级 shell"""
+        mock_logger = MagicMock(spec=logging.Logger)
+        mock_subprocess.side_effect = exc("boom")
+
+        result = _run_verification_cmd("pytest -q", tmp_path, 1, {}, mock_logger)
+
+        assert result["exit_code"] == -1, "解析失败不应产生真实退出码"
+        assert "rejected" not in result, "解析失败与安全拒绝是不同的分支"
+        assert "stdout_tail" not in result, "未执行成功不应有输出尾部"
+        warning_msgs = " ".join(str(c.args[0]) for c in mock_logger.warning.call_args_list)
+        assert "无法解析" in warning_msgs
+
+    @patch("subprocess.run")
+    def test_timeout_120s(self, mock_subprocess, tmp_path):
+        """验证命令超 120s 应捕获 TimeoutExpired 并标记 exit_code=-1"""
+        mock_logger = MagicMock(spec=logging.Logger)
+        mock_subprocess.side_effect = subprocess.TimeoutExpired(cmd=["pytest", "-q"],
+                                                                timeout=120)
+
+        result = _run_verification_cmd("pytest -q", tmp_path, 1, {}, mock_logger)
+
+        assert result["exit_code"] == -1
+        assert result["duration_ms"] == 0, "超时未正常返回不应记录耗时"
+        warning_msgs = " ".join(str(c.args[0]) for c in mock_logger.warning.call_args_list)
+        assert "超时" in warning_msgs
+
+    @patch("subprocess.run")
+    def test_output_tail_truncated_to_1500(self, mock_subprocess, tmp_path, fast_logger):
+        """stdout/stderr 尾部应只保留最后 1500 字符（供修复 prompt 注入）"""
+        mock_subprocess.return_value = make_subprocess_mock(
+            returncode=1, stdout="x" * 2000, stderr="y" * 1600)
+
+        result = _run_verification_cmd("pytest -q", tmp_path, 2, {}, fast_logger)
+
+        assert result["exit_code"] == 1
+        assert result["stdout_tail"] == "x" * 1500
+        assert result["stderr_tail"] == "y" * 1500
+        assert result["attempt"] == 2
+
+
+# ═══════════════════════════════════════════════════════════════
+# _load_verify_state 边界：损坏 JSON 容错恢复
+# ═══════════════════════════════════════════════════════════════
+
+class TestLoadVerifyState:
+    """_load_verify_state 读取 verify_state.json 的容错分支"""
+
+    def test_missing_file_returns_none(self, tmp_path):
+        """状态文件不存在时应返回 None"""
+        assert _load_verify_state(tmp_path, "sub-1") is None
+
+    def test_valid_state_returned(self, tmp_path):
+        """合法 JSON 且 subtask_id 匹配时应返回完整 dict"""
+        sub_dir = tmp_path / "sub-1"
+        sub_dir.mkdir(parents=True)
+        state = {"subtask_id": "sub-1", "attempts": 2, "history": [],
+                 "verification_results": []}
+        (sub_dir / "verify_state.json").write_text(
+            json.dumps(state), encoding="utf-8")
+
+        result = _load_verify_state(tmp_path, "sub-1")
+
+        assert result is not None
+        assert result["subtask_id"] == "sub-1"
+        assert result["attempts"] == 2
+
+    def test_wrong_subtask_id_returns_none(self, tmp_path):
+        """subtask_id 不匹配（跨子任务串扰）时应返回 None"""
+        sub_dir = tmp_path / "sub-1"
+        sub_dir.mkdir(parents=True)
+        (sub_dir / "verify_state.json").write_text(
+            json.dumps({"subtask_id": "sub-2", "attempts": 1}), encoding="utf-8")
+
+        assert _load_verify_state(tmp_path, "sub-1") is None
+
+    def test_corrupted_json_returns_none(self, tmp_path):
+        """损坏的 JSON 应容错返回 None 而不是抛 JSONDecodeError"""
+        sub_dir = tmp_path / "sub-1"
+        sub_dir.mkdir(parents=True)
+        (sub_dir / "verify_state.json").write_text("{not valid json", encoding="utf-8")
+
+        assert _load_verify_state(tmp_path, "sub-1") is None
+
+    def test_non_dict_json_returns_none(self, tmp_path):
+        """JSON 合法但不是 dict（如 list）时应返回 None"""
+        sub_dir = tmp_path / "sub-1"
+        sub_dir.mkdir(parents=True)
+        (sub_dir / "verify_state.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+        assert _load_verify_state(tmp_path, "sub-1") is None
+
+    def test_oserror_returns_none(self, tmp_path):
+        """读取抛 OSError（如权限/IO 错误）时应容错返回 None"""
+        sub_dir = tmp_path / "sub-1"
+        sub_dir.mkdir(parents=True)
+        (sub_dir / "verify_state.json").write_text("{}", encoding="utf-8")
+
+        with patch.object(Path, "read_text", side_effect=OSError("io error")):
+            assert _load_verify_state(tmp_path, "sub-1") is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# _assess_verification_confidence 各置信度分支
+# ═══════════════════════════════════════════════════════════════
+
+class TestAssessVerificationConfidence:
+    """_assess_verification_confidence 的 deterministic/heuristic/manual/none 分支"""
+
+    def test_no_changes_returns_none_level(self):
+        """无变更时无需验证，level 应为 none"""
+        result = _assess_verification_confidence("pytest -q", has_changes=False)
+
+        assert result["level"] == "none"
+        assert result["warning"] == ""
+
+    def test_no_verification_returns_manual(self):
+        """有变更但无验证命令时应为 manual，并给出假阳性警告"""
+        result = _assess_verification_confidence("", has_changes=True)
+
+        assert result["level"] == "manual"
+        assert "假阳性" in result["warning"]
+
+    def test_whitespace_verification_returns_manual(self):
+        """纯空白验证命令等价于未配置，应为 manual"""
+        result = _assess_verification_confidence("   ", has_changes=True)
+
+        assert result["level"] == "manual"
+
+    def test_deterministic_pytest(self):
+        """含测试框架关键字的命令应为 deterministic"""
+        result = _assess_verification_confidence("pytest tests/ -q", has_changes=True)
+
+        assert result["level"] == "deterministic"
+        assert result["warning"] == ""
+
+    def test_deterministic_case_insensitive(self):
+        """关键字匹配应大小写不敏感"""
+        result = _assess_verification_confidence("PYTEST -Q", has_changes=True)
+
+        assert result["level"] == "deterministic"
+
+    def test_deterministic_takes_precedence_over_heuristic(self):
+        """同时含测试和静态检查关键字时应优先判为 deterministic"""
+        result = _assess_verification_confidence("ruff --check src && pytest -q",
+                                                 has_changes=True)
+
+        assert result["level"] == "deterministic"
+
+    def test_heuristic_static_check(self):
+        """仅含 lint/check 等静态检查关键字时应为 heuristic"""
+        result = _assess_verification_confidence("ruff --check src", has_changes=True)
+
+        assert result["level"] == "heuristic"
+        assert "静态检查" in result["warning"]
+
+    def test_unclassified_returns_heuristic(self):
+        """有命令但无任何已知关键字时应归为 heuristic 并提示改用测试框架"""
+        result = _assess_verification_confidence("mypy --strict src", has_changes=True)
+
+        assert result["level"] == "heuristic"
+        assert "无法归类" in result["reason"]
+        assert "pytest" in result["warning"]
+
+    def test_echo_latest_not_deterministic(self):
+        """词边界匹配：'echo latest' 含子串 'test' 但不应误判为 deterministic"""
+        result = _assess_verification_confidence("echo latest", has_changes=True)
+
+        assert result["level"] == "heuristic"
+        assert "无法归类" in result["reason"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# _is_simple_task 判定逻辑
+# ═══════════════════════════════════════════════════════════════
+
+class TestIsSimpleTask:
+    """_is_simple_task: 探索性关键词 + depends_on 数量"""
+
+    def test_minimal_subtask_is_simple(self):
+        """无描述、无依赖的子任务应判为简单任务"""
+        assert _is_simple_task({}) is True
+
+    @pytest.mark.parametrize("keyword", [
+        "探索", "调研", "重构", "迁移",
+        "explore", "refactor", "migrate",
+    ])
+    def test_exploration_keyword_not_simple(self, keyword):
+        """description 含任一探索性关键词时应判为复杂任务"""
+        subtask = {"description": f"请{keyword}一下代码库", "depends_on": []}
+
+        assert _is_simple_task(subtask) is False
+
+    def test_keyword_in_agent_prompt_not_simple(self):
+        """agent_prompt 中的探索性关键词同样应触发复杂判定"""
+        subtask = {"description": "修改配置",
+                   "agent_prompt": "Please refactor the module"}
+
+        assert _is_simple_task(subtask) is False
+
+    def test_keyword_case_insensitive(self):
+        """英文关键词匹配应大小写不敏感"""
+        subtask = {"description": "EXPLORE the repo structure"}
+
+        assert _is_simple_task(subtask) is False
+
+    def test_two_dependencies_simple(self):
+        """depends_on ≤ 2 且无关键词时应判为简单任务"""
+        subtask = {"description": "实现登录接口", "depends_on": ["sub-1", "sub-2"]}
+
+        assert _is_simple_task(subtask) is True
+
+    def test_three_dependencies_not_simple(self):
+        """depends_on > 2 时应判为复杂任务"""
+        subtask = {"description": "实现登录接口",
+                   "depends_on": ["sub-1", "sub-2", "sub-3"]}
+
+        assert _is_simple_task(subtask) is False
+
+    def test_keyword_and_many_deps_not_simple(self):
+        """关键词与过多依赖同时存在时应判为复杂任务"""
+        subtask = {"description": "分析并重构模块",
+                   "depends_on": ["sub-1", "sub-2", "sub-3"]}
+
+        assert _is_simple_task(subtask) is False

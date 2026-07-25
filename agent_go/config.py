@@ -46,6 +46,12 @@ DEFAULT_CONFIG = {
         "timeout_seconds": 600,          # goal 循环全局超时（秒）
         "enable_goal_hook": False,      # 是否注入 Stop Hook（.claude/settings.json + verify-goal.sh）
     },
+    "agent_loop": {
+        "enabled": False,               # 默认关闭，--agent-loop 开启
+        "max_turns": 20,                # 最大对话轮数
+        "max_duration": 600,            # 全局超时（秒）
+        "api_timeout": 120,             # 单次 API 调用超时（秒）
+    },
     "evaluator": {
         "enabled": False,               # 默认关闭（向后兼容 + 成本可控）
         "provider": "anthropic",
@@ -121,7 +127,16 @@ def safe_input(prompt: str = "") -> str:
 
 def load_config() -> dict[str, Any]:
     if CONFIG_PATH.exists():
-        saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        try:
+            saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            # 配置文件损坏或读取失败：告警并回退默认配置，不覆写原文件
+            console.print(f"⚠️  配置文件损坏或无法读取 ({CONFIG_PATH}): {e}，已回退默认配置。请检查或删除该文件。")
+            return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+        if not isinstance(saved, dict):
+            # 合法 JSON 但非 dict（如 [1,2]），同样回退默认配置
+            console.print(f"⚠️  配置文件格式无效 ({CONFIG_PATH}): 顶层应为 JSON 对象，已回退默认配置。请检查或删除该文件。")
+            return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
         merged = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
         for key, value in saved.items():
             if isinstance(value, dict) and isinstance(merged.get(key), dict):

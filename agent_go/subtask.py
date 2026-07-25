@@ -195,7 +195,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                     if current_tool[0]:
                         ti = tool_input[0]
                         preview = ti[:200] if len(ti) > 200 else ti
-                        logger.debug(f"{PFX} [{current_tool[0]}] 完成")
+                        logger.debug(f"{PFX} [{current_tool[0]}] 完成: {preview}")
                         current_tool[0] = None
 
             # assistant: 消息批次

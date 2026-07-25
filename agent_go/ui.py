@@ -93,15 +93,11 @@ def _estimate_duration(plan: dict[str, Any], parallel: int = 1) -> str:
 
         total_sec = waves * BASE_PER_STEP
 
+    # 统一按 0.8/1.2 区间估算（steps 非空时最少 240s，无秒级场景）
     minutes = total_sec / 60
-    if minutes < 1:
-        return f"约 {total_sec} 秒"
-    elif minutes < 5:
-        return f"约 {int(minutes)}-{int(minutes * 1.2)} 分钟"
-    else:
-        low = int(minutes * 0.8)
-        high = int(minutes * 1.2)
-        return f"约 {low}-{high} 分钟"
+    low = int(minutes * 0.8)
+    high = int(minutes * 1.2)
+    return f"约 {low}-{high} 分钟"
 
 
 def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
@@ -177,7 +173,7 @@ def _prompt_fallback(logger: logging.Logger) -> str:
 def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "") -> tuple[Optional[dict[str, Any]], Optional[list[str]]]:
     """
     用户确认 Plan。支持默认同意模式。
-    返回: (plan, doc_paths) 或 (None, None) 或 ("__FALLBACK__", None)
+    返回: (plan, doc_paths) 或 (None, doc_paths)（R 重新生成）或 ("__FALLBACK__", None)
     """
     behavior = config.get("behavior", {})
     auto_confirm = behavior.get("auto_confirm_plan", False)

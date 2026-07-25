@@ -10,7 +10,7 @@ from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 from .evaluator import evaluate_semantic
-
+from .config import get_api_key
 __all__ = ["run_subtask"]
 
 # 模块级常量：路径替换时的边界字符集（在 _build_task_md 和 run_subtask 中共享）
@@ -385,11 +385,16 @@ def _assess_verification_confidence(verification: str, has_changes: bool) -> dic
     # 启发式检查关键字
     HEURISTIC_KEYWORDS = [
         "lint", "check", "fmt", "format", "build", "compile",
-        "typecheck", "analyze", "audit", "style", "audit",
+        "typecheck", "analyze", "audit", "style",
     ]
 
-    is_deterministic = any(kw in v_lower for kw in DETERMINISTIC_KEYWORDS)
-    is_heuristic = any(kw in v_lower for kw in HEURISTIC_KEYWORDS)
+    # 词边界匹配：避免子串误判（如 "echo latest" 含 "test"）
+    is_deterministic = any(
+        re.search(r"\b" + re.escape(kw) + r"\b", v_lower)
+        for kw in DETERMINISTIC_KEYWORDS)
+    is_heuristic = any(
+        re.search(r"\b" + re.escape(kw) + r"\b", v_lower)
+        for kw in HEURISTIC_KEYWORDS)
 
     if is_deterministic:
         return {
@@ -729,6 +734,44 @@ def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verif
     logger.info(f"上下文已写入: {line_count} 行")
 
 
+def _is_simple_task(subtask: dict) -> bool:
+    """判断子任务是否适合直接 API 执行（vs claude -p）。
+
+    判定策略：
+    1. architect/reviewer agent_type → 复杂（探索性任务）
+    2. 关键词检测（仅保留高频误伤低的词）
+    3. files_hint 通配符过多 → 涉及文件多 → 复杂
+    4. 上游依赖 > 2 → 复杂
+    """
+    # 1. Agent type
+    agent_type = subtask.get("agent_type", "developer")
+    if agent_type in ("architect", "reviewer"):
+        return False
+
+    # 2. 关键词检测（谨慎选择，避免误伤）
+    desc = ((subtask.get("description", "") or "") + " " +
+            (subtask.get("agent_prompt", "") or "")).lower()
+    exploration_keywords = [
+        "探索", "调研", "重构", "迁移",
+        "refactor", "migrate", "explore",
+    ]
+    for kw in exploration_keywords:
+        if kw in desc:
+            return False
+
+    # 3. files_hint 包含大量通配符 → 涉及文件多
+    files_hint = subtask.get("files_hint", "") or ""
+    if files_hint.count("**") > 1:
+        return False
+
+    # 4. 依赖过多
+    depends = subtask.get("depends_on", [])
+    if len(depends) > 2:
+        return False
+
+    return True
+
+
 def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path="", config=None):
     sub_id = subtask["id"]
     console = get_default_console()
@@ -830,10 +873,43 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         logger.info(f"[S4] {sub_id} difficulty={difficulty} → model={routed_model}")
         log_event(logger, "model_routing", {"sub_id": sub_id, "difficulty": difficulty, "model": routed_model})
 
-    # 5. Run Claude
-    result, sandbox_type, claude_time = _run_claude(
-        task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger
-    )
+    # 5. Run Claude（含混合策略分支：简单任务 → 直接 API）
+    _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)
+    _is_simple = _is_simple_task(subtask)
+    if _agent_loop_enabled and _is_simple and headless:
+        from .router import resolve_provider, ProviderConfig
+        from .agent_loop import AgentLoop
+        route = resolve_provider(subtask.get("agent_type", "developer"), config)
+        if route:
+            pc = route.primary
+            _route_info = f"{route.role}:{pc.provider}/{pc.model}"
+        else:
+            _plan_api = config.get("plan_api", {})
+            pc = ProviderConfig(
+                provider=_plan_api.get("provider", "anthropic"),
+                base_url=_plan_api.get("base_url", ""),
+                model=_plan_api.get("model", ""),
+            )
+            _route_info = f"plan_api:{pc.provider}/{pc.model}"
+        api_key = get_api_key(config)
+        loop = AgentLoop(logger=logger)
+        console.print(f"  🤖 直接 API 模式 ({_route_info})")
+        result = loop.run(
+            prompt=task_md,
+            worktree=worktree,
+            pc=pc,
+            api_key=api_key,
+            config=config,
+            tag_name=f"{task_id}/{sub_id}",
+            sub_id=sub_id,
+            task_id=task_id,
+        )
+        sandbox_type = "agent_loop"
+        claude_time = 0.0
+    else:
+        result, sandbox_type, claude_time = _run_claude(
+            task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger
+        )
 
     # 6. Verify changes
     tag_name = f"{task_id}/{sub_id}"
@@ -876,7 +952,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             rejected_cmds = [vr.get("command", "") for vr in verification_results if vr.get("rejected")]
             if rejected_cmds:
                 reasons.append(f"验证命令被拒绝: {rejected_cmds[0][:80]}")
-            if not failed_cmds and not rejected_cmds:
+            # 语义评估记录无 command/exit_code 字段，单独收集
+            semantic_fails = [vr for vr in verification_results
+                              if vr.get("type") == "semantic" and not vr.get("passed", True)]
+            if semantic_fails:
+                reasons.append(f"LLM 语义评估未通过: {semantic_fails[-1].get('reason', '')[:80]}")
+            if not failed_cmds and not rejected_cmds and not semantic_fails:
                 reasons.append("验证未通过（无变更或未知原因）")
         if merge_conflicts:
             conflicts = list(merge_conflicts.keys())

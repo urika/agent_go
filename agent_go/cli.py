@@ -65,6 +65,8 @@ def _build_parser():
                             help="启用 goal 指令注入（TASK.md 追加 /goal 循环，默认关闭）")
     run_parser.add_argument("--goal-hook", action="store_true", dest="goal_hook",
                             help="注入 Stop Hook（.claude/settings.json + verify-goal.sh，默认关闭）")
+    run_parser.add_argument("--agent-loop", action="store_true",
+                            help="启用混合策略：简单任务走直接 API，复杂任务保留 claude -p（默认关闭）")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -223,6 +225,8 @@ def cmd_run(args=None):
         config.setdefault("goal", {})["enabled"] = True
     if getattr(args, "goal_hook", False):
         config.setdefault("goal", {})["enable_goal_hook"] = True
+    if getattr(args, "agent_loop", False):
+        config.setdefault("agent_loop", {})["enabled"] = True
 
     if auto_yes:
         config["behavior"]["auto_confirm_plan"] = True
@@ -321,8 +325,10 @@ def cmd_run(args=None):
         else:
             while confirmed_plan is None and iteration < max_iter:
                 iteration += 1
+                # 重生成时重新读取 D 挂载的参考文档，避免确认环节挂载的内容丢失
+                regen_docs = read_reference_docs(final_doc_paths, repo, logger) if final_doc_paths else ""
                 try:
-                    plan = generate_plan(task, repo, config, logger, "", "", iteration, skill_plan_context, no_cache=no_cache)
+                    plan = generate_plan(task, repo, config, logger, "", regen_docs, iteration, skill_plan_context, no_cache=no_cache)
                 except Exception as e:
                     logger.error(f"重试生成 Plan 失败: {e}")
                     console.print(f"\n⚠️ 重试失败: {e}")
@@ -405,6 +411,8 @@ def cmd_resume(args=None):
     if not task_dir.exists():
         print(f"任务不存在: {task_id}")
         sys.exit(1)
+    # logger 需在 result.json 恢复循环之前初始化，否则损坏文件触发 UnboundLocalError
+    logger = setup_logger(task_id, task_dir)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
     if meta.get("status") not in ("running", "paused"):
         print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused 状态可恢复")
@@ -435,7 +443,6 @@ def cmd_resume(args=None):
             completed_ids.add(wid)
 
     repo = Path(meta["repo"])
-    logger = setup_logger(task_id, task_dir)
     config = load_config()
     # 与 cmd_run 一致：注入计量路径与任务 ID，否则 resume 后 planner/worker 计量丢失
     config["_metering_path"] = str(task_dir / "metering.jsonl")
