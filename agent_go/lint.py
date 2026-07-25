@@ -96,43 +96,58 @@ def _check_suspicious_for_loops(tree: ast.AST, filepath: str) -> list[dict]:
             continue
 
         # Collect variables assigned inside the for body
+        # PLUS the loop target itself (e.g. `for fut in ...` → `fut`)
         body_vars: set[str] = set()
+        _collect_assigned(node.target, body_vars)
         for stmt in node.body:
             _collect_assigned(stmt, body_vars)
         if not body_vars:
             continue
 
-        # Locate the containing block to find subsequent siblings
-        parent = parent_map.get(id(node))
-        if parent is None:
-            continue
-        container = _find_containing_list(parent, node)
-        if container is None:
-            continue
+        # Locate the containing block to find subsequent siblings.
+        # Walk up at most 2 levels: if the for is the last statement in its
+        # container, the buggy code may be a sibling of the parent (e.g.
+        # try/with accidentally outside a ``with ThreadPoolExecutor`` block).
+        overlap: set[str] = set()
+        current: ast.AST = node
+        for _level in range(3):
+            parent = parent_map.get(id(current))
+            if parent is None:
+                break
+            container = _find_containing_list(parent, current)
+            if container is None:
+                break
+            try:
+                idx = container.index(current)
+            except ValueError:
+                break
 
-        try:
-            idx = container.index(node)
-        except ValueError:
-            continue
+            # Check up to 3 subsequent sibling statements
+            for sibling in container[idx + 1 : idx + 4]:
+                sibling_vars: set[str] = set()
+                _collect_used(sibling, sibling_vars)
+                overlap = body_vars & sibling_vars
+                if overlap:
+                    break
 
-        # Check up to 3 subsequent sibling statements
-        for sibling in container[idx + 1 : idx + 4]:
-            sibling_vars: set[str] = set()
-            _collect_used(sibling, sibling_vars)
-            overlap = body_vars & sibling_vars
             if overlap:
-                var_list = ", ".join(sorted(overlap))
-                issues.append({
-                    "file": filepath,
-                    "line": node.lineno,
-                    "message": (
-                        f"For loop body has only {len(node.body)} statement(s) "
-                        f"but subsequent code uses loop variable(s): {var_list}. "
-                        "Possible indentation error \u2014 code may be "
-                        "accidentally outside the loop."
-                    ),
-                    "severity": "warning",
-                })
-                break  # one report per suspicious for-loop
+                break
+
+            # For is last in its container — walk up and check parent's siblings
+            current = parent
+
+        if overlap:
+            var_list = ", ".join(sorted(overlap))
+            issues.append({
+                "file": filepath,
+                "line": node.lineno,
+                "message": (
+                    f"For loop body has only {len(node.body)} statement(s) "
+                    f"but subsequent code uses loop variable(s): {var_list}. "
+                    "Possible indentation error \u2014 code may be "
+                    "accidentally outside the loop."
+                ),
+                "severity": "warning",
+            })
 
     return issues
