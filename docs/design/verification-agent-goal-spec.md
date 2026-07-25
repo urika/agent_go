@@ -909,11 +909,12 @@ def analyze_verification(results: list[dict]) -> dict:
 
 | 设计 | 实际实现 | 说明 |
 |------|---------|------|
-| `verifier.py` / `goal_injector.py` 新文件 | 验证循环在 `executor.py:_verify_changes()`，无独立 verifier.py | 功能等价，未做文件拆分 |
-| Stop Hook（.claude/settings.json + verify-goal.sh） | **未实现**，仅有 TASK.md 文本注入 + subtask.py watchdog | Phase 2 剩余项 |
+| `verifier.py` / `goal_injector.py` 新文件 | 验证循环在 `executor.py:_verify_changes()`；`goal_injector.py` 已按设计落地 | verifier 功能等价，未做文件拆分 |
+| Stop Hook（.claude/settings.json + verify-goal.sh） | ✅ 已实现（2026-07-25）：`GoalInjector.inject/cleanup`，`goal.enable_goal_hook` 控制（默认 false），`--goal-hook` 开启；hook 命令过 4 级白名单 | — |
 | `verification.llm_eval.*` 配置键 | 顶层 `evaluator.*` | 键名不同，功能等价 |
 | `mode: shell/llm/hybrid` 选择器 | 无；shell 必跑，LLM 评估为可选叠加（shell 不过则不触发，等价 AND） | 纯 llm 模式不存在 |
-| `goal.enabled` 默认 false | 默认 true | 与设计相反，产品决策待确认 |
+| `goal.enabled` 默认 false | ✅ 已对齐（2026-07-25）：默认 false，`--goal` 开启 | 产品决策：默认关 |
+| `retry_timeout` 死配置 | ✅ 已接线（2026-07-25）：`_run_headless(hard_timeout=retry_timeout)`，到点 kill + `headless_hard_timeout` 事件 | — |
 | `blocked_by` 字段、Q3 口径（retry==0 AND verify_ok）、P8 平均重试（Q10） | 验收中补齐 | 见 tests/test_s2_acceptance.py |
 | CLI 覆盖（--max-retries/--no-goal/--semantic-eval） | 验收中修复：经 run_subtask config 参数 + env 贯通，此前 load_config() 读磁盘导致全部断线 | — |
 | 关键 bug：wave 调度未排除 blocked 子任务 | 验收中修复（阻断此前形同虚设） | — |

@@ -168,6 +168,16 @@ call_with_role(route, messages, api_key, logger, ...) → primary → fallback �
 LLM 语义评估 + 失败原因摘要 (failure_summary)，供修复循环与 eval 指标使用
 ```
 
+## goal_injector.py — /goal Stop Hook 注入
+
+```
+GoalInjector.inject(worktree, cmds, ...)   → 写 .claude/settings.json + scripts/verify-goal.sh
+                                            （hook 命令过 4 级白名单，全不合格则不注入）
+GoalInjector.build_goal_condition(cmds)    → 生成 /goal condition 字符串
+GoalInjector.cleanup(worktree)             → 清理注入文件
+```
+开关：`goal.enable_goal_hook`（默认 false，CLI `--goal-hook`）；TASK.md goal 指令 `goal.enabled`（默认 false，CLI `--goal`）。
+
 ## notify.py — 多通道事件通知 (M1)
 
 ```

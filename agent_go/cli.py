@@ -61,6 +61,10 @@ def _build_parser():
                             help="强制清理所有 worktree，包括失败/阻断的")
     run_parser.add_argument("--no-verify-block", action="store_true", dest="no_verify_block",
                             help="验证失败不阻断下游依赖（默认阻断）")
+    run_parser.add_argument("--goal", action="store_true",
+                            help="启用 goal 指令注入（TASK.md 追加 /goal 循环，默认关闭）")
+    run_parser.add_argument("--goal-hook", action="store_true", dest="goal_hook",
+                            help="注入 Stop Hook（.claude/settings.json + verify-goal.sh，默认关闭）")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -215,6 +219,10 @@ def cmd_run(args=None):
         config.setdefault("evaluator", {})["enabled"] = False
     if getattr(args, "no_verify_block", False):
         config.setdefault("verification", {})["block_on_failure"] = False
+    if getattr(args, "goal", False):
+        config.setdefault("goal", {})["enabled"] = True
+    if getattr(args, "goal_hook", False):
+        config.setdefault("goal", {})["enable_goal_hook"] = True
 
     if auto_yes:
         config["behavior"]["auto_confirm_plan"] = True

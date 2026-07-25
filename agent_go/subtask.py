@@ -50,11 +50,12 @@ def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger
             subprocess.run(["git", "merge", "--abort"],
                            cwd=str(dst_worktree), capture_output=True)
 
-def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None, allowed_tools: Optional[list] = None) -> subprocess.CompletedProcess:
+def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None, allowed_tools: Optional[list] = None, hard_timeout: int = 0) -> subprocess.CompletedProcess:
     """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。
 
     allowed_tools: Agent 类型声明的工具白名单（如 architect 的 Read/Grep/Glob）。
     非空时通过 --allowedTools 强制约束；None/空列表表示不限制（developer 默认）。
+    hard_timeout: 单次执行硬超时（秒），0=不限制。用于修复重试的 retry_timeout 控制。
     """
     # Phase 2: GoalInjector 看门狗配置。优先级：env（运行时 config 注入，CLI 覆盖生效）> 磁盘 config > 默认
     GOAL_WATCHDOG_ENABLED = True
@@ -251,7 +252,15 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         t_err.start()
 
         idle_logged_at = 0
+        run_start = time.time()
         while proc.poll() is None:
+            # 硬超时（如修复重试的 retry_timeout）：到点即 kill，不依赖事件活动
+            if hard_timeout and time.time() - run_start > hard_timeout:
+                logger.error(f"claude 硬超时 ({hard_timeout}s, attempt={attempt})，强制终止")
+                log_event(logger, "headless_hard_timeout",
+                          {"sub_id": sub_id, "attempt": attempt, "limit": hard_timeout})
+                proc.kill()
+                break
             idle = time.time() - last_ts[0]
             if idle > IDLE_TIMEOUT:
                 logger.error(f"claude {idle:.0f}s 无事件 (attempt={attempt})，强制终止")

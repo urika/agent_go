@@ -333,6 +333,42 @@ class TestRunHeadless:
         mock_proc.kill.assert_called_once()
 
     @patch("subprocess.Popen")
+    def test_hard_timeout_kills_process(self, mock_popen, logger):
+        """hard_timeout 到点即 kill（修复重试的 retry_timeout 控制，不依赖事件活动）"""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12352
+        call_count = [0]
+
+        def polling():
+            call_count[0] += 1
+            if call_count[0] > 3:
+                return 0
+            return None
+
+        mock_proc.poll.side_effect = polling
+        mock_proc.stdout.readline.side_effect = ["", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = -9
+        mock_popen.return_value = mock_proc
+
+        # run_start=0，第一次循环检查即跳到 1000（> hard_timeout=300）
+        def time_side():
+            for v in [0, 0, 0]:
+                yield v
+            while True:
+                yield 1000
+        time_gen = time_side()
+
+        with patch("time.time", side_effect=lambda: next(time_gen)):
+            with patch("time.sleep"):
+                _run_headless(
+                    "task", Path("/tmp/work"), {},
+                    logger, "sub-ht", hard_timeout=300
+                )
+
+        mock_proc.kill.assert_called_once()
+
+    @patch("subprocess.Popen")
     def test_non_interaction_failure_no_retry(self, mock_popen, logger):
         """非交互原因失败不重试"""
         mock_proc = MagicMock()

@@ -41,5 +41,11 @@
         "events": ["on_failed", "on_blocked"]
       }
     ]
+  },
+  "goal": {
+    "enabled": false,
+    "max_turns": 20,
+    "timeout_seconds": 600,
+    "enable_goal_hook": false
   }
 }

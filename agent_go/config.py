@@ -41,9 +41,10 @@ DEFAULT_CONFIG = {
         "block_on_failure": True,        # 验证失败是否阻断下游依赖（--no-verify-block 可关）
     },
     "goal": {
-        "enabled": True,                # 是否在 TASK.md 注入 goal 指令
+        "enabled": False,               # 是否在 TASK.md 注入 goal 指令（--goal 开启）
         "max_turns": 20,                # 单个 goal 循环最大 tool-call 轮数
         "timeout_seconds": 600,          # goal 循环全局超时（秒）
+        "enable_goal_hook": False,      # 是否注入 Stop Hook（.claude/settings.json + verify-goal.sh）
     },
     "evaluator": {
         "enabled": False,               # 默认关闭（向后兼容 + 成本可控）

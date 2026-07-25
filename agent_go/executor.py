@@ -183,8 +183,8 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
         exec_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
     task_md_parts.extend(exec_requirements)
 
-    # Phase 2: GoalInjector — 注入目标导向指令
-    goal_enabled = _effective_config(config).get("goal", {}).get("enabled", True)
+    # Phase 2: GoalInjector — 注入目标导向指令（默认关闭，--goal 开启）
+    goal_enabled = _effective_config(config).get("goal", {}).get("enabled", False)
     if verification and goal_enabled:
         task_md_parts.extend([
             "",
@@ -207,6 +207,11 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
             "- 每次修复后必须重新运行全部验证命令",
             "- 如果连续 3 次修复仍失败，请在输出中说明原因后退出",
         ])
+        # 字面 /goal condition（设计稿 §3.4）：Claude Code 原生 goal 循环的判定条件
+        from .goal_injector import GoalInjector
+        _vcmds = [verification] if isinstance(verification, str) else verification
+        _condition = GoalInjector.build_goal_condition(_vcmds)
+        task_md_parts.extend(["", f'/goal "{_condition}"'])
 
     # ── Skill 知识注入 ──
     skill_names = subtask.get("skills", [])
@@ -639,9 +644,11 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 git_diff, retry_count, max_retries, verification_history,
                 semantic_feedback=semantic_feedback)
 
+            # 修复执行带硬超时（verification.retry_timeout，此前是无人读取的死配置）
+            retry_timeout = _cfg.get("verification", {}).get("retry_timeout", 300)
             _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
                           active_pids=active_pids, active_pids_lock=active_pids_lock,
-                          allowed_tools=allowed_tools)
+                          allowed_tools=allowed_tools, hard_timeout=retry_timeout)
 
             # git add + commit + tag
             subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
@@ -779,6 +786,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         )
 
     console.print(f"\n🚀 {sub_id}: {subtask['title']}")
+    # Phase 2: Stop Hook 注入（goal.enable_goal_hook，默认关；--goal-hook 开启）
+    if verification and _effective_config(config).get("goal", {}).get("enable_goal_hook", False):
+        from .goal_injector import GoalInjector
+        _vcmds = [verification] if isinstance(verification, str) else verification
+        GoalInjector.inject(worktree, _vcmds)
+
     env = os.environ.copy()
     loaded_skill_names = [sn for sn in skill_names if sn not in unresolved_skills]
     env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree), "AGENT_GO_SKILLS": ",".join(loaded_skill_names)})

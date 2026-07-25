@@ -4,7 +4,7 @@ This file provides guidance to Codex when working with code in this repository.
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (20 modules, ~5300 lines) that wraps Codex with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Codex. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, worktree preservation for failed tasks, and remote branch push.
+agent_go is a modular Python CLI tool (21 modules, ~5500 lines) that wraps Codex with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Codex. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, worktree preservation for failed tasks, and remote branch push.
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -76,7 +76,7 @@ cmd_run()
         └── inspect command → list preserved worktrees, paths, git branches
 ```
 
-## Key Modules (20 modules, ~5300 lines)
+## Key Modules (21 modules, ~5500 lines)
 
 | Module | Purpose |
 |--------|---------|
@@ -87,6 +87,7 @@ cmd_run()
 | `pipeline.py` | Wave scheduler, concurrency, worktree preservation/cleanup, remote push |
 | `subtask.py` | Codex -p headless runner, git merge upstream, worker metering |
 | `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
+| `goal_injector.py` | /goal Stop Hook injection: .claude/settings.json + verify-goal.sh |
 | `git_utils.py` | Project analysis, worktree create/remove/prune, gc.auto control |
 | `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown) |
 | `agents.py` | Agent type system: developer/architect/reviewer/tester |
@@ -116,7 +117,7 @@ cmd_run()
 ## Testing
 
 ```bash
-pytest tests/           # 722 tests (~18s)
+pytest tests/           # 740 tests (~17s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -125,8 +126,8 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 ## File Organization
 
 ```
-agent_go/           # 20 Python modules (~5300 lines)
-tests/              # 37 test files, 722 tests
+agent_go/           # 21 Python modules (~5500 lines)
+tests/              # 39 test files, 740 tests
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records
 ```
