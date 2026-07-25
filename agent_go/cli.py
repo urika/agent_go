@@ -121,12 +121,15 @@ def _build_parser():
     ci_parser.add_argument("--dry-run", action="store_true", help="Print workflow without writing file")
 
     # review 子命令
-    review_parser = subparsers.add_parser("review", help="Code review with Claude")
-    review_parser.add_argument("repo", help="Path to the repository to review")
+    review_parser = subparsers.add_parser("review", help="Review task results or code")
+    review_parser.add_argument("repo", nargs="?", help="Path to the repository to review")
+    review_parser.add_argument("--task", dest="task_id", help="Task ID to review results (M7)")
     review_parser.add_argument("--pr", dest="pr_ref", help="PR number to review")
     review_parser.add_argument("--yes", "-y", action="store_true", help="Run in headless mode")
     review_parser.add_argument("--comment", action="store_true", help="Post findings as inline PR comments")
     review_parser.add_argument("--fix", action="store_true", help="Apply fixes to working tree")
+    review_parser.add_argument("--approve", action="store_true", help="Approve the review")
+    review_parser.add_argument("--reject", action="store_true", help="Reject the review")
 
     # cache 子命令
     cache_parser = subparsers.add_parser("cache", help="Plan cache management")
@@ -672,26 +675,45 @@ def cmd_show(args=None):
             print(f"       📊 {r['summary']}")
 
 def cmd_review(args=None):
-    """代码审查：使用 Claude 审查项目变更。"""
-    if args and hasattr(args, 'repo'):
-        repo = Path(args.repo).resolve()
+    """审查任务结果或代码变更。"""
+    task_id = None
+    repo = None
+    headless = False
+    pr_ref = ""
+
+    if args:
+        task_id = getattr(args, 'task_id', None)
+        repo_path = getattr(args, 'repo', None)
         headless = getattr(args, 'yes', False)
         pr_ref = getattr(args, 'pr_ref', "") or ""
-    elif len(sys.argv) < 3:
-        print("Usage: agent_go review <repo-path> [--pr <N>] [--yes]")
-        return
+        approve = getattr(args, 'approve', False)
+        reject = getattr(args, 'reject', False)
     else:
-        repo = Path(sys.argv[2]).resolve()
-        if not repo.exists():
-            print(f"路径不存在: {repo}")
-            return
-        headless = "--yes" in sys.argv or "-y" in sys.argv
-        pr_ref = ""
-        if "--pr" in sys.argv:
+        approve = "--approve" in sys.argv
+        reject = "--reject" in sys.argv
+        if "--task" in sys.argv:
             try:
-                pr_ref = sys.argv[sys.argv.index("--pr") + 1]
+                task_id = sys.argv[sys.argv.index("--task") + 1]
             except (IndexError, ValueError):
-                logger.debug("Invalid --pr flag value, ignoring")
+                pass
+        if len(sys.argv) >= 3 and not task_id:
+            repo_path = sys.argv[2]
+        else:
+            repo_path = None
+
+    # M7: Task results review
+    if task_id:
+        _show_task_review(task_id, approve=approve, reject=reject)
+        return
+
+    # 代码审查（原有逻辑）
+    if not repo_path:
+        print("Usage: agent_go review <repo-path> [--pr <N>] [--yes] | --task <task-id>")
+        return
+    repo = Path(repo_path).resolve()
+    if not repo.exists():
+        print(f"路径不存在: {repo}")
+        return
 
     prompt = "请审查当前项目的代码变更，输出审查报告。重点检查：安全性、错误处理、代码质量、潜在bug。"
     if pr_ref:
@@ -706,6 +728,129 @@ def cmd_review(args=None):
     else:
         import subprocess
         subprocess.run(["claude", str(repo)])
+
+
+def _show_task_review(task_id: str, approve: bool = False, reject: bool = False) -> None:
+    """显示任务结果审查（M7）— 按文件分组展示变更摘要。"""
+    from .console import get_default_console
+    console = get_default_console()
+    task_dir = AGENT_GO_DIR / task_id
+    if not task_dir.exists():
+        console.print(f"❌ 任务不存在: {task_id}")
+        return
+
+    meta_path = task_dir / "meta.json"
+    if not meta_path.exists():
+        console.print(f"❌ 任务元数据不存在: {meta_path}")
+        return
+
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        console.print(f"❌ 无法读取任务元数据: {e}")
+        return
+
+    subtasks = meta.get("subtasks", [])
+    results = meta.get("results", [])
+
+    # 读取每个子任务的结果
+    result_map = {r["subtask_id"]: r for r in results}
+    subtask_map = {s["id"]: s for s in subtasks}
+
+    # 收集文件变更：按文件路径分组
+    file_changes: dict[str, list[dict]] = {}
+    for r in results:
+        sid = r.get("subtask_id", "")
+        summary = r.get("summary", "")
+        change_stats = r.get("change_stats", {})
+        actual_files = change_stats.get("actual_files", [])
+        for f in actual_files:
+            if f not in file_changes:
+                file_changes[f] = []
+            file_changes[f].append({
+                "subtask_id": sid,
+                "title": subtask_map.get(sid, {}).get("title", ""),
+                "insertions": change_stats.get("insertions", 0),
+                "deletions": change_stats.get("deletions", 0),
+                "verify_ok": r.get("verify_ok", False),
+                "agent_type": subtask_map.get(sid, {}).get("agent_type", ""),
+            })
+
+    # 输出审查仪表
+    task_title = meta.get("task", "")
+    created = meta.get("created", "")
+    status = meta.get("status", "")
+
+    lines = [
+        f"# 📋 任务审查: {task_id}",
+        f"",
+        f"**任务**: {task_title}",
+        f"**创建时间**: {created}",
+        f"**状态**: {status}",
+        f"**子任务数**: {len(subtasks)}",
+        f"",
+    ]
+
+    # 文件变更摘要
+    if file_changes:
+        lines.append("## 📁 文件变更汇总")
+        lines.append("")
+        lines.append(f"| 文件 | 涉及子任务 | 变更量 | 验证 |")
+        lines.append(f"|------|-----------|--------|------|")
+        for file_path, changes in sorted(file_changes.items()):
+            sub_ids = ", ".join(c["subtask_id"] for c in changes)
+            total_ins = sum(c["insertions"] for c in changes)
+            total_del = sum(c["deletions"] for c in changes)
+            all_verified = all(c["verify_ok"] for c in changes)
+            verify_icon = "✅" if all_verified else "❌"
+            lines.append(f"| `{file_path}` | {sub_ids} | +{total_ins}/-{total_del} | {verify_icon} |")
+        lines.append("")
+
+    # 子任务详情
+    lines.append("## 🔍 子任务详情")
+    lines.append("")
+    lines.append("| 子任务 | 标题 | Agent | 状态 | 验证 | 耗时 |")
+    lines.append("|--------|------|-------|------|------|------|")
+    for r in results:
+        sid = r.get("subtask_id", "")
+        st = subtask_map.get(sid, {})
+        title = st.get("title", "")[:40]
+        agent_type = st.get("agent_type", "")
+        status_icon = {"completed": "✅", "no_changes": "⏭️", "failed": "❌", "blocked": "🔗"}.get(r.get("status", ""), "❓")
+        verify_icon = "✅" if r.get("verify_ok") else "❌"
+        dur = f"{r.get('duration_sec', 0):.0f}s"
+        failure = f" — {r.get('failure_reason', '')}" if r.get("failure_reason") else ""
+        lines.append(f"| {sid} | {title} | {agent_type} | {status_icon} | {verify_icon} | {dur}{failure} |")
+    lines.append("")
+
+    # 质量仪表
+    quality = _build_quality_dashboard(meta)
+    if quality:
+        lines.append(quality)
+
+    # 审查结论
+    if approve:
+        _review_conclusion_path = task_dir / "review.json"
+        _review_conclusion_path.write_text(json.dumps({
+            "task_id": task_id,
+            "reviewed_at": datetime.now().isoformat(),
+            "decision": "approved",
+            "summary": "审查通过",
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
+        lines.append("")
+        lines.append("✅ **审查通过** — 已写入 review.json")
+    elif reject:
+        _review_conclusion_path = task_dir / "review.json"
+        _review_conclusion_path.write_text(json.dumps({
+            "task_id": task_id,
+            "reviewed_at": datetime.now().isoformat(),
+            "decision": "rejected",
+            "summary": "审查未通过",
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
+        lines.append("")
+        lines.append("❌ **审查未通过** — 已写入 review.json")
+
+    console.print("\n".join(lines))
 
 
 def _build_quality_dashboard(meta: dict) -> str:
