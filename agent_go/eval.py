@@ -14,6 +14,7 @@ console = _LazyConsole()
 __all__ = [
     "analyze_quality", "analyze_performance",
     "aggregate_quality", "aggregate_performance", "cmd_eval",
+    "gate_cost",
 ]
 
 def _read_meta(task_dir: Path) -> Optional[dict[str, Any]]:
@@ -410,6 +411,61 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 发布门禁：$/pass rate（北极星指标）
+# ═══════════════════════════════════════════════════════════════
+
+def gate_cost(baseline: float, tasks_dir: Path) -> dict[str, Any]:
+    """$/pass rate 发布门禁。
+
+    PRD 铁律：发布门禁「$/pass rate 不劣化」。本函数取 analyze_cost 的 dollar_per_pass_rate，
+    与 baseline 比较，返回结构化判定结果，供 cmd_eval 决定退出码。
+
+    失败语义：actual is not None 且 actual > baseline → 不通过（实际成本/通过率劣于基线）。
+    无数据语义：actual is None（无完成任务或无 metering）→ 通过，但标注门禁未生效
+                （早期仓库/新 fork 无数据时不阻挡 CI）。
+
+    Args:
+        baseline: 允许的 $/pass rate 上限（美元/通过子任务）。如 0.05 表示 ≤ $0.05/pass。
+        tasks_dir: 任务目录（通常 AGENT_GO_DIR）。
+
+    Returns:
+        dict: {passed: bool, actual: float|None, baseline: float,
+               completed_subtasks: int, estimated_cost_usd: float, reason: str}
+    """
+    cost_report = analyze_cost(tasks_dir)
+    actual = cost_report.get("dollar_per_pass_rate")
+    completed = cost_report.get("completed_subtasks", 0)
+    total_cost = cost_report.get("estimated_cost_usd", 0.0)
+
+    if actual is None:
+        return {
+            "passed": True,
+            "actual": None,
+            "baseline": baseline,
+            "completed_subtasks": completed,
+            "estimated_cost_usd": total_cost,
+            "reason": "无完成任务或无 metering 数据，门禁未生效",
+        }
+    if actual > baseline:
+        return {
+            "passed": False,
+            "actual": actual,
+            "baseline": baseline,
+            "completed_subtasks": completed,
+            "estimated_cost_usd": total_cost,
+            "reason": f"$/pass rate {actual} 超过基线 {baseline}（劣化 {actual - baseline:.4f}）",
+        }
+    return {
+        "passed": True,
+        "actual": actual,
+        "baseline": baseline,
+        "completed_subtasks": completed,
+        "estimated_cost_usd": total_cost,
+        "reason": f"$/pass rate {actual} 在基线 {baseline} 以内",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
 # Reliability
 # ═══════════════════════════════════════════════════════════════
 
@@ -598,13 +654,23 @@ def cmd_eval(args=None) -> None:
         sub = args.subcommand
         task_id = getattr(args, "task_id", None) or ""
         all_mode = bool(getattr(args, "eval_all", False)) or task_id == "--all"
+        baseline = getattr(args, "baseline", None)
     else:
         if len(sys.argv) < 3:
-            console.print("Usage: agent_go eval <quality|perf|cost|reliability|ux|all> [task-id|--all]")
+            console.print("Usage: agent_go eval <quality|perf|cost|reliability|ux|gate|all> [task-id|--all]")
             return
         sub = sys.argv[2]
         task_id = sys.argv[3] if len(sys.argv) > 3 else ""
         all_mode = task_id == "--all"
+        # 解析 --baseline X（用于 gate 子命令）
+        baseline = None
+        if "--baseline" in sys.argv:
+            i = sys.argv.index("--baseline")
+            if i + 1 < len(sys.argv):
+                try:
+                    baseline = float(sys.argv[i + 1])
+                except ValueError:
+                    pass
 
     if sub == "quality":
         if all_mode:
@@ -626,6 +692,16 @@ def cmd_eval(args=None) -> None:
                 console.print("暂无任务")
     elif sub == "cost":
         _print_cost_report(analyze_cost(AGENT_GO_DIR))
+    elif sub == "gate":
+        # 发布门禁：$/pass rate 不劣化。--baseline 缺省时取 PRD Q3 目标 0.05
+        if baseline is None:
+            baseline = 0.05
+            console.print("⚠️  未指定 --baseline，使用 PRD Q3 默认 0.05（$/pass rate ≤ $0.05）")
+        result = gate_cost(baseline, AGENT_GO_DIR)
+        _print_gate_report(result)
+        # 门禁失败 → 非零退出，CI 红灯
+        if not result["passed"]:
+            sys.exit(1)
     elif sub == "reliability":
         _print_reliability_report(analyze_reliability(AGENT_GO_DIR))
     elif sub == "ux":
@@ -643,7 +719,7 @@ def cmd_eval(args=None) -> None:
         _print_ux_report(analyze_ux(AGENT_GO_DIR))
         console.print("═" * 60)
     else:
-        console.print(f"未知子命令: {sub}。可用: quality, perf, cost, reliability, ux, all")
+        console.print(f"未知子命令: {sub}。可用: quality, perf, cost, reliability, ux, gate, all")
 
 
 def _resolve_task_dir(base_dir: Path, task_id: str) -> Optional[Path]:
@@ -723,6 +799,22 @@ def _print_cost_report(c: dict[str, Any]) -> None:
     dpp = c.get('dollar_per_pass_rate')
     dpp_str = f"${dpp}" if dpp is not None else "N/A"
     console.print(f"  ★ $/pass rate:       {dpp_str}  (北极星)")
+    console.print("─" * 50)
+
+
+def _print_gate_report(g: dict[str, Any]) -> None:
+    """打印 $/pass rate 门禁判定结果。"""
+    verdict = "✅ 通过" if g["passed"] else "❌ 不通过"
+    actual_str = f"${g['actual']}" if g["actual"] is not None else "N/A"
+    console.print(f"\n🚦 发布门禁 ($/pass rate): {verdict}")
+    console.print("─" * 50)
+    console.print(f"  实际 $/pass rate:    {actual_str}")
+    console.print(f"  基线阈值:            ${g['baseline']}")
+    console.print(f"  完成子任务:          {g['completed_subtasks']} 个")
+    console.print(f"  累计成本:            ${g['estimated_cost_usd']}")
+    console.print(f"  判定原因:            {g['reason']}")
+    if not g["passed"]:
+        console.print("  → 门禁失败，CI 应中断发布")
     console.print("─" * 50)
 
 
