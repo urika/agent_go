@@ -253,7 +253,7 @@ class TestCostPricing:
             "prompt_tokens": 1_000_000, "completion_tokens": 0,
         }])
         result = analyze_cost(tmp_path)
-        assert result["estimated_cost_usd"] == 3.0
+        assert result["estimated_cost_usd"] == 2.0   # anthropic default → claude-sonnet-5 ($2/M prompt)
 
     def test_multiple_models_aggregated_separately(self, tmp_path):
         """不同模型分别聚合计价"""
@@ -267,8 +267,8 @@ class TestCostPricing:
         ])
         result = analyze_cost(tmp_path)
         assert result["by_model"]["claude-sonnet-4-20250514"] == 3.0
-        assert result["by_model"]["deepseek-chat"] == 0.27
-        assert result["estimated_cost_usd"] == 3.27
+        assert result["by_model"]["deepseek-chat"] == 0.14   # 2025-07 涨价后真实价（¥1/M ÷ 7.2）
+        assert result["estimated_cost_usd"] == 3.14
 
 
 # ═══════════════════════════════════════════════════════════════
