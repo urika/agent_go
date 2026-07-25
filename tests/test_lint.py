@@ -1,12 +1,13 @@
 """测试 AST 静态检查器 (agent_go.lint)。
 
 覆盖场景：
-  1. 对整个 agent_go 代码库运行检查 — 汇报发现但不阻断
+  1. 对整个 agent_go 代码库运行检查 — 严格断言零警告（CI 防护）
   2. 已知 bug 模式（自包含代码片段）— 应被精确捕获
   3. 正常模式 — 不应误报
 """
 
 import ast
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -15,146 +16,162 @@ from agent_go.lint import check_path, _check_suspicious_for_loops
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 代码库级检查（info 级别，不阻断 CI）
+# 代码库级检查 — 严格断言（误报已通过 break 排除 + 阈值过滤清零）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestLintDiscovery:
-    """对整个代码库运行 AST 检查并汇报发现。
+class TestLintOnCodebase:
+    """对整个代码库运行 AST 检查，确保零警告。
 
-    这些测试会打印所有触发警告的位置，供人工 review 判断是否为真 bug。
-    不阻断 CI —— 新引入的真 bug 由单元测试 (TestDetectSuspiciousForLoop) 防护。
+    若引入新的真 bug，此测试会失败 —— 这是 CI 防护的核心。
     """
 
-    def test_discover_suspicious_loops_in_agent_go(self, capsys):
-        """扫描 agent_go/*.py 并打印所有可疑 for 循环位置。"""
+    def test_no_suspicious_for_loops_in_agent_go(self):
+        """所有 agent_go/*.py 不应触发 suspicious-for-loop 警告。"""
         reports = check_path("agent_go")
-        _print_reports("agent_go", reports, capsys)
-        # 当前所有报告是已知误报（合法的 for 使用模式）。
-        # 当新引入一个真 bug 时，单元测试层会拦截。
+        if reports:
+            lines = "\n".join(
+                f"  {r['file']}:{r['line']} [{r['severity']}] {r['message']}"
+                for r in reports
+            )
+            pytest.fail(f"Suspicious for-loop patterns found:\n{lines}")
 
-    def test_discover_suspicious_loops_in_tests(self, capsys):
-        """扫描 tests/*.py 并打印。"""
+    def test_no_suspicious_for_loops_in_tests(self):
+        """tests/*.py 也不应有警告。"""
         reports = check_path("tests")
-        _print_reports("tests", reports, capsys)
-
-
-def _print_reports(label: str, reports: list[dict], capsys) -> None:
-    """打印报告到 stderr，便于在测试输出中查看。"""
-    if not reports:
-        print(f"\n[LINT] {label}: 未发现可疑 for 循环 ✓")
-        return
-    print(f"\n[LINT] {label}: 发现 {len(reports)} 个可疑 for 循环（请人工 review）")
-    for r in reports:
-        print(f"  {r['file']}:{r['line']} [{r['severity']}] {r['message']}")
+        if reports:
+            lines = "\n".join(
+                f"  {r['file']}:{r['line']} [{r['severity']}] {r['message']}"
+                for r in reports
+            )
+            pytest.fail(f"Suspicious for-loop patterns found in tests:\n{lines}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 单元测试：精确检测已知 bug 模式
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _check(code: str) -> list[dict]:
+    """Helper: dedent + parse + check a code snippet."""
+    tree = ast.parse(textwrap.dedent(code))
+    return _check_suspicious_for_loops(tree, "<test>")
+
+
 class TestDetectSuspiciousForLoop:
     """验证检查器能识别各种缩进错误模式。"""
 
     # ── 应被捕获的模式 ────────────────────────────────────────────────────
 
-    def test_for_as_completed_tiny_body(self):
-        """for-as_completed 体只有 1 条语句 + 后续使用循环变量。"""
+    def test_original_bug_pattern(self):
+        """精确复现本次内存泄露 bug：try/with 在 ThreadPoolExecutor 块外。"""
         code = """\
-def run():
-    futures = {}
-    for fut in as_completed(futures):
-        st = futures[fut]
-    try:
-        result = fut.result()
-    except Exception:
-        pass
-    with meta_lock:
-        worktree_map[st["id"]] = result
-    completed_ids.add(st["id"])
-"""
-        tree = ast.parse(code)
-        reports = _check_suspicious_for_loops(tree, "<test>")
-        assert any("st" in r["message"] for r in reports), (
-            f"Expected report about 'st', got: {reports}"
-        )
-
-    def test_for_loop_with_two_body_stmts(self):
-        """body 有 2 条语句也属于可疑范围。"""
-        code = """\
-def run():
-    items = [1, 2]
-    for x in items:
-        y = x + 1
-        z = y * 2
-    print(y)
-    print(z)
-"""
-        tree = ast.parse(code)
-        reports = _check_suspicious_for_loops(tree, "<test>")
-        # 首条兄弟语句 print(y) 使用 y → 触发报告
+            def run(wave, parallel):
+                if parallel > 1:
+                    with ThreadPoolExecutor(max_workers=parallel) as executor:
+                        futures = {}
+                        for st in wave:
+                            fut = executor.submit(run_subtask, st)
+                            futures[fut] = st
+                        for fut in as_completed(futures):
+                            st = futures[fut]
+                    try:
+                        result = fut.result()
+                    except Exception:
+                        result = {}
+                    with meta_lock:
+                        worktree_map[st["id"]] = result
+                    completed_ids.add(st["id"])
+                    if result.get("status") == "failed":
+                        failed_ids.add(st["id"])
+        """
+        reports = _check(code)
         assert len(reports) == 1
-        assert "y" in reports[0]["message"]
+        assert "st" in reports[0]["message"]
 
-    def test_for_mixed_with_if(self):
-        """for 后在 if 中使用循环变量。"""
+    def test_direct_sibling_usage(self):
+        """for 后多个兄弟语句使用循环变量（无嵌套作用域）。"""
         code = """\
-for item in items:
-    processed = item.strip()
-if processed:
-    print(processed)
-"""
-        tree = ast.parse(code)
-        reports = _check_suspicious_for_loops(tree, "<test>")
-        assert any("processed" in r["message"] for r in reports)
+            def run():
+                for fut in as_completed(futures):
+                    st = futures[fut]
+                try:
+                    result = fut.result()
+                except Exception:
+                    pass
+                with meta_lock:
+                    worktree_map[st["id"]] = result
+                completed_ids.add(st["id"])
+        """
+        reports = _check(code)
+        assert len(reports) == 1
+        assert "st" in reports[0]["message"]
 
     # ── 不应误报的模式 ────────────────────────────────────────────────────
 
     def test_normal_loop_many_body_stmts(self):
         """体大于 2 条语句的 for 不应触发。"""
         code = """\
-for i in range(10):
-    x = i * 2
-    y = x + 1
-    print(x, y)
-"""
-        tree = ast.parse(code)
-        reports = _check_suspicious_for_loops(tree, "<test>")
-        assert len(reports) == 0
+            for i in range(10):
+                x = i * 2
+                y = x + 1
+                print(x, y)
+            print(x, y)
+        """
+        assert len(_check(code)) == 0
 
     def test_loop_without_assignments(self):
-        """body 无赋值的 for 不应触发（没有可泄露的变量）。"""
+        """body 无赋值的 for 不应触发。"""
         code = """\
-for _ in range(5):
-    print("hello")
-print("done")
-"""
-        tree = ast.parse(code)
-        reports = _check_suspicious_for_loops(tree, "<test>")
-        assert len(reports) == 0
+            for _ in range(5):
+                print("hello")
+            print("done")
+        """
+        assert len(_check(code)) == 0
 
-    def test_many_siblings_no_var_usage(self):
-        """后续语句不使用循环变量时不应触发。"""
+    def test_search_and_break_pattern(self):
+        """搜索循环（含 break）后使用结果是合法模式。"""
         code = """\
-for name in names:
-    first = name.split()[0]
-print("finished")
-x = 42
-"""
-        tree = ast.parse(code)
-        reports = _check_suspicious_for_loops(tree, "<test>")
-        assert len(reports) == 0
+            worktree_path = None
+            for r in results:
+                if r.get("status") == "completed":
+                    worktree_path = r["worktree"]
+                    break
+            if not worktree_path:
+                return None
+            diff = read_diff(worktree_path)
+            process(diff, worktree_path)
+        """
+        assert len(_check(code)) == 0
 
-    def test_nested_loop_not_confused(self):
-        """嵌套 for 不应互相干扰。"""
+    def test_single_sibling_usage(self):
+        """变量只在 1 个兄弟语句使用 → 累积模式，不报。"""
         code = """\
-for i in range(10):
-    x = i * 2
-    for j in range(5):
-        y = j + x
-    print(y)
-"""
-        tree = ast.parse(code)
-        reports = _check_suspicious_for_loops(tree, "<test>")
-        # 外层 for (i, x) 有 4 条语句 → 不触发
-        # 内层 for (j, y) 有 1 条语句，print(y) 用 y → 触发
-        assert len(reports) == 1
+            total = 0
+            for x in items:
+                total += x
+            print(total)
+        """
+        assert len(_check(code)) == 0
+
+    def test_two_sibling_usage_below_threshold(self):
+        """变量在 2 个兄弟语句使用 → 仍低于阈值 3，不报。"""
+        code = """\
+            for s in confirmed:
+                r = results_map.get(s["id"])
+                if r:
+                    print(r)
+            print("---")
+            print("done")
+        """
+        assert len(_check(code)) == 0
+
+    def test_nested_loop_correct_inner_usage(self):
+        """嵌套 for 内层正确使用循环变量。"""
+        code = """\
+            for i in range(10):
+                x = i * 2
+                for j in range(5):
+                    y = j + x
+                print(y)
+        """
+        # 内层 for 体只有 1 条语句,但 print(y) 只用 1 次 → 不报
+        assert len(_check(code)) == 0
