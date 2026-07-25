@@ -818,6 +818,18 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         available = [a["type"] for a in list_agent_types()]
         logger.warning(f"Agent 类型 \"{agent_type_name}\" 未注册，降级为 developer。可用: {available}")
 
+    # S4 复杂度双通道：按 difficulty 路由 claude 模型（空值 = CLI 默认模型）
+    difficulty = subtask.get("difficulty", "medium")
+    if difficulty not in ("easy", "medium", "hard"):
+        difficulty = "medium"
+    worker_models = _effective_config(config).get("worker_models", {})
+    routed_model = worker_models.get(difficulty, "")
+    env["AGENT_GO_DIFFICULTY"] = difficulty
+    if routed_model:
+        env["AGENT_GO_CLAUDE_MODEL"] = routed_model
+        logger.info(f"[S4] {sub_id} difficulty={difficulty} → model={routed_model}")
+        log_event(logger, "model_routing", {"sub_id": sub_id, "difficulty": difficulty, "model": routed_model})
+
     # 5. Run Claude
     result, sandbox_type, claude_time = _run_claude(
         task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger

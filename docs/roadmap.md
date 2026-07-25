@@ -3,7 +3,7 @@
 > 基线：2026-07-24，v2.0.0，684 测试全绿，14 项已知缺陷清零。
 > 目标对齐 [prd.md](prd.md) 的 Q3 / 年度 KPI；差距分析依据见 prd.md「P0 缺失功能」「P1 重点」章节。
 
-## 进度快照（2026-07-25 更新，698 测试全绿）
+## 进度快照（2026-07-25 更新，751 测试全绿）
 
 | 迭代 | 状态 | 说明 |
 |------|------|------|
@@ -11,7 +11,10 @@
 | S1 M2 失败摘要 | ✅ 完成 | `failure_reason`（验证命令 + exit code + stderr 尾部）写入结果，`show` 展示 |
 | S2 验证循环 | ✅ 完成（2026-07-25） | 全链路验收修复 8 项缺口（含 wave 调度排除 blocked 的关键 bug、CLI 配置贯通）+ 剩余项落地：Stop Hook GoalInjector（`--goal-hook`）、retry_timeout 硬超时、goal.enabled 默认对齐 false、`--goal` 开关 |
 | M1 完成通知 | ✅ 完成 | `notify.py` 多通道（desktop/webhook/command）+ 事件订阅 + IM 适配器，设计稿：[design/notification-webhook-spec.md](design/notification-webhook-spec.md) |
-| S4 模型路由 | 🔶 部分 | `router.py`（planner/worker/reviewer 路由 + 熔断 + 降级留痕）已落地；复杂度双通道未做 |
+| S4 模型路由 | 🔶 部分推进 | `router.py`（角色路由 + 熔断 + 降级留痕）已落地，设计稿：[design/router-multi-provider-extension.md](design/router-multi-provider-extension.md)；**复杂度双通道已完成**（2026-07-25：Planner 打 difficulty 标签 → `worker_models` 映射 → claude `--model`，计量记录 difficulty/真实模型） |
+| M3 PR 质量仪表 | ✅ 完成 | `_build_quality_dashboard`：通过率/验证率/合并就绪指示 + 子任务明细 + M5 启发式验证警告（2026-07-25 补 blocked 图标与置信度警告） |
+| M4 时间预估 | ✅ 完成 | `estimate_task_duration`：历史子任务耗时中位数 × 拓扑波次（考虑并行度），执行前展示 + `time_estimate` 事件 |
+| **PRD 分析改进** | ✅ 完成 | OpenChamber 竞品对比分析、四阶段开发流程模型（含 M7 审查阶段缺口识别）、用户介入点设计；已写入 `prd.md` + 排入 `roadmap.md` S5-S7 |
 
 ## 总体节奏
 
@@ -41,9 +44,13 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 
 | 迭代 | 交付物 | 对应缺口 |
 |------|--------|---------|
-| S5（10 月） | M3 PR 质量仪表（diff 统计 + 验证履历 + 审查结论汇入 `cmd_pr`）；M4 时间预估（基于 S1 计量日志的历史分位数） | M3/M4，K6 9/9 |
-| S6（11 月） | 复杂度双通道：Planner 打 `difficulty` 标签，hard 自动走强模型；Reviewer 角色灰度（仅高风险子任务，审查预算 ≤20%） | K4 → ≤$0.03 |
-| S7（12 月） | P2 精选：叠加式审查流水线（diff 视角 + 独立模型评审）、全局决策日志治「脑裂」 | 规模化质量 |
+| **S5**（10 月） | **M7 结果审查阶段**：`agent_go review <task-id>` 聚合所有子任务 diff，按文件分组展示变更摘要，支持 approve/reject | M7 |
+| **S5** | M3 PR 质量仪表（diff 统计 + 验证履历 + 审查结论汇入 `cmd_pr`）；M4 时间预估（基于 S1 计量日志的历史分位数） | M3/M4，K6 9/9 |
+| **S5** | Plan 版本管理：每次 regenerate 保存旧 Plan 快照，`agent_go plan-history <task-id>` 可回溯，`agent_go plan-diff <task-id>` 对比版本差异 | 借鉴 OpenChamber 分支式时间线 |
+| **S6**（11 月） | 复杂度双通道：Planner 打 `difficulty` 标签，hard 自动走强模型；Reviewer 角色灰度（仅高风险子任务，审查预算 ≤20%） | K4 → ≤$0.03 |
+| **S6** | **失败通知增强**：子任务失败时主动推送通知（osascript 桌面通知 / webhook），即使整体任务未完成 | M1 补完 |
+| **S7**（12 月） | P2 精选：叠加式审查流水线（diff 视角 + 独立模型评审）、全局决策日志治「脑裂」 | 规模化质量 |
+| **S7** | **PR 自动推送到 GitHub**：`agent_go pr <task-id> --push` 使用 GitHub CLI 自动创建 PR | P2 体验 |
 
 **年度出关**：K1 ≥97%、K3 ≤1.5min、K8 ≥90%、K5 ≥99.9%（S1 起恢复成功率埋点已积累一个季度数据）。
 
@@ -60,4 +67,4 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 2. ~~M2 失败摘要~~ ✅ 已完成（2026-07-25）
 3. ~~刷新文档数据漂移~~ ✅ 已完成（README/architecture.md/spec.md 同步至 698 测试）
 
-下一批：S4 复杂度双通道（Planner 打 difficulty 标签，hard 走强模型）、M3 PR 质量仪表、M4 时间预估。
+下一批：**M7 审查阶段设计稿**、Router 多 Provider 全链路扩展（设计稿评审后实施）、KPI 数据采集验证（K1/K8 是否因 S2/S4 提升）。

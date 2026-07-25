@@ -47,5 +47,10 @@
     "max_turns": 20,
     "timeout_seconds": 600,
     "enable_goal_hook": false
+  },
+  "worker_models": {
+    "easy": "",
+    "medium": "",
+    "hard": "claude-opus-4-20250514"
   }
 }

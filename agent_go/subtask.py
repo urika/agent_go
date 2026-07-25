@@ -113,6 +113,10 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         ]
         if allowed_tools:
             cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+        # S4 复杂度双通道：difficulty 路由的模型（env 由 executor 注入）
+        _routed_model = env.get("AGENT_GO_CLAUDE_MODEL", "")
+        if _routed_model:
+            cmd.extend(["--model", _routed_model])
         proc = subprocess.Popen(cmd, env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         if active_pids_lock:
@@ -348,7 +352,9 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             "role": "worker",
             "virtual_model": "agentgo-worker",
             "actual_provider": "claude-code",
-            "actual_model": "claude-code-executor",
+            # S4：路由到具体模型时记录真实模型，否则为 CLI 默认
+            "actual_model": env.get("AGENT_GO_CLAUDE_MODEL", "") or "claude-code-executor",
+            "difficulty": env.get("AGENT_GO_DIFFICULTY", ""),
             "prompt_tokens": claude_usage_total["prompt_tokens"],
             "completion_tokens": claude_usage_total["completion_tokens"],
             "cost_usd": round(claude_usage_total["cost_usd"], 6),

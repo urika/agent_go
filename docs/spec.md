@@ -48,10 +48,12 @@ _notify_complete(task_id, total, completed_ids, has_failed) → 任务完成通�
 ## executor.py — 子任务执行器 (875 行)
 
 ```
-run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="") → 单子任务端到端
+run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None) → 单子任务端到端
   ── _create_worktree() → _git_merge_upstream() → _build_task_md()
   ── _run_claude() → _verify_changes() → commit + tag
   ── metering_path → AGENT_GO_METERING_PATH env → worker 计量写入
+  ── config → 运行时配置贯通（max_retries/goal/evaluator/worker_models）
+  ── S4: difficulty → worker_models 映射 → AGENT_GO_CLAUDE_MODEL env
   ── 失败结果含 failure_reason（验证命令 + exit code + stderr 尾部，M2）
 _build_sandbox_env()        → 净化环境变量 (敏感词剔除 + AGENT_GO_API_KEY 强制删)
 _apply_resource_limits()    → setrlimit (失败不阻塞)
@@ -60,8 +62,10 @@ _apply_resource_limits()    → setrlimit (失败不阻塞)
 ## subtask.py — Claude 调用原语 (347 行)
 
 ```
-_run_headless(task_md, worktree, env, logger, ...) → claude -p 无头模式
+_run_headless(task_md, worktree, env, logger, ..., hard_timeout=0) → claude -p 无头模式
   ── 交互检测 (正则 + 退出码 130) → 最多 2 次重试
+  ── hard_timeout：硬超时 kill（retry_timeout 接线）
+  ── S4: AGENT_GO_CLAUDE_MODEL env → claude --model；计量记录 difficulty/真实模型
   ── stream-json result 事件提取 usage/cost → 写 metering.jsonl (worker 角色)
 _git_merge_upstream(src, dst, tag, logger, ...)   → 上游产物 merge
 ```
@@ -197,6 +201,7 @@ analyze_cost(tasks_dir)         → API 费用 + per-model + per-role 拆分 + $
 analyze_reliability(tasks_dir)  → 任务完成率 + sandbox 分布 + 阻断率
 analyze_ux(tasks_dir)           → 文档使用率 + Agent/Skill 分布
 aggregate_quality/perf(dir)     → 跨任务聚合
+estimate_task_duration(subtasks, parallel, tasks_dir) → M4 时间预估（历史中位数 × 拓扑波次）
 cmd_eval(args)                  → eval CLI 入口
 ```
 

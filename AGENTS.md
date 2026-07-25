@@ -117,7 +117,7 @@ cmd_run()
 ## Testing
 
 ```bash
-pytest tests/           # 740 tests (~17s)
+pytest tests/           # 751 tests (~17s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -127,7 +127,7 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 
 ```
 agent_go/           # 21 Python modules (~5500 lines)
-tests/              # 39 test files, 740 tests
+tests/              # 40 test files, 751 tests
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records
 ```

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (18 source files, ~4950 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, and remote branch push.
+agent_go is a modular Python CLI tool (21 modules, ~5500 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel completion notification, and remote branch push.
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -49,24 +49,34 @@ cmd_run()
   ├── get_resource_map()       → directories, config files
   ├── generate_plan()          → calls LLM API, returns structured JSON
   │     ├── injects skill inventory + role-skill rule summary into prompt
-  │     └── call_api()         → unified Anthropic/OpenAI/DeepSeek/custom
+  │     ├── call_api()         → unified Anthropic/OpenAI/DeepSeek/custom
+  │     ├── router.py          → optional role-aware routing (planner/worker/reviewer)
+  │     └── metering.jsonl     → per-call role/tokens/cost/latency (planner + worker)
   ├── confirm_plan()           → Y/S/D/E/R/N interactive (--yes skips)
-  ├── plan_to_subtasks()       → injects agent_prompt + applies role-skill rules
+  ├── plan_to_subtasks()       → injects agent_prompt + applies role-skill rules + difficulty
   ├── confirm_subtasks()       → Y/N/E/A/D interactive
+  ├── estimate_task_duration() → M4 time estimate (historical median × topo waves)
   └── _run_pipeline()
         ├── disable gc.auto    → concurrency safety
         ├── topological waves  → ThreadPoolExecutor with --parallel N
+        │   └── upstream failed/blocked → downstream marked blocked & skipped
         ├── run_subtask()
         │     ├── git worktree add -b agent_go/{task_id}/{sub_id}
         │     ├── git merge upstream tag → artifact passing
-        │     ├── writes TASK.md (path-rewritten for isolation)
+        │     ├── writes TASK.md (path-rewritten; optional /goal via --goal)
+        │     ├── optional Stop Hook injection (--goal-hook)
+        │     ├── S4: difficulty → worker_models → claude --model
         │     ├── spawns claude -p (or greywall wrapper)
         │     ├── loads skills + agent type per subtask
+        │     ├── verification loop: fix (stdout/stderr+diff injected) → re-verify,
+        │     │   max_retries configurable (default 3), retry_timeout hard kill
         │     ├── git commit + tag ({task_id}/{sub_id} namespaced)
-        │     └── verification + auto-retry on failure
+        │     └── worker metering (tokens/cost/difficulty → metering.jsonl)
         ├── push branches to remote (if --remote)
         ├── remove worktrees + delete tags + restore gc.auto
-        └── final report
+        │   └── preserves failed/blocked worktrees for human review (agent_go inspect)
+        ├── notify_event()       → desktop/webhook/command channels (M1)
+        └── final report + quality dashboard in cmd_pr (M3)
 ```
 
 ## Key Modules
@@ -83,11 +93,15 @@ cmd_run()
 | `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown) |
 | `agents.py` | Agent type system: developer/architect/reviewer/tester |
 | `role_skill_map.py` | Config-driven rule matching: keywords, file patterns, agent type |
-| `config.py` | Config loading, logging, API key resolution |
+| `config.py` | Config loading, logging, API key resolution, meter_event |
 | `console.py` | Unified output layer: quiet/verbose modes, table/data formatting |
 | `utils.py` | Commit formatting, slugify, shell safety, version detection, doc reading |
-| `metrics.py` | Data collection: timing, change stats, token counts, merge results |
-| `eval.py` | Quality/perf/cost/reliability/ux evaluation and reporting |
+| `router.py` | Role-aware model routing: planner/worker/reviewer, fallback + circuit breaker |
+| `evaluator.py` | LLM semantic evaluation for verification loop |
+| `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
+| `goal_injector.py` | /goal Stop Hook injection: .claude/settings.json + verify-goal.sh |
+| `metrics.py` | Data collection: timing, change stats, estimate_cost, aggregate_metering |
+| `eval.py` | Quality/perf/cost (per-role)/reliability/ux evaluation, M4 time estimation |
 | `tui.py` | Curses-based status dashboard (live task monitoring) |
 | `workflow_gen.py` | GitHub Actions CI workflow auto-generation |
 
@@ -109,7 +123,7 @@ cmd_run()
 ## Testing
 
 ```bash
-pytest tests/           # 639 tests (~14s)
+pytest tests/           # 751 tests (~17s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -118,8 +132,8 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 ## File Organization
 
 ```
-agent_go/           # 18 package modules (~5000 lines)
-tests/              # 33 test files, 639 tests
+agent_go/           # 21 package modules (~5500 lines)
+tests/              # 40 test files, 751 tests
 docs/
 ├── README.md       # 文档索引
 ├── architecture.md # 核心架构、关键设计决策、数据流

@@ -66,6 +66,11 @@ DEFAULT_CONFIG = {
     "agents": {
         "default": "developer"      # 默认 Agent 类型
     },
+    "worker_models": {
+        "easy": "",                 # S4 复杂度双通道：空 = claude CLI 默认模型
+        "medium": "",
+        "hard": "",                 # 如 "claude-opus-4-20250514"，hard 子任务走强模型
+    },
     "cache": {
         "enabled": True,
         "plan_ttl": 86400,          # Plan 缓存有效期（秒），默认 24h

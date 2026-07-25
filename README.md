@@ -121,6 +121,7 @@ Config at `~/.agent_go/config.json` (auto-created). See [`config.example.json`](
 | `behavior.max_plan_iterations` | `5` | Max plan regeneration |
 | `skills.auto_discover` | `false` | Auto-match skills by keywords |
 | `agents.default` | `developer` | Default Agent type |
+| `worker_models.hard` | `""` | S4: hard 难度子任务路由的模型（空 = CLI 默认） |
 
 ### Role-Skill Mapping
 

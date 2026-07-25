@@ -158,7 +158,7 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
     # Skill 表限制条目
     SKILL_TABLE_MAX = 10
 
-    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件",\n"skills": ["从已安装 Skill 清单中选择匹配的 Skill 名称（如无匹配则为空数组）"],\n"agent_type": "必须指定。developer=编码实现, architect=只读分析设计, reviewer=代码审查, tester=测试编写"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行\n4. agent_type 必须根据步骤性质指定合适的 Agent 类型\n5. skills 从已安装 Skill 清单中选取，不匹配则使用空数组 []"""
+    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件",\n"skills": ["从已安装 Skill 清单中选择匹配的 Skill 名称（如无匹配则为空数组）"],\n"agent_type": "必须指定。developer=编码实现, architect=只读分析设计, reviewer=代码审查, tester=测试编写",\n"difficulty": "必须指定。easy=简单明确(文案/单文件小改), medium=常规(单功能实现), hard=复杂(跨文件架构/深层推理)"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行\n4. agent_type 必须根据步骤性质指定合适的 Agent 类型\n5. skills 从已安装 Skill 清单中选取，不匹配则使用空数组 []\n6. difficulty 必须根据步骤复杂度标注：easy/medium/hard，用于执行阶段的模型路由（hard 走强模型）"""
 
     # F-1: 注入已安装 Skill 清单（限制条目数）
     installed = list_skills(repo)
@@ -211,7 +211,7 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
         else:
             logger.warning(f"[PLAN] 跳过 Skill 上下文注入（system prompt 已达上限 {len(system_prompt)} 字符）")
 
-    system_prompt += "\n## 可用 Agent 类型\n- developer: 开发者（编写代码）\n- architect: 架构师（设计分析，只读）\n- reviewer: 审查者（代码审查）\n- tester: 测试者（编写测试）\n必须为每个步骤指定合适的 agent_type。\n\n## 示例步骤\n以下是一个正确填写 agent_type 和 skills 的示例：\n{\n  \"id\": 2,\n  \"title\": \"编写单元测试\",\n  \"description\": \"为认证模块补充测试\",\n  \"files\": [\"tests/test_auth.py\"],\n  \"verification\": \"pytest tests/test_auth.py -v\",\n  \"risks\": [],\n  \"agent_prompt\": \"请为 src/auth.py 编写单元测试，覆盖正常和异常路径\",\n  \"agent_type\": \"tester\",\n  \"skills\": [\"tdd-workflow\"]\n}"
+    system_prompt += "\n## 可用 Agent 类型\n- developer: 开发者（编写代码）\n- architect: 架构师（设计分析，只读）\n- reviewer: 审查者（代码审查）\n- tester: 测试者（编写测试）\n必须为每个步骤指定合适的 agent_type。\n\n## 示例步骤\n以下是一个正确填写 agent_type 和 skills 的示例：\n{\n  \"id\": 2,\n  \"title\": \"编写单元测试\",\n  \"description\": \"为认证模块补充测试\",\n  \"files\": [\"tests/test_auth.py\"],\n  \"verification\": \"pytest tests/test_auth.py -v\",\n  \"risks\": [],\n  \"agent_prompt\": \"请为 src/auth.py 编写单元测试，覆盖正常和异常路径\",\n  \"agent_type\": \"tester\",\n  \"difficulty\": \"medium\",\n  \"skills\": [\"tdd-workflow\"]\n}"
 
     # ── Prompt 预算控制：截断 user content ──
     if reference_docs and len(reference_docs) > MAX_USER_CONTENT_CHARS // 3:

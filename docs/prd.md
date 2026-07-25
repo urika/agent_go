@@ -22,6 +22,8 @@
 
 ## 差异化
 
+### vs Claude Code 裸用
+
 | | Claude Code 裸用 | agent_go |
 |---|---|---|
 | 多步骤任务 | 人工拆分，逐个执行 | 一次输入，自动 Plan → Execute → PR |
@@ -29,6 +31,45 @@
 | 产物 | commit message 自己写 | Conventional Commits + 验证报告 + PR |
 | 安全 | 手动确认每个操作 | 命令白名单 + 沙箱 + 审计日志 |
 | 规模 | 一次对话 = 一个任务 | 一次对话 = N 个子任务，可并发 |
+
+### vs OpenChamber（Agentic Development Environment）
+
+OpenChamber（https://openchamber.dev）是 OpenCode 的开源可视化操作界面，提供 Desktop/Web/Mobile/VS Code 四端。两者定位互补而非竞争。
+
+| 维度 | OpenChamber | agent_go |
+|------|-------------|----------|
+| **定位** | OpenCode 的 GUI 界面 — "看着 Agent 干活" | 工作流编排引擎 — "用 Agent 干活" |
+| **用户介入** | 全程可视化审查（diff、成本、进度） | 战略决策点介入（Plan 确认、结果审查、PR merge） |
+| **执行方式** | 可视化多 Agent 并行 | 结构化 Plan → Decompose → Execute 流水线 |
+| **远程访问** | Cloudflare tunnel + QR 扫码配对（一等公民） | 本地 CLI，无远程（低优先级） |
+| **多表面** | Desktop / Web / Mobile / VS Code | CLI（curses TUI + 文本模式） |
+| **技术栈** | TypeScript + React + Electron + Bun | Python stdlib（无外部依赖） |
+| **Agent 引擎** | 基于 `@opencode-ai/sdk` | 直接 `subprocess.run(["claude", ...])` |
+| **收费** | 免费开源（MIT） | 免费开源（MIT） |
+| **社区** | 20k+ GitHub Stars, v1.16.3, Homebrew 上架 | 个人项目 |
+
+### 可借鉴的功能
+
+| OpenChamber 能力 | agent_go 对应 | 借鉴建议 |
+|---|---|---|
+| 分支式对话时间线（/undo/redo/fork） | 无，regenerate 覆盖旧 Plan | Plan 版本管理（P1） |
+| 多 Agent 并行（同一 prompt 多方案） | `--parallel N` 子任务并发 | 方案探索模式（P2） |
+| 可视化 Diff 审查 | `cmd_show` 文本摘要 | 聚合 diff 审查命令（P1） |
+| GitHub 原生集成（从 Issue/PR 启动） | `--issue` 参数 + `cmd_pr` | PR 自动推送到 GitHub（P2） |
+| 成本/Token 可视化 | metering.jsonl + status 命令 | 已够用 |
+| Skills 目录 | 已有 Skills 系统 | 已做得更深（role-skill 规则引擎） |
+| 远程访问 / Tunnel | 无 | 低优先级（定位不匹配） |
+
+### 核心差异：用户介入点的设计哲学
+
+OpenChamber 是"看着干"——用户全程在 GUI 中审查每个操作。agent_go 是"派活后检查结果"——用户只在**战略决策点**介入：
+
+| 介入点 | OpenChamber | agent_go（当前） | agent_go（理想） |
+|--------|-------------|------------------|-----------------|
+| Plan 确认 | 实时修改 Plan | ✅ Y/S/D/E/R/N | 保留 |
+| 执行过程 | 实时流式查看 diff | ⚠️ status --watch | 加强失败通知 |
+| 结果审查 | 可视化 diff 面板 | ❌ 缺失 | 新增 review 命令 |
+| PR 创建 | 内置 GitHub 操作 | ⚠️ 生成 PR.md | 自动推送到 GitHub |
 
 ## 功能优先级
 
@@ -41,16 +82,72 @@
 
 ## P0 缺失功能
 
-| # | 缺失 | 严重度 |
-|---|------|--------|
-| M1 | 任务完成通知 — "关了终端怎么知道跑完了？" | 🔴 |
-| M2 | 失败原因摘要 — "status=failed 但不知道为什么" | 🔴 |
-| M3 | PR 质量仪表 — "我该不该 merge？" | 🟡 |
-| M4 | 时间预估 — "能在我走之前跑完吗？" | 🟡 |
-| M5 | 验证假阳性 — "验证通过了但功能不对" | 🔴 |
-| M6 | 级联失败 — "一个子任务失败拖垮全部" | 🔴 |
+> **2026-07-25 更新：M1-M6 已全部落地**（多通道通知、失败摘要、PR 质量仪表、时间预估、验证循环防假阳性、级联阻断），详见 [roadmap.md](roadmap.md) 进度快照。下表保留为历史记录。
+
+| # | 缺失 | 严重度 | 状态 |
+|---|------|--------|------|
+| M1 | 任务完成通知 — "关了终端怎么知道跑完了？" | 🔴 | ✅ notify.py 三通道 |
+| M2 | 失败原因摘要 — "status=failed 但不知道为什么" | 🔴 | ✅ failure_reason + show |
+| M3 | PR 质量仪表 — "我该不该 merge？" | 🟡 | ✅ _build_quality_dashboard |
+| M4 | 时间预估 — "能在我走之前跑完吗？" | 🟡 | ✅ estimate_task_duration |
+| M5 | 验证假阳性 — "验证通过了但功能不对" | 🔴 | ✅ 验证循环 + 置信度评估 |
+| M6 | 级联失败 — "一个子任务失败拖垮全部" | 🔴 | ✅ blocked 阻断 + wave 排除 |
+| M7 | **结果审查阶段缺失** — "子任务都完成了，但变更汇总在哪里？" | 🔴 |
+
+## 整体开发流程：四阶段模型
+
+agent_go 的工作流分为四个阶段，用户介入点集中在**战略决策点**：
+
+```
+Phase 1: 规划阶段 (Planning)       Phase 2: 执行阶段 (Execution)
+┌──────────────────────────────┐  ┌──────────────────────────────┐
+│ [Plan 生成] → [Plan 确认]    │  │ [子任务 1] → [验证] → [子任务 2] → [验证]  │
+│   ↑ LLM API    ↑ 人做选择题   │  │   ↑ Claude   ↑ auto     ↑ Claude   ↑ auto  │
+│                S=跳过         │  │                              │
+│                D=手动编辑     │  │  异常时: 自动修复 → 重试 → 阻断+通知用户   │
+│                E=重新生成     │  │                              │
+└──────────────────────────────┘  └──────────────────────────────┘
+                                          ↓ 全部完成
+Phase 3: 审查阶段 (Review)       Phase 4: 交付阶段 (Delivery)
+┌──────────────────────────────┐  ┌──────────────────────────────┐
+│ [聚合 Diff 审查] → [人工审批] │  │ [PR 生成] → [PR 创建] → [Merge]  │
+│   ↑ 自动汇总变更   ↑ approve  │  │   ↑ 已有      ↑ 可推送到     ↑ 人做决定   │
+│   ↑ 按文件分组     /reject   │  │   cmd_pr     GitHub        │
+│   ↑ 行内评论      /changes   │  │                              │
+└──────────────────────────────┘  └──────────────────────────────┘
+```
+
+### Phase 3：审查阶段 — 最大缺口
+
+**当前状态：** 子任务执行完成后只输出文本摘要，没有结构化的变更审查流程。
+
+**需要的能力：**
+
+| 能力 | 描述 | 优先级 |
+|------|------|--------|
+| 聚合 Diff 展示 | 将所有子任务的变更汇总，展示完整 diff | **P1** |
+| Diff 按文件分组 | 同一文件被多个子任务修改时，展示最终结果 | P2 |
+| 审查命令 | `agent_go review <task-id>` 进入交互式审查 | **P1** |
+| 审批状态 | approved / changes-requested / rejected | P2 |
+| 行内评论 | 在 diff 上添加评论，可反馈给 AI | P3 |
+
+### 流程状态机
+
+```
+DRAFT → PLANNING → PLAN_REVIEWED → DECOMPOSED → READY → EXECUTING → REVIEW → DELIVERY → COMPLETED
+  ↑         ↑           ↑               ↑           ↑        ↑          ↑         ↑
+ 用户输入   LLM 生成   用户确认        LLM 分解    用户确认  子任务运行  用户审查   PR 推送/merge
+```
+
+### 关键设计原则
+
+1. **人的注意力是最稀缺资源** — 默认聚合、异常下钻。只把需要人决策的事推到人面前，且人做选择题而非问答题。
+2. **失败后阻断+通知** — 子任务验证失败达到最大重试次数后，阻断下游并通知用户。保留 worktree 供 `agent_go inspect` 审查。
+3. **审查是必选环节** — 即使 `--yes` 全自动模式，也生成审查摘要供用户事后查看。`--headless` 模式下审查自动通过。
 
 ## P1 重点：角色感知模型路由
+
+> **2026-07-25 进展**：`router.py`（角色路由 + 熔断 + 降级留痕）与**复杂度双通道**（Planner 打 difficulty 标签 → `worker_models` 映射 → claude `--model`）已落地；Router 多 Provider 全链路扩展见 [design/router-multi-provider-extension.md](design/router-multi-provider-extension.md)。
 
 **一句话：Plan 走前沿模型，Execute 走便宜模型，成本降 5 倍，质量不降。**
 
@@ -87,6 +184,8 @@ result(success|fallback|quality_fail), fallback_reason
 这是成本看板的数据源，也是发布门禁「$/pass rate 不劣化」的判定依据。
 
 ## P1 重点：验证 Agent 循环（Verification Loop）
+
+> **2026-07-25 进展**：双层验证循环已落地并全链路验收——可配置修复循环（max_retries + retry_timeout 硬超时）、全量失败反馈（stdout/stderr + diff --stat）、blocked 阻断下游、`/goal` 文本注入 + Stop Hook（`--goal` / `--goal-hook`）、LLM 语义评估、verify_state.json 断点恢复。实施偏差见 [design/verification-agent-goal-spec.md](design/verification-agent-goal-spec.md) §11.4。
 
 **一句话：验证一次不够就自动修，修到通过或上限；实在修不好就阻断下游，不让错误扩散。**
 

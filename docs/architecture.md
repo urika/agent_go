@@ -18,23 +18,29 @@ cmd_run(repo, task)
   │     ├── 计量: 每次 API 调用写 metering.jsonl (role/tokens/cost/latency)
   │     └── 降级: 外部API → 本地模型 → DECOMPOSE_RULES匹配 → 单任务兜底
   ├── confirm_plan()             → Y/S/D/E/R/N (--yes 跳过)
-  ├── plan_to_subtasks()         → plan.steps → subtasks + 角色-Skill匹配
+  ├── plan_to_subtasks()         → plan.steps → subtasks + 角色-Skill匹配 + difficulty 透传
+  ├── estimate_task_duration()   → M4 时间预估 (历史中位数 × 拓扑波次)
   ├── _run_pipeline()
   │     ├── 禁用 gc.auto         → 并发 worktree 安全
   │     ├── 拓扑波次调度          → ThreadPoolExecutor, --parallel N
+  │     │     └── 上游 failed/blocked → 下游标 blocked 并跳过 (block_on_failure 可关)
   │     ├── run_subtask()        → 每个子任务:
   │     │     ├── git worktree add -b agent_go/{task_id}/{sub_id}
   │     │     ├── git merge 上游 tag → 产物传递
-  │     │     ├── 写 TASK.md (路径已重写到 worktree)
+  │     │     ├── 写 TASK.md (路径已重写到 worktree; --goal 时注入 /goal 循环指令)
+  │     │     ├── Stop Hook 注入 (--goal-hook: .claude/settings.json + verify-goal.sh)
+  │     │     ├── S4 模型路由: difficulty → worker_models → claude --model
   │     │     ├── claude -p (无头) 或 greywall -- claude (交互)
-  │     │     ├── 验证命令执行 (白名单校验 + 沙箱环境)
+  │     │     ├── 验证循环: 失败 → 修复(注入 stdout/stderr+diff --stat) → 再验证,
+  │     │     │   max_retries 可配(默认3), retry_timeout 硬超时, 达上限标 failed 并阻断下游
+  │     │     ├── 可选 LLM 语义评估 (evaluator.enabled, shell 过后才触发)
   │     │     ├── git commit + tag ({task_id}/{sub_id})
-  │     │     └── 失败自动重试 (max 2次)
+  │     │     └── worker 计量: stream-json result → metering.jsonl (含 difficulty/真实模型)
   │     ├── 远程推送 (--remote)
   │     ├── 清理 worktree/tag + 恢复 gc.auto (failed/blocked 的 worktree 保留待审, agent_go inspect 查看)
-  │     ├── 完成通知 (_notify_complete)
+  │     ├── 完成通知 (notify_event: desktop/webhook/command 三通道, 事件订阅)
   │     └── 最终报告 + meta.json
-  └── cmd_pr()                    → 生成 PR 描述
+  └── cmd_pr()                    → PR 描述 + 质量仪表 (通过率/验证率/合并就绪指示)
 ```
 
 ## 关键设计决策
@@ -77,13 +83,14 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
     └── sub-<n>/
         ├── work/            ← git worktree (执行后清理; failed/blocked 保留)
         ├── .preserved       ← 保留标记 (subtask_id/status/failure_reason/branch)
+        ├── verify_state.json ← 验证循环状态 (resume 断点恢复)
         └── result.json      ← 单子任务结果
 ```
 
 ## 测试
 
 ```bash
-pytest tests/ -q           # 694 tests, ~16s
+pytest tests/ -q           # 751 tests, ~17s
 ```
 
 测试策略：mock 所有外部依赖 (git, claude, API)，验证逻辑正确性。NFR 专项测试在 `test_nfr_*.py`。

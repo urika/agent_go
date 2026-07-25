@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 
-from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR
+from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR, log_event
 from .console import Console, set_default_console
 from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
@@ -370,6 +370,17 @@ def cmd_run(args=None):
         "remote_url": remote_url,
     }
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # M4: 时间预估（历史子任务耗时中位数 × 拓扑波次，回答「走之前能跑完吗」）
+    from .eval import estimate_task_duration
+    est = estimate_task_duration(confirmed, parallel, AGENT_GO_DIR)
+    conf_tag = {"high": "", "medium": "（样本较少）", "low": "（样本很少，仅供参考）",
+                "none": "（无历史数据，经验值）"}[est["confidence"]]
+    console.print(f"\n⏱️ 预计耗时: ~{est['estimated_sec'] / 60:.0f} 分钟 "
+                  f"— {est['subtasks']} 个子任务 / {est['waves']} 个波次 / 并行 {parallel}{conf_tag}")
+    logger.info(f"[M4] 时间预估: {est['estimated_sec']}s "
+                f"(waves={est['waves']}, median={est['median_subtask_sec']}s, samples={est['sample_size']})")
+    log_event(logger, "time_estimate", est)
 
     _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta, remote_url=remote_url,
                   preserve_worktrees=preserve_worktrees)
@@ -754,12 +765,19 @@ def _build_quality_dashboard(meta: dict) -> str:
         for r in results:
             sid = r.get("subtask_id", "?")
             status = r.get("status", "?")
-            status_icon = {"completed": "✅", "no_changes": "⏭️", "degraded": "⚠️", "failed": "❌"}.get(status, "❓")
+            status_icon = {"completed": "✅", "no_changes": "⏭️", "degraded": "⚠️", "failed": "❌", "blocked": "🔗"}.get(status, "❓")
             verify_icon = "✅" if r.get("verify_ok") else "❌"
             dur = f"{r.get('duration_sec', 0):.0f}s"
             summary = (r.get("summary", "") or "")[:60]
             failure = f" — {r.get('failure_reason', '')}" if r.get("failure_reason") else ""
             lines.append(f"| {sid} | {status_icon} {status} | {verify_icon} | {dur} | {summary}{failure} |")
+        lines.append("")
+
+    # M5: 启发式验证警告（可能假阳性）
+    weak = [r for r in results if r.get("verification_confidence", {}).get("warning")]
+    if weak:
+        lines.append(f"> ⚠️ {len(weak)} 个子任务的验证为启发式检查（可能假阳性），建议人工抽查: "
+                     f"{', '.join(r['subtask_id'] for r in weak)}")
         lines.append("")
 
     return "\n".join(lines)
