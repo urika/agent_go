@@ -12,3 +12,12 @@ python_version = "3.9"
 ignore_missing_imports = true
 warn_return_any = true
 warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --tb=short 精简失败堆栈；addopts 让所有 pytest 调用默认生效
+addopts = "--tb=short"
+# 注册自定义 marker，避免 pytest 对未知 marker 报 warning
+markers = [
+    "flaky: 标记已知 flaky 测试（需配合 rerun 机制，当前仅作标注）",
+]

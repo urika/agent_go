@@ -109,3 +109,84 @@ class TestGetApiKey:
         finally:
             if saved is not None:
                 os.environ["AGENT_GO_API_KEY"] = saved
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# load_config 容错 / meter_event
+# ═══════════════════════════════════════════════════════════════
+
+from agent_go.config import meter_event
+
+
+class TestLoadConfigFaultTolerance:
+    """load_config 异常输入容错"""
+
+    def test_corrupt_json_falls_back_to_default(self, tmp_path, monkeypatch, capsys):
+        """config.json 为损坏 JSON 时告警并回退默认配置，不覆写原文件"""
+        bad = tmp_path / "config.json"
+        bad.write_text("{ not valid json", encoding="utf-8")
+        monkeypatch.setattr("agent_go.config.CONFIG_PATH", bad)
+        config = load_config()
+        assert config == DEFAULT_CONFIG
+        # 返回的是深拷贝，修改不影响 DEFAULT_CONFIG
+        assert config is not DEFAULT_CONFIG
+        out = capsys.readouterr().out
+        assert "config.json" in out
+        assert str(bad) in out
+        # 原文件不被覆写
+        assert bad.read_text(encoding="utf-8") == "{ not valid json"
+
+    def test_non_dict_json_falls_back_to_default(self, tmp_path, monkeypatch, capsys):
+        """config.json 为合法 JSON 但非 dict（如 [1,2]）时告警并回退默认配置"""
+        bad = tmp_path / "config.json"
+        bad.write_text("[1, 2]", encoding="utf-8")
+        monkeypatch.setattr("agent_go.config.CONFIG_PATH", bad)
+        config = load_config()
+        assert config == DEFAULT_CONFIG
+        assert str(bad) in capsys.readouterr().out
+        # 原文件不被覆写
+        assert bad.read_text(encoding="utf-8") == "[1, 2]"
+
+    def test_valid_config_unaffected(self, tmp_path, monkeypatch, capsys):
+        """正常配置不受容错逻辑影响，无 warning 输出"""
+        good = tmp_path / "config.json"
+        good.write_text(json.dumps({"plan_api": {"provider": "openai"}}), encoding="utf-8")
+        monkeypatch.setattr("agent_go.config.CONFIG_PATH", good)
+        config = load_config()
+        assert config["plan_api"]["provider"] == "openai"
+        assert config["plan_api"]["max_tokens"] == 4096  # 默认值保留
+        assert "回退" not in capsys.readouterr().out
+
+
+class TestMeterEvent:
+    """meter_event 计量写入与容错"""
+
+    def test_writes_jsonl_with_ts(self, tmp_path):
+        """正常写入一行 JSONL，自动追加 ts 字段"""
+        path = tmp_path / "metering.jsonl"
+        meter_event(path, {"role": "worker", "cost_usd": 0.01})
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        data = json.loads(lines[0])
+        assert data["role"] == "worker"
+        assert "ts" in data
+
+    def test_appends_multiple_events(self, tmp_path):
+        """多次调用追加多行；字符串路径同样支持"""
+        path = tmp_path / "metering.jsonl"
+        meter_event(path, {"n": 1})
+        meter_event(str(path), {"n": 2})
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
+
+    def test_empty_path_noop(self):
+        """metering_path 为空时不写入、不抛异常"""
+        meter_event(None, {"a": 1})
+        meter_event("", {"a": 1})
+
+    def test_write_failure_tolerated(self, tmp_path):
+        """写入失败（目录不存在）被吞掉只记 debug，不影响调用方"""
+        path = tmp_path / "no_such_dir" / "metering.jsonl"
+        meter_event(path, {"role": "worker"})  # 不抛异常
+        assert not path.exists()

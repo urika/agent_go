@@ -43,9 +43,34 @@ def _success_result(sub_id):
     }
 
 
+def _failed_result(sub_id, reason="验证失败"):
+    """run_subtask 返回的失败结果。"""
+    return {
+        "subtask_id": sub_id,
+        "status": "failed",
+        "exit_code": 1,
+        "summary": f"fail-{sub_id}",
+        "failure_reason": reason,
+        "worktree": "",
+        "sandbox_type": "headless",
+        "verify_ok": False,
+        "duration_sec": 1.0,
+    }
+
+
 def _default_meta(task_id="t1"):
     """默认 meta dict。"""
     return {"task_id": task_id, "status": "running"}
+
+
+def _setup_repo_and_task_dir(temp_dir, task_id="t1"):
+    """创建带 .git 的伪仓库目录和任务目录。"""
+    repo = temp_dir / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    task_dir = temp_dir / "tasks" / task_id
+    task_dir.mkdir(parents=True)
+    return repo, task_dir
 
 
 # ---------------------------------------------------------------------------
@@ -423,3 +448,419 @@ class TestPipelineDependencyFailure:
         # 落盘的 meta.json 同样是 failed
         saved = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
         assert saved["status"] == "failed"
+
+
+class TestPipelineRemotePush:
+    """远程 push 逻辑：分支存在性检查、失败计数与容忍（pipeline.py 193-215 行）。"""
+
+    @staticmethod
+    def _fake_git(existing=(), push_fail=()):
+        """构造 subprocess.run 的 fake，按命令区分 branch --list / push / tag -d。
+
+        existing:   本地存在的分支名集合（branch --list 返回非空）
+        push_fail:  push 应失败的分支名集合（returncode=1）
+        """
+        def _run(cmd, **kwargs):
+            if cmd[:3] == ["git", "branch", "--list"]:
+                branch = cmd[3]
+                stdout = f"{branch}\n" if branch in existing else ""
+                return MagicMock(returncode=0, stdout=stdout, stderr="")
+            if cmd[:2] == ["git", "push"]:
+                branch = cmd[3].split(":")[0]
+                rc = 1 if branch in push_fail else 0
+                return MagicMock(returncode=rc, stdout="", stderr=b"push error")
+            return MagicMock(returncode=0, stdout="", stderr=b"")
+        return _run
+
+    @staticmethod
+    def _push_calls(mock_subproc):
+        """从 subprocess.run 调用记录中筛出 git push 调用。"""
+        return [c for c in mock_subproc.call_args_list if c.args[0][:2] == ["git", "push"]]
+
+    # ── 1. 全部分支推送成功 ──────────────────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_push_all_branches_success(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """分支存在且 push 成功时，每个子任务各 push 一次，记录成功日志。"""
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        mock_run_subtask.side_effect = [_success_result("sub-1"), _success_result("sub-2")]
+        branches = {"agent_go/t1/sub-1", "agent_go/t1/sub-2"}
+        mock_subproc.side_effect = self._fake_git(existing=branches)
+
+        with patch.object(logger, "info") as mock_info:
+            _run_pipeline(
+                confirmed, repo, task_dir, logger,
+                config={}, headless=False, parallel=1,
+                issue_ref="", meta=_default_meta(),
+                remote_url="https://example.com/repo.git",
+            )
+
+        # 每个分支各 push 一次，refspec 为 branch:branch
+        pushes = self._push_calls(mock_subproc)
+        assert len(pushes) == 2
+        pushed_refs = {c.args[0][3] for c in pushes}
+        assert pushed_refs == {
+            "agent_go/t1/sub-1:agent_go/t1/sub-1",
+            "agent_go/t1/sub-2:agent_go/t1/sub-2",
+        }
+        # push 的 remote 参数正确，且在 repo 目录下执行
+        for c in pushes:
+            assert c.args[0][2] == "https://example.com/repo.git"
+            assert c.kwargs["cwd"] == str(repo)
+        # 成功日志
+        assert any("所有分支推送成功" in str(c) for c in mock_info.call_args_list)
+
+    # ── 2. 分支不存在时跳过 push ─────────────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_push_skips_missing_branch(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """branch --list 为空（如 clone 降级未建分支）时跳过该分支的 push。"""
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        mock_run_subtask.side_effect = [_success_result("sub-1"), _success_result("sub-2")]
+        # 只有 sub-1 的分支存在
+        mock_subproc.side_effect = self._fake_git(existing={"agent_go/t1/sub-1"})
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+            remote_url="https://example.com/repo.git",
+        )
+
+        pushes = self._push_calls(mock_subproc)
+        assert len(pushes) == 1
+        assert pushes[0].args[0][3] == "agent_go/t1/sub-1:agent_go/t1/sub-1"
+
+    # ── 3. push 失败计数且不影响任务状态 ────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_push_failure_counted_and_tolerated(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """单个分支 push 失败只计数告警，管线照常完成，meta 仍为 completed。"""
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        mock_run_subtask.side_effect = [_success_result("sub-1"), _success_result("sub-2")]
+        branches = {"agent_go/t1/sub-1", "agent_go/t1/sub-2"}
+        mock_subproc.side_effect = self._fake_git(
+            existing=branches, push_fail={"agent_go/t1/sub-2"},
+        )
+
+        meta = _default_meta()
+        with patch.object(logger, "warning") as mock_warning:
+            _run_pipeline(
+                confirmed, repo, task_dir, logger,
+                config={}, headless=False, parallel=1,
+                issue_ref="", meta=meta,
+                remote_url="https://example.com/repo.git",
+            )
+
+        # 两个分支都尝试了 push
+        assert len(self._push_calls(mock_subproc)) == 2
+        # 失败计数告警：单条分支失败 + 汇总
+        warnings = [str(c) for c in mock_warning.call_args_list]
+        assert any("推送失败 agent_go/t1/sub-2" in w for w in warnings)
+        assert any("1 个分支推送失败" in w for w in warnings)
+        # push 失败被容忍：任务状态不受影响
+        assert meta["status"] == "completed"
+
+    # ── 4. 未指定 remote 时不做任何 push ────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_no_push_without_remote_url(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """remote_url 为空时跳过整个远程推送段（连 branch --list 都不调用）。"""
+        confirmed = [_make_subtask("sub-1")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        mock_run_subtask.return_value = _success_result("sub-1")
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        git_cmds = [c.args[0] for c in mock_subproc.call_args_list]
+        assert not any(cmd[:2] == ["git", "push"] for cmd in git_cmds)
+        assert not any(cmd[:3] == ["git", "branch", "--list"] for cmd in git_cmds)
+
+
+class TestPipelineNotify:
+    """管线末尾通知派发：on_blocked > on_failed > on_complete，一次管线只派发一个事件
+    （pipeline.py 361-364 行）。"""
+
+    # ── 1. 全部成功 → on_complete ────────────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_notify_on_complete(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """无失败无阻断时派发 on_complete，且只派发一次。"""
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        mock_run_subtask.side_effect = [_success_result("sub-1"), _success_result("sub-2")]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        config = {}
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config=config, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        mock_notify.assert_called_once()
+        event, context, passed_config = mock_notify.call_args.args
+        assert event == "on_complete"
+        # context 携带 meta / results_map / task_dir，config 原样透传
+        assert set(context.keys()) == {"meta", "results_map", "task_dir"}
+        assert context["task_dir"] == task_dir
+        assert context["meta"]["status"] == "completed"
+        assert passed_config is config
+
+    # ── 2. 有失败（无阻断）→ on_failed ───────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_notify_on_failed(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """存在 failed 子任务（无 blocked）时派发 on_failed。"""
+        # 两个无依赖子任务：sub-1 失败，sub-2 成功 → 无级联阻断
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        mock_run_subtask.side_effect = [_failed_result("sub-1"), _success_result("sub-2")]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        mock_notify.assert_called_once()
+        assert mock_notify.call_args.args[0] == "on_failed"
+
+    # ── 3. 阻断优先于失败 → on_blocked ───────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_notify_on_blocked_priority(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """failed 与 blocked 同时存在时，优先级 on_blocked > on_failed，只派发一次。"""
+        # sub-1 失败 → 依赖它的 sub-2 被级联阻断：has_failed 与 has_blocked 同时为真
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2", depends_on=["sub-1"])]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        mock_run_subtask.return_value = _failed_result("sub-1")
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        mock_notify.assert_called_once()
+        event, context, _ = mock_notify.call_args.args
+        assert event == "on_blocked"
+        statuses = {sid: r["status"] for sid, r in context["results_map"].items()}
+        assert statuses == {"sub-1": "failed", "sub-2": "blocked"}
+
+
+class TestPipelinePreservedMarker:
+    """失败/阻断 worktree 保留与 .preserved 标记写入（pipeline.py 236-247 行）。"""
+
+    # ── 1. 失败 worktree 保留并写入标记 ──────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_failed_worktree_preserved_with_marker(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """默认行为（preserve_worktrees=None）：failed 保留+写标记，completed 正常清理。"""
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        # 两个子任务都有 worktree 目录（run_subtask 已 mock，手动补建）
+        for sid in ("sub-1", "sub-2"):
+            (task_dir / sid / "work").mkdir(parents=True)
+
+        mock_run_subtask.side_effect = [
+            _success_result("sub-1"),
+            _failed_result("sub-2", reason="pytest 3 个用例失败"),
+        ]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        # sub-2 保留：.preserved 标记存在且字段完整
+        marker = task_dir / "sub-2" / ".preserved"
+        assert marker.exists()
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        assert data == {
+            "subtask_id": "sub-2",
+            "status": "failed",
+            "failure_reason": "pytest 3 个用例失败",
+            "branch": "agent_go/t1/sub-2",
+        }
+        # sub-1 成功：被清理，无标记
+        assert not (task_dir / "sub-1" / ".preserved").exists()
+        removed_paths = [c.args[1] for c in mock_wt_remove.call_args_list]
+        assert removed_paths == [task_dir / "sub-1" / "work"]
+
+    # ── 2. 阻断 worktree 保留并写入标记 ──────────────────────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_blocked_worktree_preserved_with_marker(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """级联阻断（blocked）的子任务同样保留 worktree 并写入 .preserved。"""
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2", depends_on=["sub-1"])]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        # blocked 的 sub-2 未真实执行，但 worktree 目录可能已存在，补建以覆盖该路径
+        for sid in ("sub-1", "sub-2"):
+            (task_dir / sid / "work").mkdir(parents=True)
+
+        mock_run_subtask.return_value = _failed_result("sub-1", reason="编译失败")
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        # 两个 worktree 都保留（failed + blocked），均不清理
+        mock_wt_remove.assert_not_called()
+        # blocked 的标记：status/failure_reason 来自级联阻断结果
+        data = json.loads((task_dir / "sub-2" / ".preserved").read_text(encoding="utf-8"))
+        assert data == {
+            "subtask_id": "sub-2",
+            "status": "blocked",
+            "failure_reason": "上游依赖失败，级联阻断",
+            "branch": "agent_go/t1/sub-2",
+        }
+
+    # ── 3. preserve_worktrees=True 时成功 worktree 也保留 ────────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_preserve_all_when_flag_true(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """preserve_worktrees=True：completed 的 worktree 同样保留，标记 status 为 completed。"""
+        confirmed = [_make_subtask("sub-1")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+        (task_dir / "sub-1" / "work").mkdir(parents=True)
+
+        mock_run_subtask.return_value = _success_result("sub-1")
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+            preserve_worktrees=True,
+        )
+
+        mock_wt_remove.assert_not_called()
+        data = json.loads((task_dir / "sub-1" / ".preserved").read_text(encoding="utf-8"))
+        # 成功结果没有 failure_reason 字段 → 空串
+        assert data["status"] == "completed"
+        assert data["failure_reason"] == ""
+        assert data["branch"] == "agent_go/t1/sub-1"
+
+    # ── 4. preserve_worktrees=False 时失败 worktree 也清理 ───────────────
+    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_no_preserve_when_flag_false(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """preserve_worktrees=False：failed 的 worktree 强制清理，不写 .preserved。"""
+        confirmed = [_make_subtask("sub-1")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+        (task_dir / "sub-1" / "work").mkdir(parents=True)
+
+        mock_run_subtask.return_value = _failed_result("sub-1")
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+            preserve_worktrees=False,
+        )
+
+        mock_wt_remove.assert_called_once_with(repo, task_dir / "sub-1" / "work")
+        assert not (task_dir / "sub-1" / ".preserved").exists()

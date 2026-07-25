@@ -14,6 +14,7 @@ import pytest
 from agent_go.notify import (
     notify_event, build_payload,
     _resolve_notify_config, _interpolate, _is_allowed_url, _render_webhook_body,
+    _send_desktop, _send_command,
 )
 
 
@@ -255,3 +256,126 @@ class TestNotifyEvent:
         with patch("subprocess.run") as mock_run:
             notify_event("on_failed", task_context, config)
         assert mock_run.call_args[0][0] == ["echo", "task-t1", "failed", "1/2"]
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# _send_desktop 平台分支 / 容错
+# ═══════════════════════════════════════════════════════════════
+
+class TestSendDesktop:
+    def test_osascript_missing_silent(self, task_context):
+        """非 macOS 环境（osascript 不存在）静默跳过，不抛异常"""
+        payload = build_payload("on_complete", task_context)
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            _send_desktop(payload, 5)  # 不抛异常
+
+    def test_osascript_timeout_silent(self, task_context):
+        """osascript 超时只记 debug，不抛异常"""
+        import subprocess
+        payload = build_payload("on_complete", task_context)
+        with patch("subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("osascript", 5)):
+            _send_desktop(payload, 5)  # 不抛异常
+
+    def test_quotes_escaped(self, task_context):
+        """task_id 含双引号时转义，防 AppleScript 注入"""
+        payload = build_payload("on_complete", task_context)
+        payload["task_id"] = 'ta"sk'
+        with patch("subprocess.run") as mock_run:
+            _send_desktop(payload, 5)
+        script = mock_run.call_args[0][0][2]
+        assert 'ta\\"sk' in script
+
+
+# ═══════════════════════════════════════════════════════════════
+# webhook 发送异常容错
+# ═══════════════════════════════════════════════════════════════
+
+class TestWebhookFaultTolerance:
+    def _urlopen_ok(self):
+        resp = MagicMock()
+        resp.status = 200
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    def test_header_env_missing_skips_channel(self, task_context, monkeypatch):
+        """header 插值失败（环境变量未设置）→ 跳过该通道，不发请求"""
+        monkeypatch.delenv("NOPE_TOKEN", raising=False)
+        config = {"notify": {"channels": [
+            {"type": "webhook", "url": "https://hook/a",
+             "headers": {"Authorization": "Bearer ${NOPE_TOKEN}"}},
+        ]}}
+        with patch("urllib.request.urlopen") as mock_open:
+            notify_event("on_failed", task_context, config)
+        mock_open.assert_not_called()
+
+    def test_5xx_retried_until_exhausted(self, task_context):
+        """5xx 会重试，次数用尽后仅 warning 留痕，不抛异常"""
+        import urllib.error
+        config = {"notify": {"retry": 1, "channels": [
+            {"type": "webhook", "url": "https://hook/a"},
+        ]}}
+        err = urllib.error.HTTPError("https://hook/a", 500, "Server Error", {}, None)
+        with patch("urllib.request.urlopen", side_effect=err) as mock_open:
+            notify_event("on_failed", task_context, config)
+        assert mock_open.call_count == 2  # 1 + 1 retry
+
+    def test_5xx_then_success(self, task_context):
+        """5xx 后重试成功 → 正常返回，不再重试"""
+        import urllib.error
+        config = {"notify": {"retry": 2, "channels": [
+            {"type": "webhook", "url": "https://hook/a"},
+        ]}}
+        err = urllib.error.HTTPError("https://hook/a", 503, "Unavailable", {}, None)
+        with patch("urllib.request.urlopen",
+                   side_effect=[err, self._urlopen_ok()]) as mock_open:
+            notify_event("on_failed", task_context, config)
+        assert mock_open.call_count == 2
+
+
+# ═══════════════════════════════════════════════════════════════
+# command 通道执行 / 模板安全约定
+# ═══════════════════════════════════════════════════════════════
+
+class TestSendCommand:
+    def test_failure_reason_not_exposed(self, task_context):
+        """安全约定：模板变量不含 failure_reason（LLM 输出不可信，防 shell 注入）"""
+        config = {"notify": {"channels": [
+            {"type": "command", "command": "echo {failure_reason}"},
+        ]}}
+        with patch("subprocess.run") as mock_run:
+            notify_event("on_failed", task_context, config)
+        mock_run.assert_not_called()
+
+    def test_unknown_template_var_skips(self, task_context):
+        """未知模板变量 → warning 并跳过，不执行命令"""
+        payload = build_payload("on_failed", task_context)
+        with patch("subprocess.run") as mock_run:
+            _send_command(payload, {"type": "command", "command": "echo {nope}"}, 5)
+        mock_run.assert_not_called()
+
+    def test_command_env_missing_skips(self, task_context, monkeypatch):
+        """命令含未设置的环境变量 → 跳过通道"""
+        monkeypatch.delenv("UNSET_NOTIFY_CMD", raising=False)
+        payload = build_payload("on_failed", task_context)
+        with patch("subprocess.run") as mock_run:
+            _send_command(payload, {"type": "command",
+                                    "command": "${UNSET_NOTIFY_CMD} {task_id}"}, 5)
+        mock_run.assert_not_called()
+
+    def test_subprocess_failure_tolerated(self, task_context):
+        """命令执行失败只记 debug，不向上传播"""
+        payload = build_payload("on_failed", task_context)
+        with patch("subprocess.run", side_effect=OSError("boom")):
+            _send_command(payload, {"type": "command", "command": "echo {task_id}"}, 5)
+
+    def test_message_and_cost_vars(self, task_context):
+        """{message} 摘要行与 {cost_usd} 等安全标量可用于模板"""
+        config = {"notify": {"channels": [
+            {"type": "command", "command": "echo {cost_usd}"},
+        ]}}
+        with patch("subprocess.run") as mock_run:
+            notify_event("on_failed", task_context, config)
+        assert mock_run.call_args[0][0] == ["echo", "0.08"]

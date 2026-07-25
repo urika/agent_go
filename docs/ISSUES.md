@@ -3,7 +3,7 @@
 > 来源：2026-07 模块 spec 梳理（`docs/spec/`）中发现的代码缺陷。
 > 以下每条均已对照源码逐行核实（核实日期 2026-07-23，基于 v2.0.0 工作区代码）。
 > ISSUE-1 ~ ISSUE-6 于 2026-07-23 修复；ISSUE-7 ~ ISSUE-14 于同日修复。
-> 全部 14 项均已修复，655 个测试通过（`pytest tests/`）。
+> ISSUE-15 ~ ISSUE-23 来源于 2026-07-25 测试覆盖补强专项（751 → 1012 测试）中发现的缺陷，均已对照源码逐行核实。
 
 ## P0 — 必须修复
 
@@ -177,6 +177,146 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 
 ---
 
+## 2026-07-25 测试补强专项发现的缺陷
+
+> 来源：2026-07-25 测试覆盖补强专项（新增 261 个测试，总数 751 → 1012）中对照源码逐行核实确认的缺陷。
+> 同日全部修复，修复后 1027 个测试通过（`pytest tests/`）。
+> 修复摘要：ISSUE-15 `setup_logger` 提前至恢复循环前；ISSUE-16 损坏配置 warning 后回退默认配置深拷贝（不覆写原文件）；ISSUE-17 缺参 tool_call 返回错误 dict；ISSUE-18 命令名改 shlex token 精确匹配（元字符保留子串、解析失败回退子串）；ISSUE-19 语义评估失败原因写入 failure_reason；ISSUE-20 关键词改词边界正则匹配（顺带 `audit`/`探索性` 去重）；ISSUE-21 debug 日志补工具输入 preview；ISSUE-22 重生成前用 final_doc_paths 重读参考文档 + docstring 修正；ISSUE-23 时长估算统一 0.8/1.2 区间公式。各修复均附回归测试（约 15 个新增/改写用例）。
+
+### ISSUE-15 `cmd_resume` 遇到损坏的 result.json 抛 `UnboundLocalError`，恢复中断
+
+- **位置**：`agent_go/cli.py:427-428`（触发点）vs `:442`（`logger` 赋值点）
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P1
+
+**问题**：结果恢复循环的 `except` 块调用 `logger.debug(...)`，但局部变量 `logger = setup_logger(task_id, task_dir)` 在 :442 才赋值。Python 函数级作用域规则使 `logger` 在循环内被视为未绑定局部变量——任何损坏的 result.json 都会抛 `UnboundLocalError` 中断整个恢复流程，与 except 块"跳过损坏文件"的意图相悖。
+
+**修复建议**：将 `setup_logger` 调用提前到结果恢复循环之前。
+
+### ISSUE-16 `load_config` 对损坏的 config.json 无容错，CLI 启动即崩溃
+
+- **位置**：`agent_go/config.py:126-139`
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P1
+
+**问题**：`json.loads(CONFIG_PATH.read_text(...))` 无 try/except——config.json 损坏（非法 JSON）时抛 `json.JSONDecodeError`；内容为合法 JSON 但非 dict（如 `[1,2]`）时 `:130` 的 `saved.items()` 抛 `AttributeError`。任一情况都导致 CLI 启动直接崩溃，用户无法通过任何命令自愈。
+
+**修复建议**：try/except + `isinstance(saved, dict)` 校验，warning 提示后回退 `DEFAULT_CONFIG` 深拷贝（不覆写用户的原文件，保留人工修复机会）。
+
+### ISSUE-17 `ToolRegistry.execute` 对缺参 tool_call 抛 `KeyError`，AgentLoop 整体崩溃
+
+- **位置**：`agent_go/tool_executor.py:199-206`
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P1
+
+**问题**：`execute` 直接以 `arguments["file_path"]` 等方式取参，LLM 产生缺参 tool_call 时抛 `KeyError` 向上传播，整个 AgentLoop 崩溃——与其他错误路径统一返回 `{"success": False, "error": ...}` 的约定不一致。
+
+**修复建议**：dispatch 处捕获 `KeyError`，返回 `{"success": False, "error": f"缺少参数: ..."}`。
+
+### ISSUE-18 `_bash` 拦截规则子串匹配误伤无害命令
+
+- **位置**：`agent_go/tool_executor.py:72-80`
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P2
+
+**问题**：`"rm "`/`"su "`/`"cp "`/`"mv "` 等为子串匹配，`echo warm `（含 "wa**rm** "）等无害命令被误拦截。
+
+**修复建议**：命令名（rm/mv/cp/chmod/chown/sudo/su/mkfs/dd/wget/curl）按 shlex 分词后的 token 精确匹配；shell 元字符（`|`、`;`、`>`、`&&`、`||`）与 `git push` 等多词规则保留子串匹配；shlex 解析失败时回退子串匹配（保守方向）。
+
+### ISSUE-19 纯语义评估失败时 `failure_reason` 丢失具体原因
+
+- **位置**：`agent_go/executor.py:926-935`（原因收集）vs `:590-596`（语义评估记录结构）
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P2
+
+**问题**：语义评估失败时 `verification_results` 中写入的是 `{"type": "semantic", "passed": False, "reason": ...}`，无 `command`/`exit_code` 字段；而 :927 的失败命令过滤要求 `exit_code not in (0, -1)`，语义记录被排除，`failure_reason` 落为兜底文案"验证未通过（无变更或未知原因）"，丢失了具体的评估原因。
+
+**修复建议**：按 `type == "semantic" and not passed` 单独收集语义评估失败，将其 `reason` 写入 `failure_reason`。
+
+### ISSUE-20 `_assess_verification_confidence` 子串匹配误判
+
+- **位置**：`agent_go/executor.py:380-391`
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P2
+
+**问题**：`kw in v_lower` 子串匹配导致误判：`echo latest` 含 "test" 被判为 `deterministic`（`attest`/`contest`/`protest` 同理）。另 `HEURISTIC_KEYWORDS` 中 `"audit"` 重复出现两次。
+
+**修复建议**：关键词匹配改为词边界正则（`\b`）；`"audit"` 去重。顺带清理 `_is_simple_task`（executor.py:744）中冗余的 `"探索性"`（已被 `"探索"` 子串覆盖）。
+
+### ISSUE-21 `parse_and_log` 中工具输入 `preview` 计算后从未使用
+
+- **位置**：`agent_go/subtask.py:194-199`
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P3
+
+**问题**：`content_block_stop` 分支计算了 `preview = ti[:200] ...` 但未出现在任何日志中——累积的工具输入（`tool_input`）既没写日志也没进输出行，调试时无法看到工具实际参数。疑似日志语句遗漏。
+
+**修复建议**：debug 日志补上 `preview`。
+
+### ISSUE-22 R 重新生成丢失 D 挂载的参考文档；`confirm_plan` docstring 与实现不符
+
+- **位置**：`agent_go/cli.py:329`（重生成传 `""`）+ `agent_go/ui.py:228`（R 分支返回值）vs `ui.py:180`（docstring）
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P2
+
+**问题**：用户在确认环节用 D 挂载参考文档后，confirm_plan 的 R 分支返回 `(None, reference_doc_paths)`（与 docstring 声明的 `(None, None)` 不符）；而 cli.py:329 重新生成 Plan 时 `reference_docs` 参数硬编码传 `""`——已挂载的文档内容在重生成时丢失，新生成的 Plan 不再参考这些文档。
+
+**修复建议**：cli.py 重生成前用 `final_doc_paths` 重新 `read_reference_docs`；ui.py docstring 修正为与实际返回值一致。
+
+### ISSUE-23 `_estimate_duration` 低分钟区间显示 `约 4-4 分钟`，秒级分支不可达
+
+- **位置**：`agent_go/ui.py:96-104`
+- **状态**：✅ 已修复（2026-07-25）
+- **严重度**：P3
+
+**问题**：`1 ≤ minutes < 5` 分支下限用 `int(minutes)` 而非 `int(minutes*0.8)`，与其他分支不一致——单步 240s（4 分钟）时输出 `约 4-4 分钟`（区间两端相同）。另 `minutes < 1` 的 `约 N 秒` 分支不可达：steps 非空时最少 1×240s=4 分钟，空 steps 已在前面返回 `"N/A"`。
+
+---
+
+### ISSUE-24 测试套件 flaky：goal watchdog 线程同步竞争导致 CI 随机红绿
+
+- **位置**：`agent_go/subtask.py:260-294`（poll 循环 + 终检）+ `tests/test_subtask.py::TestGoalWatchdog`
+- **状态**：✅ 已修复（2026-07-25）— 生产侧加线程 join 后的终检；测试侧用 `_ListHandler` 替代 caplog 抓线程日志
+- **严重度**：P0（CI 随机红绿会使开发者无视失败，比确定性失败更危险）
+
+**问题**：`test_goal_max_turns_exceeded_kills` 在全量跑时 ~10% 概率失败。根因有二：
+
+1. **线程同步竞争（生产侧）**：`goal_turn_count` 在守护线程 `parse_and_log`（subtask.py:178）累加，kill 检查在主线程 poll 循环（subtask.py:282）。主循环 `time.sleep(2)` 期间，读线程处理最后一行累加 goal_turn_count 与主线程的 poll 返回存在竞争——若 poll 在 sleep 期间返回 0，kill 检查可能错过"已达 MAX_GOAL_TURNS"的最后一次累加。
+2. **caplog 与守护线程的捕获窗口竞争（测试侧）**：`caplog` 的 `LogCaptureHandler` 在 `with` 块期间附加，但守护线程生命周期与捕获窗口存在竞争，线程日志可能落在捕获区间外，导致 `caplog.text` 缺失关键日志行。
+
+**修复**：
+- 生产侧（subtask.py:293-308）：在 `t_out.join()`/`t_err.join()`（所有事件已处理完毕）后加一次确定性终检——若 `goal_turn_count >= MAX_GOAL_TURNS` 且未触发过，补记 `goal_turns_exceeded` 日志 + 标记 + kill。消除 poll 循环错过最后一轮累加的窗口。
+- 测试侧（test_subtask.py）：新增 `_ListHandler`（直接 `addHandler` 到 logger，handler 生命周期与 logger 一致，无窗口问题）替代 `caplog` 抓取线程日志；`TestGoalWatchdog` 4 个测试全部改用此模式。
+- 验证：连跑 30 次 `TestGoalWatchdog` 0 失败；全量连跑 5 次 0 失败。
+
+**根因教训**：`caplog` 与守护线程的组合是已知 pytest 陷阱；线程日志断言应优先用自定义 handler 直接挂到 logger。生产代码的"事件累加在子线程、阈值检查在主线程"模式需在 join 后补终检，避免 sleep 窗口漏检。
+
+---
+
+### ISSUE-25 三处测试与实现漂移（关键词列表 / 错误前缀 / metering 行数）
+
+- **位置**：`tests/test_executor.py:1191` + `tests/test_tool_executor.py:189` + `tests/test_agent_loop.py:494`
+- **状态**：✅ 已修复（2026-07-25）— 关键词对齐、错误前缀断言放宽、metering 行数随 ISSUE-24 自然消除
+- **严重度**：P2（测试漂移让"已覆盖"代码实际未验证，覆盖率数字虚高）
+
+**问题**：3 处测试断言与 working-tree 实现不一致：
+
+1. **`_is_simple_task` 关键词漂移**：测试参数化含 `["理解","分析","研究","understand","analyze"]`，但 `executor.py:754` 实现已精简为 `["探索","调研","重构","迁移","refactor","migrate","explore"]` 并新增 agent_type / files_hint 两条规则。5 个已移除的关键词必然断言失败。
+2. **`_bash` 错误前缀断言脆弱**：测试断言 `"禁止的命令" in result["error"]`，但 shell 操作符拦截路径返回 `"禁止的 shell 操作符: |"`（无"禁止的命令"前缀）。6 条含操作符的命令必然失败。前缀措辞是实现细节，不应锁死。
+3. **`AgentLoop.run` metering 行数**：单独跑 PASS、全量跑偶尔失败——是 ISSUE-24 flaky 的连带的 caplog 抓取问题，非确定性漂移。
+
+**修复**：
+- A1：测试关键词列表对齐实现；补 agent_type（architect/reviewer/developer）、files_hint（多通配符/单通配符）新规则的参数化用例。
+- A2：Bash 拦截断言放宽为 `result["success"] is False` 且 `result["error"]` 非空（核心行为契约），不再锁死前缀措辞。
+- A3：随 ISSUE-24 的 `_ListHandler` 改造自然消除（不再用 caplog）。
+
+**根因教训**：覆盖率统计无法发现"测试跑了但断言错了"的漂移——CI 红绿门禁 + "改实现必须同步改测试"的纪律才是根本。错误前缀等措辞不应硬编码进断言，应断言行为契约（success=False + 有错误信息）。
+
+
+**修复建议**：统一为 0.8/1.2 区间公式；删除不可达的秒级分支。
+
+---
+
 ## 已排除项
 
 ### spec 梳理中报告、经核实不成立的问题
@@ -196,3 +336,5 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 - `workflow_gen.py`：无异常处理、模板版本号硬编码（低风险辅助命令）
 - `cli.py`：`cmd_resume` 重扫 `sys.argv` 覆写参数、`__FALLBACK__` 魔法字符串（设计重构建议）
 - `__init__.py` / `config.py`：import 时创建 `~/.agent_go/` 目录（既有设计，CODE_REVIEW 已记录）
+- `api.py:116`：except 顺序依赖（`URLError` 是 `OSError` 子类，依赖 HTTPError→URLError→OSError 的声明顺序正确分派，当前行为正确但顺序改动会静默改变行为）；`api.py:387-389` `load_cached_plan` 末尾 `enabled` 判断为死代码（头部已在禁用时 return None）
+- `executor.py:67-72`：argv 解析失败与超时两个分支产出的 result dict 不可区分（均 `exit_code=-1`、`duration_ms=0`），下游只能靠日志文本分辨（可观测性改进建议）

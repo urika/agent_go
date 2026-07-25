@@ -1211,6 +1211,27 @@ class TestIsSimpleTask:
 
         assert _is_simple_task(subtask) is False
 
+    def test_architect_agent_type_not_simple(self):
+        """规则 1：architect agent_type 直接判复杂（探索性任务）"""
+        assert _is_simple_task({"agent_type": "architect"}) is False
+
+    def test_reviewer_agent_type_not_simple(self):
+        """规则 1：reviewer agent_type 直接判复杂"""
+        assert _is_simple_task({"agent_type": "reviewer"}) is False
+
+    def test_developer_agent_type_still_simple(self):
+        """developer 不触发规则 1，按其他规则判定为简单"""
+        assert _is_simple_task({"agent_type": "developer"}) is True
+
+    def test_files_hint_many_wildcards_not_simple(self):
+        """规则 3：files_hint 含 >1 个 ** → 涉及文件多 → 复杂"""
+        subtask = {"files_hint": "src/**/*.py test/**/*.py"}
+        assert _is_simple_task(subtask) is False
+
+    def test_files_hint_single_wildcard_still_simple(self):
+        """规则 3 边界：仅 1 个 ** 仍属简单"""
+        assert _is_simple_task({"files_hint": "src/**/*.py"}) is True
+
     def test_two_dependencies_simple(self):
         """depends_on ≤ 2 且无关键词时应判为简单任务"""
         subtask = {"description": "实现登录接口", "depends_on": ["sub-1", "sub-2"]}

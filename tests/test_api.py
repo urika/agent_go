@@ -586,3 +586,282 @@ class TestCacheEnabledRead:
             loaded = load_cached_plan(key, "task", {"cache": {"enabled": True, "plan_ttl": 86400}}, logger)
         assert loaded is not None
         assert loaded["overview"] == "test"
+
+
+# ═══════════════════════════════════════════════════════════════
+# call_api 错误路径
+# ═══════════════════════════════════════════════════════════════
+
+import urllib.error
+
+from agent_go.config import DEFAULT_CONFIG
+
+
+class MockRawResponse:
+    """返回原始字节内容的响应（用于非 JSON 响应体测试）"""
+
+    def __init__(self, raw_body, status=200):
+        self._raw_body = raw_body
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def read(self):
+        return self._raw_body
+
+
+class TestCallApiErrors:
+    """call_api 错误路径：HTTP 4xx/5xx、网络错误、超时/IO、响应解析失败"""
+
+    MESSAGES = [{"role": "user", "content": "hi"}]
+
+    @staticmethod
+    def _config(provider="anthropic"):
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        config["plan_api"]["provider"] = provider
+        config["plan_api"]["api_key"] = "sk-test-key"
+        return config
+
+    @patch("urllib.request.urlopen")
+    def test_http_error_4xx_with_body(self, mock_urlopen, logger):
+        """HTTP 4xx：错误 body 被读取并包含在异常信息中"""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.anthropic.com/v1/messages", 400, "Bad Request",
+            None, io.BytesIO(b'{"error": {"message": "invalid request"}}'))
+
+        with pytest.raises(RuntimeError) as exc_info:
+            call_api(self._config(), self.MESSAGES, logger)
+        assert "HTTP 400" in str(exc_info.value)
+        assert "invalid request" in str(exc_info.value)
+
+    @patch("urllib.request.urlopen")
+    def test_http_error_5xx_with_body(self, mock_urlopen, logger):
+        """HTTP 5xx：错误 body 被读取并包含在异常信息中"""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.anthropic.com/v1/messages", 500, "Internal Server Error",
+            None, io.BytesIO(b"Internal Server Error"))
+
+        with pytest.raises(RuntimeError) as exc_info:
+            call_api(self._config(), self.MESSAGES, logger)
+        assert "HTTP 500" in str(exc_info.value)
+        assert "Internal Server Error" in str(exc_info.value)
+
+    @patch("urllib.request.urlopen")
+    def test_http_error_body_read_failure(self, mock_urlopen, logger):
+        """HTTP 错误 body 读取失败时降级为 str(e)，仍抛出含状态码的 RuntimeError"""
+        broken_fp = MagicMock()
+        broken_fp.read.side_effect = OSError("stream broken")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.anthropic.com/v1/messages", 429, "Too Many Requests",
+            None, broken_fp)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            call_api(self._config(), self.MESSAGES, logger)
+        assert "HTTP 429" in str(exc_info.value)
+
+    @patch("urllib.request.urlopen")
+    def test_url_error(self, mock_urlopen, logger):
+        """URLError 网络错误"""
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+
+        with pytest.raises(RuntimeError, match="网络错误"):
+            call_api(self._config(), self.MESSAGES, logger)
+
+    @patch("urllib.request.urlopen")
+    def test_timeout_error(self, mock_urlopen, logger):
+        """超时（TimeoutError / socket.timeout）"""
+        mock_urlopen.side_effect = TimeoutError("timed out")
+
+        with pytest.raises(RuntimeError, match="连接超时或 IO 错误"):
+            call_api(self._config(), self.MESSAGES, logger)
+
+    @patch("urllib.request.urlopen")
+    def test_os_error(self, mock_urlopen, logger):
+        """其他 IO 错误（OSError 子类，如连接被重置）"""
+        mock_urlopen.side_effect = ConnectionResetError("Connection reset by peer")
+
+        with pytest.raises(RuntimeError, match="连接超时或 IO 错误"):
+            call_api(self._config(), self.MESSAGES, logger)
+
+    @patch("urllib.request.urlopen")
+    def test_invalid_json_response(self, mock_urlopen, logger):
+        """响应体无法解析为 JSON"""
+        mock_urlopen.return_value = MockRawResponse(b"<html>502 Bad Gateway</html>")
+
+        with pytest.raises(RuntimeError, match="无法解析为 JSON"):
+            call_api(self._config(), self.MESSAGES, logger)
+
+    @patch("urllib.request.urlopen")
+    def test_anthropic_response_missing_content(self, mock_urlopen, logger):
+        """Anthropic 响应缺少 content 字段"""
+        mock_urlopen.return_value = MockResponse({"id": "msg_1", "usage": {}})
+
+        with pytest.raises(RuntimeError, match="响应结构异常"):
+            call_api(self._config(), self.MESSAGES, logger)
+
+    @patch("urllib.request.urlopen")
+    def test_anthropic_response_empty_content(self, mock_urlopen, logger):
+        """Anthropic 响应 content 为空数组（IndexError 路径）"""
+        mock_urlopen.return_value = MockResponse({"content": []})
+
+        with pytest.raises(RuntimeError, match="响应结构异常"):
+            call_api(self._config(), self.MESSAGES, logger)
+
+    @patch("urllib.request.urlopen")
+    def test_openai_response_missing_choices(self, mock_urlopen, logger):
+        """OpenAI 响应缺少 choices 字段"""
+        mock_urlopen.return_value = MockResponse({"id": "chatcmpl-1"})
+
+        with pytest.raises(RuntimeError, match="响应结构异常"):
+            call_api(self._config(provider="openai"), self.MESSAGES, logger)
+
+    @patch("urllib.request.urlopen")
+    def test_response_not_a_dict(self, mock_urlopen, logger):
+        """响应 JSON 不是对象（TypeError 路径）"""
+        mock_urlopen.return_value = MockRawResponse(b'["not", "a", "dict"]')
+
+        with pytest.raises(RuntimeError, match="响应结构异常"):
+            call_api(self._config(), self.MESSAGES, logger)
+
+
+# ═══════════════════════════════════════════════════════════════
+# generate_plan：路由失败传播与缓存写入
+# ═══════════════════════════════════════════════════════════════
+
+class TestGeneratePlanRouterFailure:
+    """router.enabled=true 时 call_with_role 抛错的传播路径"""
+
+    @staticmethod
+    def _config():
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        config["plan_api"]["api_key"] = "sk-test"
+        config["router"] = {"enabled": True}
+        return config
+
+    @staticmethod
+    def _fake_route():
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            role="planner",
+            primary=SimpleNamespace(provider="anthropic", model="test"),
+        )
+
+    def test_call_with_role_error_propagates(self, logger):
+        """call_with_role 失败时异常向上传播（由调用方 cli.py 重试/降级），
+        generate_plan 内部不静默降级到 call_api"""
+        from agent_go.api import generate_plan
+        config = self._config()
+
+        with patch("agent_go.api.get_api_key", return_value="sk-test"):
+            with patch("agent_go.api.resolve_provider", return_value=self._fake_route()):
+                with patch("agent_go.api.call_with_role",
+                           side_effect=RuntimeError("路由调用失败：primary 不可用")):
+                    with patch("agent_go.api.call_api") as mock_call_api:
+                        with patch("agent_go.api.analyze_project", return_value=""):
+                            with patch("agent_go.api.get_git_info", return_value={
+                                "remote": "", "branch": "", "commit": ""
+                            }):
+                                with patch("agent_go.api.get_resource_map", return_value={
+                                    "directories": [], "key_files": []
+                                }):
+                                    with patch("agent_go.api.list_skills", return_value=[]):
+                                        with patch("agent_go.api.load_role_skill_map", return_value={}):
+                                            with pytest.raises(RuntimeError, match="路由调用失败"):
+                                                generate_plan("task", Path("/tmp"), config, logger,
+                                                              no_cache=True)
+        # 路由失败后不应回退到非路由的 call_api
+        mock_call_api.assert_not_called()
+
+    def test_call_with_role_error_skips_cache_write(self, logger):
+        """路由调用失败时不写入 Plan 缓存"""
+        from agent_go.api import generate_plan
+        config = self._config()
+        config["cache"] = {"enabled": True, "plan_ttl": 86400}
+
+        with patch("agent_go.api.get_api_key", return_value="sk-test"):
+            with patch("agent_go.api.resolve_provider", return_value=self._fake_route()):
+                with patch("agent_go.api.call_with_role",
+                           side_effect=RuntimeError("路由调用失败：primary 不可用")):
+                    with patch("agent_go.api.get_cache_key", return_value="deadbeef"):
+                        with patch("agent_go.api.load_cached_plan", return_value=None):
+                            with patch("agent_go.api.save_cached_plan") as mock_save:
+                                with patch("agent_go.api.analyze_project", return_value=""):
+                                    with patch("agent_go.api.get_git_info", return_value={
+                                        "remote": "", "branch": "", "commit": ""
+                                    }):
+                                        with patch("agent_go.api.get_resource_map", return_value={
+                                            "directories": [], "key_files": []
+                                        }):
+                                            with patch("agent_go.api.list_skills", return_value=[]):
+                                                with patch("agent_go.api.load_role_skill_map", return_value={}):
+                                                    with pytest.raises(RuntimeError, match="路由调用失败"):
+                                                        generate_plan("task", Path("/tmp"), config, logger)
+        mock_save.assert_not_called()
+
+
+class TestGeneratePlanCacheWrite:
+    """generate_plan 成功后的 Plan 缓存写入路径"""
+
+    @staticmethod
+    def _config():
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        config["plan_api"]["api_key"] = "sk-test"
+        config["cache"] = {"enabled": True, "plan_ttl": 86400}
+        return config
+
+    def test_successful_plan_saved_to_cache(self, tmp_path, logger):
+        """首次生成成功后写入缓存；二次调用命中缓存、不再请求 API"""
+        from agent_go.api import generate_plan
+        config = self._config()
+        plan_json = '{"overview": "fresh plan", "steps": [{"id": 1, "title": "step1"}]}'
+
+        with patch("agent_go.api.AGENT_GO_DIR", tmp_path):
+            with patch("agent_go.api.get_api_key", return_value="sk-test"):
+                with patch("agent_go.api.call_api", return_value=plan_json) as mock_call:
+                    with patch("agent_go.api.analyze_project", return_value="file1.py"):
+                        with patch("agent_go.api.get_git_info", return_value={
+                            "remote": "", "branch": "main", "commit": ""
+                        }):
+                            with patch("agent_go.api.get_resource_map", return_value={
+                                "directories": [], "key_files": []
+                            }):
+                                with patch("agent_go.api.list_skills", return_value=[]):
+                                    with patch("agent_go.api.load_role_skill_map", return_value={}):
+                                        plan1 = generate_plan("task", tmp_path, config, logger)
+                                        plan2 = generate_plan("task", tmp_path, config, logger)
+
+        assert plan1["overview"] == "fresh plan"
+        assert plan2["overview"] == "fresh plan"
+        # 第二次调用命中缓存，API 只被请求一次
+        assert mock_call.call_count == 1
+        # 缓存文件确实已写入
+        cache_files = list((tmp_path / "cache" / "plans").glob("*/*.json"))
+        assert len(cache_files) == 1
+
+    def test_no_cache_skips_cache_write(self, tmp_path, logger):
+        """no_cache=True 时不读写缓存"""
+        from agent_go.api import generate_plan
+        config = self._config()
+        plan_json = '{"overview": "fresh plan", "steps": [{"id": 1, "title": "step1"}]}'
+
+        with patch("agent_go.api.AGENT_GO_DIR", tmp_path):
+            with patch("agent_go.api.get_api_key", return_value="sk-test"):
+                with patch("agent_go.api.call_api", return_value=plan_json):
+                    with patch("agent_go.api.analyze_project", return_value="file1.py"):
+                        with patch("agent_go.api.get_git_info", return_value={
+                            "remote": "", "branch": "main", "commit": ""
+                        }):
+                            with patch("agent_go.api.get_resource_map", return_value={
+                                "directories": [], "key_files": []
+                            }):
+                                with patch("agent_go.api.list_skills", return_value=[]):
+                                    with patch("agent_go.api.load_role_skill_map", return_value={}):
+                                        plan = generate_plan("task", tmp_path, config, logger,
+                                                             no_cache=True)
+
+        assert plan["overview"] == "fresh plan"
+        assert not (tmp_path / "cache" / "plans").exists()

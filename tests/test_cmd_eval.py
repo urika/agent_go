@@ -499,3 +499,102 @@ class TestCmdEvalSysArgv:
         cmd_eval(None)
         out = capsys.readouterr().out
         assert "成本报告" in out
+
+
+class TestCmdEvalGate:
+    """cmd_eval gate 子命令 — 发布门禁的 CLI 集成。
+
+    复用 analyze_cost 的数据通路（metering.jsonl + meta.json），
+    验证：通过时不 exit；失败时 sys.exit(1)；无数据时通过。
+
+    注意：analyze_cost 由 MODEL_PRICES × token 重算 cost（不读 cost_usd），
+    fixture 通过 completion_tokens 精确产生 cost（sonnet-4 completion $15/M）。
+    """
+
+    SONNET4_COMPLETION_PER_TOKEN = 15.0 / 1_000_000
+
+    def _mk_task(self, base, name, cost_usd, completed):
+        import json
+        td = base / name
+        td.mkdir(parents=True)
+        ct = round(cost_usd / self.SONNET4_COMPLETION_PER_TOKEN)
+        (td / "metering.jsonl").write_text(
+            json.dumps({"role": "worker",
+                        "prompt_tokens": 0, "completion_tokens": ct,
+                        "actual_model": "claude-sonnet-4",
+                        "actual_provider": "anthropic",
+                        "cost_usd": cost_usd, "result": "success"}),
+            encoding="utf-8")
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": name, "status": "completed",
+            "results": [{"subtask_id": f"s{i}", "status": "completed"} for i in range(completed)],
+        }), encoding="utf-8")
+
+    def test_gate_passes_under_baseline(self, tmp_path, monkeypatch, capsys):
+        """rate < baseline → exit 0 + 通过报告"""
+        import agent_go.config as config_mod
+        monkeypatch.setattr(config_mod, "AGENT_GO_DIR", tmp_path)
+        self._mk_task(tmp_path, "task-001", cost_usd=0.02, completed=1)
+        args = argparse.Namespace(subcommand="gate", task_id=None,
+                                  eval_all=False, baseline=0.05)
+        cmd_eval(args)
+        out = capsys.readouterr().out
+        assert "通过" in out
+        assert "0.02" in out
+
+    def test_gate_fails_over_baseline(self, tmp_path, monkeypatch, capsys):
+        """rate > baseline → sys.exit(1) + 不通过报告"""
+        import agent_go.config as config_mod
+        monkeypatch.setattr(config_mod, "AGENT_GO_DIR", tmp_path)
+        self._mk_task(tmp_path, "task-001", cost_usd=0.10, completed=1)
+        args = argparse.Namespace(subcommand="gate", task_id=None,
+                                  eval_all=False, baseline=0.05)
+        with pytest.raises(SystemExit) as exc:
+            cmd_eval(args)
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "不通过" in out
+        assert "CI 应中断发布" in out
+
+    def test_gate_passes_when_no_data(self, tmp_path, monkeypatch, capsys):
+        """空目录 → dollar_per_pass_rate=None → 通过 + 门禁未生效"""
+        import agent_go.config as config_mod
+        monkeypatch.setattr(config_mod, "AGENT_GO_DIR", tmp_path)
+        args = argparse.Namespace(subcommand="gate", task_id=None,
+                                  eval_all=False, baseline=0.05)
+        cmd_eval(args)  # 不抛 SystemExit
+        out = capsys.readouterr().out
+        assert "通过" in out
+        assert "门禁未生效" in out
+
+    def test_gate_default_baseline_when_unspecified(self, tmp_path, monkeypatch, capsys):
+        """未传 --baseline → 默认 0.05 + 警告"""
+        import agent_go.config as config_mod
+        monkeypatch.setattr(config_mod, "AGENT_GO_DIR", tmp_path)
+        args = argparse.Namespace(subcommand="gate", task_id=None,
+                                  eval_all=False, baseline=None)
+        cmd_eval(args)
+        out = capsys.readouterr().out
+        assert "0.05" in out
+        assert "未指定 --baseline" in out
+
+    def test_gate_exact_boundary_passes(self, tmp_path, monkeypatch, capsys):
+        """rate==baseline → 通过（> 而非 >=）"""
+        import agent_go.config as config_mod
+        monkeypatch.setattr(config_mod, "AGENT_GO_DIR", tmp_path)
+        self._mk_task(tmp_path, "task-001", cost_usd=0.05, completed=1)
+        args = argparse.Namespace(subcommand="gate", task_id=None,
+                                  eval_all=False, baseline=0.05)
+        cmd_eval(args)  # 不抛 SystemExit
+        out = capsys.readouterr().out
+        assert "通过" in out
+
+    def test_gate_via_sys_argv(self, tmp_path, monkeypatch, capsys):
+        """sys.argv 路径也能解析 --baseline"""
+        import agent_go.config as config_mod
+        monkeypatch.setattr(config_mod, "AGENT_GO_DIR", tmp_path)
+        monkeypatch.setattr(sys, "argv",
+                            ["agent_go", "eval", "gate", "--baseline", "0.05"])
+        cmd_eval(None)
+        out = capsys.readouterr().out
+        assert "发布门禁" in out

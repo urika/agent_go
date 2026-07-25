@@ -25,6 +25,13 @@ jobs:
         run: |
           pytest tests/ -q
 
+      # 发布门禁：$/pass rate 不劣化（PRD 北极星指标）
+      # 无完成任务或无 metering 数据时自动通过（None 语义），不阻挡新项目/早期仓库。
+      # 有数据后超阈即红。基线 0.05 = PRD Q3 目标。
+      - name: $/pass rate gate
+        run: |
+          python agent_go.py eval gate --baseline 0.05
+
       - name: Ruff lint (includes F401 unused-import)
         run: |
           ruff check agent_go/ --select=E,F,W --ignore=E501

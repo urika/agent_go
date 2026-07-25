@@ -1,6 +1,7 @@
 """测试 subtask.py — git merge 上游产物和 headless 子进程运行
 
-全覆盖: _git_merge_upstream（冲突/成功/headless）, _run_headless（交互检测/超时/重试）
+全覆盖: _git_merge_upstream（冲突/成功/headless）, _run_headless（交互检测/超时/重试），
+stream-json 事件解析（stream_event/assistant/user/result）、goal watchdog 计数与 usage/cost 聚合
 """
 
 import os
@@ -461,3 +462,490 @@ class TestRunHeadless:
         # 只是验证模块级常量存在
         import agent_go.subtask as m
         assert hasattr(m, "EXIT_CODE_INTERACTION")
+
+
+# ═══════════════════════════════════════════════════════════════
+# stream-json 事件解析辅助
+# ═══════════════════════════════════════════════════════════════
+
+def _stream_event(inner: dict) -> str:
+    """包装一条 stream_event 事件为 JSON 行"""
+    return json.dumps({"type": "stream_event", "event": inner}) + "\n"
+
+
+def _tool_start(name: str) -> str:
+    """content_block_start（工具调用开始）事件行"""
+    return _stream_event({
+        "type": "content_block_start",
+        "content_block": {"type": "tool_use", "name": name},
+    })
+
+
+def _make_proc(stdout_lines=(), stderr_lines=(), returncode=0, pid=42000):
+    """构造 mock claude 进程：stdout/stderr 逐行吐出给定内容后 EOF，poll 立即返回。"""
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.returncode = returncode
+    out = list(stdout_lines)
+    err = list(stderr_lines)
+    mock_proc.stdout.readline.side_effect = lambda: out.pop(0) if out else ""
+    mock_proc.stderr.readline.side_effect = lambda: err.pop(0) if err else ""
+    mock_proc.poll.return_value = returncode
+    return mock_proc
+
+
+def _make_watchdog_proc(stdout_lines, consumed, pid=43000):
+    """构造 mock 进程：poll 在 stdout 行被消费完之前返回 None（进程存活），
+    消费完后再返回一次 None，保证看门狗检查循环至少跑一轮。"""
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.returncode = 0
+    out = list(stdout_lines)
+
+    def readline():
+        line = out.pop(0) if out else ""
+        if line == "":
+            # EOF 时此前所有事件行均已被 parse_and_log 处理完
+            consumed.set()
+        return line
+
+    mock_proc.stdout.readline.side_effect = readline
+    mock_proc.stderr.readline.side_effect = lambda: ""
+    after_consumed = [0]
+
+    def polling():
+        if not consumed.is_set():
+            return None
+        after_consumed[0] += 1
+        return None if after_consumed[0] <= 1 else 0
+
+    mock_proc.poll.side_effect = polling
+    return mock_proc
+
+
+# ═══════════════════════════════════════════════════════════════
+# stream-json 事件解析分支（parse_and_log）
+# ═══════════════════════════════════════════════════════════════
+
+class TestStreamEventParsing:
+    """stream_event / assistant / user / 非 JSON 行的解析分支"""
+
+    @patch("subprocess.Popen")
+    def test_content_block_start_tool_logged(self, mock_popen, logger, caplog):
+        """content_block_start 带工具名时记录工具调用日志"""
+        mock_popen.return_value = _make_proc([_tool_start("Read")])
+        with caplog.at_level(logging.DEBUG, logger="test_logger"):
+            result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev1")
+        assert result.returncode == 0
+        assert "[Read]" in caplog.text
+
+    @patch("subprocess.Popen")
+    def test_content_block_start_without_name_ignored(self, mock_popen, logger, caplog):
+        """content_block_start 无工具名（文本块）时不计入工具状态，
+        后续 content_block_stop 也不应记录工具完成日志"""
+        lines = [
+            _stream_event({"type": "content_block_start",
+                           "content_block": {"type": "text"}}),
+            _stream_event({"type": "content_block_stop"}),
+        ]
+        mock_popen.return_value = _make_proc(lines)
+        with caplog.at_level(logging.DEBUG, logger="test_logger"):
+            _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev2")
+        assert "完成" not in caplog.text
+
+    @patch("subprocess.Popen")
+    def test_text_delta_appended_to_output(self, mock_popen, logger):
+        """text_delta 非空白文本进入输出行"""
+        lines = [_stream_event({
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "你好世界"},
+        })]
+        mock_popen.return_value = _make_proc(lines)
+        result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev3")
+        assert "你好世界" in result.stdout
+
+    @patch("subprocess.Popen")
+    def test_text_delta_blank_skipped(self, mock_popen, logger):
+        """text_delta 纯空白文本被跳过，未知 delta 类型被忽略"""
+        lines = [
+            _stream_event({"type": "content_block_delta",
+                           "delta": {"type": "text_delta", "text": "   "}}),
+            _stream_event({"type": "content_block_delta",
+                           "delta": {"type": "signature_delta", "signature": "sig"}}),
+        ]
+        mock_popen.return_value = _make_proc(lines)
+        result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev4")
+        # 只剩 attempt 分隔行，不含任何事件文本
+        body = [ln for ln in result.stdout.split("\n") if "attempt" not in ln]
+        assert body == []
+
+    @patch("subprocess.Popen")
+    def test_input_json_delta_and_block_stop(self, mock_popen, logger, caplog):
+        """input_json_delta 累积工具输入，content_block_stop 复位工具状态"""
+        lines = [
+            _tool_start("Write"),
+            _stream_event({"type": "content_block_delta",
+                           "delta": {"type": "input_json_delta",
+                                     "partial_json": '{"file_path":'}}),
+            _stream_event({"type": "content_block_delta",
+                           "delta": {"type": "input_json_delta",
+                                     "partial_json": '"/tmp/x"}'}}),
+            _stream_event({"type": "content_block_stop"}),
+            # 多余的 stop（无对应 start）不应再次记录完成
+            _stream_event({"type": "content_block_stop"}),
+        ]
+        mock_popen.return_value = _make_proc(lines)
+        with caplog.at_level(logging.DEBUG, logger="test_logger"):
+            _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev5")
+        # 完成日志应附带工具输入预览
+        assert '[Write] 完成: {"file_path":"/tmp/x"}' in caplog.text
+        assert caplog.text.count("完成") == 1
+
+    @patch("subprocess.Popen")
+    def test_assistant_text_and_tool_use(self, mock_popen, logger, caplog):
+        """assistant 事件：text 块进入输出，tool_use 块记录日志，空白 text 跳过"""
+        lines = [json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "分析结果"},
+                {"type": "tool_use", "name": "Grep"},
+                {"type": "text", "text": "  "},
+            ]},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(lines)
+        with caplog.at_level(logging.DEBUG, logger="test_logger"):
+            result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev6")
+        assert "分析结果" in result.stdout
+        assert "[tool_use] Grep" in caplog.text
+
+    @patch("subprocess.Popen")
+    def test_assistant_non_dict_blocks_ignored(self, mock_popen, logger):
+        """assistant content 中的非 dict 块被忽略，不抛异常"""
+        lines = [json.dumps({
+            "type": "assistant",
+            "message": {"content": ["plain string", 42, None]},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(lines)
+        result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev7")
+        assert result.returncode == 0
+
+    @patch("subprocess.Popen")
+    def test_user_tool_result_logged(self, mock_popen, logger, caplog):
+        """user 事件的 tool_result 字符串内容记录 INFO 日志"""
+        lines = [json.dumps({
+            "type": "user",
+            "message": {"content": [
+                {"type": "tool_result", "content": "file created ok"},
+            ]},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(lines)
+        with caplog.at_level(logging.DEBUG, logger="test_logger"):
+            _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev8")
+        assert "[tool_result] file created ok" in caplog.text
+
+    @patch("subprocess.Popen")
+    def test_user_tool_result_truncated(self, mock_popen, logger, caplog):
+        """tool_result 超长内容截断到 200 字符"""
+        lines = [json.dumps({
+            "type": "user",
+            "message": {"content": [
+                {"type": "tool_result", "content": "x" * 500},
+            ]},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(lines)
+        with caplog.at_level(logging.DEBUG, logger="test_logger"):
+            _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev9")
+        assert "x" * 200 in caplog.text
+        assert "x" * 201 not in caplog.text
+
+    @patch("subprocess.Popen")
+    def test_user_tool_result_non_string_skipped(self, mock_popen, logger, caplog):
+        """tool_result 非字符串（list）或空白内容被跳过"""
+        lines = [json.dumps({
+            "type": "user",
+            "message": {"content": [
+                {"type": "tool_result",
+                 "content": [{"type": "text", "text": "inner"}]},
+                {"type": "tool_result", "content": "  "},
+                "not-a-dict",
+            ]},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(lines)
+        with caplog.at_level(logging.DEBUG, logger="test_logger"):
+            _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev10")
+        assert "[tool_result]" not in caplog.text
+
+    @patch("subprocess.Popen")
+    def test_unknown_event_type_ignored(self, mock_popen, logger):
+        """未知事件类型轻量跳过，不抛异常"""
+        lines = [
+            json.dumps({"type": "system", "subtype": "init"}) + "\n",
+            json.dumps({"type": "rate_limit_event"}) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(lines)
+        result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev11")
+        assert result.returncode == 0
+
+    @patch("subprocess.Popen")
+    def test_non_json_lines_recorded(self, mock_popen, logger):
+        """非 JSON 的 stdout/stderr 行直接记录进输出"""
+        mock_popen.return_value = _make_proc(
+            ["plain output line\n"], ["some warning\n"]
+        )
+        result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev12")
+        assert "plain output line" in result.stdout
+        assert "some warning" in result.stdout
+
+    @patch("subprocess.Popen")
+    def test_stderr_interaction_pattern_flagged(self, mock_popen, logger, caplog):
+        """stderr 命中交互模式时记录 ⚠️ 交互（退出码 0 则不触发重试）"""
+        mock_popen.return_value = _make_proc([], ["请确认是否继续 [y/n]\n"])
+        with caplog.at_level(logging.DEBUG, logger="test_logger"):
+            result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-ev13")
+        assert "⚠️ 交互" in caplog.text
+        assert result.returncode == 0
+        assert mock_popen.call_count == 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# Goal watchdog 计数与超时
+# ═══════════════════════════════════════════════════════════════
+
+class _ListHandler(logging.Handler):
+    """内存日志收集器 — 比 caplog 更可靠地抓取守护线程日志。
+
+    caplog 的 LogCaptureHandler 在 with 块期间附加，但 _run_headless 的读线程
+    生命周期与 caplog 捕获窗口存在竞争（线程日志可能落在捕获区间外）。
+    直接 addHandler 到 logger，handler 生命周期与 logger 一致，无窗口问题。
+    """
+
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records: list[str] = []
+
+    def emit(self, record):
+        self.records.append(record.getMessage())
+
+
+class TestGoalWatchdog:
+    """goal 工具轮数统计、轮数超限/超时 kill、开关禁用
+
+    用 _ListHandler（而非 caplog）抓取线程日志，消除 caplog 与守护线程的捕获窗口竞争。
+    """
+
+    @patch("subprocess.Popen")
+    def test_goal_turn_count_logged_every_5(self, mock_popen, logger):
+        """每 5 次工具调用记录一次 goal turn count"""
+        env = {"AGENT_GO_GOAL_ENABLED": "1",
+               "AGENT_GO_GOAL_MAX_TURNS": "100",
+               "AGENT_GO_GOAL_TIMEOUT": "600"}
+        mock_popen.return_value = _make_proc([_tool_start("Bash") for _ in range(10)])
+        handler = _ListHandler()
+        logger.addHandler(handler)
+        try:
+            result = _run_headless("task", Path("/tmp/work"), env, logger, "sub-g1")
+        finally:
+            logger.removeHandler(handler)
+        log_text = "\n".join(handler.records)
+        assert result.returncode == 0
+        assert "goal turn count: 5/100" in log_text
+        assert "goal turn count: 10/100" in log_text
+
+    @patch("subprocess.Popen")
+    def test_goal_max_turns_exceeded_kills(self, mock_popen, logger):
+        """goal 轮数达到上限时强制 kill"""
+        env = {"AGENT_GO_GOAL_ENABLED": "1",
+               "AGENT_GO_GOAL_MAX_TURNS": "3",
+               "AGENT_GO_GOAL_TIMEOUT": "600"}
+        consumed = threading.Event()
+        mock_popen.return_value = _make_watchdog_proc(
+            [_tool_start("Bash") for _ in range(5)], consumed
+        )
+        handler = _ListHandler()
+        logger.addHandler(handler)
+        try:
+            with patch("time.sleep"):
+                _run_headless("task", Path("/tmp/work"), env, logger, "sub-g2")
+        finally:
+            logger.removeHandler(handler)
+        mock_popen.return_value.kill.assert_called_once()
+        assert "goal 轮数超限 (5 >= 3)" in "\n".join(handler.records)
+
+    @patch("subprocess.Popen")
+    def test_goal_timeout_kills(self, mock_popen, logger):
+        """goal 循环超时（elapsed > GOAL_TIMEOUT）时强制 kill"""
+        env = {"AGENT_GO_GOAL_ENABLED": "1",
+               "AGENT_GO_GOAL_MAX_TURNS": "100",
+               "AGENT_GO_GOAL_TIMEOUT": "1"}
+        mock_proc = _make_proc([], [])
+        # 进程保持存活直到被 kill
+        poll_count = [0]
+
+        def polling():
+            poll_count[0] += 1
+            return None if poll_count[0] <= 20 else 0
+
+        mock_proc.poll.side_effect = polling
+        mock_popen.return_value = mock_proc
+
+        handler = _ListHandler()
+        logger.addHandler(handler)
+        try:
+            # 时间从 1000 开始，每次 sleep 前进 5s：idle(5s) 远低于 IDLE_TIMEOUT(600s)，
+            # 但 goal elapsed(5s) 超过 GOAL_TIMEOUT(1s)，可区分两种 kill 原因
+            now = [1000.0]
+            with patch("time.time", side_effect=lambda: now[0]):
+                with patch("time.sleep", side_effect=lambda s: now.__setitem__(0, now[0] + 5)):
+                    _run_headless("task", Path("/tmp/work"), env, logger, "sub-g3")
+        finally:
+            logger.removeHandler(handler)
+        mock_proc.kill.assert_called_once()
+        assert "goal 循环超时" in "\n".join(handler.records)
+
+    @patch("subprocess.Popen")
+    def test_goal_watchdog_disabled_no_kill(self, mock_popen, logger):
+        """AGENT_GO_GOAL_ENABLED=0 时不统计轮数也不 kill"""
+        env = {"AGENT_GO_GOAL_ENABLED": "0",
+               "AGENT_GO_GOAL_MAX_TURNS": "1",
+               "AGENT_GO_GOAL_TIMEOUT": "600"}
+        consumed = threading.Event()
+        mock_proc = _make_watchdog_proc([_tool_start("Bash") for _ in range(3)], consumed)
+        mock_popen.return_value = mock_proc
+        handler = _ListHandler()
+        logger.addHandler(handler)
+        try:
+            with patch("time.sleep"):
+                result = _run_headless("task", Path("/tmp/work"), env, logger, "sub-g4")
+        finally:
+            logger.removeHandler(handler)
+        log_text = "\n".join(handler.records)
+        assert result.returncode == 0
+        mock_proc.kill.assert_not_called()
+        assert "goal turn count" not in log_text
+        assert "轮数超限" not in log_text
+
+
+# ═══════════════════════════════════════════════════════════════
+# usage/cost 聚合与 metering
+# ═══════════════════════════════════════════════════════════════
+
+class TestUsageAggregation:
+    """result 事件的 token/cost 聚合及 metering.jsonl 写入"""
+
+    def _read_metering(self, path: Path) -> dict:
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 1
+        return json.loads(lines[0])
+
+    @patch("subprocess.Popen")
+    def test_multiple_result_events_aggregated(self, mock_popen, logger, tmp_path):
+        """多个 result 事件的 token/cost/duration/turns 累加"""
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({"type": "result", "subtype": "success",
+                        "total_cost_usd": 0.01,
+                        "usage": {"input_tokens": 100, "output_tokens": 50},
+                        "duration_ms": 1000, "num_turns": 2}) + "\n",
+            json.dumps({"type": "result", "subtype": "success",
+                        "total_cost_usd": 0.005,
+                        "usage": {"input_tokens": 200, "output_tokens": 100},
+                        "duration_ms": 500, "num_turns": 1}) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        result = _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering)},
+            logger, "sub-u1"
+        )
+        assert result.returncode == 0
+        ev = self._read_metering(metering)
+        assert ev["prompt_tokens"] == 300
+        assert ev["completion_tokens"] == 150
+        assert ev["cost_usd"] == 0.015
+        assert ev["latency_ms"] == 1500
+        assert ev["num_turns"] == 3
+        # 未注入路由模型时记录默认执行器名
+        assert ev["actual_model"] == "claude-code-executor"
+
+    @patch("subprocess.Popen")
+    def test_usage_fallback_keys(self, mock_popen, logger, tmp_path):
+        """usage 缺 input_tokens/output_tokens 时回退 prompt_tokens/completion_tokens；
+        input_tokens 存在时优先于 prompt_tokens"""
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({"type": "result", "subtype": "success",
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5}}) + "\n",
+            json.dumps({"type": "result", "subtype": "success",
+                        "usage": {"input_tokens": 100, "prompt_tokens": 999,
+                                  "output_tokens": 40}}) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering)},
+            logger, "sub-u2"
+        )
+        ev = self._read_metering(metering)
+        assert ev["prompt_tokens"] == 110
+        assert ev["completion_tokens"] == 45
+        assert ev["cost_usd"] == 0.0
+
+    @patch("subprocess.Popen")
+    def test_result_without_usage_no_metering(self, mock_popen, logger, tmp_path):
+        """result 事件无 token 且无 cost 时不聚合（仅 duration/turns 不够），不写计量"""
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({"type": "result", "subtype": "success"}) + "\n",
+            json.dumps({"type": "result", "subtype": "success",
+                        "total_cost_usd": 0.0,
+                        "duration_ms": 9999, "num_turns": 9}) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering)},
+            logger, "sub-u3"
+        )
+        assert not metering.exists()
+
+    @patch("subprocess.Popen")
+    def test_metering_failed_result(self, mock_popen, logger, tmp_path):
+        """子进程非 0 退出（非交互）时 metering result 为 failed"""
+        metering = tmp_path / "metering.jsonl"
+        events = [json.dumps({
+            "type": "result", "subtype": "error",
+            "total_cost_usd": 0.02,
+            "usage": {"input_tokens": 500, "output_tokens": 80},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(events, returncode=1)
+        result = _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering)},
+            logger, "sub-u4"
+        )
+        assert result.returncode == 1
+        assert mock_popen.call_count == 1  # 非交互失败不重试
+        ev = self._read_metering(metering)
+        assert ev["result"] == "failed"
+        assert ev["prompt_tokens"] == 500
+
+    @patch("subprocess.Popen")
+    def test_metering_actual_model_and_difficulty(self, mock_popen, logger, tmp_path):
+        """路由模型与难度从 env 注入 metering 记录"""
+        metering = tmp_path / "metering.jsonl"
+        events = [json.dumps({
+            "type": "result", "subtype": "success",
+            "total_cost_usd": 0.03,
+            "usage": {"input_tokens": 800, "output_tokens": 120},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-opus-4",
+             "AGENT_GO_DIFFICULTY": "hard"},
+            logger, "sub-u5"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "claude-opus-4"
+        assert ev["difficulty"] == "hard"

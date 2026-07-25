@@ -1,7 +1,8 @@
 """测试 cli.py — CLI 参数解析和命令分发
 
-全覆盖: _build_parser, cmd_list, cmd_show, cmd_config, cmd_clean, cmd_status (basic routing)
-部分覆盖: cmd_run (mock 管道)，cmd_resume (mock 恢复逻辑)
+全覆盖: _build_parser, cmd_list, cmd_show, cmd_config, cmd_clean, cmd_status (basic routing),
+        cmd_resume (mock 管道/配置/logger)，cmd_inspect (真实临时任务目录)
+部分覆盖: cmd_run (mock 管道)
 """
 
 import sys
@@ -15,6 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent_go.cli import _build_parser, main
+from agent_go.config import DEFAULT_CONFIG
 
 
 class TestBuildParser:
@@ -371,3 +373,507 @@ class TestCmdRunFallback:
         mock_fb.assert_not_called()
         mock_p2s.assert_called_once()
         mock_pipe.assert_called_once()
+
+
+class TestCmdRunRegenerateDocs:
+    """cmd_run 选择 R 重新生成 Plan 时保留 D 挂载的参考文档（ISSUE-22 回归）
+
+    修复前：重生成时 generate_plan 的 reference_docs 硬编码传 ""，
+    确认环节用 D 挂载的参考文档在重生成时丢失。
+    """
+
+    def _make_args(self, repo):
+        parser = _build_parser()
+        return parser.parse_args(["run", str(repo), "test task"])
+
+    def _run_with_mocks(self, tmp_path, confirm_side_effect):
+        from agent_go.cli import cmd_run
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        home = tmp_path / "agent_go_home"
+        plan = {"overview": "o", "steps": [{"id": "s1", "title": "t", "description": "d"}]}
+        with patch("agent_go.cli.AGENT_GO_DIR", home), \
+             patch("agent_go.cli.load_config", return_value={"behavior": {}}), \
+             patch("agent_go.cli.setup_logger", return_value=MagicMock()), \
+             patch("agent_go.cli._detect_tool_versions", return_value={}), \
+             patch("agent_go.cli.load_agent_type", return_value=None), \
+             patch("agent_go.cli.generate_plan", side_effect=[plan, dict(plan)]) as mock_gen, \
+             patch("agent_go.cli.confirm_plan", side_effect=confirm_side_effect), \
+             patch("agent_go.cli.read_reference_docs", return_value="DOC_CONTENT") as mock_read, \
+             patch("agent_go.cli.plan_to_subtasks", return_value=[{"id": "s1", "title": "t"}]), \
+             patch("agent_go.cli.plan_to_md", return_value="# plan"), \
+             patch("agent_go.cli.confirm_subtasks", side_effect=lambda subs, cfg, log: subs), \
+             patch("agent_go.cli._run_pipeline"):
+            cmd_run(self._make_args(repo))
+        return mock_gen, mock_read
+
+    def test_regenerate_plan_passes_reference_docs(self, tmp_path):
+        """R 重生成：用 final_doc_paths 重新读取参考文档并传入 generate_plan"""
+        plan = {"overview": "o", "steps": [{"id": "s1", "title": "t", "description": "d"}]}
+        mock_gen, mock_read = self._run_with_mocks(
+            tmp_path,
+            confirm_side_effect=[(None, ["doc.md"]), (plan, ["doc.md"])],
+        )
+        assert mock_gen.call_count == 2
+        # 重生成（第 2 次调用）的 reference_docs 为重新读取的文档内容
+        assert mock_gen.call_args_list[1].args[5] == "DOC_CONTENT"
+        mock_read.assert_called_once()
+        assert mock_read.call_args.args[0] == ["doc.md"]
+
+    def test_regenerate_plan_empty_docs_passes_empty(self, tmp_path):
+        """R 重生成：无参考文档时传空字符串，且不调用 read_reference_docs"""
+        plan = {"overview": "o", "steps": [{"id": "s1", "title": "t", "description": "d"}]}
+        mock_gen, mock_read = self._run_with_mocks(
+            tmp_path,
+            confirm_side_effect=[(None, []), (plan, [])],
+        )
+        assert mock_gen.call_count == 2
+        assert mock_gen.call_args_list[1].args[5] == ""
+        mock_read.assert_not_called()
+
+
+class TestCmdResume:
+    """cmd_resume 中断任务恢复
+
+    _run_pipeline / load_config / setup_logger 全部 mock，
+    任务目录用 tmp_path 真实文件（meta.json、result.json、worktree 占位）。
+    """
+
+    def _make_task(self, home, task_id, meta, subtask_results=None, worktrees=()):
+        """构造 ~/.agent_go/<task_id> 目录。
+
+        subtask_results: {sid: result_dict} → 写 <sid>/result.json
+        worktrees: 有 work/.git 的子任务 id 列表（模拟保留的 worktree）
+        """
+        td = home / task_id
+        td.mkdir(parents=True)
+        (td / "meta.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        for sid, result in (subtask_results or {}).items():
+            sd = td / sid
+            sd.mkdir(parents=True, exist_ok=True)
+            if result is not None:
+                (sd / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        for sid in worktrees:
+            (td / sid / "work" / ".git").mkdir(parents=True)
+        return td
+
+    def _base_meta(self, task_id, repo, status="paused"):
+        return {
+            "task_id": task_id, "task": "测试恢复", "repo": str(repo),
+            "status": status,
+            "subtasks": [
+                {"id": "sub-1", "title": "步骤一"},
+                {"id": "sub-2", "title": "步骤二"},
+            ],
+            "results": [],
+        }
+
+    def _run_resume(self, home, args, argv, config):
+        """以 mock 环境执行 cmd_resume，返回 _run_pipeline 的 mock。"""
+        from agent_go.cli import cmd_resume
+        with patch("agent_go.cli.AGENT_GO_DIR", home), \
+             patch("sys.argv", argv), \
+             patch("agent_go.cli.load_config", return_value=config), \
+             patch("agent_go.cli.setup_logger", return_value=MagicMock()), \
+             patch("agent_go.cli._run_pipeline") as mock_pipe:
+            cmd_resume(args)
+        return mock_pipe
+
+    def test_resume_nonexistent_task(self, tmp_path, capsys):
+        """任务目录不存在 → 报错并退出"""
+        from agent_go.cli import cmd_resume
+        home = tmp_path / ".agent_go"
+        home.mkdir()
+        args = _build_parser().parse_args(["resume", "task-ghost"])
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            with pytest.raises(SystemExit):
+                cmd_resume(args)
+        assert "任务不存在" in capsys.readouterr().out
+
+    def test_resume_usage_without_task_id(self, capsys):
+        """sys.argv 模式缺 task_id → 打印 Usage 并退出"""
+        from agent_go.cli import cmd_resume
+        with patch("sys.argv", ["agent_go", "resume"]):
+            with pytest.raises(SystemExit):
+                cmd_resume(None)
+        assert "Usage" in capsys.readouterr().out
+
+    def test_resume_rejects_completed_task(self, tmp_path, capsys):
+        """已完成任务不可恢复 → 报错并退出"""
+        from agent_go.cli import cmd_resume
+        home = tmp_path / ".agent_go"
+        meta = self._base_meta("task-done", tmp_path / "repo", status="completed")
+        self._make_task(home, "task-done", meta)
+        args = _build_parser().parse_args(["resume", "task-done"])
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            with pytest.raises(SystemExit):
+                cmd_resume(args)
+        out = capsys.readouterr().out
+        assert "无法恢复" in out
+        assert "completed" in out
+
+    def test_resume_paused_task_pipeline_args(self, tmp_path):
+        """paused 任务恢复：结果从 result.json 重建，completed/worktree 正确分类"""
+        home = tmp_path / ".agent_go"
+        task_id = "task-paused"
+        meta = self._base_meta(task_id, tmp_path / "repo")
+        meta["remote_url"] = "origin"
+        td = self._make_task(
+            home, task_id, meta,
+            subtask_results={
+                "sub-1": {"subtask_id": "sub-1", "status": "completed", "summary": "done"},
+                "sub-2": {"subtask_id": "sub-2", "status": "failed", "failure_reason": "verify failed"},
+            },
+            worktrees=["sub-1"],  # sub-2 无 .git，不进 worktree_map
+        )
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        args = _build_parser().parse_args(["resume", task_id, "--yes"])
+        mock_pipe = self._run_resume(
+            home, args, ["agent_go", "resume", task_id, "--yes"], config)
+
+        mock_pipe.assert_called_once()
+        call = mock_pipe.call_args
+        # 位置参数: confirmed, repo, task_dir, logger, config, headless,
+        #           parallel, issue_ref, meta, worktree_map, results_map, completed_ids
+        assert [s["id"] for s in call.args[0]] == ["sub-1", "sub-2"]
+        assert call.args[9] == {"sub-1": td / "sub-1" / "work"}      # worktree_map
+        assert set(call.args[10]) == {"sub-1", "sub-2"}              # results_map（从 result.json 恢复）
+        assert call.args[11] == {"sub-1"}                            # completed_ids
+        assert call.kwargs["remote_url"] == "origin"                 # 取自 meta.json
+        passed_config = call.args[4]
+        assert passed_config["_task_id"] == task_id
+        assert passed_config["_metering_path"].endswith("metering.jsonl")
+        # --yes → 自动确认全开
+        assert passed_config["behavior"]["auto_confirm_plan"] is True
+        assert passed_config["behavior"]["auto_confirm_subtasks"] is True
+        assert passed_config["behavior"]["auto_verify_subtask"] is True
+        # meta.json 状态置回 running 并回写 remote_url
+        saved = json.loads((td / "meta.json").read_text(encoding="utf-8"))
+        assert saved["status"] == "running"
+        assert saved["remote_url"] == "origin"
+
+    def test_resume_completed_status_variants(self, tmp_path):
+        """completed/no_changes/degraded 均视为已完成，failed 不算"""
+        home = tmp_path / ".agent_go"
+        task_id = "task-status"
+        meta = self._base_meta(task_id, tmp_path / "repo")
+        meta["results"] = [
+            {"subtask_id": "sub-1", "status": "no_changes"},
+            {"subtask_id": "sub-2", "status": "degraded"},
+        ]
+        self._make_task(home, task_id, meta)
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        args = _build_parser().parse_args(["resume", task_id, "--yes"])
+        mock_pipe = self._run_resume(
+            home, args, ["agent_go", "resume", task_id, "--yes"], config)
+        assert mock_pipe.call_args.args[11] == {"sub-1", "sub-2"}
+
+    def test_resume_max_retries_override(self, tmp_path):
+        """--max-retries 覆盖 config.verification.max_retries"""
+        home = tmp_path / ".agent_go"
+        task_id = "task-retry"
+        self._make_task(home, task_id, self._base_meta(task_id, tmp_path / "repo"))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        args = _build_parser().parse_args(["resume", task_id, "--yes", "--max-retries", "5"])
+        mock_pipe = self._run_resume(
+            home, args, ["agent_go", "resume", task_id, "--yes"], config)
+        assert mock_pipe.call_args.args[4]["verification"]["max_retries"] == 5
+
+    def test_resume_no_verify_block(self, tmp_path):
+        """--no-verify-block 关闭验证失败阻断"""
+        home = tmp_path / ".agent_go"
+        task_id = "task-noblock"
+        self._make_task(home, task_id, self._base_meta(task_id, tmp_path / "repo"))
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        args = _build_parser().parse_args(["resume", task_id, "--yes", "--no-verify-block"])
+        mock_pipe = self._run_resume(
+            home, args, ["agent_go", "resume", task_id, "--yes"], config)
+        assert mock_pipe.call_args.args[4]["verification"]["block_on_failure"] is False
+
+    def test_resume_cli_remote_overrides_meta(self, tmp_path):
+        """命令行 --remote 优先于 meta.json 中的 remote_url"""
+        home = tmp_path / ".agent_go"
+        task_id = "task-remote"
+        meta = self._base_meta(task_id, tmp_path / "repo")
+        meta["remote_url"] = "origin"
+        td = self._make_task(home, task_id, meta)
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        args = _build_parser().parse_args(["resume", task_id, "--yes"])
+        mock_pipe = self._run_resume(
+            home, args,
+            ["agent_go", "resume", task_id, "--yes", "--remote", "upstream"],
+            config)
+        assert mock_pipe.call_args.kwargs["remote_url"] == "upstream"
+        saved = json.loads((td / "meta.json").read_text(encoding="utf-8"))
+        assert saved["remote_url"] == "upstream"
+
+    def test_resume_corrupt_result_json_skipped(self, tmp_path):
+        """损坏的 result.json 被跳过，恢复流程继续（ISSUE-15 回归）
+
+        修复前：except 块引用的局部 logger 在循环之后才赋值，
+        损坏文件必抛 UnboundLocalError 中断恢复。
+        修复后：setup_logger 提前到恢复循环之前，损坏文件仅记 debug 日志并跳过。
+        """
+        home = tmp_path / ".agent_go"
+        task_id = "task-corrupt"
+        meta = self._base_meta(task_id, tmp_path / "repo")
+        td = self._make_task(home, task_id, meta,
+                             subtask_results={"sub-1": None, "sub-2": None})
+        (td / "sub-1" / "result.json").write_text("{broken", encoding="utf-8")
+        (td / "sub-2" / "result.json").write_text(
+            json.dumps({"subtask_id": "sub-2", "status": "failed"}), encoding="utf-8")
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        args = _build_parser().parse_args(["resume", task_id, "--yes"])
+        mock_pipe = self._run_resume(
+            home, args, ["agent_go", "resume", task_id, "--yes"], config)
+        # 恢复未被中断，pipeline 正常执行
+        mock_pipe.assert_called_once()
+        call = mock_pipe.call_args
+        # 损坏的 sub-1 被跳过，仅 sub-2 的结果进入 results_map
+        assert set(call.args[10]) == {"sub-2"}
+        # sub-2 状态为 failed，不计入 completed_ids
+        assert call.args[11] == set()
+
+
+class TestCmdInspect:
+    """cmd_inspect 保留 worktree 现场查看（真实临时任务目录）"""
+
+    def _make_task(self, home, task_id, subtasks, write_meta=True):
+        td = home / task_id
+        td.mkdir(parents=True)
+        if write_meta:
+            (td / "meta.json").write_text(json.dumps({
+                "task_id": task_id, "task": "测试巡检", "status": "failed",
+                "subtasks": subtasks, "results": [],
+            }), encoding="utf-8")
+        return td
+
+    def _make_subtask(self, td, sid, result=None, preserved=None,
+                      worktree=False, task_md=False):
+        sd = td / sid
+        sd.mkdir(parents=True, exist_ok=True)
+        if result is not None:
+            (sd / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        if preserved is not None:
+            (sd / ".preserved").write_text(json.dumps(preserved), encoding="utf-8")
+        if worktree:
+            (sd / "work" / ".git").mkdir(parents=True)
+        if task_md:
+            (sd / "TASK.md").write_text("# task", encoding="utf-8")
+
+    def _args(self, task_id, as_json=False, show_all=False):
+        argv = ["inspect", task_id]
+        if as_json:
+            argv.append("--json")
+        if show_all:
+            argv.append("--all")
+        return _build_parser().parse_args(argv)
+
+    def test_inspect_nonexistent_task(self, tmp_path, capsys):
+        """任务不存在 → 提示并正常返回（不退出）"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        home.mkdir()
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args("task-ghost"))
+        assert "任务不存在" in capsys.readouterr().out
+
+    def test_inspect_no_preserved(self, tmp_path, capsys):
+        """全部子任务正常完成且无保留标记 → 提示无保留 worktree"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        td = self._make_task(home, "task-ok", [{"id": "sub-1", "title": "步骤一"}])
+        self._make_subtask(td, "sub-1",
+                           result={"subtask_id": "sub-1", "status": "completed"})
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args("task-ok"))
+        assert "没有保留的 worktree" in capsys.readouterr().out
+
+    def test_inspect_preserved_failed_subtask(self, tmp_path, capsys):
+        """保留的失败子任务：展示路径、分支、失败原因、TASK.md"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-fail"
+        td = self._make_task(home, task_id, [{"id": "sub-1", "title": "步骤一"}])
+        self._make_subtask(
+            td, "sub-1",
+            result={"subtask_id": "sub-1", "status": "failed",
+                    "failure_reason": "验证失败", "summary": "改了 2 个文件",
+                    "verify_ok": False},
+            preserved={"subtask_id": "sub-1", "status": "failed",
+                       "failure_reason": "验证失败",
+                       "branch": f"agent_go/{task_id}/sub-1"},
+            worktree=True, task_md=True)
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id))
+        out = capsys.readouterr().out
+        assert "保留现场" in out
+        assert "sub-1 [保留]" in out
+        assert "验证失败" in out
+        assert "改了 2 个文件" in out
+        assert "验证: 失败" in out
+        assert str(td / "sub-1" / "work") in out
+        assert f"agent_go/{task_id}/sub-1" in out
+        assert "TASK.md" in out
+
+    def test_inspect_failed_without_marker_still_listed(self, tmp_path, capsys):
+        """failed + worktree 存在但无 .preserved 标记 → 默认也列出"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-nomarker"
+        td = self._make_task(home, task_id, [{"id": "sub-1", "title": "步骤一"}])
+        self._make_subtask(td, "sub-1",
+                           result={"subtask_id": "sub-1", "status": "failed"},
+                           worktree=True)
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id))
+        out = capsys.readouterr().out
+        assert "sub-1" in out
+        assert "[保留]" not in out  # 无标记 → 不带保留标签
+
+    def test_inspect_all_shows_completed(self, tmp_path, capsys):
+        """--all 显示全部子任务（含已完成无保留的）"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-all"
+        td = self._make_task(home, task_id, [
+            {"id": "sub-1", "title": "步骤一"},
+            {"id": "sub-2", "title": "步骤二"},
+        ])
+        self._make_subtask(td, "sub-1",
+                           result={"subtask_id": "sub-1", "status": "completed"})
+        self._make_subtask(td, "sub-2",
+                           result={"subtask_id": "sub-2", "status": "failed"},
+                           preserved={"subtask_id": "sub-2", "status": "failed",
+                                      "branch": f"agent_go/{task_id}/sub-2"},
+                           worktree=True)
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id, show_all=True))
+        out = capsys.readouterr().out
+        assert "sub-1" in out and "sub-2" in out
+
+    def test_inspect_default_hides_completed(self, tmp_path, capsys):
+        """默认模式隐藏已完成且无保留标记的子任务"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-hide"
+        td = self._make_task(home, task_id, [
+            {"id": "sub-1", "title": "步骤一"},
+            {"id": "sub-2", "title": "步骤二"},
+        ])
+        self._make_subtask(td, "sub-1",
+                           result={"subtask_id": "sub-1", "status": "completed"})
+        self._make_subtask(td, "sub-2",
+                           result={"subtask_id": "sub-2", "status": "failed"},
+                           preserved={"subtask_id": "sub-2", "status": "failed",
+                                      "branch": f"agent_go/{task_id}/sub-2"},
+                           worktree=True)
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id))
+        out = capsys.readouterr().out
+        assert "sub-1" not in out
+        assert "sub-2" in out
+
+    def test_inspect_missing_worktree(self, tmp_path, capsys):
+        """有保留标记但 worktree 已被清理 → 明确提示"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-cleaned"
+        td = self._make_task(home, task_id, [{"id": "sub-1", "title": "步骤一"}])
+        self._make_subtask(td, "sub-1",
+                           result={"subtask_id": "sub-1", "status": "failed"},
+                           preserved={"subtask_id": "sub-1", "status": "failed",
+                                      "branch": f"agent_go/{task_id}/sub-1"})
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id))
+        out = capsys.readouterr().out
+        assert "sub-1 [保留]" in out
+        assert "worktree 不存在" in out
+
+    def test_inspect_missing_meta(self, tmp_path, capsys):
+        """任务目录存在但缺 meta.json → 按无子任务处理"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        self._make_task(home, "task-nometa", [], write_meta=False)
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args("task-nometa"))
+        assert "没有保留的 worktree" in capsys.readouterr().out
+
+    def test_inspect_corrupt_files_no_crash(self, tmp_path, capsys):
+        """损坏的 result.json / .preserved 不崩溃，状态降级为 unknown"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-broken"
+        td = self._make_task(home, task_id, [{"id": "sub-1", "title": "步骤一"}])
+        sd = td / "sub-1"
+        sd.mkdir()
+        (sd / "result.json").write_text("{broken", encoding="utf-8")
+        (sd / ".preserved").write_text("not json", encoding="utf-8")
+        (sd / "work" / ".git").mkdir(parents=True)
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id))
+        out = capsys.readouterr().out
+        assert "unknown" in out
+        # 分支名回退到默认命名规则
+        assert f"agent_go/{task_id}/sub-1" in out
+
+    def test_inspect_json_output(self, tmp_path, capsys):
+        """--json 输出机器可读结构：task_id + entries 字段完整"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-json"
+        td = self._make_task(home, task_id, [{"id": "sub-1", "title": "步骤一"}])
+        self._make_subtask(
+            td, "sub-1",
+            result={"subtask_id": "sub-1", "status": "failed",
+                    "failure_reason": "验证失败", "verify_ok": False},
+            preserved={"subtask_id": "sub-1", "status": "failed",
+                       "branch": f"agent_go/{task_id}/sub-1"},
+            worktree=True, task_md=True)
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id, as_json=True))
+        data = json.loads(capsys.readouterr().out)
+        assert data["task_id"] == task_id
+        assert len(data["entries"]) == 1
+        e = data["entries"][0]
+        assert e["id"] == "sub-1"
+        assert e["title"] == "步骤一"
+        assert e["status"] == "failed"
+        assert e["worktree_exists"] is True
+        assert e["is_preserved"] is True
+        assert e["worktree_path"] == str(td / "sub-1" / "work")
+        assert e["branch"] == f"agent_go/{task_id}/sub-1"
+        assert e["failure_reason"] == "验证失败"
+        assert e["verify_ok"] is False
+        assert e["has_task_md"] is True
+
+    def test_inspect_json_empty_entries(self, tmp_path, capsys):
+        """--json 无保留现场时仍输出合法 JSON（entries 为空）"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-json-empty"
+        td = self._make_task(home, task_id, [{"id": "sub-1", "title": "步骤一"}])
+        self._make_subtask(td, "sub-1",
+                           result={"subtask_id": "sub-1", "status": "completed"})
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id, as_json=True))
+        data = json.loads(capsys.readouterr().out)
+        assert data == {"task_id": task_id, "entries": []}
+
+    def test_inspect_json_all_includes_cleaned_worktree(self, tmp_path, capsys):
+        """--json --all：已完成且 worktree 已清理的子任务也在 entries 中"""
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        task_id = "task-json-all"
+        td = self._make_task(home, task_id, [{"id": "sub-1", "title": "步骤一"}])
+        self._make_subtask(td, "sub-1",
+                           result={"subtask_id": "sub-1", "status": "completed"})
+        with patch("agent_go.cli.AGENT_GO_DIR", home):
+            cmd_inspect(self._args(task_id, as_json=True, show_all=True))
+        data = json.loads(capsys.readouterr().out)
+        assert len(data["entries"]) == 1
+        e = data["entries"][0]
+        assert e["status"] == "completed"
+        assert e["worktree_exists"] is False
+        assert e["worktree_path"] == ""

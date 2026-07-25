@@ -20,6 +20,7 @@ Give Claude Code a complex task — refactoring auth, upgrading dependencies, ad
 - **Zero dependencies** — pure Python stdlib
 - **Plan cache** — SHA256 cache key + 24h TTL reduces API costs
 - **Evaluation** — `eval quality/perf/cost/reliability/ux` built-in analytics
+- **Release gate** — `eval gate --baseline 0.05` enforces $/pass rate budget (北极星指标); CI step fails on regression
 
 ## Quick Start
 
@@ -57,6 +58,7 @@ python3 agent_go.py run ~/my-project "安全审查" --skill security-review --do
 | `review` | Code review with Claude |
 | `cache` | Plan cache management |
 | `eval` | Quality/performance/cost evaluation |
+| `eval gate` | **Release gate** — fail CI if $/pass rate exceeds baseline (北极星指标) |
 
 ### Options
 

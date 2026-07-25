@@ -25,6 +25,7 @@ from agent_go.eval import (
     analyze_quality, analyze_performance,
     analyze_cost, analyze_reliability, analyze_ux,
     aggregate_quality, aggregate_performance,
+    gate_cost,
     MODEL_PRICES,
 )
 
@@ -284,6 +285,99 @@ class TestAnalyzeCost:
         assert result["total_calls"] == 3
         assert result["by_role"]["planner"] == {"calls": 1, "cost_usd": 0.01}
         assert result["by_role"]["worker"] == {"calls": 2, "cost_usd": 0.08}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 发布门禁：$/pass rate（gate_cost 纯函数）
+# ═══════════════════════════════════════════════════════════════
+
+class TestGateCost:
+    """gate_cost: PRD 北极星指标的发布门禁判定。
+
+    语义：
+      - actual is None（无完成任务/metering）→ passed=True（不阻挡新项目）
+      - actual > baseline → passed=False（劣化）
+      - actual <= baseline → passed=True
+
+    注意：analyze_cost 的 cost 由 MODEL_PRICES × token 数重算，不读 metering 的 cost_usd。
+    因此 fixture 通过控制 completion_tokens 精确产生目标 cost。
+    sonnet-4 价格：prompt $3/M、completion $15/M。
+    """
+
+    # sonnet-4 completion: 15 USD / 1M tokens → 每 token $0.000015
+    # 想要 cost=X，用 completion_tokens = X / 0.000015
+    SONNET4_COMPLETION_PER_TOKEN = 15.0 / 1_000_000
+
+    def _cost_to_tokens(self, cost_usd: float) -> dict:
+        """把目标 cost 换算成 sonnet-4 的 completion_tokens（prompt 设 0 简化）。"""
+        ct = round(cost_usd / self.SONNET4_COMPLETION_PER_TOKEN)
+        return {"prompt_tokens": 0, "completion_tokens": ct}
+
+    def _mk_task(self, base: Path, name: str, cost_usd: float, completed: int, failed: int = 0):
+        """构造一个任务目录：metering.jsonl（token，由 analyze_cost 按价重算 cost）+ meta.json（results）。"""
+        td = base / name
+        td.mkdir(parents=True)
+        tokens = self._cost_to_tokens(cost_usd)
+        (td / "metering.jsonl").write_text(
+            json.dumps({"role": "worker",
+                        "prompt_tokens": tokens["prompt_tokens"],
+                        "completion_tokens": tokens["completion_tokens"],
+                        "actual_model": "claude-sonnet-4",
+                        "actual_provider": "anthropic",
+                        "cost_usd": cost_usd, "result": "success"}),
+            encoding="utf-8")
+        results = [{"subtask_id": f"s{i}", "status": "completed"} for i in range(completed)]
+        results += [{"subtask_id": f"f{i}", "status": "failed"} for i in range(failed)]
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": name, "status": "completed", "results": results,
+        }), encoding="utf-8")
+
+    def test_no_data_passes(self, tmp_path):
+        """空目录（无任务）→ dollar_per_pass_rate=None → 通过，门禁未生效"""
+        result = gate_cost(0.05, tmp_path)
+        assert result["passed"] is True
+        assert result["actual"] is None
+        assert "门禁未生效" in result["reason"]
+
+    def test_under_baseline_passes(self, tmp_path):
+        """rate=0.02 < baseline=0.05 → 通过"""
+        self._mk_task(tmp_path, "task-001", cost_usd=0.02, completed=1)
+        result = gate_cost(0.05, tmp_path)
+        assert result["passed"] is True
+        assert result["actual"] == 0.02
+
+    def test_over_baseline_fails(self, tmp_path):
+        """rate=0.10 > baseline=0.05 → 不通过"""
+        self._mk_task(tmp_path, "task-001", cost_usd=0.10, completed=1)
+        result = gate_cost(0.05, tmp_path)
+        assert result["passed"] is False
+        assert result["actual"] == 0.10
+        assert "超过基线" in result["reason"]
+
+    def test_exact_boundary_passes(self, tmp_path):
+        """rate==baseline → 通过（用 > 而非 >=，边界值放行）"""
+        self._mk_task(tmp_path, "task-001", cost_usd=0.05, completed=1)
+        result = gate_cost(0.05, tmp_path)
+        assert result["passed"] is True
+        assert result["actual"] == 0.05
+
+    def test_aggregates_across_tasks(self, tmp_path):
+        """多任务汇总：总 cost / 总 completed"""
+        self._mk_task(tmp_path, "task-001", cost_usd=0.06, completed=2)
+        self._mk_task(tmp_path, "task-002", cost_usd=0.04, completed=1)
+        # 汇总：0.10 / 3 completed = 0.0333
+        result = gate_cost(0.05, tmp_path)
+        assert result["passed"] is True
+        assert result["completed_subtasks"] == 3
+        assert result["actual"] == round(0.10 / 3, 4)
+
+    def test_failed_subtasks_excluded_from_denominator(self, tmp_path):
+        """failed 子任务不计入 completed 分母（拉高 rate）"""
+        self._mk_task(tmp_path, "task-001", cost_usd=0.10, completed=1, failed=2)
+        # rate = 0.10 / 1 completed（failed 不算分母）
+        result = gate_cost(0.05, tmp_path)
+        assert result["actual"] == 0.10
+        assert result["passed"] is False
 
 
 class TestAnalyzeReliability:
