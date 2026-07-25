@@ -130,6 +130,8 @@ def _build_parser():
     review_parser.add_argument("--fix", action="store_true", help="Apply fixes to working tree")
     review_parser.add_argument("--approve", action="store_true", help="Approve the review")
     review_parser.add_argument("--reject", action="store_true", help="Reject the review")
+    review_parser.add_argument("--changes-requested", action="store_true", help="Request changes (review rejected with feedback)")
+    review_parser.add_argument("--comment-text", help="Review comment text (with --changes-requested or --reject)")
 
     # cache 子命令
     cache_parser = subparsers.add_parser("cache", help="Plan cache management")
@@ -144,7 +146,11 @@ def _build_parser():
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
     # gate 子命令参数：$/pass rate 基线阈值（缺省 0.05 = PRD Q3 目标）
     eval_parser.add_argument("--baseline", type=float, dest="baseline", default=None,
-                             help="$/pass rate 基线阈值（gate 子命令用，缺省 0.05）")
+                             help="$/pass rate 绝对阈值（gate 子命令默认模式，缺省 0.05）")
+    eval_parser.add_argument("--check-regression", dest="check_regression", action="store_true",
+                             help="gate 改用「不劣化」语义：对比历史基线（劣化 >10%% 即失败）")
+    eval_parser.add_argument("--update-baseline", dest="update_baseline", action="store_true",
+                             help="gate 强制更新历史基线为当前 rate（模型升级等场景重置基线）")
 
     # inspect 子命令
     inspect_parser = subparsers.add_parser("inspect", help="查看保留的 worktree 现场")
@@ -703,9 +709,19 @@ def cmd_review(args=None):
         pr_ref = getattr(args, 'pr_ref', "") or ""
         approve = getattr(args, 'approve', False)
         reject = getattr(args, 'reject', False)
+        changes_requested = getattr(args, 'changes_requested', False)
+        comment_text = getattr(args, 'comment_text', "") or ""
     else:
         approve = "--approve" in sys.argv
         reject = "--reject" in sys.argv
+        changes_requested = "--changes-requested" in sys.argv
+        comment_text = ""
+        if "--comment-text" in sys.argv:
+            try:
+                i = sys.argv.index("--comment-text")
+                comment_text = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+            except (IndexError, ValueError):
+                pass
         if "--task" in sys.argv:
             try:
                 task_id = sys.argv[sys.argv.index("--task") + 1]
@@ -718,7 +734,8 @@ def cmd_review(args=None):
 
     # M7: Task results review
     if task_id:
-        _show_task_review(task_id, approve=approve, reject=reject)
+        _show_task_review(task_id, approve=approve, reject=reject,
+                          changes_requested=changes_requested, comment_text=comment_text)
         return
 
     # 代码审查（原有逻辑）
@@ -745,7 +762,8 @@ def cmd_review(args=None):
         subprocess.run(["claude", str(repo)])
 
 
-def _show_task_review(task_id: str, approve: bool = False, reject: bool = False) -> None:
+def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
+                      changes_requested: bool = False, comment_text: str = "") -> None:
     """显示任务结果审查（M7）— 按文件分组展示变更摘要。"""
     from .console import get_default_console
     console = get_default_console()
@@ -843,27 +861,46 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False)
     if quality:
         lines.append(quality)
 
-    # 审查结论
-    if approve:
-        _review_conclusion_path = task_dir / "review.json"
-        _review_conclusion_path.write_text(json.dumps({
+    # 审查结论（三态：changes-requested > reject > approve）
+    if changes_requested:
+        _conclusion = {
             "task_id": task_id,
             "reviewed_at": datetime.now().isoformat(),
-            "decision": "approved",
-            "summary": "审查通过",
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
+            "decision": "changes-requested",
+            "summary": comment_text or "需要修改后重新审查",
+        }
+        (task_dir / "review.json").write_text(
+            json.dumps(_conclusion, indent=2, ensure_ascii=False), encoding="utf-8")
         lines.append("")
-        lines.append("✅ **审查通过** — 已写入 review.json")
+        lines.append(f"📝 **需要修改** — 已写入 review.json")
+        if comment_text:
+            lines.append(f"  审查意见: {comment_text}")
+        lines.append("")
+        lines.append("**建议**: 修复问题后执行 `agent_go review --task <id> --approve` 重新审查")
     elif reject:
-        _review_conclusion_path = task_dir / "review.json"
-        _review_conclusion_path.write_text(json.dumps({
+        _conclusion = {
             "task_id": task_id,
             "reviewed_at": datetime.now().isoformat(),
             "decision": "rejected",
-            "summary": "审查未通过",
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
+            "summary": comment_text or "审查未通过",
+        }
+        (task_dir / "review.json").write_text(
+            json.dumps(_conclusion, indent=2, ensure_ascii=False), encoding="utf-8")
         lines.append("")
         lines.append("❌ **审查未通过** — 已写入 review.json")
+        if comment_text:
+            lines.append(f"  审查意见: {comment_text}")
+    elif approve:
+        _conclusion = {
+            "task_id": task_id,
+            "reviewed_at": datetime.now().isoformat(),
+            "decision": "approved",
+            "summary": comment_text or "审查通过",
+        }
+        (task_dir / "review.json").write_text(
+            json.dumps(_conclusion, indent=2, ensure_ascii=False), encoding="utf-8")
+        lines.append("")
+        lines.append("✅ **审查通过** — 已写入 review.json")
 
     console.print("\n".join(lines))
 
@@ -932,7 +969,7 @@ def _build_quality_dashboard(meta: dict, task_dir: Optional[Path] = None) -> str
             try:
                 review = json.loads(review_path.read_text(encoding="utf-8"))
                 decision = review.get("decision", "?")
-                decision_icon = {"approved": "✅", "rejected": "❌"}.get(decision, "❓")
+                decision_icon = {"approved": "✅", "rejected": "❌", "changes-requested": "📝"}.get(decision, "❓")
                 reviewed_at = review.get("reviewed_at", "")[:19]
                 review_summary = review.get("summary", "")
                 lines.append(f"| **审查结论** | {decision_icon} {decision} ({reviewed_at}) |")
@@ -1456,7 +1493,8 @@ def cmd_router(args=None) -> None:
 
         # Planner 铁律：不允许配置降级到弱模型
         if role == "planner" and "fallback" in role_cfg:
-            print("⚠️  警告：Planner 角色不应配置降级（规划 token 省小钱，Worker token 数倍膨胀）")
+            print("⚠️  政策违规：Planner 角色配置了 fallback 降级（规划 token 省小钱，Worker token 数倍膨胀）")
+            print("   路由执行时 metering 将标记 policy_violation=planner_fallback_configured")
             print("   建议移除 fallback: agent_go router set-role planner --provider ... --model ... --base-url ...")
 
         CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")

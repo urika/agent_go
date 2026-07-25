@@ -14,7 +14,8 @@ console = _LazyConsole()
 __all__ = [
     "analyze_quality", "analyze_performance",
     "aggregate_quality", "aggregate_performance", "cmd_eval",
-    "gate_cost",
+    "gate_cost", "gate_cost_regression",
+    "load_cost_baseline", "save_cost_baseline",
 ]
 
 def _read_meta(task_dir: Path) -> Optional[dict[str, Any]]:
@@ -317,6 +318,13 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     errors = 0
     cache_hits = 0
     cache_checks = 0
+    # D1/D2 修复：成本双轨——真实 metering cost_usd（主）+ token 重算（仅补缺 cost_usd 的事件）
+    cost_from_metering = 0.0
+    # 缺 cost_usd 且模型在价目表的事件，按 token 重算（旧日志/fallback 用）
+    rebuild_usage: dict[str, dict[str, int]] = {}
+    unknown_model_events = 0   # 既无 cost_usd 又不在 MODEL_PRICES 的事件（监控价目表覆盖度）
+    fallback_events = 0        # result="fallback" 或 fallback_reason 非空（PRD §line 173 留痕字段）
+    policy_violations: dict[str, int] = {}  # 政策违规类型 → 次数
 
     for td in _scan_task_dirs(tasks_dir):
         # Phase 1 配套：优先读取结构化的 metering.jsonl
@@ -335,7 +343,7 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
                 total_prompt += p
                 total_completion += c
                 provider = ev.get("actual_provider", "?")
-                model = ev.get("actual_model") or PROVIDER_DEFAULT_MODEL.get(provider, "deepseek-chat")
+                model = ev.get("actual_model") or PROVIDER_DEFAULT_MODEL.get(provider, "")
                 if model not in by_model:
                     by_model[model] = {"calls": 0, "prompt": 0, "completion": 0}
                 by_model[model]["calls"] += 1
@@ -346,6 +354,25 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
                     by_role[role] = {"calls": 0, "cost_usd": 0.0}
                 by_role[role]["calls"] += 1
                 by_role[role]["cost_usd"] += ev.get("cost_usd", 0.0) or 0.0
+                # D1/D2：优先用真实 cost_usd；缺则留待 token 重算
+                ev_cost = ev.get("cost_usd", 0.0) or 0.0
+                if ev_cost > 0:
+                    cost_from_metering += ev_cost
+                elif model and model in MODEL_PRICES:
+                    # 缺 cost_usd 但模型已知 → 按 token 重算补
+                    rebuild_usage.setdefault(model, {"prompt": 0, "completion": 0})
+                    rebuild_usage[model]["prompt"] += p
+                    rebuild_usage[model]["completion"] += c
+                else:
+                    # 既无 cost_usd 又不在价目表（如 claude-code-executor 缺 cost_usd）→ 无法计价，计为未知
+                    unknown_model_events += 1
+                # D5 可观测：降级事件（PRD §line 173 留痕字段终于被读）
+                if ev.get("result") == "fallback" or (ev.get("fallback_reason") or ""):
+                    fallback_events += 1
+                # 政策违规事件（如 Planner 配置 fallback 降级）
+                pv = ev.get("policy_violation", "")
+                if pv:
+                    policy_violations[pv] = policy_violations.get(pv, 0) + 1
                 if ev.get("result") in ("failed", "quality_fail"):
                     errors += 1
 
@@ -358,12 +385,19 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
             total_prompt += p
             total_completion += c
             provider = ev.get("provider", "?")
-            model = ev.get("model") or PROVIDER_DEFAULT_MODEL.get(provider, "deepseek-chat")
+            model = ev.get("model") or PROVIDER_DEFAULT_MODEL.get(provider, "")
             if model not in by_model:
                 by_model[model] = {"calls": 0, "prompt": 0, "completion": 0}
             by_model[model]["calls"] += 1
             by_model[model]["prompt"] += p
             by_model[model]["completion"] += c
+            # 旧日志无 cost_usd，按 token 重算（模型未知则计 unknown）
+            if model and model in MODEL_PRICES:
+                rebuild_usage.setdefault(model, {"prompt": 0, "completion": 0})
+                rebuild_usage[model]["prompt"] += p
+                rebuild_usage[model]["completion"] += c
+            else:
+                unknown_model_events += 1
         for ev in _read_log_events(log_path, "api_error"):
             errors += 1
         for ev in _read_log_events(log_path, "plan_complete"):
@@ -371,15 +405,18 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
             if ev.get("cache_hit"):
                 cache_hits += 1
 
-    cost = 0
+    # token 重算（仅对缺 cost_usd 且模型在价目表的事件）
+    cost_from_rebuild = 0.0
     model_costs = {}
-    for model, usage in by_model.items():
-        price = MODEL_PRICES.get(model, MODEL_PRICES["deepseek-chat"])
+    # 先把 metering 真实成本按模型分摊到 model_costs（从 by_role 无法反推模型，故 model_costs 用重算值代表可重算部分）
+    for model, usage in rebuild_usage.items():
+        price = MODEL_PRICES[model]
         pc = usage["prompt"] / 1_000_000 * price.get("prompt", 1)
         cc = usage["completion"] / 1_000_000 * price.get("completion", 5)
         model_costs[model] = round(pc + cc, 4)
-        cost += pc + cc
-    cost = round(cost, 4)
+        cost_from_rebuild += pc + cc
+    cost_from_rebuild = round(cost_from_rebuild, 4)
+    cost = round(cost_from_metering + cost_from_rebuild, 4)
 
     tasks = list(_scan_task_dirs(tasks_dir))
     subtask_total = 0
@@ -399,6 +436,11 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     return {
         "total_calls": total_calls, "total_prompt_tokens": total_prompt, "total_completion_tokens": total_completion,
         "estimated_cost_usd": cost,
+        # 成本来源透明化：metering（真实）+ rebuild（token 重算补缺）
+        "cost_source_breakdown": {"metering": round(cost_from_metering, 6), "rebuilt": cost_from_rebuild},
+        "unknown_model_events": unknown_model_events,
+        "fallback_events": fallback_events,
+        "policy_violations": policy_violations,
         "by_model": model_costs,
         "by_role": {r: {"calls": v["calls"], "cost_usd": round(v["cost_usd"], 4)} for r, v in sorted(by_role.items())},
         "errors": errors, "cache_hits": cache_hits, "cache_checks": cache_checks,
@@ -465,6 +507,107 @@ def gate_cost(baseline: float, tasks_dir: Path) -> dict[str, Any]:
     }
 
 
+# PRD "不劣化"语义：相对基线对比（vs 绝对阈值）。
+# 基线文件 .agent_go/cost_baseline.json 存储上次记录的 $/pass rate，
+# `eval gate --check-regression` 对比当前 rate 与基线，劣化 > 阈值即失败。
+_BASELINE_FILENAME = "cost_baseline.json"
+_REGRESSION_TOLERANCE = 0.10  # 允许 10% 波动（噪声容差）
+
+
+def _baseline_path(tasks_dir: Path) -> Path:
+    return Path(tasks_dir) / _BASELINE_FILENAME
+
+
+def load_cost_baseline(tasks_dir: Path) -> Optional[float]:
+    """读取已存储的 $/pass rate 基线。无基线返回 None。"""
+    p = _baseline_path(tasks_dir)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data.get("dollar_per_pass_rate")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def save_cost_baseline(tasks_dir: Path, rate: float) -> None:
+    """持久化当前 $/pass rate 作为下次对比的基线。"""
+    p = _baseline_path(tasks_dir)
+    try:
+        p.write_text(json.dumps({
+            "dollar_per_pass_rate": rate,
+            "updated_at": datetime.now().isoformat(),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def gate_cost_regression(tasks_dir: Path, tolerance: float = _REGRESSION_TOLERANCE,
+                         update: bool = False) -> dict[str, Any]:
+    """$/pass rate 回归门禁（PRD "不劣化"语义）。
+
+    对比当前 rate 与已存储基线，劣化幅度 > tolerance（默认 10%）→ 不通过。
+    无基线时：首次运行自动写入基线并通过（建立基线）。
+    actual is None（无数据）：通过，门禁未生效。
+
+    Args:
+        tasks_dir: 任务目录（基线文件存于此）。
+        tolerance: 允许的劣化比例（0.10 = 10%）。当前 rate ≤ 基线×(1+tolerance) 即通过。
+        update: True 时无论结果都更新基线（用于主动刷新基线，如模型升级后重置）。
+
+    Returns:
+        dict: {passed, actual, baseline, tolerance, regression_pct, reason, updated}
+    """
+    cost_report = analyze_cost(tasks_dir)
+    actual = cost_report.get("dollar_per_pass_rate")
+    completed = cost_report.get("completed_subtasks", 0)
+    total_cost = cost_report.get("estimated_cost_usd", 0.0)
+    stored_baseline = load_cost_baseline(tasks_dir)
+
+    def _result(passed, reason, baseline_val, updated):
+        return {
+            "passed": passed, "actual": actual, "baseline": baseline_val,
+            "tolerance": tolerance,
+            "regression_pct": (
+                round((actual - baseline_val) / baseline_val * 100, 2)
+                if (actual is not None and baseline_val and baseline_val > 0) else None
+            ),
+            "completed_subtasks": completed, "estimated_cost_usd": total_cost,
+            "reason": reason, "updated": updated,
+        }
+
+    if actual is None:
+        return _result(True, "无完成任务或无 metering 数据，门禁未生效", stored_baseline, False)
+
+    if stored_baseline is None:
+        # 首次：建立基线
+        save_cost_baseline(tasks_dir, actual)
+        return _result(True, f"无历史基线，已建立基线 {actual}", actual, True)
+
+    if update:
+        save_cost_baseline(tasks_dir, actual)
+        return _result(True, f"基线已更新为 {actual}（--update 强制）", actual, True)
+
+    # 回归判定：劣化比例 = (actual - baseline) / baseline
+    if stored_baseline > 0:
+        regression_pct = (actual - stored_baseline) / stored_baseline
+    else:
+        regression_pct = 0
+    if regression_pct > tolerance:
+        return _result(
+            False,
+            f"$/pass rate {actual} 较基线 {stored_baseline} 劣化 {regression_pct*100:.1f}%"
+            f"（超过容差 {tolerance*100:.0f}%）",
+            stored_baseline, False,
+        )
+    return _result(
+        True,
+        f"$/pass rate {actual} 较基线 {stored_baseline} 劣化 {regression_pct*100:.1f}%"
+        f"（容差 {tolerance*100:.0f}% 以内）",
+        stored_baseline, False,
+    )
+
+
 # ═══════════════════════════════════════════════════════════════
 # Reliability
 # ═══════════════════════════════════════════════════════════════
@@ -483,6 +626,9 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
     blocked = 0
     retried = 0
     retried_success = 0
+    # K5：中断恢复成功率。被中断过的任务（task_paused 事件），恢复后最终 status=="completed" 的比例。
+    interrupted_tasks = 0        # 至少被中断过一次的任务数
+    interrupted_then_completed = 0  # 中断过且最终 completed 的任务数
 
     for td in _scan_task_dirs(tasks_dir):
         meta = _read_meta(td)
@@ -512,13 +658,20 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
                 retried += 1
                 if r_status == "completed":
                     retried_success += 1
-        # 从日志统计中断/恢复
+        # 从日志统计中断/恢复 + K5 派生
         log_path = td / "execution.log"
         if log_path.exists():
+            was_interrupted = False
             for ev in _read_log_events(log_path, "task_paused"):
                 interrupted += 1
+                was_interrupted = True
             for ev in _read_log_events(log_path, "subtask_resume"):
                 resumed += 1
+            # K5：该任务被中断过 → 计入分母；若最终 completed → 计入分子
+            if was_interrupted:
+                interrupted_tasks += 1
+                if status == "completed":
+                    interrupted_then_completed += 1
 
     total_sandbox = greywall + native + headless
     return {
@@ -533,6 +686,12 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
         "blocked_rate": round(blocked / subtask_total * 100) if subtask_total else 0,
         "interrupted": interrupted,
         "resumed": resumed,
+        # K5 中断恢复成功率：被中断过的任务中最终 completed 的比例（PRD K5 年度目标 ≥99.9%）
+        "interrupted_tasks": interrupted_tasks,
+        "resume_success_rate": (
+            round(interrupted_then_completed / interrupted_tasks * 100, 1)
+            if interrupted_tasks else None
+        ),
     }
 
 
@@ -655,6 +814,8 @@ def cmd_eval(args=None) -> None:
         task_id = getattr(args, "task_id", None) or ""
         all_mode = bool(getattr(args, "eval_all", False)) or task_id == "--all"
         baseline = getattr(args, "baseline", None)
+        check_regression = bool(getattr(args, "check_regression", False))
+        update_baseline = bool(getattr(args, "update_baseline", False))
     else:
         if len(sys.argv) < 3:
             console.print("Usage: agent_go eval <quality|perf|cost|reliability|ux|gate|all> [task-id|--all]")
@@ -662,7 +823,7 @@ def cmd_eval(args=None) -> None:
         sub = sys.argv[2]
         task_id = sys.argv[3] if len(sys.argv) > 3 else ""
         all_mode = task_id == "--all"
-        # 解析 --baseline X（用于 gate 子命令）
+        # 解析 --baseline X（用于 gate 子命令绝对阈值模式）
         baseline = None
         if "--baseline" in sys.argv:
             i = sys.argv.index("--baseline")
@@ -671,6 +832,8 @@ def cmd_eval(args=None) -> None:
                     baseline = float(sys.argv[i + 1])
                 except ValueError:
                     pass
+        check_regression = "--check-regression" in sys.argv
+        update_baseline = "--update-baseline" in sys.argv
 
     if sub == "quality":
         if all_mode:
@@ -693,12 +856,19 @@ def cmd_eval(args=None) -> None:
     elif sub == "cost":
         _print_cost_report(analyze_cost(AGENT_GO_DIR))
     elif sub == "gate":
-        # 发布门禁：$/pass rate 不劣化。--baseline 缺省时取 PRD Q3 目标 0.05
-        if baseline is None:
-            baseline = 0.05
-            console.print("⚠️  未指定 --baseline，使用 PRD Q3 默认 0.05（$/pass rate ≤ $0.05）")
-        result = gate_cost(baseline, AGENT_GO_DIR)
-        _print_gate_report(result)
+        # 发布门禁：两种模式互斥
+        #   --check-regression：PRD "不劣化"语义，对比历史基线（劣化 > 容差即失败）
+        #   --baseline X（默认）：绝对阈值模式（actual > X 即失败，X 缺省 0.05）
+        if check_regression or update_baseline:
+            result = gate_cost_regression(AGENT_GO_DIR, update=update_baseline)
+            _print_gate_report(result)
+        else:
+            if baseline is None:
+                baseline = 0.05
+                console.print("⚠️  未指定 --baseline，使用 PRD Q3 默认 0.05（$/pass rate ≤ $0.05）")
+                console.print("   提示：用 --check-regression 切换到「不劣化」语义（对比历史基线）")
+            result = gate_cost(baseline, AGENT_GO_DIR)
+            _print_gate_report(result)
         # 门禁失败 → 非零退出，CI 红灯
         if not result["passed"]:
             sys.exit(1)
@@ -784,6 +954,11 @@ def _print_cost_report(c: dict[str, Any]) -> None:
     console.print(f"  API 调用:            {c['total_calls']} 次")
     console.print(f"  Token:               {c['total_prompt_tokens']:,} in + {c['total_completion_tokens']:,} out")
     console.print(f"  预估费用:            ${c['estimated_cost_usd']}")
+    # 成本来源透明化（D1/D2 修复）：真实 metering vs token 重算
+    src = c.get("cost_source_breakdown") or {}
+    if src:
+        console.print(f"    来源 metering:     ${src.get('metering', 0)} (真实计费)")
+        console.print(f"    来源 token 重算:   ${src.get('rebuilt', 0)} (补缺 cost_usd)")
     if c["by_model"]:
         for model, cost in c["by_model"].items():
             console.print(f"    {model}:  ${cost}")
@@ -792,6 +967,14 @@ def _print_cost_report(c: dict[str, Any]) -> None:
         for role, v in c["by_role"].items():
             console.print(f"    {role}:  {v['calls']} 次, ${v['cost_usd']}")
     console.print(f"  API 错误:            {c['errors']} 次")
+    # D5 可观测：降级事件 + 未知模型（价目表覆盖度监控）
+    if c.get("fallback_events"):
+        console.print(f"  ⚠️  降级事件:         {c['fallback_events']} 次 (result=fallback 或 fallback_reason 非空)")
+    if c.get("unknown_model_events"):
+        console.print(f"  ⚠️  未知模型事件:     {c['unknown_model_events']} 次 (无法计价，cost_usd 缺失且模型不在价目表)")
+    if c.get("policy_violations"):
+        for pv_type, count in c["policy_violations"].items():
+            console.print(f"  🚩  政策违规:         {pv_type} ×{count}")
     console.print(f"  缓存命中:            {c['cache_hits']}/{c['cache_checks']} ({c['cache_hit_rate']}%)")
     console.print(f"  每任务成本:          ${c['avg_cost_per_task']}")
     console.print(f"  每子任务成本:        ${c.get('avg_cost_per_subtask', 0)}")
@@ -829,6 +1012,10 @@ def _print_reliability_report(r: dict[str, Any]) -> None:
     console.print(f"  重试修复成功率:      {r['retry_success_rate']}%")
     console.print(f"  阻断子任务:          {r['blocked']} 个 ({r['blocked_rate']}%)")
     console.print(f"  中断/恢复:           {r['interrupted']}/{r['resumed']}")
+    # K5 中断恢复成功率（PRD K5 年度目标 ≥99.9%）
+    rsr = r.get("resume_success_rate")
+    rsr_str = f"{rsr}%" if rsr is not None else "N/A（无中断任务）"
+    console.print(f"  ★ K5 中断恢复成功率: {rsr_str} ({r.get('interrupted_tasks', 0)} 个中断任务)")
     console.print("─" * 50)
 
 

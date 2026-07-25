@@ -304,6 +304,15 @@ def call_with_role(
     prompt_tokens = 0
     completion_tokens = 0
     _quality_fail = False  # 标记是否为质量性失败（用于重试判断）
+    _policy_violation = ""  # 铁律违规标记（空字符串=无违规）
+
+    # Planner 铁律检查：Planner 不允许配置 fallback 降级
+    if route.role == "planner" and route.fallback is not None:
+        logger.warning(
+            f"[Router] 政策违规: Planner 角色配置了 fallback 降级 "
+            f"({_provider_key(route.fallback)})。PRD 铁律禁止 Planner 降级。"
+        )
+        _policy_violation = "planner_fallback_configured"
 
     def _try_provider(pc: ProviderConfig, is_fallback: bool = False) -> Optional[str]:
         """尝试调用一个 provider，返回内容或 None（失败时）。"""
@@ -362,7 +371,7 @@ def call_with_role(
         metering = _build_metering(route.role, actual_provider, actual_model,
                                          prompt_tokens, completion_tokens, cost,
                                          latency_ms, result, fallback_reason,
-                                         task_id, subtask_id)
+                                         task_id, subtask_id, _policy_violation)
         meter_event(metering_path, metering)
         return content, metering
 
@@ -376,7 +385,7 @@ def call_with_role(
             metering = _build_metering(route.role, actual_provider, actual_model,
                                              prompt_tokens, completion_tokens, cost,
                                              latency_ms, result, fallback_reason,
-                                             task_id, subtask_id)
+                                             task_id, subtask_id, _policy_violation)
             meter_event(metering_path, metering)
             return content, metering
 
@@ -390,7 +399,7 @@ def call_with_role(
             metering = _build_metering(route.role, actual_provider, actual_model,
                                              prompt_tokens, completion_tokens, cost,
                                              latency_ms, result, fallback_reason,
-                                             task_id, subtask_id)
+                                             task_id, subtask_id, _policy_violation)
             meter_event(metering_path, metering)
             return content, metering
 
@@ -412,6 +421,7 @@ def _build_metering(
     fallback_reason: str,
     task_id: str,
     subtask_id: str,
+    policy_violation: str = "",
 ) -> dict:
     """构建结构化计量信息。"""
     metering: dict[str, Any] = {
@@ -430,4 +440,6 @@ def _build_metering(
         metering["task_id"] = task_id
     if subtask_id:
         metering["subtask_id"] = subtask_id
+    if policy_violation:
+        metering["policy_violation"] = policy_violation
     return metering
