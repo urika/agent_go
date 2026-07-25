@@ -7,42 +7,11 @@ from typing import Any, Optional
 from .console import get_default_console
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
+from .notify import notify_event
 
 logger = logging.getLogger(__name__)
 
 __all__: list[str] = []
-
-def _notify_complete(task_id: str, total: int, completed_ids: list, has_failed: bool, config: dict) -> None:
-    """任务完成时发送桌面通知（M1）。"""
-    behavior = config.get("behavior", {})
-    if not behavior.get("notify_on_complete", True):
-        return
-
-    status_str = "失败" if has_failed else "完成"
-    title = f"🤖 agent_go: {task_id}"
-    msg = f"全部完成 ({len(completed_ids)}/{total}) [{status_str}]"
-
-    # macOS 桌面通知
-    import shlex
-    script = f'display notification "{msg}" with title "{title}"'
-    try:
-        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
-    except FileNotFoundError:
-        pass  # 非 macOS 环境
-    except subprocess.TimeoutExpired:
-        pass
-
-    # 自定义通知命令
-    custom_cmd = behavior.get("notify_command", "")
-    if custom_cmd:
-        try:
-            formatted = custom_cmd.format(
-                task_id=task_id, status=status_str,
-                completed=len(completed_ids), total=total,
-            )
-            subprocess.run(shlex.split(formatted), capture_output=True, timeout=10)
-        except Exception as e:
-            logger.debug("自定义通知命令失败: %s", e)
 
 
 def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
@@ -115,25 +84,33 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
 
     while remaining:
         # M6: 分离已阻断的子任务（上游失败 → 下游不执行）
+        # block_on_failure=false（--no-verify-block）时跳过阻断，下游照常调度
+        block_on_failure = config.get("verification", {}).get("block_on_failure", True)
         newly_blocked = []
-        for st in remaining:
-            deps = st.get("depends_on", [])
-            if any(dep in failed_ids or dep in blocked_ids for dep in deps):
-                newly_blocked.append(st)
-                blocked_ids.add(st["id"])
-                results_map[st["id"]] = {
-                    "subtask_id": st["id"], "status": "blocked",
-                    "exit_code": -1, "summary": f"上游失败，已阻断: {[d for d in deps if d in failed_ids or d in blocked_ids]}",
-                    "failure_reason": "上游依赖失败，级联阻断",
-                    "worktree": "", "sandbox_type": "headless",
-                    "verify_ok": False, "duration_sec": 0,
-                }
-                completed_ids.add(st["id"])
+        if block_on_failure:
+            for st in remaining:
+                deps = st.get("depends_on", [])
+                blockers = [d for d in deps if d in failed_ids or d in blocked_ids]
+                if blockers:
+                    newly_blocked.append(st)
+                    blocked_ids.add(st["id"])
+                    results_map[st["id"]] = {
+                        "subtask_id": st["id"], "status": "blocked",
+                        "exit_code": -1, "summary": f"上游失败，已阻断: {blockers}",
+                        "blocked_by": blockers,
+                        "failure_reason": "上游依赖失败，级联阻断",
+                        "worktree": "", "sandbox_type": "headless",
+                        "verify_ok": False, "duration_sec": 0,
+                    }
+                    completed_ids.add(st["id"])
         if newly_blocked:
             logger.info(f"[级联阻断] {', '.join(st['id'] for st in newly_blocked)} — 上游失败，已阻断")
 
+        # 已被阻断的子任务不得进入 wave（blocked_ids 中的子任务虽然 deps 已满足，
+        # 但必须跳过执行，否则阻断形同虚设、blocked 结果会被真实执行覆盖）
         wave = [st for st in remaining
-                if all(dep in completed_ids for dep in st.get("depends_on", []))]
+                if st["id"] not in blocked_ids
+                and all(dep in completed_ids for dep in st.get("depends_on", []))]
         if not wave:
             logger.error("依赖循环或无法满足的依赖！")
             # 将无法调度的子任务标记为失败，避免收尾时 meta 误标 completed
@@ -153,7 +130,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         if actual_workers == 1:
             for st in wave:
                 upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock, metering_path=config.get("_metering_path", ""))
+                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
                 with meta_lock:
                     worktree_map[st["id"]] = task_dir / st["id"] / "work"
                     results_map[st["id"]] = result
@@ -171,7 +148,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                 futures = {}
                 for st in wave:
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids, active_pids_lock, metering_path=config.get("_metering_path", ""))
+                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids, active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
                     futures[fut] = st
                 for fut in as_completed(futures):
                     st = futures[fut]
@@ -382,4 +359,6 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         console.print(f"  或直接 cd 到对应目录查看")
 
     # ── 任务完成通知（M1） ──
-    _notify_complete(meta.get("task_id", ""), total, completed_ids, has_failed, config)
+    # 事件优先级：on_blocked > on_failed > on_complete（一次管线只派发一个事件）
+    event = "on_blocked" if has_blocked else "on_failed" if has_failed else "on_complete"
+    notify_event(event, {"meta": meta, "results_map": results_map, "task_dir": task_dir}, config)

@@ -9,8 +9,8 @@
 |------|------|------|
 | S1 计量日志 | ✅ 完成 | planner/worker 双角色 metering.jsonl 全链路（run + resume）；eval cost per-role 拆分；修复 executor 计量路径死代码、api.py router 路径 NameError |
 | S1 M2 失败摘要 | ✅ 完成 | `failure_reason`（验证命令 + exit code + stderr 尾部）写入结果，`show` 展示 |
-| S2 验证循环 | 🔶 部分 | blocked 阻断、evaluator、max-retries 已在代码中；失败 worktree 保留 + `agent_go inspect` + `--preserve-worktrees/--no-preserve` 已落地 |
-| M1 完成通知 | 🔶 部分 | `_notify_complete` 已落地，通知通道（webhook/系统通知）待配 |
+| S2 验证循环 | ✅ 基本完成（2026-07-25 全链路验收） | 验收修复：CLI 配置贯通（--max-retries/--no-goal/--semantic-eval 此前全部断线）、fix prompt 注入 stdout/stderr+diff --stat、verify_retry 结构化事件、blocked_by 字段、**wave 调度排除 blocked 子任务（阻断此前形同虚设）**、block_on_failure 开关、eval Q3 口径 + Q10 平均重试。剩余：Stop Hook GoalInjector（.claude/settings.json + verify-goal.sh）未实现、retry_timeout 死配置、goal.enabled 默认 true vs 设计 false |
+| M1 完成通知 | ✅ 完成 | `notify.py` 多通道（desktop/webhook/command）+ 事件订阅 + IM 适配器，设计稿：[design/notification-webhook-spec.md](design/notification-webhook-spec.md) |
 | S4 模型路由 | 🔶 部分 | `router.py`（planner/worker/reviewer 路由 + 熔断 + 降级留痕）已落地；复杂度双通道未做 |
 
 ## 总体节奏
@@ -60,4 +60,4 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 2. ~~M2 失败摘要~~ ✅ 已完成（2026-07-25）
 3. ~~刷新文档数据漂移~~ ✅ 已完成（README/architecture.md/spec.md 同步至 698 测试）
 
-下一批：M1 通知通道配置化（webhook/系统通知）、S2 对照设计稿全链路验收（`/goal` 注入 + eval 新指标）。
+下一批：S2 剩余项（Stop Hook GoalInjector、retry_timeout 接线或移除、goal.enabled 默认值对齐）、S4 复杂度双通道。

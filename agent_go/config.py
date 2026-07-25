@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "verification": {
         "max_retries": 3,               # 验证失败后最大修复重试次数
         "retry_timeout": 300,            # 每次修复重试超时（秒）
+        "block_on_failure": True,        # 验证失败是否阻断下游依赖（--no-verify-block 可关）
     },
     "goal": {
         "enabled": True,                # 是否在 TASK.md 注入 goal 指令

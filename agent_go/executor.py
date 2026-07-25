@@ -18,6 +18,20 @@ _BOUNDARY_CHARS = r'\s"\'\(\):/：，。、'
 _BOUNDARY_BEFORE = rf'(?<![^{_BOUNDARY_CHARS}])'
 _BOUNDARY_AFTER = rf'(?![^{_BOUNDARY_CHARS}])'
 
+_mod_logger = logging.getLogger(__name__)
+
+
+def _effective_config(config: Optional[dict]) -> dict:
+    """优先使用调用方传入的运行时 config（含 CLI 覆盖，如 --max-retries/--no-goal），
+    否则回退磁盘配置。此前各函数一律 load_config() 读磁盘，导致 CLI 覆盖不生效。"""
+    if config:
+        return config
+    try:
+        from .config import load_config
+        return load_config()
+    except Exception:
+        return {}
+
 
 def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, logger: logging.Logger,
                           task_id: str = "", sub_id: str = "") -> dict:
@@ -45,6 +59,9 @@ def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, lo
                             env=_build_sandbox_env())
         result_entry["exit_code"] = vr.returncode
         result_entry["duration_ms"] = round((time.time() - v_start) * 1000)
+        # S2 全量失败反馈：保留输出尾部供修复 prompt 注入
+        result_entry["stdout_tail"] = (vr.stdout or "")[-1500:]
+        result_entry["stderr_tail"] = (vr.stderr or "")[-1500:]
     except (FileNotFoundError, OSError, ValueError):
         logger.warning(f"验证命令无法解析为 argv (跳过): {vcmd[:100]}")
         # 不降级到 shell=True（安全策略）
@@ -110,7 +127,7 @@ def _create_worktree(task_id, sub_id, repo, task_dir, logger):
     return worktree, worktree_create_ms
 
 
-def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_conflicts=None):
+def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_conflicts=None, config=None):
     """Build TASK.md content. Returns (task_md, verification, skill_names, unresolved_skills)."""
     task_md_parts = [f"# 子任务: {subtask['title']}", ""]
 
@@ -167,13 +184,7 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     task_md_parts.extend(exec_requirements)
 
     # Phase 2: GoalInjector — 注入目标导向指令
-    goal_enabled = True
-    try:
-        from .config import load_config
-        _cfg = load_config()
-        goal_enabled = _cfg.get("goal", {}).get("enabled", True)
-    except Exception:
-        pass
+    goal_enabled = _effective_config(config).get("goal", {}).get("enabled", True)
     if verification and goal_enabled:
         task_md_parts.extend([
             "",
@@ -413,7 +424,7 @@ def _load_verify_state(task_dir: Path, sub_id: str) -> Optional[dict]:
         if isinstance(data, dict) and data.get("subtask_id") == sub_id:
             return data
     except (json.JSONDecodeError, OSError) as e:
-        logger.debug(f"读取 verify_state.json 失败: {e}")
+        _mod_logger.debug(f"读取 verify_state.json 失败: {e}")
     return None
 
 
@@ -442,21 +453,16 @@ def _persist_verify_state(
     try:
         path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     except OSError as e:
-        logger.debug(f"写入 verify_state.json 失败: {e}")
+        _mod_logger.debug(f"写入 verify_state.json 失败: {e}")
 
 
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
-                    task_dir=None):
+                    task_dir=None, config=None):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
-    # Phase 1: 从 config 读取 max_retries（默认 3）
-    max_retries = 3
-    try:
-        from .config import load_config
-        _cfg = load_config()
-        max_retries = _cfg.get("verification", {}).get("max_retries", 3)
-    except Exception:
-        pass  # 测试环境 config 不可用时使用默认值
+    # Phase 1: 从运行时 config 读取 max_retries（默认 3，CLI --max-retries 可覆盖）
+    _cfg = _effective_config(config)
+    max_retries = _cfg.get("verification", {}).get("max_retries", 3)
 
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
@@ -512,17 +518,10 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     verification_ms = 0
     verification_history: list[dict] = []
 
-    # Phase 3: 读取 LLM 语义评估配置
-    evaluator_cfg = {}
-    evaluator_enabled = False
-    _full_cfg: dict = {}
-    try:
-        from .config import load_config
-        _full_cfg = load_config()
-        evaluator_cfg = _full_cfg.get("evaluator", {})
-        evaluator_enabled = bool(evaluator_cfg.get("enabled", False))
-    except Exception:
-        pass
+    # Phase 3: 读取 LLM 语义评估配置（运行时 config 优先，CLI --semantic-eval 可覆盖）
+    _full_cfg: dict = _effective_config(config)
+    evaluator_cfg = _full_cfg.get("evaluator", {})
+    evaluator_enabled = bool(evaluator_cfg.get("enabled", False))
 
     semantic_feedback: Optional[dict] = None
     if verification and has_changes:
@@ -563,11 +562,13 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 if vr_entry["exit_code"] not in (0, 127):
                     all_pass = False
                     failed_cmds.append(vcmd)
-                    # 尝试获取失败命令的输出
-                    cmd_output = ""
-                    if vr_entry.get("exit_code", -1) > 0:
-                        cmd_output = f"exit_code={vr_entry['exit_code']}"
-                    failed_outputs.append(cmd_output)
+                    # S2 全量失败反馈：exit code + stdout/stderr 尾部注入修复 prompt
+                    out_parts = [f"exit_code={vr_entry['exit_code']}"]
+                    if vr_entry.get("stdout_tail"):
+                        out_parts.append(f"stdout:\n{vr_entry['stdout_tail']}")
+                    if vr_entry.get("stderr_tail"):
+                        out_parts.append(f"stderr:\n{vr_entry['stderr_tail']}")
+                    failed_outputs.append("\n".join(out_parts))
 
             # Phase 4: 持久化验证状态
             if task_dir:
@@ -622,12 +623,16 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             # 6. 构建修复 prompt 并执行修复
             retry_count += 1
             logger.info(f"验证失败，第 {retry_count}/{max_retries} 次修复重试")
+            # S2 可观测性：每次修复重试落结构化事件，供 eval 分析
+            log_event(logger, "verify_retry", {
+                "sub_id": sub_id, "attempt": retry_count, "max_retries": max_retries,
+                "failed_cmds": [c[:100] for c in failed_cmds],
+                "exit_codes": [vr.get("exit_code") for vr in verification_results[-len(cmds):]],
+                "duration_ms": round(verification_ms),
+            })
 
-            # 获取 git diff
-            diff_result = subprocess.run(
-                ["git", "diff"], cwd=str(worktree),
-                capture_output=True, text=True)
-            git_diff = diff_result.stdout
+            # diff --stat 在 commit 前已计算（summary）；commit 后工作区干净，git diff 必为空
+            git_diff = summary
 
             fix_prompt = _build_repair_prompt(
                 task_md, failed_cmds, failed_outputs,
@@ -717,7 +722,7 @@ def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verif
     logger.info(f"上下文已写入: {line_count} 行")
 
 
-def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path=""):
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path="", config=None):
     sub_id = subtask["id"]
     console = get_default_console()
     sub_dir = task_dir / sub_id
@@ -757,7 +762,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     # 3. Build TASK.md
     task_md, verification, skill_names, unresolved_skills = _build_task_md(
         subtask, repo, task_dir, worktree, logger, headless,
-        merge_conflicts=merge_conflicts
+        merge_conflicts=merge_conflicts, config=config,
     )
 
     # Write TASK.md to disk
@@ -782,6 +787,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     # config.json 没有此键，必须用参数传入，不能 load_config() 重读。
     if metering_path:
         env["AGENT_GO_METERING_PATH"] = str(metering_path)
+    # 运行时 config 的 goal 设置经 env 传给 subtask.py 的 watchdog（CLI --no-goal 等覆盖才能生效）
+    if config:
+        goal_cfg = config.get("goal", {})
+        env["AGENT_GO_GOAL_ENABLED"] = "1" if goal_cfg.get("enabled", True) else "0"
+        env["AGENT_GO_GOAL_MAX_TURNS"] = str(goal_cfg.get("max_turns", 20))
+        env["AGENT_GO_GOAL_TIMEOUT"] = str(goal_cfg.get("timeout_seconds", 600))
 
     # 4. Agent type configuration
     agent_type_name = subtask.get("agent_type", "developer")
@@ -805,7 +816,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
         active_pids, active_pids_lock, logger, issue_ref=issue_ref,
         allowed_tools=agent.claude_config.get("allowed_tools", []) if agent else None,
-        task_dir=task_dir,
+        task_dir=task_dir, config=config,
     )
     has_changes = verify_results["has_changes"]
     summary = verify_results["summary"]

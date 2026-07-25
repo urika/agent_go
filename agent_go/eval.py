@@ -63,7 +63,9 @@ def analyze_quality(meta: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     q1 = round(completed / total * 100) if total else 0
     q2 = round((completed + no_changes) / total * 100) if total else 0
 
-    first_pass = sum(1 for r in results if r.get("retry_count", 0) == 0)
+    # Q3 首次验证通过率：retry_count==0 且 verify_ok（此前只看 retry_count，
+    # 0 次重试但验证失败的也被误算进「首次通过」）
+    first_pass = sum(1 for r in results if r.get("retry_count", 0) == 0 and r.get("verify_ok"))
     q3 = round(first_pass / total * 100) if total else 0
 
     with_changes = [r for r in results if r.get("status") != "no_changes"]
@@ -117,6 +119,9 @@ def analyze_quality(meta: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     blocked = sum(1 for r in results if r.get("status") == "blocked")
     blocked_rate = round(blocked / total * 100) if total else 0
 
+    # 平均重试次数（设计稿 P8 指标，归入质量报告随 Q8/Q9 一起展示）
+    avg_retries = round(sum(r.get("retry_count", 0) for r in results) / total, 2) if total else 0
+
     return {
         "task_id": meta.get("task_id", ""),
         "status": meta.get("status", ""),
@@ -131,6 +136,7 @@ def analyze_quality(meta: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         "Q7_plan_accuracy_recall": q7_recall,
         "Q8_retry_success_rate": retry_success_rate,
         "Q9_blocked_rate": blocked_rate,
+        "Q10_avg_retries": avg_retries,
         "change_scale": {"avg_files": avg_files, "avg_insertions": avg_insertions, "avg_deletions": avg_deletions},
         "score": round(q1 * 0.4 + q3 * 0.3 + q4 * 0.3),
     }
@@ -247,6 +253,7 @@ def aggregate_quality(tasks_dir: Path) -> Optional[dict[str, Any]]:
         "avg_merge_success": round(sum(r["Q6_merge_success_rate"] for r in items) / len(items)),
         "avg_retry_success": round(sum(r["Q8_retry_success_rate"] for r in items) / len(items)),
         "avg_blocked_rate": round(sum(r["Q9_blocked_rate"] for r in items) / len(items)),
+        "avg_retries": round(sum(r.get("Q10_avg_retries", 0) for r in items) / len(items), 2),
         "avg_score": round(sum(r["score"] for r in items) / len(items)),
     }
 
@@ -599,6 +606,7 @@ def _print_quality_report(q: Optional[dict[str, Any]]) -> None:
     console.print(f"  Q7 计划准确性:       P={q['Q7_plan_accuracy_precision']}% R={q['Q7_plan_accuracy_recall']}%")
     console.print(f"  Q8 重试修复成功率:   {q['Q8_retry_success_rate']}%")
     console.print(f"  Q9 级联阻断率:       {q['Q9_blocked_rate']}%")
+    console.print(f"  Q10 平均重试次数:    {q.get('Q10_avg_retries', 0)}")
     cs = q["change_scale"]
     console.print(f"  变更规模:            avg {cs['avg_files']} files, +{cs['avg_insertions']}/-{cs['avg_deletions']}")
     console.print(f"  ─────────────────────────────")

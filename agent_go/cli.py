@@ -59,6 +59,8 @@ def _build_parser():
                             help="保留全部 worktree 不清除（默认仅保留 failed/blocked）")
     run_parser.add_argument("--no-preserve", action="store_true", dest="no_preserve",
                             help="强制清理所有 worktree，包括失败/阻断的")
+    run_parser.add_argument("--no-verify-block", action="store_true", dest="no_verify_block",
+                            help="验证失败不阻断下游依赖（默认阻断）")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -74,6 +76,8 @@ def _build_parser():
                                help="保留全部 worktree 不清除")
     resume_parser.add_argument("--no-preserve", action="store_true", dest="no_preserve",
                                help="强制清理所有 worktree")
+    resume_parser.add_argument("--no-verify-block", action="store_true", dest="no_verify_block",
+                               help="验证失败不阻断下游依赖（默认阻断）")
 
     # list 子命令
     subparsers.add_parser("list", help="List all historical tasks")
@@ -209,6 +213,8 @@ def cmd_run(args=None):
         config.setdefault("evaluator", {})["enabled"] = True
     if no_semantic_eval:
         config.setdefault("evaluator", {})["enabled"] = False
+    if getattr(args, "no_verify_block", False):
+        config.setdefault("verification", {})["block_on_failure"] = False
 
     if auto_yes:
         config["behavior"]["auto_confirm_plan"] = True
@@ -416,6 +422,12 @@ def cmd_resume(args=None):
     config["_metering_path"] = str(task_dir / "metering.jsonl")
     config["_task_id"] = task_id
 
+    # CLI 覆盖：--max-retries / --no-verify-block（args 模式）
+    if args and getattr(args, 'max_retries', None) is not None:
+        config.setdefault("verification", {})["max_retries"] = args.max_retries
+    if args and getattr(args, 'no_verify_block', False):
+        config.setdefault("verification", {})["block_on_failure"] = False
+
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv
     parallel = 1
@@ -434,6 +446,16 @@ def cmd_resume(args=None):
             remote_url = sys.argv[ri + 1]
         except (IndexError, ValueError):
             logger.debug("Invalid --remote flag value, ignoring")
+    # sys.argv 模式的 --max-retries / --no-verify-block（非 args 模式）
+    if not (args and hasattr(args, 'task_id')):
+        if "--max-retries" in sys.argv:
+            try:
+                mi = sys.argv.index("--max-retries")
+                config.setdefault("verification", {})["max_retries"] = int(sys.argv[mi + 1])
+            except (IndexError, ValueError):
+                logger.debug("Invalid --max-retries value, ignoring")
+        if "--no-verify-block" in sys.argv:
+            config.setdefault("verification", {})["block_on_failure"] = False
     # 如果从 sys.argv 解析（非 args 模式），解析 preserve 标志
     if not (args and hasattr(args, 'task_id')):
         preserve_worktrees = "--preserve-worktrees" in sys.argv

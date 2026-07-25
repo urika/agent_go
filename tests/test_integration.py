@@ -130,7 +130,7 @@ def make_fast_subtask_result(status="completed", sub_id="sub-1", delay=0.0):
     """模拟 run_subtask 的返回值，可选延迟。"""
     def _run(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None,
              headless=False, issue_ref="", active_pids=None, active_pids_lock=None,
-             metering_path=""):
+             metering_path="", config=None):
         if delay > 0:
             time.sleep(delay)
         worktree = task_dir / subtask["id"] / "work"
@@ -217,7 +217,7 @@ class TestFullPipeline:
                       "sandbox_type": "headless", "duration_sec": 0.1},
         }
         mock_run_subtask.side_effect = lambda task_id, subtask, repo, task_dir, \
-            logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path="": \
+            logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path="", config=None: \
             results[subtask["id"]]
 
         subtasks = plan_to_subtasks(sample_plan, fast_logger)
@@ -383,7 +383,7 @@ class TestConcurrentExecution:
         def _mock_run_with_order(task_id, subtask, repo, task_dir,
                                   logger, upstream_worktrees=None,
                                   headless=False, issue_ref="", active_pids=None, active_pids_lock=None,
-                                  metering_path=""):
+                                  metering_path="", config=None):
             execution_order.append(subtask["id"])
             return {"subtask_id": subtask["id"], "status": "completed",
                     "summary": "ok", "verify_ok": True,

@@ -4,7 +4,7 @@ This file provides guidance to Codex when working with code in this repository.
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (19 modules, ~5100 lines) that wraps Codex with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Codex. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, worktree preservation for failed tasks, and remote branch push.
+agent_go is a modular Python CLI tool (20 modules, ~5300 lines) that wraps Codex with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Codex. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, worktree preservation for failed tasks, and remote branch push.
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -76,7 +76,7 @@ cmd_run()
         └── inspect command → list preserved worktrees, paths, git branches
 ```
 
-## Key Modules (19 modules, ~5100 lines)
+## Key Modules (20 modules, ~5300 lines)
 
 | Module | Purpose |
 |--------|---------|
@@ -84,8 +84,9 @@ cmd_run()
 | `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
 | `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
 | `executor.py` | Core subtask runner: worktree create, skill load, Codex spawn, verify |
-| `pipeline.py` | Wave scheduler, concurrency, worktree preservation/cleanup, remote push, notify |
+| `pipeline.py` | Wave scheduler, concurrency, worktree preservation/cleanup, remote push |
 | `subtask.py` | Codex -p headless runner, git merge upstream, worker metering |
+| `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
 | `git_utils.py` | Project analysis, worktree create/remove/prune, gc.auto control |
 | `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown) |
 | `agents.py` | Agent type system: developer/architect/reviewer/tester |
@@ -115,7 +116,7 @@ cmd_run()
 ## Testing
 
 ```bash
-pytest tests/           # 698 tests (~17s)
+pytest tests/           # 722 tests (~18s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -124,8 +125,8 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 ## File Organization
 
 ```
-agent_go/           # 19 Python modules (~5100 lines)
-tests/              # 36 test files, 698 tests
+agent_go/           # 20 Python modules (~5300 lines)
+tests/              # 37 test files, 722 tests
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records
 ```

@@ -168,6 +168,16 @@ call_with_role(route, messages, api_key, logger, ...) → primary → fallback �
 LLM 语义评估 + 失败原因摘要 (failure_summary)，供修复循环与 eval 指标使用
 ```
 
+## notify.py — 多通道事件通知 (M1)
+
+```
+notify_event(event, context, config)   → 唯一入口：on_complete/on_failed/on_blocked
+  ── _resolve_notify_config()          → notify 块解析 + behavior.notify_* 兼容层
+  ── build_payload()                   → 聚合 failure_reason/metering/.preserved（白名单字段）
+  ── desktop / webhook / command 通道   → webhook 支持 generic/slack/dingtalk/wecom/ntfy
+  ── ${VAR} 环境变量插值、https 校验、超时重试、故障隔离
+```
+
 ## eval.py — 离线评估 (606 行)
 
 ```

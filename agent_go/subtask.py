@@ -56,7 +56,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     allowed_tools: Agent 类型声明的工具白名单（如 architect 的 Read/Grep/Glob）。
     非空时通过 --allowedTools 强制约束；None/空列表表示不限制（developer 默认）。
     """
-    # Phase 2: GoalInjector 看门狗配置
+    # Phase 2: GoalInjector 看门狗配置。优先级：env（运行时 config 注入，CLI 覆盖生效）> 磁盘 config > 默认
     GOAL_WATCHDOG_ENABLED = True
     MAX_GOAL_TURNS = 20
     GOAL_TIMEOUT = 600
@@ -69,6 +69,18 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         GOAL_TIMEOUT = _goal_cfg.get("timeout_seconds", 600)
     except Exception:
         pass
+    if "AGENT_GO_GOAL_ENABLED" in env:
+        GOAL_WATCHDOG_ENABLED = env["AGENT_GO_GOAL_ENABLED"] == "1"
+    if "AGENT_GO_GOAL_MAX_TURNS" in env:
+        try:
+            MAX_GOAL_TURNS = int(env["AGENT_GO_GOAL_MAX_TURNS"])
+        except ValueError:
+            pass
+    if "AGENT_GO_GOAL_TIMEOUT" in env:
+        try:
+            GOAL_TIMEOUT = int(env["AGENT_GO_GOAL_TIMEOUT"])
+        except ValueError:
+            pass
 
     PFX = f"[{sub_id}]"
     if active_pids is None:
