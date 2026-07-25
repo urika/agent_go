@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["notify_event", "build_payload"]
 
-EVENTS = ("on_complete", "on_failed", "on_blocked")
+EVENTS = ("on_complete", "on_failed", "on_blocked", "subtask_failed")
 
 _FAILURE_REASON_MAX = 500   # IM 消息上限保护，超出截断并标注 truncated
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -88,6 +88,29 @@ def _parse_created(created: str) -> Optional[float]:
 def build_payload(event: str, context: dict[str, Any]) -> dict[str, Any]:
     """组装通用 payload（字段白名单制，不接受 config 扩展字段）。"""
     meta = context.get("meta", {})
+
+    # S6: subtask_failed 事件走独立路径（无完整 results_map）
+    if event == "subtask_failed":
+        subtask = context.get("subtask", {})
+        result = context.get("result", {})
+        task_dir = Path(context.get("task_dir", "."))
+        task_id = meta.get("task_id", "")
+        reason = result.get("failure_reason", "") or "未知错误"
+        title = subtask.get("title", "")
+        return {
+            "event": event,
+            "task_id": task_id,
+            "task": meta.get("task", ""),
+            "repo": meta.get("repo", ""),
+            "subtask_id": subtask.get("id", ""),
+            "subtask_title": title,
+            "failure_reason": reason,
+            "status": result.get("status", "failed"),
+            "duration_sec": result.get("duration_sec", 0),
+            "task_dir": str(task_dir),
+            "ts": datetime.now().isoformat(timespec="seconds"),
+        }
+
     results_map = context.get("results_map", {})
     task_dir = Path(context.get("task_dir", "."))
     task_id = meta.get("task_id", "")
@@ -164,7 +187,12 @@ def build_payload(event: str, context: dict[str, Any]) -> dict[str, Any]:
 
 def _summary_line(payload: dict[str, Any]) -> str:
     c = payload["subtasks"]
-    icon = {"on_complete": "🎉", "on_failed": "❌", "on_blocked": "🔗"}.get(payload["event"], "🤖")
+    event = payload["event"]
+    if event == "subtask_failed":
+        return (f"❌ agent_go {payload['task_id']}: 子任务「{payload.get('subtask_title', '')}」失败"
+                f" — {payload.get('failure_reason', '')[:120]}")
+
+    icon = {"on_complete": "🎉", "on_failed": "❌", "on_blocked": "🔗"}.get(event, "🤖")
     parts = [f"{icon} agent_go {payload['task_id']}: {payload['status']} "
              f"({c['completed']}/{c['total']} 完成"]
     if c["failed"]:

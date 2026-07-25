@@ -143,6 +143,17 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                 completed_ids.add(st["id"])
                 if result.get("status") == "failed":
                     failed_ids.add(st["id"])
+                    # S6 失败通知增强：子任务失败时主动推送（即使整体未完成）
+                    from .notify import notify_event as _notify_event
+                    try:
+                        _notify_event("subtask_failed", {
+                            "subtask": st,
+                            "result": result,
+                            "meta": meta,
+                            "task_dir": str(task_dir),
+                        }, config)
+                    except Exception:
+                        pass
         else:
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 futures = {}
@@ -164,6 +175,18 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                         results_map[st["id"]] = result
                         if result.get("status") == "degraded":
                             degraded_count += 1
+                        # S6 失败通知增强：子任务失败时主动推送
+                        if result.get("status") == "failed":
+                            from .notify import notify_event as _notify_event
+                            try:
+                                _notify_event("subtask_failed", {
+                                    "subtask": st,
+                                    "result": result,
+                                    "meta": meta,
+                                    "task_dir": str(task_dir),
+                                }, config)
+                            except Exception:
+                                pass
                         # 每个 subtask 独立写 result.json
                         result_file = task_dir / st["id"] / "result.json"
                         result_file.parent.mkdir(parents=True, exist_ok=True)

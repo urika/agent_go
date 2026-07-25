@@ -891,6 +891,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 model=_plan_api.get("model", ""),
             )
             _route_info = f"plan_api:{pc.provider}/{pc.model}"
+        # S4 复杂度双通道：按 difficulty 路由模型（非空时覆盖）
+        if routed_model:
+            pc.model = routed_model
+            _route_info += f" → {routed_model}"
+            logger.info(f"[S4] AgentLoop {sub_id} difficulty={difficulty} → model={routed_model}")
         api_key = get_api_key(config)
         loop = AgentLoop(logger=logger)
         console.print(f"  🤖 直接 API 模式 ({_route_info})")
