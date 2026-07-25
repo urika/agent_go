@@ -138,15 +138,26 @@ def _build_parser():
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
-    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "all"],
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "all"],
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
+    # gate 子命令参数：$/pass rate 基线阈值（缺省 0.05 = PRD Q3 目标）
+    eval_parser.add_argument("--baseline", type=float, dest="baseline", default=None,
+                             help="$/pass rate 基线阈值（gate 子命令用，缺省 0.05）")
 
     # inspect 子命令
     inspect_parser = subparsers.add_parser("inspect", help="查看保留的 worktree 现场")
     inspect_parser.add_argument("task_id", help="Task ID to inspect")
     inspect_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # plan-history / plan-diff 子命令（Plan 版本管理）
+    plan_history_parser = subparsers.add_parser("plan-history", help="List Plan version history")
+    plan_history_parser.add_argument("task_id", help="Task ID")
+    plan_diff_parser = subparsers.add_parser("plan-diff", help="Diff two Plan versions")
+    plan_diff_parser.add_argument("task_id", help="Task ID")
+    plan_diff_parser.add_argument("--v1", type=int, default=1, help="First version (default: 1)")
+    plan_diff_parser.add_argument("--v2", type=int, default=None, help="Second version (default: latest)")
     inspect_parser.add_argument("--all", action="store_true", help="Show all subtasks, not just preserved ones")
 
     # router 子命令
@@ -330,6 +341,9 @@ def cmd_run(args=None):
                 iteration += 1
                 # 重生成时重新读取 D 挂载的参考文档，避免确认环节挂载的内容丢失
                 regen_docs = read_reference_docs(final_doc_paths, repo, logger) if final_doc_paths else ""
+                # 保存上一版 Plan 快照后再生
+                if plan:
+                    _save_plan_snapshot(task_dir, plan, iteration - 1)
                 try:
                     plan = generate_plan(task, repo, config, logger, "", regen_docs, iteration, skill_plan_context, no_cache=no_cache)
                 except Exception as e:
@@ -359,7 +373,8 @@ def cmd_run(args=None):
             subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)
             doc_paths = final_doc_paths
             (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
-            logger.info("[PLAN] PLAN.md 已保存")
+            _save_plan_snapshot(task_dir, confirmed_plan, iteration)
+            logger.info(f"[PLAN] PLAN.md 已保存 (v{iteration})")
     else:
         # 降级拆解
         console.print(f"\n⚠️ Plan Mode 失败: {last_error}")
@@ -824,7 +839,7 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False)
     lines.append("")
 
     # 质量仪表
-    quality = _build_quality_dashboard(meta)
+    quality = _build_quality_dashboard(meta, task_dir=task_dir)
     if quality:
         lines.append(quality)
 
@@ -853,12 +868,14 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False)
     console.print("\n".join(lines))
 
 
-def _build_quality_dashboard(meta: dict) -> str:
+def _build_quality_dashboard(meta: dict, task_dir: Optional[Path] = None) -> str:
     """构建 PR 质量仪表（M3）— 回答「我该不该 merge？」。
 
     返回 Markdown 格式的质量评估段，包含：
     - 通过率统计（completed / total / degraded）
     - 每子任务验证状态（verify_ok, duration, failure_reason）
+    - 审查结论（从 review.json 读取）
+    - Plan 版本信息（从 plans/ 目录读取）
     - 合并就绪指示器（🟢 ready / 🟡 caution / 🔴 blocked）
     """
     results = meta.get("results", [])
@@ -908,6 +925,30 @@ def _build_quality_dashboard(meta: dict) -> str:
         "",
     ]
 
+    # 审查结论
+    if task_dir:
+        review_path = task_dir / "review.json"
+        if review_path.exists():
+            try:
+                review = json.loads(review_path.read_text(encoding="utf-8"))
+                decision = review.get("decision", "?")
+                decision_icon = {"approved": "✅", "rejected": "❌"}.get(decision, "❓")
+                reviewed_at = review.get("reviewed_at", "")[:19]
+                review_summary = review.get("summary", "")
+                lines.append(f"| **审查结论** | {decision_icon} {decision} ({reviewed_at}) |")
+                lines.append(f"| **审查摘要** | {review_summary} |")
+                lines.append("")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Plan 版本信息
+        plans_dir = task_dir / "plans"
+        if plans_dir.exists():
+            versions = sorted([f.stem for f in plans_dir.glob("v*.json")], key=lambda x: int(x[1:]))
+            if versions:
+                lines.append(f"| **Plan 版本** | {len(versions)} 个版本 (v{versions[0][1:]}–v{versions[-1][1:]}) |")
+                lines.append("")
+
     # 每子任务详情
     if results:
         lines.append("### 子任务详情")
@@ -933,6 +974,110 @@ def _build_quality_dashboard(meta: dict) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _save_plan_snapshot(task_dir: Path, plan: dict, version: int) -> None:
+    """保存 Plan 版本快照到 task_dir/plans/v{version}.json。"""
+    plans_dir = task_dir / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "version": version,
+        "saved_at": datetime.now().isoformat(),
+        "plan": plan,
+    }
+    path = plans_dir / f"v{version}.json"
+    path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _show_plan_history(task_dir: Path) -> None:
+    """显示 Plan 版本历史。"""
+    from .console import get_default_console
+    console = get_default_console()
+    plans_dir = task_dir / "plans"
+    if not plans_dir.exists():
+        console.print("📋 Plan 版本历史")
+        console.print("  (无历史版本)")
+        return
+
+    versions = sorted(
+        [f.stem for f in plans_dir.glob("v*.json")],
+        key=lambda x: int(x[1:]),
+    )
+    if not versions:
+        console.print("📋 Plan 版本历史")
+        console.print("  (无历史版本)")
+        return
+
+    lines = ["## 📋 Plan 版本历史", ""]
+    for v in versions:
+        try:
+            data = json.loads((plans_dir / f"{v}.json").read_text(encoding="utf-8"))
+            saved_at = data.get("saved_at", "?")[:19]
+            plan = data.get("plan", {})
+            steps = plan.get("steps", plan.get("subtasks", []))
+            step_count = len(steps)
+            step_titles = "; ".join(s.get("title", "?")[:30] for s in steps[:5])
+            lines.append(f"| `{v}` | {saved_at} | {step_count} 步骤 | {step_titles}... |")
+        except Exception as e:
+            lines.append(f"| `{v}` | ❌ 读取失败: {e} | |")
+
+    console.print("\n".join(lines))
+
+
+def _show_plan_diff(task_dir: Path, v1: int, v2: Optional[int] = None) -> None:
+    """对比两个 Plan 版本的差异。"""
+    from .console import get_default_console
+    console = get_default_console()
+    plans_dir = task_dir / "plans"
+    if not plans_dir.exists():
+        console.print("❌ 无 Plan 版本历史")
+        return
+
+    versions = sorted(
+        [int(f.stem[1:]) for f in plans_dir.glob("v*.json")],
+    )
+    if not versions:
+        console.print("❌ 无 Plan 版本历史")
+        return
+
+    if v2 is None:
+        v2 = versions[-1]
+    if v1 not in versions or v2 not in versions:
+        console.print(f"❌ 版本不存在 (可用: {versions})")
+        return
+
+    data1 = json.loads((plans_dir / f"v{v1}.json").read_text(encoding="utf-8"))
+    data2 = json.loads((plans_dir / f"v{v2}.json").read_text(encoding="utf-8"))
+    plan1 = data1.get("plan", {})
+    plan2 = data2.get("plan", {})
+    steps1 = plan1.get("steps", plan1.get("subtasks", []))
+    steps2 = plan2.get("steps", plan2.get("subtasks", []))
+
+    lines = [
+        f"## 🔍 Plan Diff: v{v1} → v{v2}",
+        f"",
+        f"| 维度 | v{v1} | v{v2} |",
+        f"|------|------|------|",
+        f"| 步骤数 | {len(steps1)} | {len(steps2)} |",
+        f"| 保存时间 | {data1.get('saved_at', '?')[:19]} | {data2.get('saved_at', '?')[:19]} |",
+        f"",
+    ]
+
+    # 对比步骤
+    max_steps = max(len(steps1), len(steps2))
+    lines.append("### 步骤对比")
+    lines.append("")
+    lines.append("| # | v1 | v2 |")
+    lines.append("|---|-----|-----|")
+    for i in range(max_steps):
+        s1 = steps1[i] if i < len(steps1) else None
+        s2 = steps2[i] if i < len(steps2) else None
+        t1 = s1.get("title", "")[:40] if s1 else "(无)"
+        t2 = s2.get("title", "")[:40] if s2 else "(无)"
+        marker = " " if t1 == t2 else "← 差异"
+        lines.append(f"| {i+1} | {t1} | {t2} {marker}|")
+
+    console.print("\n".join(lines))
 
 
 def cmd_pr(args=None):
@@ -964,7 +1109,7 @@ def cmd_pr(args=None):
     context = ctx_file.read_text(encoding="utf-8") if ctx_file.exists() else ""
 
     # 质量仪表（M3）
-    quality_dashboard = _build_quality_dashboard(meta)
+    quality_dashboard = _build_quality_dashboard(meta, task_dir=task_dir)
 
     pr_body = f"""## Summary
 
@@ -1404,6 +1549,18 @@ def main() -> None:
             cmd_router(args)
         elif args.command == "inspect":
             cmd_inspect(args)
+        elif args.command == "plan-history":
+            task_dir = AGENT_GO_DIR / args.task_id
+            if not task_dir.exists():
+                console.print(f"❌ 任务不存在: {args.task_id}")
+            else:
+                _show_plan_history(task_dir)
+        elif args.command == "plan-diff":
+            task_dir = AGENT_GO_DIR / args.task_id
+            if not task_dir.exists():
+                console.print(f"❌ 任务不存在: {args.task_id}")
+            else:
+                _show_plan_diff(task_dir, args.v1, args.v2)
     except KeyboardInterrupt:
         print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)
