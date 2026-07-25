@@ -14,6 +14,50 @@ logger = logging.getLogger(__name__)
 __all__: list[str] = []
 
 
+def _record_subtask_result(
+    st: dict,
+    result: dict,
+    task_dir: Path,
+    meta: dict,
+    worktree_map: dict,
+    results_map: dict,
+    completed_ids: set,
+    failed_ids: set,
+    degraded_count: int,
+    meta_lock: threading.Lock,
+    config: dict,
+) -> int:
+    """记录 subtask 结果到共享状态、写 result.json、标记完成、失败时通知。
+
+    串行和并发路径共用此函数，避免双分支代码不一致导致的缩进/语义错误。
+    返回更新后的 degraded_count（int 不可变，需传值返回）。
+    """
+    with meta_lock:
+        worktree_map[st["id"]] = task_dir / st["id"] / "work"
+        results_map[st["id"]] = result
+        if result.get("status") == "degraded":
+            degraded_count += 1
+        # 每个 subtask 独立写 result.json，减少全量覆写
+        result_file = task_dir / st["id"] / "result.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    completed_ids.add(st["id"])
+    if result.get("status") == "failed":
+        failed_ids.add(st["id"])
+        # S6 失败通知增强：子任务失败时主动推送（即使整体未完成）
+        from .notify import notify_event as _notify_event
+        try:
+            _notify_event("subtask_failed", {
+                "subtask": st,
+                "result": result,
+                "meta": meta,
+                "task_dir": str(task_dir),
+            }, config)
+        except Exception:
+            pass
+    return degraded_count
+
+
 def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
                   worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "",
                   preserve_worktrees: Optional[bool] = None) -> None:
@@ -131,29 +175,11 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             for st in wave:
                 upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
                 result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
-                with meta_lock:
-                    worktree_map[st["id"]] = task_dir / st["id"] / "work"
-                    results_map[st["id"]] = result
-                    if result.get("status") == "degraded":
-                        degraded_count += 1
-                    # 每个 subtask 独立写 result.json，减少全量覆写
-                    result_file = task_dir / st["id"] / "result.json"
-                    result_file.parent.mkdir(parents=True, exist_ok=True)
-                    result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-                completed_ids.add(st["id"])
-                if result.get("status") == "failed":
-                    failed_ids.add(st["id"])
-                    # S6 失败通知增强：子任务失败时主动推送（即使整体未完成）
-                    from .notify import notify_event as _notify_event
-                    try:
-                        _notify_event("subtask_failed", {
-                            "subtask": st,
-                            "result": result,
-                            "meta": meta,
-                            "task_dir": str(task_dir),
-                        }, config)
-                    except Exception:
-                        pass
+                degraded_count = _record_subtask_result(
+                    st, result, task_dir, meta,
+                    worktree_map, results_map, completed_ids, failed_ids,
+                    degraded_count, meta_lock, config,
+                )
         else:
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 futures = {}
@@ -161,39 +187,20 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
                     fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids, active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
                     futures[fut] = st
-                    for fut in as_completed(futures):
-                        st = futures[fut]
-                        try:
-                            result = fut.result()
-                        except Exception as e:
-                            result = {"subtask_id": st["id"], "status": "failed",
-                                      "exit_code": -1, "summary": str(e), "worktree": "",
-                                      "sandbox_type": "headless", "verify_ok": False, "duration_sec": 0}
-                            logger.error(f"并发异常 {st['id']}: {e}")
-                        with meta_lock:
-                            worktree_map[st["id"]] = task_dir / st["id"] / "work"
-                            results_map[st["id"]] = result
-                            if result.get("status") == "degraded":
-                                degraded_count += 1
-                            # S6 失败通知增强：子任务失败时主动推送
-                            if result.get("status") == "failed":
-                                from .notify import notify_event as _notify_event
-                                try:
-                                    _notify_event("subtask_failed", {
-                                        "subtask": st,
-                                        "result": result,
-                                        "meta": meta,
-                                        "task_dir": str(task_dir),
-                                    }, config)
-                                except Exception:
-                                    pass
-                            # 每个 subtask 独立写 result.json
-                            result_file = task_dir / st["id"] / "result.json"
-                            result_file.parent.mkdir(parents=True, exist_ok=True)
-                            result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-                        completed_ids.add(st["id"])
-                        if result.get("status") == "failed":
-                            failed_ids.add(st["id"])
+                for fut in as_completed(futures):
+                    st = futures[fut]
+                    try:
+                        result = fut.result()
+                    except Exception as e:
+                        result = {"subtask_id": st["id"], "status": "failed",
+                                  "exit_code": -1, "summary": str(e), "worktree": "",
+                                  "sandbox_type": "headless", "verify_ok": False, "duration_sec": 0}
+                        logger.error(f"并发异常 {st['id']}: {e}")
+                    degraded_count = _record_subtask_result(
+                        st, result, task_dir, meta,
+                        worktree_map, results_map, completed_ids, failed_ids,
+                        degraded_count, meta_lock, config,
+                    )
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
         if _interrupted.is_set():
