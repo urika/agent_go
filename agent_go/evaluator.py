@@ -181,6 +181,9 @@ def evaluate_semantic(
 
     eval_config = dict(config)
     eval_config["plan_api"] = eval_api_cfg
+    # D3 修复：抑制 call_api 的内部记账（它硬编码 role="planner"，会把 evaluator 调用误标）。
+    # evaluator 自己写一条 role="evaluator" 的 metering（用 prompt 长度估算真实 token，而非硬编码）。
+    eval_config.pop("_metering_path", None)
 
     diff = _get_worktree_diff(worktree)
     prompt = _build_eval_prompt(subtask, verification, diff, previous_attempts)
@@ -203,14 +206,16 @@ def evaluate_semantic(
     parsed = _parse_eval_response(content)
     latency_ms = round((time.time() - start) * 1000, 2)
 
-    # 估算成本
+    # D3 修复：用 prompt 长度估算真实 token（替代硬编码 1000/200）。
+    # 保守估算：~3 字符/token（中英混合）。completion 用实际响应长度。
+    est_prompt_tokens = max(1, len(prompt) // 3)
+    est_completion_tokens = max(1, len(content) // 3)
     cost_usd = 0.0
     try:
-        # 简单估算：prompt 约 1000 tokens，completion 约 200 tokens
         cost_usd = estimate_cost(
             eval_api_cfg.get("provider", "anthropic"),
             eval_api_cfg.get("model", ""),
-            1000, 200
+            est_prompt_tokens, est_completion_tokens
         )
     except Exception:
         pass
@@ -222,8 +227,8 @@ def evaluate_semantic(
         "virtual_model": "agentgo-evaluator",
         "actual_provider": eval_api_cfg.get("provider", "anthropic"),
         "actual_model": eval_api_cfg.get("model", ""),
-        "prompt_tokens": 1000,
-        "completion_tokens": 200,
+        "prompt_tokens": est_prompt_tokens,
+        "completion_tokens": est_completion_tokens,
         "cost_usd": round(cost_usd, 6),
         "latency_ms": latency_ms,
         "result": "success" if parsed["passed"] else "quality_fail",
