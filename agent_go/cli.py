@@ -1,4 +1,4 @@
-import sys, os, subprocess, json, time, logging, argparse
+import sys, os, subprocess, json, time, logging, argparse, shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
@@ -114,6 +114,8 @@ def _build_parser():
     pr_parser = subparsers.add_parser("pr", help="Generate and create PR")
     pr_parser.add_argument("task_id", help="Task ID to create PR from")
     pr_parser.add_argument("--offline", action="store_true", help="Only generate PR.md, do not create PR")
+    pr_parser.add_argument("--push", action="store_true", help="Push branch to remote before creating PR")
+    pr_parser.add_argument("--remote", default="origin", help="Remote name to push to (default: origin)")
 
     # ci 子命令
     ci_parser = subparsers.add_parser("ci", help="Generate GitHub Actions workflow")
@@ -1118,16 +1120,25 @@ def _show_plan_diff(task_dir: Path, v1: int, v2: Optional[int] = None) -> None:
 
 
 def cmd_pr(args=None):
-    """根据已完成任务的 meta.json + git log 生成 PR 描述。"""
+    """根据已完成任务的 meta.json + git log 生成并推送 PR。"""
     if args and hasattr(args, 'task_id'):
         task_id = args.task_id
         offline = getattr(args, 'offline', False)
+        do_push = getattr(args, 'push', False)
+        remote = getattr(args, 'remote', "origin")
     elif len(sys.argv) < 3:
-        print("Usage: agent_go pr <task-id> [--offline]")
+        print("Usage: agent_go pr <task-id> [--offline] [--push] [--remote <name>]")
         sys.exit(1)
     else:
         task_id = sys.argv[2]
         offline = "--offline" in sys.argv
+        do_push = "--push" in sys.argv
+        remote = "origin"
+        if "--remote" in sys.argv:
+            try:
+                remote = sys.argv[sys.argv.index("--remote") + 1]
+            except (IndexError, ValueError):
+                pass
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         print(f"任务不存在: {task_id}")
@@ -1145,6 +1156,20 @@ def cmd_pr(args=None):
     ctx_file = task_dir / "SHARED_CONTEXT.md"
     context = ctx_file.read_text(encoding="utf-8") if ctx_file.exists() else ""
 
+    # 审查结论
+    review_section = ""
+    review_path = task_dir / "review.json"
+    if review_path.exists():
+        try:
+            review = json.loads(review_path.read_text(encoding="utf-8"))
+            decision = review.get("decision", "?")
+            decision_icon = {"approved": "✅", "rejected": "❌"}.get(decision, "❓")
+            reviewed_at = review.get("reviewed_at", "")[:19]
+            review_summary = review.get("summary", "")
+            review_section = f"## Review\n\n- **结论**: {decision_icon} {decision} ({reviewed_at})\n- **摘要**: {review_summary}\n\n"
+        except (json.JSONDecodeError, OSError):
+            pass
+
     # 质量仪表（M3）
     quality_dashboard = _build_quality_dashboard(meta, task_dir=task_dir)
 
@@ -1153,7 +1178,7 @@ def cmd_pr(args=None):
 {meta.get('task', 'N/A')}
 
 {quality_dashboard}
-## Subtasks
+{review_section}## Subtasks
 
 {chr(10).join(subtask_lines)}
 
@@ -1165,11 +1190,26 @@ def cmd_pr(args=None):
     if meta.get("issue"):
         pr_body = f"Fixes #{meta['issue']}\n\n{pr_body}"
 
+    # S7: --push 先推送分支到远程
+    if do_push and not offline:
+        repo = meta.get("repo", "")
+        if repo and Path(repo).exists():
+            branch = meta.get("base_branch", "main")
+            push_result = subprocess.run(
+                ["git", "push", remote, f"HEAD:{branch}"],
+                cwd=str(Path(repo)), capture_output=True, text=True,
+            )
+            if push_result.returncode == 0:
+                print(f"✅ 分支已推送到 {remote}/{branch}")
+            else:
+                print(f"⚠️ 推送失败: {push_result.stderr.strip()[:200]}")
+
     if offline:
         out = task_dir / "PR.md"
         out.write_text(pr_body, encoding="utf-8")
         print(f"PR 描述已写入 {out}")
-        print(f"请手动创建 PR 或稍后执行: agent_go pr {task_id}")
+        push_hint = f" --push" if not do_push else ""
+        print(f"请手动创建 PR 或稍后执行: agent_go pr {task_id}{push_hint}")
     else:
         # 在线模式：通过 gh CLI 创建 PR
         import tempfile
@@ -1178,6 +1218,12 @@ def cmd_pr(args=None):
             pr_file = tf.name
         title = meta.get("task", "agent_go task")[:72]
         base = meta.get("base_branch", "main")
+        if not shutil.which("gh"):
+            print("❌ 未安装 gh CLI。请先安装: brew install gh")
+            (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
+            print(f"PR 描述已备份到 {task_dir}/PR.md")
+            os.unlink(pr_file)
+            return
         result = subprocess.run([
             "gh", "pr", "create", "--title", f"{title}",
             "--body-file", pr_file, "--base", base,
