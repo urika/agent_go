@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 
-from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR, log_event
+from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR, log_event, get_api_key
 from .console import Console, set_default_console
 from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
@@ -134,6 +134,8 @@ def _build_parser():
     review_parser.add_argument("--reject", action="store_true", help="Reject the review")
     review_parser.add_argument("--changes-requested", action="store_true", help="Request changes (review rejected with feedback)")
     review_parser.add_argument("--comment-text", help="Review comment text (with --changes-requested or --reject)")
+    review_parser.add_argument("--deep", action="store_true",
+                                help="深层审查：使用独立模型逐子任务分析 diff 并给出评审意见")
 
     # cache 子命令
     cache_parser = subparsers.add_parser("cache", help="Plan cache management")
@@ -404,7 +406,8 @@ def cmd_run(args=None):
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # M4: 时间预估（历史子任务耗时中位数 × 拓扑波次，回答「走之前能跑完吗」）
-    from .eval import estimate_task_duration
+    # 解耦：从 planning.py 取（预执行估算，不依赖 eval 评估模块）
+    from .planning import estimate_task_duration
     est = estimate_task_duration(confirmed, parallel, AGENT_GO_DIR)
     conf_tag = {"high": "", "medium": "（样本较少）", "low": "（样本很少，仅供参考）",
                 "none": "（无历史数据，经验值）"}[est["confidence"]]
@@ -713,10 +716,12 @@ def cmd_review(args=None):
         reject = getattr(args, 'reject', False)
         changes_requested = getattr(args, 'changes_requested', False)
         comment_text = getattr(args, 'comment_text', "") or ""
+        deep_review = getattr(args, 'deep', False)
     else:
         approve = "--approve" in sys.argv
         reject = "--reject" in sys.argv
         changes_requested = "--changes-requested" in sys.argv
+        deep_review = "--deep" in sys.argv
         comment_text = ""
         if "--comment-text" in sys.argv:
             try:
@@ -737,7 +742,8 @@ def cmd_review(args=None):
     # M7: Task results review
     if task_id:
         _show_task_review(task_id, approve=approve, reject=reject,
-                          changes_requested=changes_requested, comment_text=comment_text)
+                          changes_requested=changes_requested, comment_text=comment_text,
+                          deep_review=deep_review)
         return
 
     # 代码审查（原有逻辑）
@@ -765,8 +771,13 @@ def cmd_review(args=None):
 
 
 def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
-                      changes_requested: bool = False, comment_text: str = "") -> None:
-    """显示任务结果审查（M7）— 按文件分组展示变更摘要。"""
+                      changes_requested: bool = False, comment_text: str = "",
+                      deep_review: bool = False) -> None:
+    """显示任务结果审查（M7）— 按文件分组展示变更摘要。
+
+    Args:
+        deep_review: 是否启用深层审查（独立模型分析每个子任务的 diff）
+    """
     from .console import get_default_console
     console = get_default_console()
     task_dir = AGENT_GO_DIR / task_id
@@ -857,6 +868,72 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
         failure = f" — {r.get('failure_reason', '')}" if r.get("failure_reason") else ""
         lines.append(f"| {sid} | {title} | {agent_type} | {status_icon} | {verify_icon} | {dur}{failure} |")
     lines.append("")
+
+    # S7 叠加式审查流水线：深层审查（独立模型分析 diff）
+    if deep_review:
+        lines.append("## 🔬 深层审查（独立模型）")
+        lines.append("")
+        for r in results:
+            sid = r.get("subtask_id", "")
+            st = subtask_map.get(sid, {})
+            title = st.get("title", "")
+            r_status = r.get("status", "")
+            if r_status not in ("completed", "failed"):
+                continue
+            wt_path = r.get("worktree", "")
+            if not wt_path or not Path(wt_path).exists():
+                continue
+            try:
+                # 获取 git diff
+                diff = subprocess.run(
+                    ["git", "diff", "HEAD"],
+                    cwd=str(wt_path), capture_output=True, text=True, timeout=15,
+                ).stdout
+                if not diff.strip():
+                    continue
+                # 获取 repo 路径构建审查 prompt
+                review_repo = meta.get("repo", "")
+                review_prompt = (
+                    f"你是一位资深代码审查者。请审查以下 git diff 变更。\n\n"
+                    f"### 子任务: {title} ({sid})\n"
+                    f"### 任务描述: {st.get('description', '')[:200]}\n\n"
+                    f"### git diff:\n```diff\n{diff[:3000]}\n```\n\n"
+                    f"请评估：\n"
+                    f"1. 代码是否正确实现了需求？\n"
+                    f"2. 是否有潜在的 bug、安全问题或性能问题？\n"
+                    f"3. 代码风格是否与现有代码一致？\n"
+                    f"4. 是否有更好的实现方式？\n\n"
+                    f"对每个问题分别回答「通过」或「需改进」，并附上具体说明。"
+                )
+                from .router import resolve_provider, ProviderConfig, call_with_role
+                _route = resolve_provider("reviewer", config)
+                if _route:
+                    _review_pc = _route.primary
+                    _review_key = (_review_pc.api_key or
+                                   os.environ.get("AGENT_GO_API_KEY", "") or
+                                   config.get("plan_api", {}).get("api_key", ""))
+                else:
+                    _plan_api = config.get("plan_api", {})
+                    _review_pc = ProviderConfig(
+                        provider=_plan_api.get("provider", "anthropic"),
+                        base_url=_plan_api.get("base_url", ""),
+                        model=_plan_api.get("model", ""),
+                    )
+                    _review_key = get_api_key(config)
+                _review_content, _review_metering = call_with_role(
+                    type('_Route', (), {'role': 'reviewer', 'primary': _review_pc,
+                                         'fallback': None})(),
+                    [{"role": "user", "content": review_prompt}],
+                    _review_key, logger, task_id=task_id, subtask_id=sid,
+                )
+                lines.append(f"### {sid}: {title}")
+                lines.append("")
+                lines.append(f"```\n{_review_content[:2000]}\n```")
+                lines.append("")
+            except Exception as e:
+                lines.append(f"### {sid}: {title}")
+                lines.append(f"> ⚠️ 审查失败: {e}")
+                lines.append("")
 
     # 质量仪表
     quality = _build_quality_dashboard(meta, task_dir=task_dir)
