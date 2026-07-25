@@ -161,39 +161,39 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
                     fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids, active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
                     futures[fut] = st
-                for fut in as_completed(futures):
-                    st = futures[fut]
-                    try:
-                        result = fut.result()
-                    except Exception as e:
-                        result = {"subtask_id": st["id"], "status": "failed",
-                                  "exit_code": -1, "summary": str(e), "worktree": "",
-                                  "sandbox_type": "headless", "verify_ok": False, "duration_sec": 0}
-                        logger.error(f"并发异常 {st['id']}: {e}")
-                    with meta_lock:
-                        worktree_map[st["id"]] = task_dir / st["id"] / "work"
-                        results_map[st["id"]] = result
-                        if result.get("status") == "degraded":
-                            degraded_count += 1
-                        # S6 失败通知增强：子任务失败时主动推送
+                    for fut in as_completed(futures):
+                        st = futures[fut]
+                        try:
+                            result = fut.result()
+                        except Exception as e:
+                            result = {"subtask_id": st["id"], "status": "failed",
+                                      "exit_code": -1, "summary": str(e), "worktree": "",
+                                      "sandbox_type": "headless", "verify_ok": False, "duration_sec": 0}
+                            logger.error(f"并发异常 {st['id']}: {e}")
+                        with meta_lock:
+                            worktree_map[st["id"]] = task_dir / st["id"] / "work"
+                            results_map[st["id"]] = result
+                            if result.get("status") == "degraded":
+                                degraded_count += 1
+                            # S6 失败通知增强：子任务失败时主动推送
+                            if result.get("status") == "failed":
+                                from .notify import notify_event as _notify_event
+                                try:
+                                    _notify_event("subtask_failed", {
+                                        "subtask": st,
+                                        "result": result,
+                                        "meta": meta,
+                                        "task_dir": str(task_dir),
+                                    }, config)
+                                except Exception:
+                                    pass
+                            # 每个 subtask 独立写 result.json
+                            result_file = task_dir / st["id"] / "result.json"
+                            result_file.parent.mkdir(parents=True, exist_ok=True)
+                            result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+                        completed_ids.add(st["id"])
                         if result.get("status") == "failed":
-                            from .notify import notify_event as _notify_event
-                            try:
-                                _notify_event("subtask_failed", {
-                                    "subtask": st,
-                                    "result": result,
-                                    "meta": meta,
-                                    "task_dir": str(task_dir),
-                                }, config)
-                            except Exception:
-                                pass
-                        # 每个 subtask 独立写 result.json
-                        result_file = task_dir / st["id"] / "result.json"
-                        result_file.parent.mkdir(parents=True, exist_ok=True)
-                        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-                    completed_ids.add(st["id"])
-                    if result.get("status") == "failed":
-                        failed_ids.add(st["id"])
+                            failed_ids.add(st["id"])
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
         if _interrupted.is_set():
