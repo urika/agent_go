@@ -293,6 +293,19 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         t_out.join()
         t_err.join()
         proc.wait()
+        # 终检：poll 循环因 time.sleep(2) 可能错过最后一个事件触发的 goal 轮数超限
+        # （读线程处理最后一行累加 goal_turn_count 与主线程 sleep 期间的 poll 返回存在竞争）。
+        # 线程 join 后所有事件已处理完毕，此时做一次确定性检查，消除 flaky。
+        if (GOAL_WATCHDOG_ENABLED and not goal_watchdog_triggered[0]
+                and goal_turn_count[0] >= MAX_GOAL_TURNS):
+            logger.error(f"claude goal 轮数超限 ({goal_turn_count[0]} >= {MAX_GOAL_TURNS})，强制终止")
+            log_event(logger, "goal_turns_exceeded",
+                      {"sub_id": sub_id, "turns": goal_turn_count[0], "limit": MAX_GOAL_TURNS})
+            goal_watchdog_triggered[0] = True
+            try:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
         if active_pids_lock:
             with active_pids_lock:
                 active_pids.discard(proc.pid)
