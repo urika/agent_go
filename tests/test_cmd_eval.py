@@ -19,8 +19,6 @@ from agent_go.eval import (
     _read_meta,
     _read_log_events,
     _scan_task_dirs,
-    MODEL_PRICES,
-    PROVIDER_DEFAULT_MODEL,
     analyze_quality,
     analyze_performance,
     analyze_cost,
@@ -29,6 +27,7 @@ from agent_go.eval import (
     aggregate_quality,
     aggregate_performance,
 )
+from agent_go.pricing import MODEL_PRICES, PROVIDER_DEFAULT_MODEL
 
 
 # ═══════════════════════════════════════════════════════════════

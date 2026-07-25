@@ -1,0 +1,11 @@
+id: write-storage-test
+difficulty: easy
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 tests/test_storage.py 中新增测试函数 test_save_multiple_tasks：
+  - 创建 3 个不同 description 的 Task 并保存
+  - 加载全部并断言 len == 3
+  - 断言每个 description 都正确保留
+verification:
+  - "python -m pytest tests/test_storage.py -q"
+timeout: 180

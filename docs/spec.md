@@ -206,17 +206,66 @@ notify_event(event, context, config)   → 唯一入口：on_complete/on_failed/
 analyze_quality(meta)           → Q1-Q10 质量指标 + 综合评分
 analyze_performance(meta, log)  → P1-P6 性能指标
 analyze_cost(tasks_dir)         → API 费用 + per-model/per-role 拆分
-                                  + cost_source_breakdown(metering/rebuild)
-                                  + policy_violations + $/pass rate
-gate_cost(baseline, tasks_dir)  → 北极星门禁：$/pass rate 与基线比对
-                                  → {passed, actual, baseline, reason}
-                                  无数据时 passed=True（不阻挡 CI）
+                                  计价双轨：优先真实 cost_usd（metering 通道），
+                                  缺失时按 MODEL_PRICES × token 重算（rebuilt 通道）
+                                  + cost_source_breakdown {metering, rebuilt}
+                                  + unknown_model_events（价目表覆盖度监控）
+                                  + fallback_events（降级事件计数，PRD 铁律留痕字段）
+                                  + $/pass rate（北极星）
+gate_cost(baseline, tasks_dir)  → 绝对阈值门禁：actual > baseline → 不通过
+                                  无数据（actual=None）→ passed=True（不阻挡 CI）
+gate_cost_regression(tasks_dir) → 回归门禁（PRD "不劣化"语义）：
+                                  对比 .agent_go/cost_baseline.json 基线，
+                                  劣化 > tolerance(10%) → 不通过
+                                  首次运行自动建立基线；update=True 强制重置
+load/save_cost_baseline(dir)    → 基线文件读写（cost_baseline.json）
 analyze_reliability(tasks_dir)  → 任务完成率 + sandbox 分布 + 阻断率
+                                  + K5 resume_success_rate（中断恢复成功率，
+                                    被中断过的任务中最终 completed 比例）
 analyze_ux(tasks_dir)           → 文档使用率 + Agent/Skill 分布
 aggregate_quality/perf(dir)     → 跨任务聚合
 estimate_task_duration(subtasks, parallel, tasks_dir) → M4 时间预估（历史中位数 × 拓扑波次）
-cmd_eval(args)                  → eval CLI（子命令含 gate --baseline X）
+cmd_eval(args)                  → eval CLI，子命令：
+                                  quality|perf|cost|reliability|ux|gate|all
+                                  gate 支持 --baseline X（绝对阈值，默认 0.05）
+                                            --check-regression（对比历史基线）
+                                            --update-baseline（重置基线）
+
+# 模型分级元数据（见 design/model-evaluation-and-tiering.md §1）
+MODEL_PRICES                    → {model: {prompt, completion}} 定价表（USD/百万tokens）
+MODEL_TIER                      → {frontier/value/lite: [models]} 模型档位（待落地）
+PROVIDER_DEFAULT_MODEL          → provider → 默认模型（旧日志缺 model 字段时回退）
 ```
+
+## bench.py — 模型生产力评估（待落地，见 design/model-evaluation-and-tiering.md §3）
+
+> **状态**：设计完成，待实施。三层评估体系（确定性 + 交叉评判 + 决策汇总）。
+
+```
+cmd_bench(args)                            → 对照运行编排器
+  ── --tasks eval_suite/                   标准任务集（YAML，带 ground-truth 验证）
+  ── --models M1,M2,M3                     被评模型（每模型跑全部任务）
+  ── --repeat N                            每任务重复 N 次（稳定性，默认 3）
+  ── --judge-model Mj                      跨模型评判（第 2 层，禁绝自评）
+  ── --output results.jsonl                原始结果落盘
+  ── 复用 _worktree_create / run_subtask / evaluate_semantic
+  ── 硬约束：judge_model != candidate_model（规避 LLM-as-Judge 自偏）
+
+analyze_model_productivity(results_path)   → 第 3 层决策汇总
+  ── 按 actual_model 聚合：pass_rate / first_pass_rate / avg_retries
+                            avg_latency_ms / dollar_per_pass / semantic_score
+                            false_positive_rate / pass_rate_std
+  ── difficulty_breakdown: {easy/medium/hard: {pass_rate, dollar_per_pass}}
+  ── recommendation: recommended | conditional | discouraged
+  ── recommended_roles: [worker_easy, worker_medium, reviewer, ...]
+  ── 决策规则：pass_rate<60% 或 假阳性>20% → discouraged；
+              sample_size<5 → low_confidence 不参与自动决策
+```
+
+**标准任务集（`eval_suite/`，待落地）：**
+- `eval_suite/tasks/*.yaml` — 任务定义（id / difficulty / repo / task / verification / timeout）
+- `eval_suite/fixtures/sample-py-project/` — 固定最小可测仓库 + ground truth 测试
+- 规模：easy 10-15 + medium 10 + hard 5-10（每档 ≥10 才能算稳通过率）
 
 ## tui.py — 状态面板 (199 行)
 
@@ -224,10 +273,97 @@ cmd_eval(args)                  → eval CLI（子命令含 gate --baseline X）
 cmd_status_tui()  → curses 多面板实时监控
 ```
 
-## workflow_gen.py — CI 生成 (80 行)
+## bench.py — 模型对照评估编排器 (300 行)
+
+> **状态**：S8 P0 已落地。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
 
 ```
-detect_language(repo)       → python/go/node/rust/java
-generate_workflow(repo)     → .github/workflows/test.yml 内容
-cmd_ci(args)                → CLI 入口
+cmd_bench(args)                            → 对照运行编排器
+  ── --tasks eval_suite/                   标准任务集（YAML，带 ground-truth 验证）
+  ── --models M1,M2,M3                     被评模型（每模型跑全部任务）
+  ── --repeat N                            每任务重复 N 次（默认 3）
+  ── --output results.jsonl                JSONL 落盘
+  ── 内部 subprocess 调 agent_go run（--yes --headless --preserve-worktrees）
+  ── 读 AGENT_GO_DIR/task-*/meta.json + metering.jsonl
+
+cmd_models(args)                           → 决策矩阵展示
+  ── --results results.jsonl               读取 bench 产出
+  ── 按模型聚合：pass_rate / dollar_per_pass / sample_size / recommendation
+  ── 决策规则：pass_rate<60%→discouraged, >=85%→recommended, <3样本→insufficient
+
+analyze_model_productivity(path) → 与 cmd_models 同逻辑，返回 dict 供编程调用
 ```
+
+## cross_judge.py — 交叉评判矩阵 (350 行)
+
+> **状态**：S8 P1 已落地。N 模型互评（禁绝自评）+ 人工校准。
+
+```
+cmd_judge(args)                            → 交叉评判 + 校准 CLI
+  ── --results results.jsonl               bench 产出（含 task_dir 路径）
+  ── --judge-models M1,M2                  评判模型列表（逗号分隔）
+  ── --output cross_judge_scores.jsonl     评分落盘
+  ── --judge-subcommand calibrate           人工校准模式
+
+cross_judge_results(bench_results, judges) → 逐条调用 evaluate_semantic（读 worktree git diff）
+  ── 硬约束：judge_model != candidate_model（禁绝自评，LLM-as-Judge 自偏防护）
+  ── 评分尺度：correctness/completeness/code_quality（1-5）+ false_positive(bool)
+
+calibrate_judge(llm_path, human_csv)       → 人工校准
+  ── human CSV: task_id,candidate_model,correctness,... 
+  ── 输出每 judge: avg_divergence / agreement_rate / verdict
+  ── 分歧 ≤1.0→✓reliable, 1.0-1.5→⚠marginal, >1.5→✗unreliable
+```
+
+## pricing.py — 大模型定价表 (130 行)
+
+> **状态**：从 eval.py 迁出。S8 P0 落地。38 个模型（2026-07 最新）+ 档位元数据。
+
+```
+MODEL_PRICES        → {model: {prompt, completion}} 定价表（USD/百万tokens）
+MODEL_TIER          → {frontier/value/lite: [models]} 模型档位（供 difficulty 路由）
+PROVIDER_DEFAULT_MODEL → provider → 默认模型（7 个 provider 含 google/volcengine/moonshot/zhipu）
+```
+
+## query.py — 结构化查询 API（待落地）
+
+> **状态**：设计完成。封装现有的 `_read_meta` / `_scan_task_dirs` / `_read_log_events`。
+
+```
+query_task(task_id)                            → Optional[TaskResult]
+query_project_trend(repo, days=30)              → task trend dict
+```
+
+## events.py — 事件总线（待落地）
+
+> **状态**：设计完成。全生命周期事件订阅 + `events.jsonl` 持久化。
+
+```
+emit_event(event)                              → 同步触发已注册 handler
+subscribe_event(event_type, handler, once)     → 注册事件监听器（glob 支持）
+EVENT_TYPES                                    → "plan.generated"|"subtask.started"|... 枚举
+events.jsonl 文件                               → ~/.agent_go/task-xxx/events.jsonl
+```
+
+## knowledge/ — 知识存储（待落地）
+
+> **状态**：设计完成。项目级经验沉淀 + Plan prompt 自动注入。纯 JSON 文件，零外部依赖。
+
+```
+KnowledgeStore(repo_path)                      → 项目级知识存储
+  ├── record_success(category, content, src)   → 记录成功模式
+  ├── record_failure(category, signal, src)    → 记录失败信号
+  ├── get_relevant(desc, max=5)                → 获取最相关的历史经验
+  └── get_project_profile()                    → 项目特征推断
+```
+
+文件结构：
+```
+~/.agent_go/knowledge/<repo-hash>/
+  ├── patterns.json           # 成功模式（验证命令/分解策略）
+  ├── failure-signals.json    # 失败信号（高频失败原因）
+  ├── verified-cmds.json      # 已验证命令（exit_code=0）
+  └── project-meta.json       # 项目特征（语言/框架/构建工具）
+```
+
+## workflow_gen.py — CI 生成 (80 行)

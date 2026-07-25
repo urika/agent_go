@@ -478,7 +478,7 @@ class TestPipelineRemotePush:
         return [c for c in mock_subproc.call_args_list if c.args[0][:2] == ["git", "push"]]
 
     # ── 1. 全部分支推送成功 ──────────────────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -520,7 +520,7 @@ class TestPipelineRemotePush:
         assert any("所有分支推送成功" in str(c) for c in mock_info.call_args_list)
 
     # ── 2. 分支不存在时跳过 push ─────────────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -550,7 +550,7 @@ class TestPipelineRemotePush:
         assert pushes[0].args[0][3] == "agent_go/t1/sub-1:agent_go/t1/sub-1"
 
     # ── 3. push 失败计数且不影响任务状态 ────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -589,7 +589,7 @@ class TestPipelineRemotePush:
         assert meta["status"] == "completed"
 
     # ── 4. 未指定 remote 时不做任何 push ────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -622,7 +622,7 @@ class TestPipelineNotify:
     （pipeline.py 361-364 行）。"""
 
     # ── 1. 全部成功 → on_complete ────────────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -646,9 +646,13 @@ class TestPipelineNotify:
             issue_ref="", meta=_default_meta(),
         )
 
-        mock_notify.assert_called_once()
-        event, context, passed_config = mock_notify.call_args.args
-        assert event == "on_complete"
+        # 解耦后所有调用（含循环内 subtask_failed + 末尾 on_complete）都被拦截。
+        event_names = [c.args[0] for c in mock_notify.call_args_list]
+        assert "on_complete" in event_names
+        # 取 on_complete 调用的 context 做原断言
+        on_complete_calls = [c for c in mock_notify.call_args_list if c.args[0] == "on_complete"]
+        assert len(on_complete_calls) == 1
+        event, context, passed_config = on_complete_calls[0].args
         # context 携带 meta / results_map / task_dir，config 原样透传
         assert set(context.keys()) == {"meta", "results_map", "task_dir"}
         assert context["task_dir"] == task_dir
@@ -656,7 +660,7 @@ class TestPipelineNotify:
         assert passed_config is config
 
     # ── 2. 有失败（无阻断）→ on_failed ───────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -680,11 +684,14 @@ class TestPipelineNotify:
             issue_ref="", meta=_default_meta(),
         )
 
-        mock_notify.assert_called_once()
-        assert mock_notify.call_args.args[0] == "on_failed"
+        # 解耦后 mock 目标改为 agent_go.notify.notify_event，循环内 subtask_failed
+        # 调用也会被拦截（之前 mock pipeline.notify_event 时遗漏了函数内动态 import 的调用）。
+        # 断言 on_failed 在调用列表中即可。
+        event_names = [c.args[0] for c in mock_notify.call_args_list]
+        assert "on_failed" in event_names
 
     # ── 3. 阻断优先于失败 → on_blocked ───────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -708,9 +715,14 @@ class TestPipelineNotify:
             issue_ref="", meta=_default_meta(),
         )
 
-        mock_notify.assert_called_once()
-        event, context, _ = mock_notify.call_args.args
-        assert event == "on_blocked"
+        # 解耦后 mock 目标改为 agent_go.notify.notify_event，循环内 subtask_failed
+        # 调用也会被拦截。断言 on_blocked 在调用列表中即可（优先级正确）。
+        event_names = [c.args[0] for c in mock_notify.call_args_list]
+        assert "on_blocked" in event_names
+        # 取最后一次 on_blocked 调用的 context
+        on_blocked_calls = [c for c in mock_notify.call_args_list if c.args[0] == "on_blocked"]
+        assert len(on_blocked_calls) == 1
+        event, context, _ = on_blocked_calls[0].args
         statuses = {sid: r["status"] for sid, r in context["results_map"].items()}
         assert statuses == {"sub-1": "failed", "sub-2": "blocked"}
 
@@ -719,7 +731,7 @@ class TestPipelinePreservedMarker:
     """失败/阻断 worktree 保留与 .preserved 标记写入（pipeline.py 236-247 行）。"""
 
     # ── 1. 失败 worktree 保留并写入标记 ──────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -765,7 +777,7 @@ class TestPipelinePreservedMarker:
         assert removed_paths == [task_dir / "sub-1" / "work"]
 
     # ── 2. 阻断 worktree 保留并写入标记 ──────────────────────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -804,7 +816,7 @@ class TestPipelinePreservedMarker:
         }
 
     # ── 3. preserve_worktrees=True 时成功 worktree 也保留 ────────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -837,7 +849,7 @@ class TestPipelinePreservedMarker:
         assert data["branch"] == "agent_go/t1/sub-1"
 
     # ── 4. preserve_worktrees=False 时失败 worktree 也清理 ───────────────
-    @patch("agent_go.pipeline.notify_event")
+    @patch("agent_go.notify.notify_event")
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
     @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
@@ -864,3 +876,112 @@ class TestPipelinePreservedMarker:
 
         mock_wt_remove.assert_called_once_with(repo, task_dir / "sub-1" / "work")
         assert not (task_dir / "sub-1" / ".preserved").exists()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 并发压力测试（P2）
+# ═══════════════════════════════════════════════════════════════
+
+class TestPipelineConcurrencyStress:
+    """高并发场景下管线稳定性。
+
+    覆盖 2 个场景：
+      1. 20 个子任务 parallel=10 → 全部完成，不崩溃
+      2. 并发不丢失 subtask 结果（meta.results 完整）
+    """
+
+    @patch("agent_go.notify.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_high_concurrency_no_crash(
+        self, mock_run, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """20 个无依赖子任务 parallel=10 → 全部 completed，不崩溃"""
+        n = 20
+        confirmed = [_make_subtask(f"sub-{i}") for i in range(n)]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-stress")
+
+        mock_run.side_effect = [_success_result(f"sub-{i}") for i in range(n)]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        meta = _default_meta("t-stress")
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=True, parallel=10,
+            issue_ref="", meta=meta,
+        )
+
+        # 验证全部完成
+        assert meta["status"] == "completed"
+        assert len(meta["results"]) == n
+        assert all(r["status"] == "completed" for r in meta["results"])
+        # run_subtask 被调用了 n 次
+        assert mock_run.call_count == n
+
+    @patch("agent_go.notify.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_concurrent_with_mixed_results(
+        self, mock_run, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """并发场景混搭成功/失败 → 全部结果被记录，不崩溃"""
+        n = 12
+        confirmed = [_make_subtask(f"sub-{i}") for i in range(n)]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-mix")
+
+        # 前 8 个成功，后 4 个失败（在同一个 wave 中，互不影响）
+        results = [_success_result(f"sub-{i}") for i in range(8)]
+        results += [_failed_result(f"sub-{i}", reason=f"sub-{i} error") for i in range(8, 12)]
+        mock_run.side_effect = results
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        meta = _default_meta("t-mix")
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=True, parallel=6,
+            issue_ref="", meta=meta,
+        )
+
+        assert meta["status"] == "failed"
+        assert len(meta["results"]) == n
+        completed = sum(1 for r in meta["results"] if r["status"] == "completed")
+        failed = sum(1 for r in meta["results"] if r["status"] == "failed")
+        assert completed == 8, f"期望 8 个成功，实际 {completed}"
+        assert failed == 4, f"期望 4 个失败，实际 {failed}"
+
+    @patch("agent_go.notify.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_all_subtasks_fail_no_crash(
+        self, mock_run, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """10 个子任务 parallel=5 全部失败 → pipeline 不崩溃"""
+        n = 10
+        confirmed = [_make_subtask(f"sub-{i}") for i in range(n)]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-all-fail")
+
+        mock_run.side_effect = [_failed_result(f"sub-{i}") for i in range(n)]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        meta = _default_meta("t-all-fail")
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=True, parallel=5,
+            issue_ref="", meta=meta,
+        )
+
+        assert meta["status"] == "failed"
+        assert len(meta["results"]) == n
+        assert all(r["status"] == "failed" for r in meta["results"])

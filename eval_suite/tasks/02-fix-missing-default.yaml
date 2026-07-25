@@ -1,0 +1,14 @@
+id: fix-missing-default
+difficulty: easy
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 src/cli.py 的 cmd_list 函数中，status 参数默认值为空字符串 ""。
+  当用户不传 status 参数时，函数行为正确（load_all 返回全部任务）。
+  但代码中有一个防御性缺陷：如果 status 为 None（而非 ""），会导致属性错误。
+
+  修复：将 cmd_list 的签名改为 `def cmd_list(status: str = "all") -> int:`，
+  并更新 `main()` 中的调用，确保 `all` 状态显示全部任务（当前行为不变）。
+verification:
+  - "python -m pytest tests/test_models_utils.py -q"
+  - "python -c \"from src.cli import cmd_list; assert cmd_list() == 0; print('OK')\""
+timeout: 180

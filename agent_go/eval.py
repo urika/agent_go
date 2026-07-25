@@ -29,6 +29,30 @@ def _read_meta(task_dir: Path) -> Optional[dict[str, Any]]:
         return None
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read JSONL file, return list of dicts (shared by bench / cross_judge)."""
+    if not path or not path.exists():
+        return []
+    items = []
+    for line in path.read_text(encoding="utf-8").strip().split("\n"):
+        if line:
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return items
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """Read JSON file, return dict (shared by bench / cross_judge)."""
+    if not path or not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def _read_log_events(log_path: Path, event_name: str) -> list[dict[str, Any]]:
     events = []
     if not log_path.exists():
@@ -260,6 +284,24 @@ def aggregate_quality(tasks_dir: Path) -> Optional[dict[str, Any]]:
     }
 
 
+def _resolve_provider_default(provider: str, timestamp: Optional[str] = None) -> str:
+    """根据 provider 和日志时间戳选择正确的默认模型。
+
+    用法：旧日志（早于 PROVIDER_DEFAULT_MODEL_CUTOFF）使用 LEGACY_PROVIDER_DEFAULT_MODEL，
+    新日志使用 PROVIDER_DEFAULT_MODEL。这样历史 $/pass rate 不会被新默认价（往往更便宜）拉低。
+    """
+    is_legacy = True
+    if timestamp:
+        try:
+            ts_date = timestamp[:10]
+            is_legacy = ts_date < PROVIDER_DEFAULT_MODEL_CUTOFF
+        except (TypeError, ValueError):
+            is_legacy = True
+    if is_legacy:
+        return LEGACY_PROVIDER_DEFAULT_MODEL.get(provider, PROVIDER_DEFAULT_MODEL.get(provider, ""))
+    return PROVIDER_DEFAULT_MODEL.get(provider, "")
+
+
 def aggregate_performance(tasks_dir: Path) -> Optional[dict[str, Any]]:
     all_durations = []
     p1_values = []
@@ -287,26 +329,14 @@ def aggregate_performance(tasks_dir: Path) -> Optional[dict[str, Any]]:
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# Cost
-# ═══════════════════════════════════════════════════════════════
-
-MODEL_PRICES = {
-    "claude-sonnet-4-20250514": {"prompt": 3.0, "completion": 15.0},
-    "claude-sonnet-4": {"prompt": 3.0, "completion": 15.0},
-    "gpt-4o": {"prompt": 2.5, "completion": 10.0},
-    "deepseek-v4-flash": {"prompt": 0.27, "completion": 1.1},
-    "deepseek-v4-pro": {"prompt": 0.55, "completion": 2.19},
-    "deepseek-chat": {"prompt": 0.27, "completion": 1.1},
-    "deepseek-reasoner": {"prompt": 0.55, "completion": 2.19},
-}
-
-# provider → 默认模型（旧日志缺 model 字段时回退用）
-PROVIDER_DEFAULT_MODEL = {
-    "anthropic": "claude-sonnet-4-20250514",
-    "openai": "gpt-4o",
-    "deepseek": "deepseek-chat",
-}
+# 定价表已迁至 pricing.py（纯配置数据，避免 eval 成为配置的事实标准源）。
+# eval.py 通过模块级 import 引用，analyze_cost 内直接使用 MODEL_PRICES / PROVIDER_DEFAULT_MODEL。
+from .pricing import (
+    MODEL_PRICES,
+    PROVIDER_DEFAULT_MODEL,
+    LEGACY_PROVIDER_DEFAULT_MODEL,
+    PROVIDER_DEFAULT_MODEL_CUTOFF,
+)
 
 
 def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
@@ -343,7 +373,7 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
                 total_prompt += p
                 total_completion += c
                 provider = ev.get("actual_provider", "?")
-                model = ev.get("actual_model") or PROVIDER_DEFAULT_MODEL.get(provider, "")
+                model = ev.get("actual_model") or _resolve_provider_default(provider, ev.get("timestamp"))
                 if model not in by_model:
                     by_model[model] = {"calls": 0, "prompt": 0, "completion": 0}
                 by_model[model]["calls"] += 1
@@ -385,7 +415,7 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
             total_prompt += p
             total_completion += c
             provider = ev.get("provider", "?")
-            model = ev.get("model") or PROVIDER_DEFAULT_MODEL.get(provider, "")
+            model = ev.get("model") or _resolve_provider_default(provider, ev.get("timestamp"))
             if model not in by_model:
                 by_model[model] = {"calls": 0, "prompt": 0, "completion": 0}
             by_model[model]["calls"] += 1
@@ -519,7 +549,12 @@ def _baseline_path(tasks_dir: Path) -> Path:
 
 
 def load_cost_baseline(tasks_dir: Path) -> Optional[float]:
-    """读取已存储的 $/pass rate 基线。无基线返回 None。"""
+    """读取已存储的 $/pass rate 基线。无基线返回 None。
+
+    关键修复（ISSUE #9）：区分「文件不存在（合法首次）」与「文件存在但读取失败（不应静默重置）」。
+    读失败时返回 None 但通过 _baseline_read_error 异常路径让调用方感知；
+    此函数保持简单返回 None，由 gate_cost_regression 检查文件存在性后再决定。
+    """
     p = _baseline_path(tasks_dir)
     if not p.exists():
         return None
@@ -580,7 +615,18 @@ def gate_cost_regression(tasks_dir: Path, tolerance: float = _REGRESSION_TOLERAN
         return _result(True, "无完成任务或无 metering 数据，门禁未生效", stored_baseline, False)
 
     if stored_baseline is None:
-        # 首次：建立基线
+        # 关键修复（ISSUE #9）：区分「文件不存在（首次）」与「文件存在但读取失败（permission/disk 错误）」
+        # 文件不存在是合法首次 → 建立基线；读取失败则 FAIL 让运维介入，不静默重置
+        baseline_file = _baseline_path(tasks_dir)
+        if baseline_file.exists():
+            # 文件存在但 load_cost_baseline 返回 None → 读失败
+            return _result(
+                False,
+                f"基线文件 {baseline_file} 存在但无法读取（permission/disk/JSON 错误）；"
+                f"拒绝静默重置，请运维介入修复文件后重试。当前 rate {actual} 未与基线对比",
+                None, False,
+            )
+        # 真正首次：建立基线
         save_cost_baseline(tasks_dir, actual)
         return _result(True, f"无历史基线，已建立基线 {actual}", actual, True)
 
@@ -735,70 +781,9 @@ def analyze_ux(tasks_dir: Path) -> dict[str, Any]:
     }
 
 
-# ═══════════════════════════════════════════════════════════════
-# M4 时间预估
-# ═══════════════════════════════════════════════════════════════
-
-# 无历史数据时的经验值：4 分钟/子任务
-_DEFAULT_SUBTASK_SEC = 240
-
-
-def estimate_task_duration(subtasks: list[dict], parallel: int, tasks_dir: Path) -> dict[str, Any]:
-    """M4 时间预估：历史子任务耗时中位数 × 拓扑波次（考虑并行度）。
-
-    Returns:
-        {
-            "subtasks": int, "waves": int, "parallel": int,
-            "median_subtask_sec": float, "estimated_sec": int,
-            "sample_size": int, "confidence": "high|medium|low|none",
-        }
-    """
-    # 1. 拓扑波次数（依赖链深度，带环保护）
-    ids = {st["id"] for st in subtasks}
-    depth: dict[str, int] = {}
-
-    def _depth(sid: str, seen: frozenset) -> int:
-        if sid in depth:
-            return depth[sid]
-        if sid in seen:
-            return 0
-        st = next((s for s in subtasks if s["id"] == sid), None)
-        if not st:
-            return 0
-        deps = [d for d in st.get("depends_on", []) if d in ids]
-        d = 1 + max((_depth(dep, seen | {sid}) for dep in deps), default=0)
-        depth[sid] = d
-        return d
-
-    waves = max((_depth(st["id"], frozenset()) for st in subtasks), default=1)
-
-    # 2. 历史子任务耗时中位数
-    durations = sorted(
-        r["duration_sec"]
-        for td in _scan_task_dirs(tasks_dir)
-        if (meta := _read_meta(td))
-        for r in meta.get("results", [])
-        if r.get("status") in ("completed", "no_changes") and r.get("duration_sec")
-    )
-    sample_size = len(durations)
-    median = durations[sample_size // 2] if durations else _DEFAULT_SUBTASK_SEC
-
-    # 3. 估算：受限于「关键路径（波次）」和「并行吞吐」两者较大者
-    total_work = median * len(subtasks)
-    est_sec = max(waves * median, total_work / max(1, parallel))
-
-    confidence = ("high" if sample_size >= 20 else
-                  "medium" if sample_size >= 5 else
-                  "low" if sample_size > 0 else "none")
-    return {
-        "subtasks": len(subtasks),
-        "waves": waves,
-        "parallel": parallel,
-        "median_subtask_sec": median,
-        "estimated_sec": round(est_sec),
-        "sample_size": sample_size,
-        "confidence": confidence,
-    }
+# 注：estimate_task_duration（M4 时间预估）已迁移到 planning.py。
+# 它逻辑上是"预执行估算"（在线、嵌入 cmd_run），不是"离线评估"，放在 eval.py 会让
+# 核心流程反向依赖评估模块，违背解耦原则。详见 docs/architecture.md「模块依赖与解耦原则」。
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -818,7 +803,7 @@ def cmd_eval(args=None) -> None:
         update_baseline = bool(getattr(args, "update_baseline", False))
     else:
         if len(sys.argv) < 3:
-            console.print("Usage: agent_go eval <quality|perf|cost|reliability|ux|gate|all> [task-id|--all]")
+            console.print("Usage: agent_go eval <quality|perf|cost|reliability|ux|gate|bench|models|all> [task-id|--all]")
             return
         sub = sys.argv[2]
         task_id = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -855,6 +840,18 @@ def cmd_eval(args=None) -> None:
                 console.print("暂无任务")
     elif sub == "cost":
         _print_cost_report(analyze_cost(AGENT_GO_DIR))
+    elif sub == "bench":
+        # 模型对照评估编排器（S8，subprocess 隔离核心）
+        from .bench import cmd_bench
+        cmd_bench(args)
+    elif sub == "models":
+        # 模型生产力决策矩阵
+        from .bench import cmd_models
+        cmd_models(args)
+    elif sub == "judge":
+        # 交叉评判矩阵（S8 P1，第 2 层语义评估）
+        from .cross_judge import cmd_judge
+        cmd_judge(args)
     elif sub == "gate":
         # 发布门禁：两种模式互斥
         #   --check-regression：PRD "不劣化"语义，对比历史基线（劣化 > 容差即失败）
@@ -889,7 +886,7 @@ def cmd_eval(args=None) -> None:
         _print_ux_report(analyze_ux(AGENT_GO_DIR))
         console.print("═" * 60)
     else:
-        console.print(f"未知子命令: {sub}。可用: quality, perf, cost, reliability, ux, gate, all")
+        console.print(f"未知子命令: {sub}。可用: quality, perf, cost, reliability, ux, gate, bench, models, all")
 
 
 def _resolve_task_dir(base_dir: Path, task_id: str) -> Optional[Path]:

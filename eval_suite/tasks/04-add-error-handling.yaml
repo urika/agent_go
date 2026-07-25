@@ -1,0 +1,13 @@
+id: add-error-handling
+difficulty: easy
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 src/storage.py 的 TaskStorage.load_all 方法中，如果 JSON 文件存在但包含非法 JSON 内容，
+  当前会抛出 json.JSONDecodeError 导致程序崩溃。
+  
+  修复：给 load_all 方法添加 try/except，捕获 json.JSONDecodeError 并返回空列表 []。
+  同时记录一条 warning 日志（使用标准库 logging）。
+verification:
+  - "python -m pytest tests/test_models_utils.py tests/test_storage.py -q"
+  - "python -c \"import json, pathlib; from src.storage import TaskStorage; p=pathlib.Path('/tmp/test_bad.json'); p.write_text('not json'); s=TaskStorage(p); assert s.load_all()==[]; print('OK')\""
+timeout: 180

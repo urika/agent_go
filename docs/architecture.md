@@ -90,7 +90,7 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
 ## 测试
 
 ```bash
-pytest tests/ -q           # 751 tests, ~17s
+pytest tests/ -q           # 1130 tests, ~17s
 ```
 
 测试策略：mock 所有外部依赖 (git, claude, API)，验证逻辑正确性。NFR 专项测试在 `test_nfr_*.py`。
@@ -99,3 +99,76 @@ pytest tests/ -q           # 751 tests, ~17s
 
 - 2026-07-23 的 14 项已知问题（含下方原列的 3 项）均已修复，详见 [ISSUES.md](ISSUES.md)
 - 当前无未修复的阻塞性问题
+
+## 模块依赖与解耦原则
+
+> **守则生效日期**：2026-07-25。所有后续改动（含 S8 模型评估落地）必须遵守。
+
+### 解耦四原则
+
+1. **核心模块不静态 import 增强模块**——pipeline / executor / subtask / cli-run 的顶部 import 不应包含可选增强（evaluator / notify / goal_injector / agent_loop / skills / router）。所有增强用函数内动态 import `from .X import Y`。
+
+2. **每个增强调用点必须有 try/except 容错**——增强模块加载失败或运行时异常绝不中断核心流程。已有通用模式：
+   ```python
+   try:
+       from .enhancement import enhance_func
+       enhance_func(...)
+   except Exception as e:
+       logger.warning(f"增强功能 XXX 失败，跳过（不中断核心）: {e}")
+   ```
+
+3. **增强模块单向依赖核心**——增强可以 import 核心（api / config / metrics），核心不 import 增强。S8 bench 编排器需反向调用 `run_subtask` 时，**用 CLI subprocess 隔离**（`subprocess.run(["python", "agent_go.py", "run", ...])`），不做 Python import。读 metering.jsonl / meta.json 不 import 核心代码。
+
+4. **增强功能开关统一**——每个增强都有 `enabled` flag（默认 False），关闭时不 import、不调用、不写文件。开关收口在 `config.py` 的 `DEFAULT_CONFIG` 。无开关的 always-on 基础设施（metering / S4 difficulty 路由）属于核心可观测性，不在此列。
+
+### 核心 ↔ 评估数据契约
+
+评估模块（eval.py / future: bench.py）与核心的耦合面收敛为两个文件格式。**核心改动不得破坏这两个格式（向后兼容约束）**：
+
+**契约 1：`metering.jsonl`**（核心写入，eval/bench 读取）
+
+每行一个 JSON 对象，必需字段：
+- `role`, `actual_provider`, `actual_model`, `difficulty`
+- `prompt_tokens`, `completion_tokens`, `cost_usd`, `latency_ms`
+- `result` (success / failed / fallback / quality_fail), `fallback_reason`
+- `task_id`, `subtask_id`
+
+**契约 2：`meta.json` → `results[]`**（核心写入，eval/bench 读取）
+
+每个 result 元素必需字段：
+- `subtask_id`, `status` (completed / no_changes / failed / blocked)
+- `verify_ok` (bool), `retry_count` (int)
+- `timing.claude_execute_ms` (int), `duration_sec` (float)
+- `difficulty` (string, optional)
+
+### 当前耦合状态（2026-07-25 基线）
+
+| 增强 | import 方式 | 开关 | 容错 | 状态 |
+|------|-----------|------|------|------|
+| Evaluator | 动态 + except | `evaluator.enabled` (False) | ✅ 评估失败不中断 | ✅ 解耦完成 |
+| Notify | 动态 + except | `notify.enabled` (True) | ✅ 三层 try/except | ✅ 解耦完成 |
+| GoalInjector (/goal) | 动态 + except | `goal.enabled` (False) | ✅ (02) | ✅ 解耦完成 |
+| GoalInjector (Stop Hook) | 动态 + except | `goal.enable_goal_hook` (False) | ✅ (02) | ✅ 解耦完成 |
+| AgentLoop | 动态 + except | `agent_loop.enabled` (False) | ✅ 失败回退 claude -p | ✅ 解耦完成 |
+| Skills | 动态 + except | `skills` 字段非空 | ✅ (02) | ✅ 解耦完成 |
+| M4 时间预估 | planning 模块归位 | 无开关（always-on） | N/A | ✅ 已从 eval 解耦 |
+| Metering | 动态 | `_metering_path` 非空 | ✅ OSError 兜底 | 核心可观测性 |
+| S4 difficulty | N/A | `worker_models` 非空 | N/A | 核心可观测性 |
+
+(02) = 2026-07-25 补 try/except。
+
+### S8 评估机制隔离架构（✅ 已落地）
+
+```
+agent_go/bench.py（编排器，不 import pipeline/executor）
+  通过 subprocess 调 CLI（完全进程隔离）
+  agent_go/cross_judge.py（交叉评判，读 worktree 调用 evaluate_semantic）
+  agent_go/pricing.py（定价表，eval/bench 共享，不依赖核心）
+  eval_suite/（任务集 + fixtures + migrate_history.py + setup_local_model.py）
+  
+  CLI 入口：
+    agent_go eval bench --tasks eval_suite/ --models M1,M2 --repeat 3
+    agent_go eval models --results results.jsonl
+    agent_go eval judge --results results.jsonl --judge-models M1,M2
+    agent_go eval judge calibrate --llm-scores ... --human-scores ...
+```

@@ -364,7 +364,7 @@ class TestExecutorSemanticEval:
     """executor._verify_changes 的 Phase 3 语义评估集成（mock 隔离 git/subprocess）。"""
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor.evaluate_semantic")
+    @patch("agent_go.evaluator.evaluate_semantic")
     @patch("agent_go.executor.collect_change_stats")
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
@@ -409,7 +409,7 @@ class TestExecutorSemanticEval:
         assert (task_dir / "sub-1" / "verify_state.json").exists()
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor.evaluate_semantic")
+    @patch("agent_go.evaluator.evaluate_semantic")
     @patch("agent_go.executor.collect_change_stats")
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
@@ -441,7 +441,7 @@ class TestExecutorSemanticEval:
         assert "验证未通过（无变更或未知原因）" not in result["failure_reason"]
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor.evaluate_semantic")
+    @patch("agent_go.evaluator.evaluate_semantic")
     @patch("agent_go.executor.collect_change_stats")
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
@@ -467,7 +467,7 @@ class TestExecutorSemanticEval:
         assert all(e.get("type") != "semantic" for e in result["verification_results"])
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor.evaluate_semantic")
+    @patch("agent_go.evaluator.evaluate_semantic")
     @patch("agent_go.executor.collect_change_stats")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")

@@ -3,6 +3,8 @@
 ## 定位
 
 > **agent_go 让 Claude Code 从「对话式结对编程」升级为「异步任务委派」——你说需求，它交 PR。**
+>
+> 基础设施化方向评估见 [design/infrastructure-api-design.md](design/infrastructure-api-design.md)
 
 核心用户：每周用 Claude Code 超过 20 次的工程师。他们信任 AI 写代码，但厌倦了手动拆分多步骤任务。
 
@@ -54,8 +56,8 @@ OpenChamber（https://openchamber.dev）是 OpenCode 的开源可视化操作界
 |---|---|---|
 | 分支式对话时间线（/undo/redo/fork） | 无，regenerate 覆盖旧 Plan | Plan 版本管理（P1） |
 | 多 Agent 并行（同一 prompt 多方案） | `--parallel N` 子任务并发 | 方案探索模式（P2） |
-| 可视化 Diff 审查 | `cmd_show` 文本摘要 | 聚合 diff 审查命令（P1） |
-| GitHub 原生集成（从 Issue/PR 启动） | `--issue` 参数 + `cmd_pr` | PR 自动推送到 GitHub（P2） |
+| 可视化 Diff 审查 | `review --task` 聚合 diff 审查 | ✅ 已实现 |
+| GitHub 原生集成（从 Issue/PR 启动） | `--issue` 参数 + `cmd_pr --push` | ✅ 已实现（gh CLI） |
 | 成本/Token 可视化 | metering.jsonl + status 命令 | 已够用 |
 | Skills 目录 | 已有 Skills 系统 | 已做得更深（role-skill 规则引擎） |
 | 远程访问 / Tunnel | 无 | 低优先级（定位不匹配） |
@@ -68,8 +70,8 @@ OpenChamber 是"看着干"——用户全程在 GUI 中审查每个操作。agen
 |--------|-------------|------------------|-----------------|
 | Plan 确认 | 实时修改 Plan | ✅ Y/S/D/E/R/N | 保留 |
 | 执行过程 | 实时流式查看 diff | ⚠️ status --watch | 加强失败通知 |
-| 结果审查 | 可视化 diff 面板 | ❌ 缺失 | 新增 review 命令 |
-| PR 创建 | 内置 GitHub 操作 | ⚠️ 生成 PR.md | 自动推送到 GitHub |
+| 结果审查 | 可视化 diff 面板 | ✅ review --task（文本模式） | 已是当前形态 |
+| PR 创建 | 内置 GitHub 操作 | ✅ cmd_pr --push（gh CLI） | 已实现 |
 
 ## 功能优先级
 
@@ -82,7 +84,7 @@ OpenChamber 是"看着干"——用户全程在 GUI 中审查每个操作。agen
 
 ## P0 缺失功能
 
-> **2026-07-25 更新：M1-M6 已全部落地**（多通道通知、失败摘要、PR 质量仪表、时间预估、验证循环防假阳性、级联阻断），详见 [roadmap.md](roadmap.md) 进度快照。下表保留为历史记录。
+> **2026-07-25 更新：M1-M7 已全部落地**（多通道通知、失败摘要、PR 质量仪表、时间预估、验证循环防假阳性、级联阻断、聚合结果审查），详见 [roadmap.md](roadmap.md) 进度快照。下表保留为历史记录。
 
 | # | 缺失 | 严重度 | 状态 |
 |---|------|--------|------|
@@ -92,7 +94,7 @@ OpenChamber 是"看着干"——用户全程在 GUI 中审查每个操作。agen
 | M4 | 时间预估 — "能在我走之前跑完吗？" | 🟡 | ✅ estimate_task_duration |
 | M5 | 验证假阳性 — "验证通过了但功能不对" | 🔴 | ✅ 验证循环 + 置信度评估 |
 | M6 | 级联失败 — "一个子任务失败拖垮全部" | 🔴 | ✅ blocked 阻断 + wave 排除 |
-| M7 | **结果审查阶段缺失** — "子任务都完成了，但变更汇总在哪里？" | 🔴 |
+| M7 | **结果审查阶段缺失** — "子任务都完成了，但变更汇总在哪里？" | 🔴 | ✅ `review --task` 聚合 diff + 审批 |
 
 ## 整体开发流程：四阶段模型
 
@@ -117,19 +119,20 @@ Phase 3: 审查阶段 (Review)       Phase 4: 交付阶段 (Delivery)
 └──────────────────────────────┘  └──────────────────────────────┘
 ```
 
-### Phase 3：审查阶段 — 最大缺口
+### Phase 3：审查阶段 — 已落地（2026-07-25）
 
-**当前状态：** 子任务执行完成后只输出文本摘要，没有结构化的变更审查流程。
+**当前状态：** `agent_go review --task <task-id>` 已实现聚合结果审查——按文件分组展示各子任务变更摘要，支持 `--approve` / `--reject` / `--changes-requested` 人工审批；`--deep` 用独立模型逐个子任务分析 diff。
 
-**需要的能力：**
+**能力清单：**
 
-| 能力 | 描述 | 优先级 |
-|------|------|--------|
-| 聚合 Diff 展示 | 将所有子任务的变更汇总，展示完整 diff | **P1** |
-| Diff 按文件分组 | 同一文件被多个子任务修改时，展示最终结果 | P2 |
-| 审查命令 | `agent_go review <task-id>` 进入交互式审查 | **P1** |
-| 审批状态 | approved / changes-requested / rejected | P2 |
-| 行内评论 | 在 diff 上添加评论，可反馈给 AI | P3 |
+| 能力 | 描述 | 状态 |
+|------|------|------|
+| 聚合 Diff 展示 | 将所有子任务的变更汇总，展示完整 diff | ✅ 已实现（`review --task`） |
+| Diff 按文件分组 | 同一文件被多个子任务修改时，展示最终结果 | ✅ 已实现 |
+| 审查命令 | `agent_go review --task <task-id>` 进入审查 | ✅ 已实现 |
+| 审批状态 | approved / changes-requested / rejected | ✅ 已实现 |
+| 深度分析 | 独立模型逐子任务分析 diff（`--deep`） | ✅ 已实现 |
+| 行内评论 | 在 diff 上添加评论，可反馈给 AI | P3 未实现 |
 
 ### 流程状态机
 
@@ -182,6 +185,50 @@ result(success|fallback|quality_fail), fallback_reason
 ```
 
 这是成本看板的数据源，也是发布门禁「$/pass rate 不劣化」的判定依据。
+
+### 模型分级策略（2026-07-25 补充）
+
+> 完整设计见 [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md)。
+
+**一句话：角色决定档位，difficulty 决定升降，评估机制验证选对。**
+
+角色路由解决了"按角色路由不同模型"的机制，但留下两个未闭环问题：(1) 选哪个模型？(2) 怎么知道选得对？分级策略回答前者，评估机制回答后者。
+
+**三角色 × 三档位分级矩阵（要点）：**
+
+| 角色 / 档位 | 主力旗舰 (Frontier) | 性价比 (Value) | 轻量 (Lite) |
+|-------------|---------------------|---------------|-------------|
+| Planner（不降级） | ★ Sonnet 4 / GPT-4.1 / Qwen-Max | ✗ 铁律禁降级 | ✗ |
+| Worker-hard | Opus 4.6 / GPT-5.6 Terra / GLM-4.6 | DeepSeek V3.2 / Qwen-Plus | — |
+| Worker-medium | Sonnet 4 / GPT-4.1 | DeepSeek V3.2 / Qwen-Plus | Doubao-lite |
+| Worker-easy | — | DeepSeek V3.2 / Doubao-pro | Haiku 4.5 / GPT-4.1 Nano |
+| Reviewer（不同源） | Gemini 2.5 Pro / Qwen-Max | Kimi K2 | — |
+
+**关键约束（补充铁律）：**
+- **$/pass 计价必须优先用真实 `cost_usd`** — 厂商标称价表无法覆盖所有模型（`claude-code-executor`、本地模型、国产新旗舰），兜底为最便宜模型会让 [$/pass rate 被低估 11-22 倍](ISSUES.md#issue-26)，gate 假性通过
+- **Reviewer 与 Worker 不同源** — 编排器强制校验（`judge != candidate`），保证视角低相关，防止同模型既写又审的系统性偏差
+- **性价比档必须配质量门** — 省钱不能牺牲 K8 首次通过率；本地/便宜模型接入后必须开 `gate --check-regression`
+
+**成本估算结论**：纯国际分级难以达到 Q3 的 $/pass ≤ $0.05（PRD 承认 K4 现状 ~$0.05-0.15）；国内分级轻松达标（~$0.008）但需质量门；**混合策略**（Sonnet 规划保质量 + DeepSeek 执行省成本，~$0.036/pass）是 P1 最优解。
+
+### 模型生产力评估机制（2026-07-25 补充）
+
+> 完整设计见 [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md) §3。
+
+**核心矛盾**：厂商 benchmark（SWE-bench）与真实 agentic 场景存在巨大鸿沟——Qwen3-Coder-30B-A3B 官方上榜，独立测试真实解决率仅 7%。**不能靠厂商 benchmark 决策模型选型**。
+
+**三层评估体系（用 agent_go 自跑数据，不信厂商分）：**
+1. **第 1 层 确定性评估**（客观）：标准任务集（带 ground-truth 验证命令）× N 模型 → pass_rate / first_pass_rate / latency / cost
+2. **第 2 层 语义评估**（跨模型交叉评判规避自偏）：对"通过但有疑问"的产出，用 A 模型评 B 模型产出 → semantic_score / false_positive_rate
+3. **第 3 层 决策汇总**：`analyze_model_productivity` 聚合 → recommendation（recommended/conditional/discouraged）+ 推荐角色
+
+**关键设计约束（铁律）：**
+- **LLM-as-Judge 禁绝自评** — 研究显示模型对自产输出评分偏高 10-30%；编排器硬约束 `judge != candidate`，每产出 ≥2 不同 provider 评判
+- **样本 <5 不决策** — 标记 low_confidence，不参与自动降级（避免小样本噪声误判）
+- **假阳性 >20% 禁用** — 验证通过但功能错误的模型不可信（验证命令覆盖不全是常态）
+- **人工抽检 10% 校准** — LLM 评判者与人工分歧 >30% 时标记 judge unreliable，回退到仅第 1 层
+
+**落地形态**：`agent_go eval bench --tasks eval_suite/ --models M1,M2,M3 --repeat 3 --judge-model Mj` → `agent_go eval models` 输出决策矩阵 → `agent_go router recommend` 自动生成路由配置。
 
 ## P1 重点：验证 Agent 循环（Verification Loop）
 
@@ -312,7 +359,60 @@ $$
 | **验证循环 token 爆炸** | 多次验证-修复循环可能消耗远超预期的 token | `max_retries` 硬上限（默认 3）+ 每迭代超时控制；启用 /goal 模式减少外部循环次数 |
 | **修复 Agent 引入新问题** | 修复可能引入回归，新旧问题叠加 | 每次重试全量运行所有验证命令，不是只验上次失败的；达到上限后阻断下游 |
 | **/goal 循环不终止** | Claude 内部 goal 循环可能超出 agent_go 的控制 | 外部 watchdog（全局超时 + max_goal_turns）强制 kill 进程 |
-| 开放：跨任务记忆沉淀 | Agent 间经验随会话结束丢失，每次任务从零开始 | 远期探索 Field Guide 机制（Agent 自主维护的项目级记忆） |
+| **$/pass 计价失真** | 未知模型兜底为最便宜单价（ISSUE-26），$/pass rate 被低估 11-22 倍，gate 假性通过 | `analyze_cost` 优先用真实 `cost_usd`，token 重算仅兜底；本地模型强制 `local_model_hourly_cost` 估算并记入 metering |
+| **本地模型"免费"错觉** | 本地模型真实成本=时间×硬件折旧，4090 跑 27B 约 $0.24/pass（比 DeepSeek API 贵 240 倍）；延迟击穿 K3 | 评估机制实测后再接入；本地模型仅用于 easy worker / reviewer 等低频延迟不敏感角色 |
+| **厂商 benchmark 失真** | Qwen3-Coder-30B 官方上榜 vs 独立测真实 7%，SWE-bench 与 agentic 场景鸿沟大 | 三层评估机制（§评估机制），只用 agent_go 自跑数据，不信厂商分 |
+| **LLM-as-Judge 自偏** | 用 Sonnet 评 Sonnet 产出会系统性偏高 10-30%，评估结果不可信 | 交叉评判矩阵禁绝自评（`judge != candidate`）+ 人工抽检 10% 校准 |
+| 开放：跨任务记忆沉淀 | Agent 间经验随会话结束丢失，每次从零开始 | 远期探索 Field Guide 机制（Agent 自主维护的项目级记忆） |
+
+## 基础设施化方向（评估中）
+
+> **状态**：设计草案完成（见 [design/infrastructure-api-design.md](design/infrastructure-api-design.md)），待论证必要性和可行性后决定是否投入。
+
+### 定位扩展
+
+```
+当前：agent_go = CLI 工具（用户手动输入命令 → 看终端输出）
+目标：agent_go = 可编程开发基础设施（CI/CD / IDE / Git Hooks / 项目管理平台可调用）
+```
+
+### 新增能力全景
+
+| 能力 | 说明 | 优先级 | 设计文档 |
+|------|------|--------|---------|
+| **Python API** | `run_task()` 返回结构化 `TaskResult`，替代 CLI 的 `None` 输出 | P0 | §3.1 |
+| **CLI --json** | 所有子命令支持 JSON 输出，供外部脚本调用 | P0 | §3.4 |
+| **事件总线** | 全生命周期 `emit_event` + `subscribe_event` + `events.jsonl` | P1 | §4 |
+| **状态查询 API** | `query_task()` / `query_project_trend()` 统一查询入口 | P1 | §3.1 |
+| **知识存储** | `KnowledgeStore` 项目级经验沉淀，Plan prompt 自动注入 | P2 | §5 |
+| **CI/CD 集成** | GitHub Action / pre-commit hook / GitLab CI 模板 | P3 | §6 |
+| **IDE 插件** | VS Code Extension（进度面板 + 一键运行 + 审查入口） | P4 | §6.3 |
+
+### 新增场景
+
+| # | 场景 | 用户 | 当前方案 | 基础设施化后 |
+|---|------|------|---------|-------------|
+| N1 | CI 门禁自动拦截 | 团队 | 人工 `eval gate` | CI pipeline 自动跑门禁，失败阻断发布 |
+| N2 | 开发流程嵌入 | 个人 | 切换到终端输入命令 | pre-commit hook + VS Code 面板 |
+| N3 | 项目管理同步 | 组织 | 无 | Jira Task → agent_go → 状态自动流转 |
+| N4 | 知识沉淀 | 个人+团队 | 每次从零开始 | 自动提取历史模式，Plan 注入经验 |
+| N5 | 多工具编排 | 平台 | 脚本包装 CLI | Python API 嵌入自有工作流 |
+
+### 新增 KPI
+
+| # | KPI | 当前 | 目标 | 说明 |
+|---|-----|------|------|------|
+| K9 | 集成接入数 | 0 | 10 → 50 | 累计集成的外部系统数（CI / IDE / Webhook） |
+| K10 | 知识注入采纳率 | — | ≥60% | Plan 中知识注入段被 Planner 有效使用的比例 |
+
+### 新增风险
+
+| 风险 | 说明 | 缓解 |
+|------|------|------|
+| API 接口不稳定 | 外部调用方频繁适配 | 结构化结果版本化 `schema_version` |
+| 知识注入误导 Planner | 错误经验降低 Plan 质量 | JSON 校验失败跳过注入，回退无知识模式 |
+| IDE 插件维护成本高 | VS Code API 频繁变动 | 插件仅做薄壳，核心逻辑走 CLI `--json` |
+| 范围蔓延 | 基础设施化吞噬核心迭代资源 | 明确 P0-P4 分期，每期验收后再投入下一期 |
 
 ## 远期方向（P2+）
 

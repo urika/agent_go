@@ -7,7 +7,8 @@ from typing import Any, Optional
 from .console import get_default_console
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
-from .notify import notify_event
+# 解耦：notify 是可选增强，删除模块级 import 以匹配 architecture.md 解耦原则
+# （让函数内动态 import 统一拦截，便于测试 mock 和 disable notify 而不破坏 import）
 
 logger = logging.getLogger(__name__)
 
@@ -391,4 +392,9 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     # ── 任务完成通知（M1） ──
     # 事件优先级：on_blocked > on_failed > on_complete（一次管线只派发一个事件）
     event = "on_blocked" if has_blocked else "on_failed" if has_failed else "on_complete"
-    notify_event(event, {"meta": meta, "results_map": results_map, "task_dir": task_dir}, config)
+    # 解耦：动态 import + try/except——notify 是可选增强，失败不中断
+    try:
+        from .notify import notify_event
+        notify_event(event, {"meta": meta, "results_map": results_map, "task_dir": task_dir}, config)
+    except Exception as e:
+        logger.warning(f"notify 加载/调用失败，跳过任务完成通知（不中断）: {e}")

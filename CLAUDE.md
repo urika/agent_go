@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (21 modules, ~5500 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel completion notification, and remote branch push.
+agent_go is a modular Python CLI tool (28 modules, ~10,300 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel completion notification, and remote branch push.
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -83,7 +83,7 @@ cmd_run()
 
 | Module | Purpose |
 |--------|---------|
-| `cli.py` | CLI commands: run, resume, list, show, status, pr, config, clean, cache |
+| `cli.py` | CLI commands: run, resume, list, show, status, pr, config, clean, cache, inspect, review, router, eval, ci, plan-history, plan-diff |
 | `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
 | `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
 | `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify |
@@ -101,7 +101,13 @@ cmd_run()
 | `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
 | `goal_injector.py` | /goal Stop Hook injection: .claude/settings.json + verify-goal.sh |
 | `metrics.py` | Data collection: timing, change stats, estimate_cost, aggregate_metering |
-| `eval.py` | Quality/perf/cost (per-role)/reliability/ux evaluation, M4 time estimation |
+| `eval.py` | Quality/perf/cost (per-role)/reliability/ux evaluation, eval gate ($/pass baseline + regression) |
+| `planning.py` | Planning helpers: estimate_task_duration (M4) |
+| `pricing.py` | Model price table (22 models), MODEL_TIER, provider defaults |
+| `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks |
+| `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
+| `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
+| `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |
 | `tui.py` | Curses-based status dashboard (live task monitoring) |
 | `workflow_gen.py` | GitHub Actions CI workflow auto-generation |
 
@@ -123,7 +129,7 @@ cmd_run()
 ## Testing
 
 ```bash
-pytest tests/           # 751 tests (~17s)
+pytest tests/           # 1130 tests (~17s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -132,8 +138,9 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 ## File Organization
 
 ```
-agent_go/           # 21 package modules (~5500 lines)
-tests/              # 40 test files, 751 tests
+agent_go/           # 28 package modules (~10,300 lines)
+tests/              # 46 test files, 1130 tests
+eval_suite/         # Standard task suite for eval bench (8 tasks + fixtures)
 docs/
 ├── README.md       # 文档索引
 ├── architecture.md # 核心架构、关键设计决策、数据流

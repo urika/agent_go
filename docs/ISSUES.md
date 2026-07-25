@@ -312,6 +312,70 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 
 **根因教训**：覆盖率统计无法发现"测试跑了但断言错了"的漂移——CI 红绿门禁 + "改实现必须同步改测试"的纪律才是根本。错误前缀等措辞不应硬编码进断言，应断言行为契约（success=False + 有错误信息）。
 
+---
+
+### ISSUE-26 `analyze_cost` 计价失真：$/pass rate 被低估 11-22 倍，gate 假性通过
+
+- **位置**：`agent_go/eval.py:374-382`（旧实现，无条件 token 重算）+ `agent_go/subtask.py:370`（写 `actual_model="claude-code-executor"`）
+- **状态**：✅ 已修复（2026-07-25）— `analyze_cost` 改为优先用真实 `cost_usd`，token 重算仅补缺；未知模型不再兜底 deepseek
+- **严重度**：**P0**（北极星指标 $/pass rate 失真，门禁永远绿，违背存在意义）
+
+**问题**：`subtask.py:370` 默认写 `actual_model="claude-code-executor"`（Claude Code 子进程的真实标识），该字符串不在 `MODEL_PRICES`（仅 7 个模型）。旧 `analyze_cost:377` 对未知模型兜底 `MODEL_PRICES["deepseek-chat"]`（$0.27/$1.1 per Mtok），而真实 Claude 是 $3-15/Mtok——**成本被低估 11-22 倍**。`dollar_per_pass_rate` 因此被严重拉低，gate 永远通过。
+
+**附带问题（D2 双数据源）**：`by_role` 读真实 `cost_usd`（line 348），总 cost 却用 token 重算——同一批事件两份成本对不上，报告自相矛盾。
+
+**修复**：
+- `analyze_cost` 改为双轨：每条事件优先累加真实 `cost_usd` 到 `cost_from_metering`；仅当事件缺 `cost_usd` 且模型在 `MODEL_PRICES` 时，才按 token 重算补到 `cost_from_rebuild`。`estimated_cost_usd = metering + rebuilt`。
+- 未知模型（既无 `cost_usd` 又不在价目表）不再兜底 deepseek，而是计为 `unknown_model_events`（可观测字段，监控价目表覆盖度）。
+- 新增可观测字段：`cost_source_breakdown`（{metering, rebuilt}）、`unknown_model_events`、`fallback_events`（PRD §line 173 留痕字段终于被读）。
+- `by_role` 与总 cost 现都以 `cost_usd` 为主，自洽。
+
+**验证**：构造混合场景（claude-code-executor 真实 cost + sonnet + opus），新逻辑 $/pass=0.125（真实），旧逻辑会算成 ~0.005（低估 25 倍）。20 个 E2E 场景覆盖（`tests/test_e2e_scenarios.py`）。
+
+**根因教训**：北极星指标的计价不能依赖"价目表全覆盖"的假设——新模型/provider 持续涌现（claude-code-executor、custom 本地模型），兜底为最便宜模型会让门禁变摆设。必须优先用 provider 自报的真实 `cost_usd`，token 重算仅作兜底，且对未知模型要有可观测告警。
+
+---
+
+### ISSUE-27 `evaluator.py` 硬编码 token 导致重复记账 + cost 低估
+
+- **位置**：`agent_go/evaluator.py:225-226`（旧硬编码）+ `agent_go/api.py:82-96`（call_api 内部记账）
+- **状态**：✅ 已修复（2026-07-25）— evaluator 抑制 call_api 内部记账，自写带估算 token 的 metering
+- **严重度**：P1（重试越多 cost 越低估；角色标错）
+
+**问题**：`evaluator.py` 调 `call_api` 时传入含 `_metering_path` 的 config，`call_api` 内部会写一条 `role="planner"` 的 metering（api.py:82-96，含真实 token）。随后 evaluator 又写第二条 `role="evaluator"` 的 metering（硬编码 `prompt_tokens=1000, completion_tokens=200`）。后果：
+1. **重复记账**：同一 API 调用写两条 metering，cost 翻倍。
+2. **角色标错**：evaluator 调用被 call_api 标成 planner。
+3. **token 硬编码**：重试越多，evaluator cost 越被相对低估（真实评估可能消耗 10k+ token，却记 1k）。
+
+**修复**：
+- evaluator 传给 call_api 的 config 移除 `_metering_path`（`eval_config.pop("_metering_path", None)`），抑制 call_api 的内部记账。
+- evaluator 用 prompt/response 长度估算真实 token（~3 字符/token，中英混合保守值），替代硬编码 1000/200。
+- 角色正确标为 `evaluator`。
+
+**根因教训**：`call_api` 硬编码 `role="planner"` 是设计债（不接受 role 参数），导致所有非 planner 调用方都必须手动抑制其内部记账。根治应给 `call_api` 加 `role` 参数，但影响面大（planner/evaluator/router 多处），本次用最小侵入修复（evaluator 抑制 + 自写）。
+
+---
+
+### ISSUE-28 PRD "不劣化"语义 vs 绝对阈值门禁；K5 中断恢复成功率无派生计算
+
+- **位置**：`agent_go/eval.py:gate_cost`（绝对阈值）+ `analyze_reliability`（无 K5 派生）
+- **状态**：✅ 已修复（2026-07-25）— 新增 `gate_cost_regression`（基线对比）+ `--check-regression` CLI flag + K5 `resume_success_rate`
+- **严重度**：P1（PRD 铁律无执行力 + KPI 覆盖不全）
+
+**问题**：
+1. **PRD §line 184 "发布门禁「$/pass rate 不劣化」"** 是相对语义（vs S1 基线），但 `gate_cost` 用绝对阈值（actual > baseline）。后果：成熟仓库从 0.02 劣化到 0.04 仍"通过"；新 fork 仓库永远过不了 0.05 绝对门禁。
+2. **PRD K5（中断恢复成功率，年度 ≥99.9%）** 的原始数据已在 execution.log（task_paused/subtask_resume 事件，`analyze_reliability:661-664` 已读），但无"恢复后是否最终成功"的派生计算。
+
+**修复**：
+- 新增 `gate_cost_regression(tasks_dir, tolerance=0.10, update=False)`：对比当前 rate 与 `.agent_go/cost_baseline.json` 基线，劣化 >10% 即失败（PRD "不劣化"语义）。首次运行自动建立基线；`--update-baseline` 强制重置（模型升级等场景）。
+- CLI 新增 `--check-regression` / `--update-baseline` flag，与 `--baseline`（绝对阈值）互斥。
+- `analyze_reliability` 新增 `interrupted_tasks` + `resume_success_rate`：被中断过的任务中最终 status=="completed" 的比例。
+
+**未覆盖（记录为后续）**：K2（安全零事故）、K6（可观测性可回答率）、K7（首次上手时间）需全新数据采集，超出本次范围。
+
+**根因教训**：PRD 的"铁律"和"KPI"必须有可执行的代码闭环（gate + 派生指标），否则只是文档承诺。"不劣化"这种相对语义需要状态（基线文件），不能只用无状态函数实现。
+
+
 
 **修复建议**：统一为 0.8/1.2 区间公式；删除不可达的秒级分支。
 

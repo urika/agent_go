@@ -247,13 +247,19 @@ class TestCostPricing:
         assert result["by_model"]["claude-sonnet-4-20250514"] == 3.0
 
     def test_missing_model_falls_back_to_provider_default(self, tmp_path):
-        """旧日志缺 model 字段时按 provider 默认模型定价"""
+        """旧日志缺 model 字段时按 LEGACY provider 默认模型定价（PRD 不劣化修复 #4）
+
+        任务日期 task-20260102（2026-01-02）早于 PROVIDER_DEFAULT_MODEL_CUTOFF (2026-07-25)，
+        应使用 LEGACY 默认 anthropic → claude-sonnet-4-20250514（$3/$15）。
+        之前会按新默认 Sonnet 5 ($2/$10) 定价 → 历史 $/pass 被低估 33%。
+        """
         _write_task_with_api_log(tmp_path, "task-20260102", [{
             "event": "api_call", "provider": "anthropic",
             "prompt_tokens": 1_000_000, "completion_tokens": 0,
         }])
         result = analyze_cost(tmp_path)
-        assert result["estimated_cost_usd"] == 2.0   # anthropic default → claude-sonnet-5 ($2/M prompt)
+        # LEGACY 默认 claude-sonnet-4-20250514 ($3/M prompt) → 1M * $3 = $3
+        assert result["estimated_cost_usd"] == 3.0
 
     def test_multiple_models_aggregated_separately(self, tmp_path):
         """不同模型分别聚合计价"""

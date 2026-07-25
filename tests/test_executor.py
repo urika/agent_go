@@ -1251,3 +1251,144 @@ class TestIsSimpleTask:
                    "depends_on": ["sub-1", "sub-2", "sub-3"]}
 
         assert _is_simple_task(subtask) is False
+
+
+# ═══════════════════════════════════════════════════════════════
+# 验证循环 E2E
+# ═══════════════════════════════════════════════════════════════
+
+class TestVerificationLoopE2E:
+    """_verify_changes 的 retry → fix → reverify 完整循环。
+
+    覆盖 3 个场景：
+      1. 首次验证失败 → 修复 → 重新验证通过
+      2. 始终失败 → 达到 max_retries → verify_ok=False
+      3. shell 通过但语义评估未通过 → 触发修复
+    """
+
+    _SUBTASK_TPL = {
+        "id": "sub-1", "title": "基础任务", "description": "执行操作",
+        "verification": "pytest tests/",
+        "risks": [], "depends_on": [], "skills": [], "agent_type": "developer",
+        "agent_prompt": "work",
+    }
+
+    @staticmethod
+    def _git_mock(verify_success_on_attempt: int = 1):
+        """构造 subprocess.run side_effect。
+
+        Args:
+            verify_success_on_attempt: 验证命令在第几次调用时返回成功。
+               例 1 → 首次通过；2 → 首次失败、二次通过。
+        """
+        verify_count = [0]
+
+        def _run(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+
+            # Git status → has changes
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout=" M main.py\n", stderr="")
+            # Git diff stat
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="1 file changed, 10 insertions(+)", stderr="")
+            # Git operations (add / commit / tag) always succeed
+            if any(g in cmd_str for g in ["git add", "git commit", "git tag"]):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            # Verification command
+            if "pytest" in cmd_str:
+                verify_count[0] += 1
+                rc = 0 if verify_count[0] >= verify_success_on_attempt else 1
+                return MagicMock(returncode=rc, stdout="", stderr="test output")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return _run
+
+    def test_verify_fail_then_fix_then_pass(self, temp_repo, task_dir, logger):
+        """验证首次失败 → 修复 → 重新验证通过 (retry_count=1, verify_ok=True)"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=2)), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+            )
+
+        assert result["verify_ok"] is True, "修复后应验证通过"
+        assert result["retry_count"] == 1, "应修复 1 次后通过"
+        assert mock_fix.call_count == 1, "修复 prompt 应被调用 1 次"
+
+    def test_max_retries_then_fail(self, temp_repo, task_dir, logger):
+        """始终失败 → 达到 max_retries → verify_ok=False"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 2}},
+            )
+
+        assert result["verify_ok"] is False, "应最终失败"
+        assert result["retry_count"] == 2, "应达到 max_retries=2"
+        assert mock_fix.call_count == 2, "应修复 2 次"
+
+    def test_semantic_eval_triggers_repair(self, temp_repo, task_dir, logger):
+        """shell 验证通过 → 语义评估失败 → 触发修复 → 修复后通过"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
+            mock_fix.return_value = MagicMock(returncode=0)
+            # 语义评估首次失败，二次通过
+            mock_eval.side_effect = [
+                {"passed": False, "reason": "代码风格不统一",
+                 "cost_usd": 0.001, "latency_ms": 100},
+                {"passed": True, "reason": "修复后符合规范",
+                 "cost_usd": 0.001, "latency_ms": 100},
+            ]
+
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": True}},
+            )
+
+        assert result["verify_ok"] is True, "修复后应通过"
+        assert mock_eval.call_count >= 1, "语义评估至少被调用 1 次"
+        assert mock_fix.call_count >= 1, "语义评估失败应触发修复"
+
+    def test_semantic_eval_disabled_skips(self, temp_repo, task_dir, logger):
+        """evaluator.enabled=False → 不触发语义评估（即使 shell 通过）"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
+             patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
+
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": False}},
+            )
+
+        assert result["verify_ok"] is True
+        mock_eval.assert_not_called()

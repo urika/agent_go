@@ -144,17 +144,38 @@ def _build_parser():
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
-    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "all"],
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "models", "judge", "all"],
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
-    # gate 子命令参数：$/pass rate 基线阈值（缺省 0.05 = PRD Q3 目标）
+    # gate 子命令参数
     eval_parser.add_argument("--baseline", type=float, dest="baseline", default=None,
                              help="$/pass rate 绝对阈值（gate 子命令默认模式，缺省 0.05）")
     eval_parser.add_argument("--check-regression", dest="check_regression", action="store_true",
                              help="gate 改用「不劣化」语义：对比历史基线（劣化 >10%% 即失败）")
     eval_parser.add_argument("--update-baseline", dest="update_baseline", action="store_true",
                              help="gate 强制更新历史基线为当前 rate（模型升级等场景重置基线）")
+    # bench / models 子命令参数
+    eval_parser.add_argument("--tasks", dest="tasks", default="eval_suite",
+                             help="任务集目录（bench 子命令，缺省 eval_suite/）")
+    eval_parser.add_argument("--candidate-models", dest="candidate_models",
+                             help="被测模型列表，逗号分隔（bench 子命令，如 sonnet-5,deepseek-chat）")
+    eval_parser.add_argument("--repeat", dest="repeat", type=int, default=3,
+                             help="每任务重复次数（bench 子命令，默认 3）")
+    eval_parser.add_argument("--output", dest="output", default="eval_suite/results.jsonl",
+                             help="结果输出文件（bench 子命令）")
+    eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
+                             help="读取结果文件（models 子命令）")
+    # judge 子命令参数
+    eval_parser.add_argument("--judge-models", dest="judge_models",
+                             help="评判模型列表，逗号分隔（judge 子命令）")
+    eval_parser.add_argument("--judge-subcommand", dest="judge_subcommand", default="run",
+                             choices=["run", "calibrate"],
+                             help="judge 子命令：run=交叉评判 calibrate=人工校准")
+    eval_parser.add_argument("--llm-scores", dest="llm_scores",
+                             help="LLM 评分文件（judge calibrate 用）")
+    eval_parser.add_argument("--human-scores", dest="human_scores",
+                             help="人工评分 CSV（judge calibrate 用）")
 
     # inspect 子命令
     inspect_parser = subparsers.add_parser("inspect", help="查看保留的 worktree 现场")

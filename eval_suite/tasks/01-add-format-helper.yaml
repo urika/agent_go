@@ -1,0 +1,13 @@
+# Easy: single-function addition with clear spec
+id: add-format-helper
+difficulty: easy
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 src/utils.py 中新增函数 `truncate_text(text: str, max_len: int = 50) -> str`：
+  - 如果 text 长度 ≤ max_len，原样返回
+  - 如果超过，返回前 max_len 个字符 + "..."
+  - 加 docstring 说明参数和返回值
+verification:
+  - "python -m pytest tests/test_models_utils.py::test_truncate_text -q"  # 新增测试（需 agent 同时写）
+  - "python -c \"from src.utils import truncate_text; assert truncate_text('hi', 5) == 'hi'; assert truncate_text('hello world', 5) == 'hello...'; print('OK')\""
+timeout: 180

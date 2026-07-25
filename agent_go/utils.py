@@ -1,8 +1,51 @@
-import subprocess, json, re, time, shlex, logging
+import subprocess, json, re, time, shlex, logging, importlib
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Callable, Optional
 
-__all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES"]
+__all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES", "_safe_optional_call"]
+
+
+def _safe_optional_call(
+    module_name: str,
+    func_name: str,
+    logger: logging.Logger,
+    *args: Any,
+    fallback: Optional[Any] = None,
+    label: Optional[str] = None,
+    **kwargs: Any,
+) -> Any:
+    """可选增强调用 helper（解耦原则：动态 import + try/except 容错的统一封装）。
+
+    用法：替代散落在 executor/pipeline 中的 5+ 处重复 try/except 模式：
+        try:
+            from .X import Y
+            Y(arg1, arg2)
+        except Exception as e:
+            logger.warning(f"X.Y 失败: {e}")
+
+    改为：
+        _safe_optional_call(".X", "Y", logger, arg1, arg2, label="X.Y")
+
+    Args:
+        module_name: 子模块名（相对路径，如 ".evaluator" 或 ".notify"）
+        func_name: 要调用的函数名
+        logger: 用于记录警告
+        *args, **kwargs: 透传给目标函数
+        fallback: 调用失败时返回的默认值（默认 None）
+        label: 日志中的可读标签，默认 f"{module_name}.{func_name}"
+
+    Returns:
+        目标函数的返回值；调用失败时返回 fallback。
+    """
+    tag = label or f"{module_name}.{func_name}"
+    try:
+        mod = importlib.import_module(module_name, __package__)
+        func = getattr(mod, func_name)
+        return func(*args, **kwargs)
+    except Exception as e:
+        logger.warning(f"可选增强 {tag} 加载/调用失败，跳过（不中断核心）: {e}")
+        return fallback
 
 def read_reference_docs(doc_paths: list[str], repo: Path, logger: logging.Logger) -> str:
     contents = []

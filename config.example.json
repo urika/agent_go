@@ -1,9 +1,13 @@
 {
+  "_comment": "agent_go 配置示例。将本文件复制为 ~/.agent_go/config.json 后编辑。",
+  "_presets": "底部提供三套 router + worker_models 预设（国际/国内/混合），按需选用。",
+
   "plan_api": {
     "provider": "anthropic",
     "base_url": "https://api.anthropic.com/v1/messages",
     "api_key": "",
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-sonnet-5",
+    "_note":  "Sonnet 5 intro 价 $2/$10 至 Aug 31 2026，之后 $3/$15。也可选 claude-sonnet-4-6 ($3/$15) 或 gpt-4.1 ($2/$8)",
     "max_tokens": 4096,
     "temperature": 0.2
   },
@@ -49,8 +53,115 @@
     "enable_goal_hook": false
   },
   "worker_models": {
-    "easy": "",
+    "easy":   "",
     "medium": "",
-    "hard": "claude-opus-4-20250514"
+    "hard":   "claude-opus-4-8"
+  },
+
+  "router": {
+    "enabled": false,
+    "roles": {},
+    "agent_type_mapping": {
+      "developer": "worker",
+      "architect": "planner",
+      "reviewer": "reviewer",
+      "tester": "worker"
+    }
+  },
+
+  "_preset_international": "以下为国际场景预设（Claude 生态，2026-07 最新模型）。Sonnet 5 为规划默认，Haiku 4.5 执行，Opus 4.8 复杂任务。$/pass 估算约 $0.06（Sonnet 5 intro 价）。worker_models 必须与 router 平级（根级），不要嵌进 router 对象内。",
+  "_international_router": {
+    "router": {
+      "enabled": true,
+      "roles": {
+        "planner": {
+          "provider": "anthropic",
+          "model": "claude-sonnet-5",
+          "_note":  "Sonnet 5 intro $2/$10 至 Aug 2026。Planner 不降级（铁律）"
+        },
+        "worker": {
+          "provider": "anthropic",
+          "model": "claude-haiku-4-5",
+          "fallback": {
+            "provider": "deepseek",
+            "model": "deepseek-chat"
+          }
+        },
+        "reviewer": {
+          "provider": "google",
+          "model": "gemini-3.1-pro",
+          "_note":  "与 Worker(anthropic) 不同源（铁律）"
+        }
+      }
+    },
+    "worker_models": {
+      "easy":   "claude-haiku-4-5",
+      "medium": "claude-sonnet-5",
+      "hard":   "claude-opus-4-8"
+    }
+  },
+
+  "_preset_domestic": "以下为国内场景预设（2026-07 最新）。DeepSeek V3.2 主力，GLM-5 轻量，Qwen3-Max 复杂。$/pass 估算约 $0.005。worker_models 必须与 router 平级（根级）。",
+  "_domestic_router": {
+    "router": {
+      "enabled": true,
+      "roles": {
+        "planner": {
+          "provider": "deepseek",
+          "model": "deepseek-chat",
+          "_note":  "DeepSeek V3.2，成本仅 Claude 的 1/20。Planner 不降级。"
+        },
+        "worker": {
+          "provider": "deepseek",
+          "model": "deepseek-chat",
+          "fallback": {
+            "provider": "volcengine",
+            "model": "doubao-1.5-pro-32k"
+          }
+        },
+        "reviewer": {
+          "provider": "moonshot",
+          "model": "kimi-k2.5",
+          "_note":  "与 Worker(deepseek) 不同源。K2.5 前端专精 + 256K ctx"
+        }
+      }
+    },
+    "worker_models": {
+      "easy":   "glm-4.7-air",
+      "medium": "deepseek-chat",
+      "hard":   "qwen3-max"
+    }
+  },
+
+  "_preset_hybrid": "以下为混合场景预设（Sonnet 5 规划保质量 + DeepSeek 执行省成本）。$/pass 估算约 $0.025（Sonnet 5 intro 价），最接近 PRD Q3 目标。worker_models 必须与 router 平级（根级）。",
+  "_hybrid_router": {
+    "router": {
+      "enabled": true,
+      "roles": {
+        "planner": {
+          "provider": "anthropic",
+          "model": "claude-sonnet-5",
+          "_note":  "规划质量是总成本前置变量（铁律）。Sonnet 5 intro $2/$10"
+        },
+        "worker": {
+          "provider": "deepseek",
+          "model": "deepseek-chat",
+          "fallback": {
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5"
+          }
+        },
+        "reviewer": {
+          "provider": "google",
+          "model": "gemini-2.5-pro",
+          "_note":  "与 Worker(deepseek) 不同源"
+        }
+      }
+    },
+    "worker_models": {
+      "easy":   "glm-4.7-air",
+      "medium": "deepseek-chat",
+      "hard":   "claude-opus-4-8"
+    }
   }
 }

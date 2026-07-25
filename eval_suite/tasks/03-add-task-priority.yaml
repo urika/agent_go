@@ -1,0 +1,12 @@
+id: add-task-priority
+difficulty: easy
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 src/models.py 的 Task 类中，新增 priority 字段：
+  - __init__ 增加 priority: str = "medium" 参数（可选值 "low"/"medium"/"high"）
+  - to_dict() 输出含 priority
+  - from_dict() 读取 priority（缺省 "medium"）
+verification:
+  - "python -m pytest tests/test_models_utils.py -q"
+  - "python -c \"from src.models import Task; t=Task('x',priority='high'); d=t.to_dict(); assert d['priority']=='high'; print('OK')\""
+timeout: 180

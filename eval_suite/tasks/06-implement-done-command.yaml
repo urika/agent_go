@@ -1,0 +1,14 @@
+id: implement-done-command
+difficulty: medium
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 src/cli.py 中实现 cmd_done 命令（标记任务为完成）：
+  - 接收 task_id 参数（如 `done abc123`）
+  - 从 TaskStorage 加载所有任务，找到对应 id 的任务
+  - 调用 task.mark_done() 后再写回存储
+  - 实现细节：需要在 TaskStorage 新增 update 或 find_by_id 方法（当前只有 load_all + save）
+  - 更新 main() 注册 "done" 子命令
+verification:
+  - "python -m pytest tests/test_models_utils.py tests/test_storage.py -q"
+  - "python -c \"from src.storage import TaskStorage; from src.models import Task; from pathlib import Path; from src.cli import cmd_done; import sys; p=Path('/tmp/test_done.json'); s=TaskStorage(p); t=Task('x',task_id='t1'); s.save(t); sys.argv=['src','done','t1']; assert cmd_done('t1')==0; print('OK')\""
+timeout: 360

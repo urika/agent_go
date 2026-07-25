@@ -4,12 +4,13 @@ from typing import Optional, Any
 
 from .console import get_default_console
 from .config import log_event
-from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command
+from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
-from .evaluator import evaluate_semantic
+# 解耦原则：evaluator 是可选增强，不静态 import（避免核心模块强绑增强模块的传递依赖）。
+# 改为调用点（_verify_changes 内 evaluator_enabled 守卫后）动态 import。
 from .config import get_api_key
 __all__ = ["run_subtask"]
 
@@ -208,27 +209,44 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
             "- 如果连续 3 次修复仍失败，请在输出中说明原因后退出",
         ])
         # 字面 /goal condition（设计稿 §3.4）：Claude Code 原生 goal 循环的判定条件
-        from .goal_injector import GoalInjector
-        _vcmds = [verification] if isinstance(verification, str) else verification
-        _condition = GoalInjector.build_goal_condition(_vcmds)
-        task_md_parts.extend(["", f'/goal "{_condition}"'])
+        # 解耦：使用 _safe_optional_call helper（utils.py）替代散落的 try/except 样板。
+        try:
+            from .goal_injector import GoalInjector as _GI
+            _vcmds = [verification] if isinstance(verification, str) else verification
+            _condition = _GI.build_goal_condition(_vcmds)
+            task_md_parts.extend(["", f'/goal "{_condition}"'])
+        except Exception as _goal_err:
+            _mod_logger.warning(f"goal_injector 加载/调用失败，跳过 /goal 注入（不中断任务）: {_goal_err}")
 
     # ── Skill 知识注入 ──
     skill_names = subtask.get("skills", [])
     unresolved_skills = []
     if skill_names:
-        from .skills import load_skill, render_skill_for_execution, list_skills as _list_skills
-        installed_names = [s["name"] for s in _list_skills(repo)]
-        task_md_parts.append("")
-        for sn in skill_names:
-            sk = load_skill(sn, repo)
-            if sk:
-                task_md_parts.append(render_skill_for_execution(sk))
-                task_md_parts.append("")
-                logger.info(f"Skill 注入: {sn} → TASK.md")
-            else:
-                unresolved_skills.append(sn)
-                logger.warning(f"Skill 未找到: \"{sn}\"，已跳过。已安装: {installed_names[:10]}")
+        # 解耦：动态 import + try/except——Skills 是可选增强，加载失败不中断。
+        # 关键修复（ISSUE #6）：每个 skill 独立 try/except，单点失败不吞后续 skill。
+        installed_names: list[str] = []
+        try:
+            from .skills import load_skill, render_skill_for_execution, list_skills as _list_skills
+            installed_names = [s["name"] for s in _list_skills(repo)]
+            task_md_parts.append("")
+            for sn in skill_names:
+                # 单 skill try/except：单点失败仅记警告 + 标 unresolved，不影响其他 skill
+                try:
+                    sk = load_skill(sn, repo)
+                    if sk:
+                        task_md_parts.append(render_skill_for_execution(sk))
+                        task_md_parts.append("")
+                        logger.info(f"Skill 注入: {sn} → TASK.md")
+                    else:
+                        unresolved_skills.append(sn)
+                except Exception as _one_skill_err:
+                    logger.warning(f"Skill 加载失败（已跳过该 skill）: {sn} — {_one_skill_err}")
+                    unresolved_skills.append(sn)
+        except Exception as _skill_err:
+            _mod_logger.warning(f"Skills 模块加载/调用失败，跳过知识注入（不中断任务）: {_skill_err}")
+        # 未解析的 skill 警告（与 try/except 平级，不在 except 块内）
+        for sn in unresolved_skills:
+            logger.warning(f"Skill 未找到: \"{sn}\"，已跳过。已安装: {installed_names[:10]}")
 
     # 将 Agent Prompt 中的源项目路径替换为 worktree 路径，确保隔离
     task_md_text = "\n".join(task_md_parts)
@@ -590,9 +608,20 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             # 2. shell 验证全部通过 → 可选 LLM 语义评估（Phase 3）
             if all_pass and evaluator_enabled and headless:
                 logger.info("shell 验证通过，执行 LLM 语义评估...")
-                semantic_feedback = evaluate_semantic(
+                # 解耦：使用 _safe_optional_call helper 统一封装动态 import + try/except。
+                # 评估加载/调用异常绝不中断核心流程（降级为"评估跳过"，按架构原则 fail-open）。
+                semantic_feedback = _safe_optional_call(
+                    ".evaluator", "evaluate_semantic", logger,
                     subtask, worktree, verification,
-                    verification_history, _full_cfg, logger)
+                    verification_history, _full_cfg, logger,
+                    fallback={
+                        "passed": True,
+                        "reason": "语义评估失败（已跳过）",
+                        "cost_usd": 0.0,
+                        "latency_ms": 0.0,
+                    },
+                    label="evaluator.evaluate_semantic",
+                )
                 verification_results.append({
                     "type": "semantic",
                     "passed": semantic_feedback.get("passed", True),
@@ -831,9 +860,13 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     console.print(f"\n🚀 {sub_id}: {subtask['title']}")
     # Phase 2: Stop Hook 注入（goal.enable_goal_hook，默认关；--goal-hook 开启）
     if verification and _effective_config(config).get("goal", {}).get("enable_goal_hook", False):
-        from .goal_injector import GoalInjector
-        _vcmds = [verification] if isinstance(verification, str) else verification
-        GoalInjector.inject(worktree, _vcmds)
+        # 解耦：动态 import + try/except——Stop Hook 是可选增强，加载失败不中断。
+        try:
+            from .goal_injector import GoalInjector
+            _vcmds = [verification] if isinstance(verification, str) else verification
+            GoalInjector.inject(worktree, _vcmds)
+        except Exception as _hook_err:
+            logger.warning(f"GoalInjector Stop Hook 注入失败，跳过（不中断任务）: {_hook_err}")
 
     env = os.environ.copy()
     loaded_skill_names = [sn for sn in skill_names if sn not in unresolved_skills]
@@ -877,40 +910,57 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)
     _is_simple = _is_simple_task(subtask)
     if _agent_loop_enabled and _is_simple and headless:
-        from .router import resolve_provider, ProviderConfig
-        from .agent_loop import AgentLoop
-        route = resolve_provider(subtask.get("agent_type", "developer"), config)
-        if route:
-            pc = route.primary
-            _route_info = f"{route.role}:{pc.provider}/{pc.model}"
-        else:
-            _plan_api = config.get("plan_api", {})
-            pc = ProviderConfig(
-                provider=_plan_api.get("provider", "anthropic"),
-                base_url=_plan_api.get("base_url", ""),
-                model=_plan_api.get("model", ""),
+        # 解耦：动态 import + try/except——AgentLoop 是可选增强（方案 C 混合策略），
+        # 模块加载或执行失败时回退到传统 claude -p 路径，不中断任务。
+        try:
+            from .router import resolve_provider, ProviderConfig
+            from .agent_loop import AgentLoop
+            route = resolve_provider(subtask.get("agent_type", "developer"), config)
+            if route:
+                pc = route.primary
+                _route_info = f"{route.role}:{pc.provider}/{pc.model}"
+            else:
+                _plan_api = config.get("plan_api", {})
+                pc = ProviderConfig(
+                    provider=_plan_api.get("provider", "anthropic"),
+                    base_url=_plan_api.get("base_url", ""),
+                    model=_plan_api.get("model", ""),
+                )
+                _route_info = f"plan_api:{pc.provider}/{pc.model}"
+            # S4 复杂度双通道：按 difficulty 路由模型（非空时覆盖）
+            if routed_model:
+                pc.model = routed_model
+                _route_info += f" → {routed_model}"
+                logger.info(f"[S4] AgentLoop {sub_id} difficulty={difficulty} → model={routed_model}")
+            api_key = get_api_key(config)
+            loop = AgentLoop(logger=logger)
+            console.print(f"  🤖 直接 API 模式 ({_route_info})")
+            result = loop.run(
+                prompt=task_md,
+                worktree=worktree,
+                pc=pc,
+                api_key=api_key,
+                config=config,
+                tag_name=f"{task_id}/{sub_id}",
+                sub_id=sub_id,
+                task_id=task_id,
             )
-            _route_info = f"plan_api:{pc.provider}/{pc.model}"
-        # S4 复杂度双通道：按 difficulty 路由模型（非空时覆盖）
-        if routed_model:
-            pc.model = routed_model
-            _route_info += f" → {routed_model}"
-            logger.info(f"[S4] AgentLoop {sub_id} difficulty={difficulty} → model={routed_model}")
-        api_key = get_api_key(config)
-        loop = AgentLoop(logger=logger)
-        console.print(f"  🤖 直接 API 模式 ({_route_info})")
-        result = loop.run(
-            prompt=task_md,
-            worktree=worktree,
-            pc=pc,
-            api_key=api_key,
-            config=config,
-            tag_name=f"{task_id}/{sub_id}",
-            sub_id=sub_id,
-            task_id=task_id,
-        )
-        sandbox_type = "agent_loop"
-        claude_time = 0.0
+            sandbox_type = "agent_loop"
+            claude_time = 0.0
+        except Exception as _loop_err:
+            logger.warning(f"AgentLoop 加载/执行失败，回退到 claude -p（不中断任务）: {_loop_err}")
+            # 关键修复（ISSUE #2）：AgentLoop 可能已部分修改 worktree（未 commit），
+            # 必须先 git reset 清空，避免 claude -p 看到/继续 AgentLoop 的脏状态造成假阳性验证。
+            try:
+                import subprocess as _sp
+                _sp.run(["git", "checkout", "--", "."], cwd=worktree, capture_output=True, timeout=10)
+                _sp.run(["git", "clean", "-fd"], cwd=worktree, capture_output=True, timeout=10)
+                logger.info(f"AgentLoop fallback: 已清空 worktree 残留改动 ({worktree})")
+            except Exception as _reset_err:
+                logger.warning(f"AgentLoop fallback: worktree reset 失败 ({_reset_err})，继续 fallback（claude -p 可能在脏状态上运行）")
+            result, sandbox_type, claude_time = _run_claude(
+                task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger
+            )
     else:
         result, sandbox_type, claude_time = _run_claude(
             task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger

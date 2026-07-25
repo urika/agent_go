@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from agent_go.eval import estimate_task_duration
+from agent_go.planning import estimate_task_duration
 from agent_go.cli import _build_quality_dashboard
 from agent_go.ui import plan_to_subtasks
 from agent_go.executor import run_subtask
