@@ -14,6 +14,7 @@ from .skills import load_skills, discover_skills, render_skill_for_plan, list_sk
 from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .replay import cmd_replay
+from .checkpoint import list_checkpoints, restore_checkpoint, SnapshotManager
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
 from .git_utils import init_git_repo
@@ -216,6 +217,20 @@ def _build_parser():
     replay_parser.add_argument("task_id", help="Task ID to replay")
     replay_parser.add_argument("--json", action="store_true", dest="json_mode",
                                help="Output as JSON Lines")
+
+    # checkpoint 子命令（P4-2 检查点快照）
+    checkpoint_parser = subparsers.add_parser("checkpoint", help="Manage file snapshots for subtask rollback")
+    checkpoint_sub = checkpoint_parser.add_subparsers(dest="checkpoint_command", help="Checkpoint operation")
+    chk_list = checkpoint_sub.add_parser("list", help="List checkpoints for a task")
+    chk_list.add_argument("task_id", help="Task ID")
+    chk_list.add_argument("--json", action="store_true", dest="json_mode", help="Output as JSON")
+    chk_restore = checkpoint_sub.add_parser("restore", help="Restore files from a checkpoint")
+    chk_restore.add_argument("task_id", help="Task ID")
+    chk_restore.add_argument("--name", "-n", required=True, help="Checkpoint name (subtask ID)")
+    chk_restore.add_argument("--target", help="Target directory (default: task_dir/sub_id/work)")
+    chk_delete = checkpoint_sub.add_parser("delete", help="Delete a checkpoint")
+    chk_delete.add_argument("task_id", help="Task ID")
+    chk_delete.add_argument("--name", "-n", required=True, help="Checkpoint name to delete")
 
     # router 子命令
     router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")
@@ -1752,6 +1767,55 @@ def cmd_recover(args) -> None:
         console.print(f"   ✓ meta.json 已更新（recovered_at={result.get('recovered_at', '?')[:19]}）")
 
 
+def cmd_checkpoint(args) -> None:
+    """P4-2: 检查点快照管理。"""
+    from .console import _LazyConsole
+    _con = _LazyConsole()
+    task_dir = AGENT_GO_DIR / args.task_id
+    if not task_dir.exists():
+        _con.error(f"任务不存在: {args.task_id}")
+        return
+
+    subcmd = args.checkpoint_command if args else "list"
+
+    if subcmd == "list":
+        snapshots = list_checkpoints(args.task_id)
+        if not snapshots:
+            _con.print(f"任务 {args.task_id} 没有检查点")
+            return
+        if getattr(args, "json_mode", False):
+            import json as _json
+            _con.force(_json.dumps(snapshots, indent=2, ensure_ascii=False))
+            return
+        _con.sep("─", 55)
+        _con.title(f"📸 检查点: {args.task_id}")
+        for s in snapshots:
+            ts = s.get("timestamp", 0)
+            time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "?"
+            _con.print(f"  {s['subtask_id']:<10} {s.get('file_count', 0)} files  {time_str}")
+        _con.sep("─", 55)
+
+    elif subcmd == "restore":
+        sub_id = args.name
+        target = Path(args.target) if args.target else None
+        n = restore_checkpoint(args.task_id, sub_id, target)
+        if n > 0:
+            _con.success(f"已恢复 {n} 个文件（{sub_id} → {target or '默认 worktree'}）")
+        else:
+            _con.warning(f"检查点 {sub_id} 不存在或无可恢复文件")
+
+    elif subcmd == "delete":
+        sub_id = args.name
+        mgr = SnapshotManager(task_dir)
+        if mgr.delete(sub_id):
+            _con.success(f"已删除检查点 {sub_id}")
+        else:
+            _con.warning(f"检查点 {sub_id} 不存在")
+
+    else:
+        _con.print(f"未知操作: {subcmd}。可用: list | restore | delete")
+
+
 def cmd_router(args=None) -> None:
     """角色感知模型路由配置管理。"""
     from .config import CONFIG_PATH
@@ -1968,6 +2032,8 @@ def main() -> None:
                 _show_plan_diff(task_dir, args.v1, args.v2)
         elif args.command == "replay":
             cmd_replay(args)
+        elif args.command == "checkpoint":
+            cmd_checkpoint(args)
     except KeyboardInterrupt:
         console.print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)

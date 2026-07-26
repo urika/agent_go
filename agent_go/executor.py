@@ -943,6 +943,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                     merge_conflicts.get(up_id, "").split("\n") if has_conflict else None))
     clone_time = time.time() - clone_start
 
+    # P4-2: 检查点快照 — 在 Claude 执行前保存 worktree 文件快照
+    # （catch 所有异常，不影响主线流程）
+    try:
+        from .checkpoint import take_snapshot as _take_snapshot
+        _take_snapshot(task_dir, sub_id, worktree, subtask.get("files_hint", ""))
+    except Exception:
+        logger.debug(f"[checkpoint] snapshot 失败（非关键）: {sub_id}")
+
     # 3. Build TASK.md
     task_md, verification, skill_names, unresolved_skills = _build_task_md(
         subtask, repo, task_dir, worktree, logger, headless,

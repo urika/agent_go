@@ -1,17 +1,83 @@
 import json
 import logging
 import time
+import os
+import subprocess as _subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
+
 from .config import AGENT_GO_DIR
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["cmd_status_tui"]
 
+
+class LogTailer:
+    """Efficient log file tailer using seek/tell. O(1) per poll after first read."""
+
+    def __init__(self, path: Path, max_lines: int = 500):
+        self.path = path
+        self.max_lines = max_lines
+        self._fp: Any = None
+        self._pos = 0
+        self._all_lines: list[str] = []
+
+    def close(self) -> None:
+        if self._fp:
+            try:
+                self._fp.close()
+            except OSError:
+                pass
+            self._fp = None
+
+    def poll(self) -> list[str]:
+        if not self.path.exists():
+            return []
+        try:
+            cur_size = self.path.stat().st_size
+        except OSError:
+            return []
+        if self._fp is None:
+            try:
+                self._fp = open(self.path, "r", encoding="utf-8", errors="replace")
+            except OSError:
+                return []
+            self._pos = self._fp.seek(0, 2)
+            return []
+        if cur_size < self._pos:
+            self._pos = 0
+            self._fp.seek(0)
+            self._all_lines = []
+        if cur_size == self._pos:
+            return []
+        try:
+            self._fp.seek(self._pos)
+            new_lines = self._fp.readlines()
+            self._pos = self._fp.tell()
+        except OSError:
+            return []
+        stripped = [l.rstrip("\n\r") for l in new_lines]
+        self._all_lines.extend(stripped)
+        if len(self._all_lines) > self.max_lines:
+            self._all_lines = self._all_lines[-self.max_lines:]
+        return stripped
+
+    def get_all(self) -> list[str]:
+        return self._all_lines
+
+
+def _get_tail_lines(log_path: Path, count: int = 10) -> list[str]:
+    """Legacy compatibility — simple read without LogTailer."""
+    if not log_path.exists():
+        return []
+    lines = log_path.read_text(encoding="utf-8").strip().split("\n")
+    tail = lines[-30:]
+    return [l.split(" | ")[-1][:100] for l in tail if "|" in l][-count:]
+
+
 def _read_metering_cost(task_dir: Path) -> float:
-    """从 metering.jsonl 汇总 cost_usd（轻量版，TUI 用）。"""
     metering_path = task_dir / "metering.jsonl"
     if not metering_path.exists():
         return 0.0
@@ -54,7 +120,6 @@ def _get_task_status(task_dir: Path) -> Optional[dict[str, Any]]:
             try:
                 current = json.loads(line.split(" | ")[-1]).get("title", "")
             except (json.JSONDecodeError, IndexError, KeyError):
-                # TUI log parsing — malformed lines are expected
                 logger.debug("Failed to parse subtask title from log line")
             break
 
@@ -62,18 +127,16 @@ def _get_task_status(task_dir: Path) -> Optional[dict[str, Any]]:
     created = meta.get("created", "")
     if created:
         try:
-            # created 格式为 "20260725-030125-545"（带毫秒后缀），剥离后解析
             created_clean = created.rsplit("-", 1)[0] if created.count("-") == 2 else created
             start = datetime.strptime(created_clean, "%Y%m%d-%H%M%S")
-            end = datetime.now() if status == "running" else datetime.fromtimestamp(log_path.stat().st_mtime) if log_path.exists() else datetime.now()
+            end = datetime.now() if status == "running" else (
+                datetime.fromtimestamp(log_path.stat().st_mtime) if log_path.exists() else datetime.now())
             delta = end - start
             elapsed = f"{int(delta.total_seconds() // 60)}m{int(delta.total_seconds() % 60)}s"
         except ValueError:
-            # TUI timestamp parsing — invalid format expected in some entries
             logger.debug("Failed to parse elapsed time from created timestamp")
 
     cost = _read_metering_cost(task_dir)
-    # $/pass rate = 总成本 / 成功完成的子任务数
     completed_count = sum(1 for r in results if r.get("status") == "completed")
     dollar_per_pass = round(cost / completed_count, 4) if completed_count > 0 else None
 
@@ -88,19 +151,25 @@ def _get_task_status(task_dir: Path) -> Optional[dict[str, Any]]:
     }
 
 
-def _get_tail_lines(log_path: Path, count: int = 10) -> list[str]:
-    if not log_path.exists():
-        return []
-    lines = log_path.read_text(encoding="utf-8").strip().split("\n")
-    tail = lines[-30:]
-    return [l.split(" | ")[-1][:100] for l in tail if "|" in l][-count:]
-
-
-STATUS_COLORS = {"completed": 2, "no_changes": 2, "degraded": 3, "running": 3, "failed": 1, "paused": 3, "aborted": 1, "blocked": 5}
-ICONS = {"completed": "ok", "no_changes": "--", "degraded": "~", "running": "> ", "failed": "!!", "paused": "||", "aborted": "x ", "blocked": "##"}
-
-# 验证置信度缩写
+STATUS_COLORS = {"completed": 2, "no_changes": 2, "degraded": 3, "running": 3,
+                 "failed": 1, "paused": 3, "aborted": 1, "blocked": 5}
+ICONS = {"completed": "ok", "no_changes": "--", "degraded": "~", "running": "> ",
+         "failed": "!!", "paused": "||", "aborted": "x ", "blocked": "##"}
 VC_ABBR = {"deterministic": "det", "heuristic": "heur", "manual": "man", "none": "--"}
+
+
+def _shorten_log_line(raw: str, max_w: int) -> str:
+    """Shorten a log line for TUI display. Extract key info from JSON lines."""
+    if "{" in raw:
+        try:
+            ev = json.loads(raw.split("{", 1)[0].rsplit(" | ", 1)[-1] + "{" + raw.split("{", 1)[1]) if "{" in raw else raw.split(" | ")[-1] if " | " in raw else raw
+            return ev.get("event", raw)[:max_w]
+        except (json.JSONDecodeError, IndexError):
+            pass
+    text = raw.split(" | ")[-1] if " | " in raw else raw
+    if len(text) > max_w:
+        text = text[:max_w - 3] + "..."
+    return text
 
 
 def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
@@ -108,9 +177,11 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
     curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
-    for i, c in enumerate([curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_CYAN, curses.COLOR_WHITE], 1):
+    for i, c in enumerate([curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_YELLOW,
+                           curses.COLOR_CYAN, curses.COLOR_WHITE], 1):
         curses.init_pair(i, c, -1)
     curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLUE)
 
     stdscr.nodelay(True)
     stdscr.timeout(500)
@@ -118,6 +189,12 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
     expanded_tasks = set()
     filter_mode = 0
     detail_idx = 0
+
+    # P3-2: Log tailer per task + scroll state
+    log_tailers: dict[str, LogTailer] = {}
+    log_scroll = 0
+    auto_scroll = True
+    focus: str = "list"  # "list" | "log"
 
     while True:
         tasks_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
@@ -130,21 +207,22 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
                 _safe_addstr(stdscr, 2, 2, "暂无任务。按 q 退出。")
             stdscr.refresh()
             key = stdscr.getch()
-            if key == ord('q'):
+            if key == ord("q"):
                 break
             time.sleep(0.5)
             continue
+
         rows = [r for r in (_get_task_status(td) for td in tasks_dirs) if r]
 
-        # 执行模式（单任务过滤）：任务完成自动退出
         if task_filter and rows:
             _ts = rows[0]["status"]
             if _ts in ("completed", "failed", "aborted"):
-                # 展示最终结果 3 秒后自动退出
-                _safe_addstr(stdscr, 2, 2, f"任务 {task_filter}: {_ts}", curses.color_pair(2) if _ts == "completed" else curses.color_pair(1))
+                _safe_addstr(stdscr, 2, 2, f"任务 {task_filter}: {_ts}",
+                             curses.color_pair(2) if _ts == "completed" else curses.color_pair(1))
                 stdscr.refresh()
                 time.sleep(3)
                 break
+
         if filter_mode == 1:
             rows = [r for r in rows if r["status"] == "running"]
         elif filter_mode == 2:
@@ -155,7 +233,7 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
         max_y, max_x = stdscr.getmaxyx()
         if max_y < 8 or max_x < 50:
             key = stdscr.getch()
-            if key == ord('q'):
+            if key == ord("q"):
                 break
             time.sleep(0.5)
             continue
@@ -165,17 +243,23 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
 
         stdscr.erase()
 
-        # Header
+        # ── P3-2/3: Header with focus indicator ──
         _mode_label = " 执行模式 " if task_filter else " agent_go Status "
-        _safe_addstr(stdscr, 0, 0, f" {_mode_label} [q]退出 [j/k]选择 [Enter]展开 [←/→]子任务 ".ljust(max_x - 1), curses.color_pair(6))
+        focus_indicator = " [Tab:日志]" if focus == "list" else " [Tab:列表]"
+        header = f" {_mode_label} [q]退出 [j/k]选择 [Enter]展开 [←/→]子任务 {focus_indicator}".ljust(max_x - 1)
+        _safe_addstr(stdscr, 0, 0, header, curses.color_pair(6))
 
         list_w = min(max_x - 42, 60)
         detail_x = list_w + 1
 
-        # Task list
+        # ── Layout: log panel takes bottom ~35% ──
+        log_height = max(3, (max_y - 2) * 35 // 100)
+        list_height = max_y - 2 - log_height
+
+        # ── Task list (left column, top section) ──
         line_y = 2
         for i, row in enumerate(rows):
-            if line_y >= max_y - 4:
+            if line_y >= list_height:
                 break
             is_sel = (i == selected_idx)
             color = STATUS_COLORS.get(row["status"], 5)
@@ -188,7 +272,7 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
 
             if row["id"] in expanded_tasks:
                 for sr in row.get("results", []):
-                    if line_y >= max_y - 4:
+                    if line_y >= list_height:
                         break
                     sid = sr.get("subtask_id", "?")
                     sstat = sr.get("status", "?")
@@ -203,30 +287,28 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
                     _safe_addstr(stdscr, line_y, 3, sub_line[:list_w - 4], curses.color_pair(scolor))
                     line_y += 1
 
-        # Detail panel — 任务级摘要 + 子任务轮播
+        # ── Detail panel (right column) ──
         sel = rows[selected_idx] if rows and selected_idx < len(rows) else None
         if sel:
             res = sel.get("results", [])
-            # 子任务轮播索引边界
             if detail_idx >= len(res):
                 detail_idx = max(0, len(res) - 1)
             _safe_addstr(stdscr, 2, detail_x, f"{sel['id'][:24]} {sel['task'][:24]}", curses.color_pair(4))
 
-            # 任务级摘要
             summary_y = 3
             _safe_addstr(stdscr, summary_y, detail_x + 1,
-                         f"状态: {sel['status']:<10} 进度: {sel['progress']}", curses.color_pair(STATUS_COLORS.get(sel['status'], 5)))
+                         f"状态: {sel['status']:<10} 进度: {sel['progress']}",
+                         curses.color_pair(STATUS_COLORS.get(sel['status'], 5)))
             _safe_addstr(stdscr, summary_y + 1, detail_x + 1,
                          f"耗时: {sel['elapsed']:<8} 成本: ${sel.get('cost_usd', 0):.4f}")
             _safe_addstr(stdscr, summary_y + 2, detail_x + 1,
                          f"ok {sel.get('completed_count', 0)} | fail {sel.get('failed', 0)} | "
                          f"blocked {sel.get('blocked', 0)} | retry成功 {sel.get('retried_success', 0)}")
-            dpp = sel.get('dollar_per_pass')
+            dpp = sel.get("dollar_per_pass")
             dpp_str = f"${dpp}" if dpp is not None else "N/A"
             _safe_addstr(stdscr, summary_y + 3, detail_x + 1,
                          f"★ $/pass: {dpp_str}", curses.color_pair(2))
 
-            # 子任务轮播详情
             sub_detail_y = summary_y + 5
             if res:
                 sr = res[detail_idx]
@@ -249,51 +331,126 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
                 for j, d in enumerate(dl):
                     _safe_addstr(stdscr, sub_detail_y + 1 + j, detail_x + 1, d[:max_x - detail_x - 3])
 
-            # Log panel
-            log_y = sub_detail_y + 8
-            log_path = AGENT_GO_DIR / sel["id"] / "execution.log"
-            tail = _get_tail_lines(log_path, max(3, max_y - log_y - 2))
-            _safe_addstr(stdscr, log_y, detail_x, "--- Log ---", curses.color_pair(5))
-            for k, tl in enumerate(tail):
-                _safe_addstr(stdscr, log_y + 1 + k, detail_x + 1, tl[:max_x - detail_x - 2])
+        # ── P3-2: Log panel (bottom, full width) ──
+        log_y = max_y - log_height
+        _safe_addstr(stdscr, log_y - 1, 1, "─── Log ───", curses.color_pair(5))
 
-        # Status bar
+        if sel:
+            tid = sel["id"]
+            log_path = AGENT_GO_DIR / tid / "execution.log"
+
+            # Initialize tailer on first encounter
+            if tid not in log_tailers:
+                log_tailers[tid] = LogTailer(log_path)
+
+            tailer = log_tailers[tid]
+            new_lines = tailer.poll()
+            if new_lines and auto_scroll:
+                log_scroll = 0  # Stay at bottom when auto-scrolling
+
+            all_lines = tailer.get_all()
+            max_visible = log_height - 1
+
+            # Clamp scroll to valid range
+            if auto_scroll:
+                log_scroll = 0
+            else:
+                max_scroll = max(0, len(all_lines) - max_visible)
+                if log_scroll > max_scroll:
+                    log_scroll = max_scroll
+
+            visible_lines = all_lines[max(0, len(all_lines) - max_visible - log_scroll):len(all_lines) - log_scroll] if all_lines else []
+            visible_lines = visible_lines[:max_visible]
+
+            for k, l in enumerate(visible_lines):
+                if log_y + k >= max_y - 1:
+                    break
+                display = _shorten_log_line(l, max_x - 4)
+                if focus == "log":
+                    attr = curses.A_REVERSE if k == log_scroll % max_visible else 0
+                else:
+                    attr = 0
+                _safe_addstr(stdscr, log_y + k, 1, display[:max_x - 2], attr)
+
+        # ── P3-3: Status bar with shortcuts ──
         running = sum(1 for r in rows if r["status"] == "running")
         done = sum(1 for r in rows if r["status"] == "completed")
         fail = sum(1 for r in rows if r["status"] == "failed")
-        bar = f" {_mode_label.strip()} | {len(rows)} tasks | {running} run | {done} done | {fail} fail"
+        focus_label = " [日志]" if focus == "log" else " [列表]"
+        bar = f" {_mode_label.strip()}{focus_label} | {len(rows)} tasks | {running} run | {done} done | {fail} fail"
         if not task_filter:
             bar += " | [1]all [2]run [3]done [4]fail"
-        bar += " | [←/→]子任务 "
+        bar += " | [Tab]焦点 [←/→]子任务 "
+        if task_filter:
+            bar += " [r]重试失败 "
         _safe_addstr(stdscr, max_y - 1, 0, bar[:max_x - 1], curses.color_pair(6))
 
         stdscr.refresh()
+
+        # ── P3-3: Key handling ──
         key = stdscr.getch()
-        if key == ord('q'):
+
+        # Global keys
+        if key == ord("q"):
             break
-        elif key == ord('j') or key == curses.KEY_DOWN:
-            selected_idx = min(selected_idx + 1, len(rows) - 1) if rows else 0
-        elif key == ord('k') or key == curses.KEY_UP:
-            selected_idx = max(selected_idx - 1, 0)
-        elif key == 10 and rows:
-            tid = rows[selected_idx]["id"]
-            expanded_tasks.symmetric_difference_update({tid})
-        elif key in (ord('l'), curses.KEY_RIGHT) and rows:
+        elif key == 9:  # Tab — toggle focus
+            focus = "log" if focus == "list" else "list"
+        elif key == ord(" ") and focus == "log":
+            auto_scroll = not auto_scroll
+
+        # List-focus keys
+        elif focus == "list":
+            if key == ord("j") or key == curses.KEY_DOWN:
+                selected_idx = min(selected_idx + 1, len(rows) - 1) if rows else 0
+            elif key == ord("k") or key == curses.KEY_UP:
+                selected_idx = max(selected_idx - 1, 0)
+            elif key == 10 and rows:
+                tid = rows[selected_idx]["id"]
+                expanded_tasks.symmetric_difference_update({tid})
+            elif key in (ord("l"), curses.KEY_RIGHT) and rows:
+                _sel = rows[selected_idx] if selected_idx < len(rows) else None
+                if _sel and _sel.get("results"):
+                    detail_idx = min(detail_idx + 1, len(_sel["results"]) - 1)
+            elif key in (ord("h"), curses.KEY_LEFT) and rows:
+                detail_idx = max(detail_idx - 1, 0)
+            elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
+                filter_mode = {ord("1"): 0, ord("2"): 1, ord("3"): 2, ord("4"): 3}[key]
+
+        # Log-focus keys
+        elif focus == "log":
+            if key == ord("j") or key == curses.KEY_DOWN:
+                auto_scroll = False
+                log_scroll = max(log_scroll - 1, 0)
+            elif key == ord("k") or key == curses.KEY_UP:
+                auto_scroll = False
+                all_count = len(log_tailers.get(rows[selected_idx]["id"], LogTailer(Path("/dev/null"))).get_all()) if rows else 0
+                max_scroll = max(0, all_count - (log_height - 1))
+                log_scroll = min(log_scroll + 1, max_scroll)
+            elif key == ord("G") or key == ord("g"):
+                auto_scroll = True
+                log_scroll = 0
+
+        # P3-3: Retry key (exec mode only)
+        if key == ord("r") and task_filter and rows:
             sel = rows[selected_idx] if selected_idx < len(rows) else None
-            if sel and sel.get("results"):
-                detail_idx = min(detail_idx + 1, len(sel["results"]) - 1)
-        elif key in (ord('h'), curses.KEY_LEFT) and rows:
-            detail_idx = max(detail_idx - 1, 0)
-        elif key in (ord('1'), ord('2'), ord('3'), ord('4')):
-            # 状态栏提示 [1]all [2]run [3]done [4]fail → filter_mode 0/1/2/3
-            filter_mode = {ord('1'): 0, ord('2'): 1, ord('3'): 2, ord('4'): 3}[key]
+            if sel:
+                _failed_subs = [r for r in sel.get("results", []) if r.get("status") == "failed"]
+                if _failed_subs:
+                    try:
+                        curses.endwin()
+                        _subprocess.run(
+                            ["agent_go", "resume", sel["id"], "--yes", "--headless"],
+                            capture_output=False)
+                        # Re-enter curses
+                        curses.doupdate()
+                    except Exception:
+                        pass
 
 
 def _safe_addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> None:
     try:
         win.addstr(y, x, text, attr)
     except Exception:
-        # curses addstr throws on boundary/resize — intentionally silent
         pass
 
 
