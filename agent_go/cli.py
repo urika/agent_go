@@ -15,6 +15,7 @@ from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .replay import cmd_replay
 from .checkpoint import list_checkpoints, restore_checkpoint, SnapshotManager
+from .mcp_server import main as cmd_mcp
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
 from .git_utils import init_git_repo
@@ -231,6 +232,9 @@ def _build_parser():
     chk_delete = checkpoint_sub.add_parser("delete", help="Delete a checkpoint")
     chk_delete.add_argument("task_id", help="Task ID")
     chk_delete.add_argument("--name", "-n", required=True, help="Checkpoint name to delete")
+
+    # mcp 子命令
+    subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio)")
 
     # router 子命令
     router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")
@@ -2034,6 +2038,8 @@ def main() -> None:
             cmd_replay(args)
         elif args.command == "checkpoint":
             cmd_checkpoint(args)
+        elif args.command == "mcp":
+            cmd_mcp()
     except KeyboardInterrupt:
         console.print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)
