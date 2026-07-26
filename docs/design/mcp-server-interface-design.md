@@ -3,7 +3,7 @@
 | 字段 | 值 |
 |---|---|
 | 文档版本 | v1.1 |
-| 状态 | ✅ M1+M2+M3 已完成 |
+| 状态 | ✅ M1+M2+M3+M4 已完成 |
 | 关联文档 | [`interaction-design-spec.md`](./interaction-design-spec.md)（§4.6 JSON 事件 schema）、[`design-decisions.md`](./design-decisions.md)（ADR-002）、`competitive-engineering-analysis.md`（§6 反向嵌入路径） |
 | 上游输入 | OpenClaw/Hermes 集成评估（反向嵌入路径） |
 
@@ -505,7 +505,7 @@ OpenClaw 路径同理（其 plugin SDK / MCP 工具接入等价），渠道渲�
 | **M1** | `mcp_server.py`（stdio JSON-RPC + tools/list + tools/call + 4 工具 + degraded 事件轮询） | 无 | 3d |
 | **M2** | 对接 `--json` 完整事件流（替换轮询） | P0.5（ADR-002） | 1d |
 | **M3** | `current_activity` 进度字段（含子任务中间阶段活动 + inspect 查询） | P1-5（ADR-004） | ✅ M3 已完成 |
-| **M4** | Hermes/OpenClaw 集成指南 + 示例 skill | M1 | 1d |
+| **M4** | Hermes/OpenClaw 集成指南 + 示例 skill | M1 | ✅ M4 已完成 |
 
 M1 先行不阻塞——degraded 模式保证四工具端到端可用，M2 仅提升事件粒度。
 
