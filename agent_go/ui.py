@@ -324,6 +324,10 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
 
         # 默认同意模式
         if auto_confirm and iteration == 1:
+            if not sys.stdin.isatty() or console.json_mode:
+                logger.info("默认同意模式：自动确认 Plan")
+                log_event(logger, "plan_auto_confirmed", {"iteration": iteration})
+                return plan, reference_doc_paths
             console.force(f"\n⚡ 默认同意模式已开启（来自配置 behavior.auto_confirm_plan）")
             console.force(f"   按 Enter 直接确认，或输入任意键进入交互模式...")
             quick = safe_input("\n> ").strip()
@@ -541,6 +545,10 @@ def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], log
     print_subtasks(subtasks, config)
 
     if auto_confirm:
+        if not sys.stdin.isatty() or console.json_mode:
+            logger.info("默认同意模式：自动确认子任务")
+            log_event(logger, "subtasks_auto_confirmed", {"count": len(subtasks)})
+            return subtasks
         console.force(f"\n⚡ 默认同意模式已开启（behavior.auto_confirm_subtasks）")
         console.force(f"   按 Enter 直接执行，或输入任意键进入交互...")
         quick = safe_input("\n> ").strip()

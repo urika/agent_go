@@ -48,8 +48,7 @@ def _build_parser():
     run_parser.add_argument("--headless", action="store_true", help="Run subtasks in headless mode")
     run_parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output")
     run_parser.add_argument("--verbose", action="store_true", help="Show debug/diagnostic output")
-    run_parser.add_argument("--json", action="store_true", dest="json_mode",
-                            help="Output JSON Lines (machine-readable)")
+
     run_parser.add_argument("--issue", type=int, dest="issue_ref", help="GitHub issue number to link")
     run_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks (default: 1)")
     run_parser.add_argument("--remote", help="Push worktree branches to remote URL")
@@ -88,8 +87,6 @@ def _build_parser():
     resume_parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmations")
     resume_parser.add_argument("--headless", action="store_true", help="Run in headless mode")
     resume_parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output")
-    resume_parser.add_argument("--json", action="store_true", dest="json_mode",
-                               help="Output JSON Lines (machine-readable)")
     resume_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks")
     resume_parser.add_argument("--remote", help="Push worktree branches to remote URL")
     resume_parser.add_argument("--max-retries", type=int, default=None,
