@@ -91,13 +91,15 @@ def _record_subtask_result(
 
 def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
                   worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "",
-                  preserve_worktrees: Optional[bool] = None) -> None:
+                  preserve_worktrees: Optional[bool] = None, interrupted: Optional[threading.Event] = None) -> None:
     """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。
 
     preserve_worktrees:
       None  → 默认行为：保留 failed/blocked 的 worktree，其余清理
       True  → 保留所有 worktree
       False → 强制清理所有 worktree
+    interrupted:
+      外部中断 Event（TUI 模式由主线程维护）。None 时内部创建并注册 OS 信号处理器。
     """
     worktree_map = worktree_map or {}
     results_map = results_map or {}
@@ -121,24 +123,27 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             gc_disabled = True
             logger.info(f"[worktree] gc.auto 已禁用 (原值: {original_gc_value})")
 
-    # ── 中断标志（信号处理器中仅设置此标志，不执行 I/O） ──
-    _interrupted = threading.Event()
-
-    # 注册中断信号处理
-    # P0 Layer 2 增强：先用 SIGTERM（graceful），30s 内 claude 不退出才 SIGKILL
-    def _on_interrupt(signum: int, frame: Any) -> None:
-        _interrupted.set()
-        # 先发 SIGTERM（让 claude 完成当前工具调用、写 checkpoint）
-        with active_pids_lock:
-            pids_to_kill = list(active_pids)
-        for pid in pids_to_kill:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-
-    prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
-    prev_sigterm = signal.signal(signal.SIGTERM, _on_interrupt)
+    # ── 中断标志 ──
+    # TUI 模式：main 线程维护 Event，后台线程只检查
+    # CLI 模式：内部创建 Event 并注册 OS 信号处理器
+    if interrupted is not None:
+        _interrupted = interrupted
+        _own_signal = False
+    else:
+        _interrupted = threading.Event()
+        _own_signal = True
+        # P0 Layer 2 增强：先用 SIGTERM（graceful），30s 内 claude 不退出才 SIGKILL
+        def _on_interrupt(signum: int, frame: Any) -> None:
+            _interrupted.set()
+            with active_pids_lock:
+                pids_to_kill = list(active_pids)
+            for pid in pids_to_kill:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
+        prev_sigterm = signal.signal(signal.SIGTERM, _on_interrupt)
 
     # 跳过已完成的子任务
     remaining = [st for st in confirmed if st["id"] not in completed_ids]
@@ -146,9 +151,10 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         console.print("所有子任务已完成，无需恢复执行")
         meta["status"] = "completed"
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-        # 恢复信号处理器与 gc.auto（与其他退出路径一致，避免仓库 config 残留 gc.auto=0）
-        signal.signal(signal.SIGINT, prev_sigint)
-        signal.signal(signal.SIGTERM, prev_sigterm)
+        # 恢复信号处理器（仅 CLI 模式自有）与 gc.auto
+        if _own_signal:
+            signal.signal(signal.SIGINT, prev_sigint)
+            signal.signal(signal.SIGTERM, prev_sigterm)
         if gc_disabled and original_gc_value is not None:
             _, _, _ = _set_gc_auto(repo, original_gc_value)
         return
@@ -238,8 +244,9 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             meta["status"] = "paused"
             (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
-            signal.signal(signal.SIGINT, prev_sigint)
-            signal.signal(signal.SIGTERM, prev_sigterm)
+            if _own_signal:
+                signal.signal(signal.SIGINT, prev_sigint)
+                signal.signal(signal.SIGTERM, prev_sigterm)
             # 恢复 gc.auto
             if gc_disabled and original_gc_value is not None:
                 _, _, _ = _set_gc_auto(repo, original_gc_value)
@@ -248,8 +255,9 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         remaining = [st for st in remaining if st["id"] not in completed_ids]
         wave_num += 1
 
-    signal.signal(signal.SIGINT, prev_sigint)
-    signal.signal(signal.SIGTERM, prev_sigterm)
+    if _own_signal:
+        signal.signal(signal.SIGINT, prev_sigint)
+        signal.signal(signal.SIGTERM, prev_sigterm)
 
     # ── 远程推送 worktree 分支（可选）──
     if remote_url and (repo / ".git").exists():

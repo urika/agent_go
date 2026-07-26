@@ -103,7 +103,7 @@ ICONS = {"completed": "ok", "no_changes": "--", "degraded": "~", "running": "> "
 VC_ABBR = {"deterministic": "det", "heuristic": "heur", "manual": "man", "none": "--"}
 
 
-def tui_main(stdscr: Any) -> None:
+def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
     import curses
     curses.curs_set(0)
     curses.start_color()
@@ -117,11 +117,34 @@ def tui_main(stdscr: Any) -> None:
     selected_idx = 0
     expanded_tasks = set()
     filter_mode = 0
-    detail_idx = 0  # 详情面板子任务轮播索引
+    detail_idx = 0
 
     while True:
         tasks_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
+        if task_filter:
+            tasks_dirs = [td for td in tasks_dirs if td.name == task_filter]
+        if not tasks_dirs:
+            if task_filter:
+                _safe_addstr(stdscr, 2, 2, f"任务 {task_filter} 不存在或已清理。按 q 退出。")
+            else:
+                _safe_addstr(stdscr, 2, 2, "暂无任务。按 q 退出。")
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == ord('q'):
+                break
+            time.sleep(0.5)
+            continue
         rows = [r for r in (_get_task_status(td) for td in tasks_dirs) if r]
+
+        # 执行模式（单任务过滤）：任务完成自动退出
+        if task_filter and rows:
+            _ts = rows[0]["status"]
+            if _ts in ("completed", "failed", "aborted"):
+                # 展示最终结果 3 秒后自动退出
+                _safe_addstr(stdscr, 2, 2, f"任务 {task_filter}: {_ts}", curses.color_pair(2) if _ts == "completed" else curses.color_pair(1))
+                stdscr.refresh()
+                time.sleep(3)
+                break
         if filter_mode == 1:
             rows = [r for r in rows if r["status"] == "running"]
         elif filter_mode == 2:
@@ -143,7 +166,8 @@ def tui_main(stdscr: Any) -> None:
         stdscr.erase()
 
         # Header
-        _safe_addstr(stdscr, 0, 0, " agent_go Status  [q]退出 [j/k]选择 [Enter]展开 [←/→]子任务 [1-4]过滤 ".ljust(max_x - 1), curses.color_pair(6))
+        _mode_label = " 执行模式 " if task_filter else " agent_go Status "
+        _safe_addstr(stdscr, 0, 0, f" {_mode_label} [q]退出 [j/k]选择 [Enter]展开 [←/→]子任务 ".ljust(max_x - 1), curses.color_pair(6))
 
         list_w = min(max_x - 42, 60)
         detail_x = list_w + 1
@@ -237,7 +261,10 @@ def tui_main(stdscr: Any) -> None:
         running = sum(1 for r in rows if r["status"] == "running")
         done = sum(1 for r in rows if r["status"] == "completed")
         fail = sum(1 for r in rows if r["status"] == "failed")
-        bar = f" {len(rows)} tasks | {running} run | {done} done | {fail} fail | [1]all [2]run [3]done [4]fail | [←/→]子任务 "
+        bar = f" {_mode_label.strip()} | {len(rows)} tasks | {running} run | {done} done | {fail} fail"
+        if not task_filter:
+            bar += " | [1]all [2]run [3]done [4]fail"
+        bar += " | [←/→]子任务 "
         _safe_addstr(stdscr, max_y - 1, 0, bar[:max_x - 1], curses.color_pair(6))
 
         stdscr.refresh()
@@ -270,9 +297,9 @@ def _safe_addstr(win: Any, y: int, x: int, text: str, attr: int = 0) -> None:
         pass
 
 
-def cmd_status_tui() -> None:
+def cmd_status_tui(task_filter: Optional[str] = None) -> None:
     import curses
     try:
-        curses.wrapper(tui_main)
+        curses.wrapper(lambda stdscr: tui_main(stdscr, task_filter=task_filter))
     except KeyboardInterrupt:
         pass

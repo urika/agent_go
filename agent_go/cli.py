@@ -74,6 +74,8 @@ def _build_parser():
                             help="注入 Stop Hook（.claude/settings.json + verify-goal.sh，默认关闭）")
     run_parser.add_argument("--agent-loop", action="store_true",
                             help="启用混合策略：简单任务走直接 API，复杂任务保留 claude -p（默认关闭）")
+    run_parser.add_argument("--interactive", action="store_true",
+                            help="启动 TUI 仪表盘实时监控子任务执行")
     run_parser.add_argument("--auto-init", action="store_true",
                             help="目标目录非 git 仓库时自动 git init + 首次 commit（默认关闭）")
     run_parser.add_argument("--config", help="Path to config JSON file (default: ~/.agent_go/config.json)")
@@ -467,8 +469,33 @@ def cmd_run(args=None):
                 f"(waves={est['waves']}, median={est['median_subtask_sec']}s, samples={est['sample_size']})")
     log_event(logger, "time_estimate", est)
 
-    _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta, remote_url=remote_url,
-                  preserve_worktrees=preserve_worktrees)
+    _interactive_mode = getattr(args, 'interactive', False)
+
+    if _interactive_mode:
+        import threading as _th, signal as _sig
+        from .tui import cmd_status_tui
+        _interrupted = _th.Event()
+
+        def _tui_sigint(signum, frame):
+            _interrupted.set()
+        _prev_int = _sig.signal(_sig.SIGINT, _tui_sigint)
+        _prev_term = _sig.signal(_sig.SIGTERM, _tui_sigint)
+
+        _pipeline_t = _th.Thread(
+            target=_run_pipeline,
+            args=(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta),
+            kwargs={"remote_url": remote_url, "preserve_worktrees": preserve_worktrees,
+                    "interrupted": _interrupted},
+            daemon=True)
+        _pipeline_t.start()
+        cmd_status_tui(task_filter=task_id)
+        _interrupted.set()
+        _pipeline_t.join(timeout=10)
+        _sig.signal(_sig.SIGINT, _prev_int)
+        _sig.signal(_sig.SIGTERM, _prev_term)
+    else:
+        _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
+                      remote_url=remote_url, preserve_worktrees=preserve_worktrees)
 
 def cmd_resume(args=None):
     """恢复被中断的任务。"""
