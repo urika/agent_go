@@ -13,6 +13,7 @@ from .pipeline import _run_pipeline
 from .skills import load_skills, discover_skills, render_skill_for_plan, list_skills
 from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
+from .replay import cmd_replay
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
 from .git_utils import init_git_repo
@@ -209,6 +210,12 @@ def _build_parser():
     plan_diff_parser.add_argument("--v1", type=int, default=1, help="First version (default: 1)")
     plan_diff_parser.add_argument("--v2", type=int, default=None, help="Second version (default: latest)")
     inspect_parser.add_argument("--all", action="store_true", help="Show all subtasks, not just preserved ones")
+
+    # replay 子命令（P4-1 执行回放）
+    replay_parser = subparsers.add_parser("replay", help="Execution timeline replay")
+    replay_parser.add_argument("task_id", help="Task ID to replay")
+    replay_parser.add_argument("--json", action="store_true", dest="json_mode",
+                               help="Output as JSON Lines")
 
     # router 子命令
     router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")
@@ -1853,6 +1860,8 @@ def _install_sigterm_handler() -> None:
     import signal as _sig
     def _re_raise(signum, frame):
         import os
+        import signal as _sig
+        _sig.signal(signum, _sig.SIG_DFL)
         os.kill(os.getpid(), signum)
     _sig.signal(_sig.SIGTERM, _re_raise)
     _sig.signal(_sig.SIGINT, _re_raise)
@@ -1957,6 +1966,8 @@ def main() -> None:
                 console.error(f"任务不存在: {args.task_id}")
             else:
                 _show_plan_diff(task_dir, args.v1, args.v2)
+        elif args.command == "replay":
+            cmd_replay(args)
     except KeyboardInterrupt:
         console.print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)
