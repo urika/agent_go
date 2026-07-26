@@ -285,10 +285,38 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
 
     if headless:
         sandbox_type = "headless"
-        # Agent 工具白名单（如 architect 只读）在 headless 下也必须强制生效
         allowed_tools = agent.claude_config.get("allowed_tools", []) if agent else []
-        result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids,
-                               active_pids_lock=active_pids_lock, allowed_tools=allowed_tools)
+        shared_activity = [None]
+        _progress_stop = threading.Event()
+
+        def _tick():
+            start = time.time()
+            while not _progress_stop.is_set():
+                elapsed = int(time.time() - start)
+                act = shared_activity[0]
+                if act and act.get("target"):
+                    console.print(f"\r➜ {sub_id}: {act['tool']} {act['target']}  ({elapsed}s)", end="")
+                elif act:
+                    console.print(f"\r➜ {sub_id}: {act['tool']}  ({elapsed}s)", end="")
+                else:
+                    console.print(f"\r➜ {sub_id}: 运行中 ({elapsed}s)", end="")
+                _progress_stop.wait(5)
+
+        t = threading.Thread(target=_tick, daemon=True)
+        t.start()
+
+        try:
+            result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids,
+                                   active_pids_lock=active_pids_lock, allowed_tools=allowed_tools,
+                                   shared_activity=shared_activity)
+        finally:
+            _progress_stop.set()
+            t.join(timeout=2)
+
+        elapsed = int(time.time() - claude_start)
+        act = shared_activity[0]
+        _activity_note = f" → {act['tool']} {act['target']}" if act and act.get("target") else ""
+        console.print(f"\r➜ {sub_id}: ✓ {elapsed}s{_activity_note}" + " " * 20)
     else:
         # greywall 包装单点完成：agent 路径由 get_claude_command 内部处理，禁止重复包装
         greywall_bin = shutil.which("greywall")

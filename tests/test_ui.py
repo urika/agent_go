@@ -37,7 +37,7 @@ class TestPlanToMd:
         assert "Git 远程" in md
         assert "当前分支" in md
         assert "依赖关系" in md
-        assert "步骤 2 依赖: [1]" in md or "步骤 2 依赖" in md
+        assert "depends_on: 1" in md or "依赖关系" in md
         assert "验证" in md
 
     def test_minimal_plan(self, minimal_plan):

@@ -1,4 +1,4 @@
-import subprocess, json, re, time, threading, logging
+import subprocess, json, re, time, threading, logging, signal, os
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -9,6 +9,36 @@ __all__: list[str] = []
 
 # claude 进程退出码常量：130 = SIGINT（视为检测到交互）
 EXIT_CODE_INTERACTION = 130
+
+# P1-5: 工具活动快照目标提取（从 stream-json tool_input 提取文件路径/命令）
+def _extract_activity_target(tool_name: str, raw_input: str) -> str:
+    """从工具调用的 partial_json 输入中提取人类可读的目标（文件路径或命令）。
+
+    适用于 Read/Edit/Write 的 file_path 字段和 Bash 的 command 字段。
+    若 json 解析失败或不包含目标字段，降级为工具名 + 原始输入前 50 字符。
+    """
+    if not raw_input or not raw_input.startswith("{"):
+        return raw_input[:50] if raw_input else ""
+    try:
+        import json as _json
+        parsed = _json.loads(raw_input)
+    except _json.JSONDecodeError:
+        return raw_input[:50] if raw_input else ""
+    for key in ("file_path", "command", "url", "query"):
+        val = parsed.get(key)
+        if val and isinstance(val, str):
+            if len(val) > 80:
+                val = val[:77] + "..."
+            return val
+    # fallback: first string value in args
+    for val in parsed.values():
+        if isinstance(val, str) and len(val) > 3 and len(val) < 120:
+            return val
+    return raw_input[:50] if raw_input else ""
+
+# P2 Layer 3：claude SIGTERM handler 占位
+# 实际安装在 _run_headless 内（需要 worktree 路径）
+_INTERRUPTED_FLAG = threading.Event()
 
 def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger: logging.Logger, headless: bool = False) -> None:
     """将上游 worktree 的 tag 合并到当前 worktree。
@@ -50,12 +80,16 @@ def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger
             subprocess.run(["git", "merge", "--abort"],
                            cwd=str(dst_worktree), capture_output=True)
 
-def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None, allowed_tools: Optional[list] = None, hard_timeout: int = 0) -> subprocess.CompletedProcess:
+def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None, allowed_tools: Optional[list] = None, hard_timeout: int = 0, shared_activity: Optional[list] = None) -> subprocess.CompletedProcess:
     """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。
 
     allowed_tools: Agent 类型声明的工具白名单（如 architect 的 Read/Grep/Glob）。
     非空时通过 --allowedTools 强制约束；None/空列表表示不限制（developer 默认）。
     hard_timeout: 单次执行硬超时（秒），0=不限制。用于修复重试的 retry_timeout 控制。
+    shared_activity: 可选 [dict] 列表，_run_headless 会将其 [0] 更新为当前工具活动快照
+                     {tool, target, since}，供调用方（如进度行）无锁读取最新活动。
+                    共享规则：写线程（daemon reader）替换列表元素 [0]；
+                    读线程（调用方主线程）读取 [0]。CPython GIL 下 dict 引用赋值是原子的。
     """
     # Phase 2: GoalInjector 看门狗配置。优先级：env（运行时 config 注入，CLI 覆盖生效）> 磁盘 config > 默认
     GOAL_WATCHDOG_ENABLED = True
@@ -117,6 +151,12 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         _routed_model = env.get("AGENT_GO_CLAUDE_MODEL", "")
         if _routed_model:
             cmd.extend(["--model", _routed_model])
+        # 透传 max_tokens 到 Claude Code（claude -p 不支持 --max-tokens flag，只能用 env var）
+        # Claude Code >=2.1 支持 CLAUDE_CODE_MAX_OUTPUT_TOKENS 环境变量
+        # 实际生效：API 会按模型上限截断（opus-4-7 = 128K）
+        _max_tokens = env.get("AGENT_GO_MAX_TOKENS", "")
+        if _max_tokens:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = _max_tokens
         proc = subprocess.Popen(cmd, env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         if active_pids_lock:
@@ -196,6 +236,14 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                         ti = tool_input[0]
                         preview = ti[:200] if len(ti) > 200 else ti
                         logger.debug(f"{PFX} [{current_tool[0]}] 完成: {preview}")
+                        # P1-5: 提取工具活动快照（供进度行消费）
+                        if shared_activity is not None:
+                            _target = _extract_activity_target(current_tool[0], ti)
+                            shared_activity[0] = {
+                                "tool": current_tool[0],
+                                "target": _target,
+                                "since": time.time(),
+                            }
                         current_tool[0] = None
 
             # assistant: 消息批次

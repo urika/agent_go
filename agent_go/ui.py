@@ -16,7 +16,7 @@ __all__ = [
 ]
 
 def plan_to_md(plan: dict[str, Any]) -> str:
-    """将 Plan 转为 Markdown 文档。"""
+    """将 Plan 转为 Markdown 文档（IDS §4.2.4 格式：英文 key，自由文本值中英均可）。"""
     lines = [
         f"# 执行方案\n",
         f"## 概述\n{plan.get('overview', 'N/A')}\n",
@@ -34,18 +34,109 @@ def plan_to_md(plan: dict[str, Any]) -> str:
         lines.append(f"### [{step['id']}] {step['title']}\n")
         lines.append(f"{step.get('description', '')}\n")
         if step.get("files"):
-            lines.append(f"- 文件: {', '.join(step['files'])}")
+            lines.append(f"- files: {', '.join(step['files'])}")
         if step.get("verification"):
-            lines.append(f"- 验证: `{step['verification']}`")
+            lines.append(f"- verification: `{step['verification']}`")
         if step.get("risks"):
-            lines.append(f"- 风险: {'; '.join(step['risks'])}")
+            r_text = '; '.join(step['risks'])
+            lines.append(f"- Risks: {r_text}")
+        diff = step.get("difficulty", "medium")
+        if diff:
+            lines.append(f"- difficulty: {diff}")
+        agent = step.get("agent_type", "")
+        if agent:
+            lines.append(f"- agent: {agent}")
+        skill_list = step.get("skills", [])
+        if skill_list:
+            lines.append(f"- skill: {', '.join(skill_list)}")
         lines.append("")
     deps = plan.get("dependencies", {})
     if deps:
         lines.append("## 依赖关系\n")
         for sid, prereqs in deps.items():
-            lines.append(f"- 步骤 {sid} 依赖: {prereqs}")
+            lines.append(f"- step {sid} depends_on: {', '.join(str(p) for p in prereqs)}")
     return "\n".join(lines)
+
+
+def _parse_plan_md(text: str) -> dict:
+    """将 PLAN.md Markdown 解析回 Plan dict（plan_to_md 的逆操作）。
+
+    IDS §4.2.4 格式：英文 key（description/files/verification/risks/…），
+    自由文本值中英均可。未知字段忽略（向前兼容）。
+    支持边界：描述含 ###、缺失字段取默认、多值字段逗号分隔。
+    """
+    import re as _re
+    plan: dict = {"overview": "", "estimated_effort": "", "shared_resources": {},
+                  "steps": [], "dependencies": {}}
+    current_section = None
+    current_step = None
+
+    for line in text.split("\n"):
+        s = line.strip()
+        if s.startswith("## 概述"):
+            current_section = "overview"; current_step = None; continue
+        elif s.startswith("## 预估工作量"):
+            current_section = "effort"; current_step = None; continue
+        elif s.startswith("## 共享资源清单"):
+            current_section = "resources"; current_step = None; continue
+        elif s.startswith("## 执行步骤"):
+            current_section = "steps"; current_step = None; continue
+        elif s.startswith("## 依赖关系"):
+            current_section = "deps"; current_step = None; continue
+
+        if current_section == "overview" and s:
+            plan["overview"] = (plan["overview"] + " " + s).strip()
+        elif current_section == "effort" and s:
+            plan["estimated_effort"] = (plan["estimated_effort"] + " " + s).strip()
+        elif current_section == "resources":
+            m = _re.match(r'^- (.+): (.+)$', line)
+            if m:
+                plan["shared_resources"][m.group(1).strip()] = m.group(2).strip()
+        elif current_section == "steps":
+            m = _re.match(r'^### \[(\d+)\] (.+)$', line)
+            if m:
+                if current_step:
+                    plan["steps"].append(current_step)
+                current_step = {
+                    "id": int(m.group(1)), "title": m.group(2),
+                    "description": "", "files": [], "verification": "",
+                    "risks": [], "difficulty": "medium",
+                    "agent_type": "developer", "skills": [],
+                }
+                continue
+            if current_step:
+                m2 = _re.match(r'^- ([a-zA-Z]+): (.+)$', line)
+                if m2:
+                    key, val = m2.group(1).lower(), m2.group(2).strip().strip("` ")
+                    if key == "files":
+                        current_step["files"] = [
+                            x.strip() for x in _re.split(r'[,，]', val) if x.strip()]
+                    elif key == "skill":
+                        current_step["skills"] = [
+                            x.strip() for x in _re.split(r'[,，]', val) if x.strip()]
+                    elif key == "risks":
+                        current_step["risks"] = [
+                            x.strip("- ").strip() for x in val.split(";") if x.strip()]
+                    elif key == "difficulty":
+                        if val in ("easy", "medium", "hard"):
+                            current_step["difficulty"] = val
+                    elif key in ("agent", "agent_type"):
+                        current_step["agent_type"] = val
+                    elif key == "verification":
+                        current_step["verification"] = val
+                elif s and not line.startswith("-") and not line.startswith("#"):
+                    current_step["description"] += " " + s
+        elif current_section == "deps":
+            m = _re.match(r'^- step (\d+) depends_on: (.+)$', line)
+            if m:
+                plan["dependencies"][m.group(1)] = [
+                    p.strip() for p in m.group(2).split(",") if p.strip()]
+
+    if current_step:
+        plan["steps"].append(current_step)
+    # Normalize dependency values to str
+    plan["dependencies"] = {str(k): [str(p) for p in v] for k, v in plan.get("dependencies", {}).items()}
+    return plan
 
 def _estimate_duration(plan: dict[str, Any], parallel: int = 1) -> str:
     """根据 Plan 的步骤数和依赖关系估算执行时间（M4）。
