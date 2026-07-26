@@ -288,6 +288,7 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
         allowed_tools = agent.claude_config.get("allowed_tools", []) if agent else []
         shared_activity = [None]
         _progress_stop = threading.Event()
+        _last_activity_emit = [None]
 
         def _tick():
             start = time.time()
@@ -300,6 +301,19 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
                     console.print(f"\r➜ {sub_id}: {act['tool']}  ({elapsed}s)", end="")
                 else:
                     console.print(f"\r➜ {sub_id}: 运行中 ({elapsed}s)", end="")
+                # Bridge shared_activity to event stream (only on change)
+                if act != _last_activity_emit[0]:
+                    _last_activity_emit[0] = act
+                    if act and act.get("target"):
+                        console.emit("subtask_activity", {
+                            "sub_id": sub_id,
+                            "activity": f"{act['tool']} {act['target']}",
+                        })
+                    elif act:
+                        console.emit("subtask_activity", {
+                            "sub_id": sub_id,
+                            "activity": f"{act['tool']}",
+                        })
                 _progress_stop.wait(5)
 
         t = threading.Thread(target=_tick, daemon=True)
@@ -603,6 +617,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         logger.info(f"已打 tag (无新增变更): {tag_name}")
 
     git_commit_ms = (time.time() - git_start) * 1000
+    if has_changes:
+        console.emit("subtask_activity", {"sub_id": sub_id, "activity": "Committing changes"})
 
     # Phase 1 验证循环：可配置的多轮修复重试
     verification = subtask.get("verification", "")
@@ -633,12 +649,17 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 verification_results = saved_results
                 logger.info(f"从 verify_state.json 恢复: 已尝试 {saved_attempts} 次")
 
+        console.emit("subtask_activity", {"sub_id": sub_id, "activity": "Verifying changes"})
+
         while retry_count <= max_retries:
             # 1. 执行所有验证命令
             all_pass = True
             failed_cmds: list[str] = []
             failed_outputs: list[str] = []
             attempt_label = retry_count + 1
+            if retry_count > 0:
+                console.emit("subtask_activity", {"sub_id": sub_id,
+                    "activity": f"Retrying verification ({attempt_label}/{max_retries + 1})"})
 
             for vcmd in cmds:
                 logger.info(f"执行验证 [{attempt_label}/{max_retries + 1}]: {vcmd}")
@@ -920,6 +941,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     # 1. Create worktree
     worktree, worktree_create_ms = _create_worktree(task_id, sub_id, repo, task_dir, logger)
+    console.emit("subtask_activity", {"sub_id": sub_id, "activity": "Creating worktree"})
 
     # 2. Upstream merge (artifact passing)
     merge_conflicts = {}
@@ -941,6 +963,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                     conflict_file.unlink()
                 merge_results.append(collect_merge_result(up_id, not has_conflict,
                     merge_conflicts.get(up_id, "").split("\n") if has_conflict else None))
+    console.emit("subtask_activity", {"sub_id": sub_id, "activity": "Merging upstream"})
     clone_time = time.time() - clone_start
 
     # P4-2: 检查点快照 — 在 Claude 执行前保存 worktree 文件快照
@@ -959,6 +982,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     # Write TASK.md to disk
     (sub_dir / "TASK.md").write_text(task_md, encoding="utf-8")
+    console.emit("subtask_activity", {"sub_id": sub_id, "activity": "TASK.md ready"})
 
     # Save original verification before path rewriting (for context.md)
     original_verification = verification
@@ -971,6 +995,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         )
 
     console.print(f"\n🚀 {sub_id}: {subtask['title']}")
+    console.emit("subtask_start", {
+        "sub_id": sub_id,
+        "title": subtask["title"],
+        "depends_on": subtask.get("depends_on", []),
+        "files_hint": subtask.get("files_hint", ""),
+    })
     # Phase 2: Stop Hook 注入（goal.enable_goal_hook，默认关；--goal-hook 开启）
     if verification and _effective_config(config).get("goal", {}).get("enable_goal_hook", False):
         # 解耦：动态 import + try/except——Stop Hook 是可选增强，加载失败不中断。
@@ -1159,6 +1189,19 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                                      round(claude_time * 1000), verification_ms, git_commit_ms)
 
     verification_confidence = verify_results.get("verification_confidence", {})
+    change_stats = verify_results.get("change_stats", {})
+
+    console.emit("subtask_complete", {
+        "sub_id": sub_id,
+        "status": status,
+        "duration_sec": round(claude_time, 2),
+        "verify_ok": verify_ok,
+        "retry_count": retry_count,
+        "summary": summary[:120],
+        "files_changed": change_stats.get("files_changed", 0) if change_stats else 0,
+        "insertions": change_stats.get("insertions", 0) if change_stats else 0,
+        "deletions": change_stats.get("deletions", 0) if change_stats else 0,
+    })
 
     return {"subtask_id": sub_id, "status": status, "exit_code": result.returncode,
             "summary": summary, "failure_reason": failure_reason,

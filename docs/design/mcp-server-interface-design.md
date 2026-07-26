@@ -2,8 +2,8 @@
 
 | 字段 | 值 |
 |---|---|
-| 文档版本 | v1.0 |
-| 状态 | Draft |
+| 文档版本 | v1.1 |
+| 状态 | ✅ M1+M2+M3 已完成 |
 | 关联文档 | [`interaction-design-spec.md`](./interaction-design-spec.md)（§4.6 JSON 事件 schema）、[`design-decisions.md`](./design-decisions.md)（ADR-002）、`competitive-engineering-analysis.md`（§6 反向嵌入路径） |
 | 上游输入 | OpenClaw/Hermes 集成评估（反向嵌入路径） |
 
@@ -255,6 +255,7 @@
   "elapsed_sec": 95,
   "progress": { "completed": 1, "failed": 0, "blocked": 0, "running": 1, "pending": 2, "total": 4 },
   "cost_usd": 0.05,
+  "current_activity": "Editing src/routes.py",
   "subtasks": [
     {
       "id": "sub-1", "title": "迁移数据模型", "status": "completed",
@@ -279,7 +280,7 @@
 }
 ```
 
-`current_activity` 字段依赖 stream-json 进度数据（ADR-004/P1-5）；不可用时省略该字段。
+`current_activity` 字段由 M3 实现，通过 `subtask_activity` 事件流推送（含子任务中间阶段活动，如 `"Editing src/routes.py"`、`"Verifying changes"`）。不可用时省略该字段。
 
 ---
 
@@ -374,13 +375,15 @@
     "progressToken": "host-supplied-token",
     "progress": 2,
     "total": 4,
-    "message": "sub-2 修改路由配置 — 验证失败，重试 1/3"
+    "current_activity": "Editing src/routes.py",
+    "message": "sub-2 修改路由配置 — Editing src/routes.py"
   }
 }
 ```
 
 - `progress/total`：已完结子任务数 / 总子任务数（`total` 在 `plan_confirmed` 前未知，此前事件省略这两个字段，仅带 `message`）。
-- `message`：面向宿主的单行摘要，由事件 data 合成（`f"{id} {title} — {状态语义}"`）。宿主可直接展示给用户。
+- `current_activity`：当前正在进行的子任务级活动描述（由 `subtask_activity` 事件实时更新），如 `"Editing src/routes.py"`、`"Verifying changes"`、`"Creating worktree"`。宿主编排 UI 可用此字段显示进度行；任务未运行或事件流不可用时省略该字段。
+- `message`：面向宿主的单行摘要，由事件 data 合成。宿主可直接展示给用户。
 - 节流：`subtask_progress` 心跳在 server 侧合并为 ≤1 条/15s/任务，防止刷爆宿主。
 
 ### 4.3 终止与结果组装
@@ -501,7 +504,7 @@ OpenClaw 路径同理（其 plugin SDK / MCP 工具接入等价），渠道渲�
 |---|---|---|---|
 | **M1** | `mcp_server.py`（stdio JSON-RPC + tools/list + tools/call + 4 工具 + degraded 事件轮询） | 无 | 3d |
 | **M2** | 对接 `--json` 完整事件流（替换轮询） | P0.5（ADR-002） | 1d |
-| **M3** | `current_activity` 进度字段 | P1-5（ADR-004） | 0.5d |
+| **M3** | `current_activity` 进度字段（含子任务中间阶段活动 + inspect 查询） | P1-5（ADR-004） | ✅ M3 已完成 |
 | **M4** | Hermes/OpenClaw 集成指南 + 示例 skill | M1 | 1d |
 
 M1 先行不阻塞——degraded 模式保证四工具端到端可用，M2 仅提升事件粒度。

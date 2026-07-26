@@ -1,6 +1,6 @@
 """Tests for agent_go MCP Server (mcp_server.py)."""
 
-import json, os, sys
+import io, json, os, sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -255,17 +255,29 @@ class TestCostAggregation:
         assert server._aggregate_cost(tmp_path) == 0.0
 
 
-# ── Wait/poll loop ────────────────────────────────────────────────
+# ── Wait/events loop ──────────────────────────────────────────────
 
-class TestWaitPoll:
+class TestWaitEvents:
+    """Test _wait_with_events: reads --json event stream + polls meta.json."""
+
+    def _mock_proc(self, exited: bool = False, returncode: int = 0):
+        proc = MagicMock()
+        proc.stdout = io.StringIO()
+        if exited:
+            proc.poll.return_value = returncode
+        else:
+            proc.poll.return_value = None
+        return proc
+
     def test_completed_immediately(self, server, tmp_path):
-        task_id = "task-test-poll"
+        task_id = "task-test-events"
         td = tmp_path / task_id
         td.mkdir()
         meta = {"task_id": task_id, "status": "completed", "subtasks": [], "results": []}
         (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        proc = self._mock_proc(exited=True)
         with patch.object(server, "_aggregate_cost", return_value=0.42):
-            result = server._wait_poll(task_id, 10)
+            result = server._wait_with_events(proc, task_id, 10)
         assert result["status"] == "completed"
         assert result["cost_usd"] == 0.42
 
@@ -275,8 +287,9 @@ class TestWaitPoll:
         td.mkdir()
         meta = {"task_id": task_id, "status": "running", "subtasks": [], "results": []}
         (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        proc = self._mock_proc(exited=False)
         with patch.object(server, "_aggregate_cost", return_value=0.0):
-            result = server._wait_poll(task_id, 0.5)
+            result = server._wait_with_events(proc, task_id, 0.5)
         assert result["status"] == "running"
         assert "timeout_hint" in result
 
@@ -293,6 +306,7 @@ class TestWaitPoll:
             ]
         }
         (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        proc = self._mock_proc(exited=False)
         notifications = []
         original = server._send
         def track(msg):
@@ -301,8 +315,47 @@ class TestWaitPoll:
             original(msg)
         server._send = track
         with patch.object(server, "_aggregate_cost", return_value=0.0):
-            result = server._wait_poll(task_id, 0.5, token="abc123", send_notify=True)
+            result = server._wait_with_events(proc, task_id, 0.5, token="abc123")
         assert any(n.get("progressToken") == "abc123" for n in notifications)
+
+    def test_event_stream_updates_activity(self, server, tmp_path):
+        """Verify lifecycle events from stdout update progress message."""
+        task_id = "task-test-stream"
+        td = tmp_path / task_id
+        td.mkdir()
+        meta = {"task_id": task_id, "status": "running",
+                "subtasks": [{"id": "s1"}, {"id": "s2"}], "results": []}
+        (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        ev_subtask_start = json.dumps({
+            "event": "subtask_start", "level": "event",
+            "ts": "2026-07-27T12:00:00",
+            "data": {"data": {"sub_id": "s1", "title": "Step one"}}
+        }) + "\n"
+        ev_subtask_done = json.dumps({
+            "event": "subtask_complete", "level": "event",
+            "ts": "2026-07-27T12:00:05",
+            "data": {"data": {"sub_id": "s1", "status": "completed"}}
+        }) + "\n"
+
+        proc = MagicMock()
+        proc.stdout = io.StringIO(ev_subtask_start + ev_subtask_done)
+        proc.poll.return_value = 0
+
+        notifications = []
+        original = server._send
+        def track(msg):
+            if msg.get("method") == "notifications/progress":
+                notifications.append(msg["params"])
+            original(msg)
+        server._send = track
+
+        with patch.object(server, "_aggregate_cost", return_value=0.0):
+            result = server._wait_with_events(proc, task_id, 5, token="tok1")
+
+        progress_messages = [n.get("message", "") for n in notifications]
+        assert any("Executing s1" in m for m in progress_messages) or \
+               any("Completed s1" in m for m in progress_messages)
 
 
 # ── Thread-safety (concurrent tasks) ──────────────────────────────

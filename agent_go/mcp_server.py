@@ -116,6 +116,7 @@ class MCPServer:
         self._allowed_repos = self._parse_allowed_repos()
         self._deferred: dict[Any, threading.Event] = {}  # msg_id -> completion event
         self._deferred_result: dict[Any, Any] = {}        # msg_id -> result
+        self._activity_store: dict[str, dict] = {}  # task_id -> {current_activity, activity_per_subtask}
 
     def _parse_allowed_repos(self) -> list[str]:
         raw = os.environ.get("AGENT_GO_MCP_ALLOWED_REPOS", "")
@@ -186,41 +187,136 @@ class MCPServer:
         dirs = sorted(AGENT_GO_DIR.glob("task-*"), key=lambda p: p.stat().st_mtime, reverse=True)
         return dirs[0].name if dirs else "unknown"
 
-    def _wait_poll(self, task_id: str, timeout: float, token: Any = None,
-                   send_notify: bool = False) -> dict:
-        """Poll meta.json until task completes or timeout. Sends progress notifications."""
+    def _wait_with_events(self, proc: subprocess.Popen, task_id: str,
+                          timeout: float, token: Any = None) -> dict:
+        """Read --json event stream from agent_go subprocess for real-time progress.
+
+        Background thread parses JSON Lines events from stdout and forwards
+        lifecycle events (subtask_start/complete, pipeline_complete) as MCP
+        progress notifications. Main thread polls meta.json as authoritative
+        result source. Degraded fallback: pure polling if no lifecycle events
+        detected within 2 seconds.
+        """
         task_dir = AGENT_GO_DIR / task_id
         meta_path = task_dir / "meta.json"
-        last_ok = 0
+
+        from threading import Lock as _Lock
+        state: dict = {
+            "has_lifecycle": False,
+            "total": 0,
+            "completed": 0,
+            "current_activity": "",
+            "activity_per_subtask": {},
+        }
+        state_lock = _Lock()
+
+        def _reader() -> None:
+            for raw in iter(proc.stdout.readline, ""):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("level") != "event":
+                    continue
+                data = ev.get("data", {})
+                payload = data.get("data", data)
+                event = ev.get("event", "")
+                with state_lock:
+                    state["has_lifecycle"] = True
+                    if event == "pipeline_start":
+                        state["total"] = payload.get("total_subtasks", 0)
+                    elif event == "subtask_start":
+                        sub_id = payload.get("sub_id", "")
+                        state["current_activity"] = (
+                            f"Executing {sub_id}: {payload.get('title', '')}")
+                    elif event == "subtask_complete":
+                        state["completed"] += 1
+                        sub_id = payload.get("sub_id", "")
+                        state["current_activity"] = (
+                            f"Completed {sub_id}: {payload.get('status', '')}")
+                    elif event == "subtask_activity":
+                        sub_id = payload.get("sub_id", "")
+                        activity = payload.get("activity", "")
+                        state["current_activity"] = activity
+                        state["activity_per_subtask"][sub_id] = activity
+                        # Update server-wide activity store
+                        self._activity_store[task_id] = {
+                            "current_activity": activity,
+                            "activity_per_subtask": dict(state["activity_per_subtask"]),
+                        }
+                    elif event == "pipeline_complete":
+                        state["current_activity"] = (
+                            f"Pipeline {payload.get('status', 'completed')}")
+
+        reader_thread = threading.Thread(target=_reader, daemon=True)
+        reader_thread.start()
+
+        last_meta_ok = 0
         deadline = time.time() + timeout
+
         while time.time() < deadline:
+            ret = proc.poll()
+            if ret is not None:
+                time.sleep(0.3)
+                break
+
             if meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     status = meta.get("status", "running")
                     results = meta.get("results", [])
-                    n_done = sum(1 for r in results if r.get("status") in ("completed", "no_changes"))
-                    n_fail = sum(1 for r in results if r.get("status") in ("failed", "blocked"))
-                    total = len(meta.get("subtasks", [results]))
-                    if n_done + n_fail > last_ok and send_notify and token is not None:
-                        last_ok = n_done + n_fail
+                    n_done = sum(1 for r in results
+                                 if r.get("status") in ("completed", "no_changes"))
+
+                    if status in ("completed", "failed", "paused", "stale_aborted"):
+                        time.sleep(0.3)
+                        break
+
+                    with state_lock:
+                        _total = state["total"] or len(meta.get("subtasks", [results]))
+                        _progress = state["completed"] if state["has_lifecycle"] else n_done
+                        _activity = state["current_activity"]
+
+                    if (_progress > last_meta_ok or _activity) and token is not None:
+                        last_meta_ok = _progress
+                        msg = _activity or f"{_progress}/{_total} 完成"
                         self._notify("notifications/progress", {
                             "progressToken": token,
-                            "progress": n_done,
-                            "total": total or len(results),
-                            "message": f"{n_done}/{total or len(results)} 完成"
+                            "progress": _progress,
+                            "total": max(_total, _progress),
+                            "current_activity": _activity,
+                            "message": msg,
                         })
-                    if status in ("completed", "failed", "paused", "stale_aborted"):
-                        return self._build_completed(task_id, meta)
                 except (json.JSONDecodeError, OSError):
                     pass
-            time.sleep(2)
-        # Timeout — return snapshot of current state
+
+            time.sleep(0.5)
+
         try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+            meta = json.loads(
+                meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
         except (json.JSONDecodeError, OSError):
             meta = {}
-        return self._build_completed(task_id, meta, timed_out=True)
+
+        # Final progress notification before returning
+        if token is not None:
+            with state_lock:
+                _final_progress = state["completed"]
+                _final_total = max(state["total"], _final_progress, 1)
+                _final_activity = state["current_activity"]
+            self._notify("notifications/progress", {
+                "progressToken": token,
+                "progress": _final_progress,
+                "total": _final_total,
+                "current_activity": _final_activity,
+                "message": _final_activity or "Pipeline finished",
+            })
+
+        return self._build_completed(
+            task_id, meta, timed_out=(time.time() >= deadline))
 
     def _build_completed(self, task_id: str, meta: dict, timed_out: bool = False) -> dict:
         results = meta.get("results", [])
@@ -349,7 +445,7 @@ class MCPServer:
             self._running[task_id] = proc
 
         if args.get("wait", False):
-            result = self._wait_poll(task_id, args.get("timeout_sec", 3600), token, send_notify=True)
+            result = self._wait_with_events(proc, task_id, args.get("timeout_sec", 3600), token)
             with self._lock:
                 self._running.pop(task_id, None)
             return result
@@ -386,7 +482,7 @@ class MCPServer:
             self._running[task_id] = proc
 
         if args.get("wait", False):
-            result = self._wait_poll(task_id, args.get("timeout_sec", 3600), token, send_notify=True)
+            result = self._wait_with_events(proc, task_id, args.get("timeout_sec", 3600), token)
             with self._lock:
                 self._running.pop(task_id, None)
             return result
@@ -417,12 +513,13 @@ class MCPServer:
             "progress": {"completed": n_done, "failed": n_fail, "blocked": n_fail,
                          "running": n_running, "pending": max(0, pending), "total": total or len(results)},
             "cost_usd": self._aggregate_cost(td),
-            "subtasks": [{"id": r.get("subtask_id", ""), "title": r.get("title", ""),
-                          "status": r.get("status", "unknown"), "duration_sec": r.get("duration_sec", 0),
-                          "verify_ok": r.get("verify_ok", False), "retry_count": r.get("retry_count", 0),
-                          "changes": self._extract_changes(r)} for r in results],
+            "subtasks": self._build_subtask_list(results, task_id),
             "preserved_worktrees": self._find_preserved(task_id, results),
         }
+        # Add current_activity from activity store (if available)
+        act_state = self._activity_store.get(task_id, {})
+        if act_state.get("current_activity"):
+            rv["current_activity"] = act_state["current_activity"]
         if args.get("include_log_tail"):
             lp = td / "execution.log"
             if lp.exists():
@@ -456,6 +553,24 @@ class MCPServer:
             f.write(json.dumps(decision, ensure_ascii=False) + "\n")
         return {"task_id": task_id, "decision": action, "recorded_at": decision["recorded_at"],
                 "decision_path": str(dp)}
+
+    def _build_subtask_list(self, results: list, task_id: str) -> list:
+        """Build subtask list, enriching running subtasks with current_activity."""
+        act_state = self._activity_store.get(task_id, {})
+        activity_per_subtask = act_state.get("activity_per_subtask", {})
+        subtasks = []
+        for r in results:
+            sid = r.get("subtask_id", "") or r.get("id", "")
+            entry = {"id": sid, "title": r.get("title", ""),
+                     "status": r.get("status", "unknown"), "duration_sec": r.get("duration_sec", 0),
+                     "verify_ok": r.get("verify_ok", False), "retry_count": r.get("retry_count", 0),
+                     "changes": self._extract_changes(r)}
+            if entry["status"] in ("running", "pending"):
+                act = activity_per_subtask.get(sid)
+                if act:
+                    entry["current_activity"] = act
+            subtasks.append(entry)
+        return subtasks
 
     def _parse_jsonl_last(self, text: str) -> Optional[dict]:
         last = None
