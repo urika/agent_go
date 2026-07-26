@@ -91,7 +91,7 @@ def _record_subtask_result(
 
 def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
                   worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "",
-                  preserve_worktrees: Optional[bool] = None, interrupted: Optional[threading.Event] = None) -> None:
+                  preserve_worktrees: Optional[bool] = None, interrupted: Optional[threading.Event] = None, step_confirm: bool = False) -> None:
     """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。
 
     preserve_worktrees:
@@ -100,6 +100,8 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
       False → 强制清理所有 worktree
     interrupted:
       外部中断 Event（TUI 模式由主线程维护）。None 时内部创建并注册 OS 信号处理器。
+    step_confirm:
+      每波执行前暂停，确认继续/跳过/退出。仅非 TUI 模式有效。
     """
     worktree_map = worktree_map or {}
     results_map = results_map or {}
@@ -207,6 +209,33 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
 
         logger.info(f"[Wave {wave_num}] {', '.join(st['id'] for st in wave)}")
         actual_workers = min(parallel, len(wave)) if parallel > 1 else 1
+
+        # P1-4: 每波前确认（仅 CLI 非 TUI 模式，step_confirm=True）
+        if step_confirm and not _interrupted.is_set():
+            _wave_titles = [f"{st['id']} ({st.get('title', '?')})" for st in wave]
+            console.force(f"\n⏸ Wave {wave_num} — 准备执行: {', '.join(_wave_titles)}")
+            try:
+                _resp = input("  [Enter]继续  [s]跳过本波  [q]暂停: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                _resp = "q"
+            if _resp == "q":
+                console.force("⏹ 用户选择暂停")
+                _interrupted.set()
+                break
+            elif _resp == "s":
+                logger.info(f"[skip] 用户跳过 Wave {wave_num}")
+                for st in wave:
+                    if st["id"] not in results_map:
+                        results_map[st["id"]] = {
+                            "subtask_id": st["id"], "status": "no_changes",
+                            "exit_code": 0, "summary": "用户跳过",
+                            "worktree": "", "sandbox_type": "headless",
+                            "verify_ok": False, "duration_sec": 0,
+                        }
+                    completed_ids.add(st["id"])
+                remaining = [st for st in remaining if st["id"] not in completed_ids]
+                wave_num += 1
+                continue
 
         if actual_workers == 1:
             for st in wave:
@@ -359,54 +388,74 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
 
     blocked_count = sum(1 for r in results_map.values() if r.get("status") == "blocked")
     summary_icon = "❌" if has_failed else "🎉"
-    console.print(f"\n{'='*60}\n{summary_icon} 全部完成 ({len(completed_ids)}/{total})")
+
+    # ── P1-3 增强报告 ──────────────────────────────────────
+    console.sep()
+    console.title(f"{summary_icon} 全部完成 ({len(completed_ids)}/{total})")
     if has_blocked:
         console.print(f"🔗 级联阻断: {blocked_count} 个子任务因上游失败被阻断")
-    console.print(f"{'='*60}")
-    console.print("\n📦 最终报告")
-    console.print("─" * 60)
+
+    # 总体统计
+    _total_time = sum(r.get("duration_sec", 0) for r in results_map.values())
+    _total_cost = sum(r.get("claude_cost", 0) for r in results_map.values() if r.get("claude_cost"))
+    _total_changed = sum(r.get("change_stats", {}).get("files_changed", 0) for r in results_map.values())
+    _total_insertions = sum(r.get("change_stats", {}).get("insertions", 0) for r in results_map.values())
+    _total_deletions = sum(r.get("change_stats", {}).get("deletions", 0) for r in results_map.values())
+
+    console.subtitle("汇总")
+    console.print(f"  子任务: {len(completed_ids)}/{total}  总耗时: {_total_time:.0f}s  总变更: +{_total_insertions}/-{_total_deletions} ({_total_changed} 文件)  ", end="")
+    if _total_cost:
+        console.print(f" 总成本: ${_total_cost:.4f}")
+    else:
+        console.print("")
+
+    # 逐子任务详情表
+    console.subtitle("子任务明细")
+    _tbl_headers = ["id", "状态", "耗时", "变更", "摘要"]
+    _tbl_rows: list[list[str]] = []
     for s in confirmed:
         r = results_map.get(s["id"])
-        if r:
-            icon = {"completed": "✅", "no_changes": "⏭️", "failed": "❌", "blocked": "🔗"}.get(r["status"], "❓")
-            console.print(f"{icon} {r['subtask_id']}: {r['summary']}")
+        if not r:
+            _tbl_rows.append([s["id"], "⏳", "-", "-", "未执行"])
+            continue
+        _icon = {"completed": "✅", "no_changes": "⏭️", "failed": "❌", "blocked": "🔗"}.get(r["status"], "❓")
+        _dur = f"{r.get('duration_sec', 0):.0f}s" if r.get("duration_sec") else "-"
+        _cs = r.get("change_stats", {})
+        if _cs:
+            _chg = f"+{_cs.get('insertions', 0)}/-{_cs.get('deletions', 0)} ({_cs.get('files_changed', 0)}f)"
         else:
-            console.print(f"⏳ {s['id']}: 未执行")
-    console.print("─" * 60)
+            _chg = "-"
+        _tbl_rows.append([s["id"], _icon, _dur, _chg, r["summary"]])
+    if _tbl_rows:
+        console.table(_tbl_headers, _tbl_rows)
 
-    # ── 级联阻断摘要（M6） ──
+    # ── 级联阻断摘要 ──
     if has_blocked:
-        console.print("\n🔗 级联阻断详情")
-        console.print("─" * 60)
+        console.subtitle("🔗 级联阻断详情")
         for s in confirmed:
             r = results_map.get(s["id"])
             if r and r.get("status") == "blocked":
                 console.print(f"  {r['subtask_id']}: {r.get('failure_reason', '上游失败')}")
-        console.print("─" * 60)
 
-    # ── 失败原因摘要（M2） ──
+    # ── 失败原因摘要 ──
     if has_failed:
-        console.print("\n❌ 失败原因摘要")
-        console.print("─" * 60)
+        console.subtitle("❌ 失败原因摘要")
         for s in confirmed:
             r = results_map.get(s["id"])
             if r and r.get("status") == "failed" and r.get("failure_reason"):
                 console.print(f"  {r['subtask_id']}: {r['failure_reason']}")
-        console.print("─" * 60)
 
-    # ── 验证质量警告（M5） ──
+    # ── 验证质量警告 ──
     weak_verify = [
         r for r in results_map.values()
         if r.get("verification_confidence", {}).get("warning")
         and r.get("status") == "completed"
     ]
     if weak_verify:
-        console.print("\n⚠️  验证质量警告（可能存在假阳性）")
-        console.print("─" * 60)
+        console.subtitle("⚠️  验证质量警告（可能存在假阳性）")
         for r in weak_verify:
             vc = r.get("verification_confidence", {})
             console.print(f"  {r['subtask_id']}: {vc['warning']} ({vc['level']})")
-        console.print("─" * 60)
 
     console.print(f"\n📁 {task_dir}")
     console.print(f"📝 {task_dir}/execution.log")

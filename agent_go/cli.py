@@ -76,6 +76,8 @@ def _build_parser():
                             help="启用混合策略：简单任务走直接 API，复杂任务保留 claude -p（默认关闭）")
     run_parser.add_argument("--interactive", action="store_true",
                             help="启动 TUI 仪表盘实时监控子任务执行")
+    run_parser.add_argument("--step-confirm", action="store_true",
+                            help="每波执行前暂停确认（适用于交互式非 TUI 场景）")
     run_parser.add_argument("--auto-init", action="store_true",
                             help="目标目录非 git 仓库时自动 git init + 首次 commit（默认关闭）")
     run_parser.add_argument("--config", help="Path to config JSON file (default: ~/.agent_go/config.json)")
@@ -470,6 +472,7 @@ def cmd_run(args=None):
     log_event(logger, "time_estimate", est)
 
     _interactive_mode = getattr(args, 'interactive', False)
+    _step_confirm = getattr(args, 'step_confirm', False)
 
     if _interactive_mode:
         import threading as _th, signal as _sig
@@ -495,7 +498,8 @@ def cmd_run(args=None):
         _sig.signal(_sig.SIGTERM, _prev_term)
     else:
         _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
-                      remote_url=remote_url, preserve_worktrees=preserve_worktrees)
+                      remote_url=remote_url, preserve_worktrees=preserve_worktrees,
+                      step_confirm=_step_confirm)
 
 def cmd_resume(args=None):
     """恢复被中断的任务。"""
@@ -620,7 +624,8 @@ def cmd_resume(args=None):
 
     _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
                   worktree_map, results_map, completed_ids, remote_url=remote_url,
-                  preserve_worktrees=preserve_worktrees)
+                  preserve_worktrees=preserve_worktrees,
+                  step_confirm=getattr(args, 'step_confirm', False) if args else False)
 
 def cmd_inspect(args) -> None:
     """查看保留的 worktree 现场。"""
