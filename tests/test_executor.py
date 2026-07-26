@@ -489,7 +489,8 @@ class TestRunSubtask:
 
         mock_subprocess.side_effect = subprocess_side_effect
 
-        with patch("shutil.which", return_value=None):
+        with patch("shutil.which", return_value=None), \
+             patch("agent_go.executor.safe_input", return_value="C"):
             result = run_subtask("test-task", subtask, temp_repo, task_dir,
                                  fast_logger, headless=False)  # 交互模式不重试
 

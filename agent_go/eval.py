@@ -862,7 +862,7 @@ def cmd_eval(args=None) -> None:
         else:
             if baseline is None:
                 baseline = 0.05
-                console.print("⚠️  未指定 --baseline，使用 PRD Q3 默认 0.05（$/pass rate ≤ $0.05）")
+                console.warning("未指定 --baseline，使用 PRD Q3 默认 0.05（$/pass rate ≤ $0.05）")
                 console.print("   提示：用 --check-regression 切换到「不劣化」语义（对比历史基线）")
             result = gate_cost(baseline, AGENT_GO_DIR)
             _print_gate_report(result)
@@ -966,9 +966,9 @@ def _print_cost_report(c: dict[str, Any]) -> None:
     console.print(f"  API 错误:            {c['errors']} 次")
     # D5 可观测：降级事件 + 未知模型（价目表覆盖度监控）
     if c.get("fallback_events"):
-        console.print(f"  ⚠️  降级事件:         {c['fallback_events']} 次 (result=fallback 或 fallback_reason 非空)")
+        console.warning(f"降级事件:         {c['fallback_events']} 次 (result=fallback 或 fallback_reason 非空)")
     if c.get("unknown_model_events"):
-        console.print(f"  ⚠️  未知模型事件:     {c['unknown_model_events']} 次 (无法计价，cost_usd 缺失且模型不在价目表)")
+        console.warning(f"未知模型事件:     {c['unknown_model_events']} 次 (无法计价，cost_usd 缺失且模型不在价目表)")
     if c.get("policy_violations"):
         for pv_type, count in c["policy_violations"].items():
             console.print(f"  🚩  政策违规:         {pv_type} ×{count}")

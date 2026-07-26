@@ -1,9 +1,9 @@
-import os, subprocess, re, time, shlex, shutil, logging, json
+import os, subprocess, re, time, shlex, shutil, logging, json, threading, signal
 from pathlib import Path
 from typing import Optional, Any
 
-from .console import get_default_console
-from .config import log_event
+from .console import _LazyConsole
+from .config import log_event, safe_input
 from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
@@ -12,7 +12,26 @@ from .metrics import collect_timing, collect_change_stats, collect_merge_result
 # 解耦原则：evaluator 是可选增强，不静态 import（避免核心模块强绑增强模块的传递依赖）。
 # 改为调用点（_verify_changes 内 evaluator_enabled 守卫后）动态 import。
 from .config import get_api_key
+
+console = _LazyConsole()
 __all__ = ["run_subtask"]
+
+
+def _resolve_env_value(value: str) -> str:
+    """解析 config 字符串中的 ${VAR} 占位符为环境变量值。
+
+    用例：config.json 中写 "api_key": "${DEEPSEEK_API_KEY}" 时，
+    这个函数会从 os.environ 读取 DEEPSEEK_API_KEY 的真实值并返回。
+    未匹配到 ${VAR} 占位符则原样返回。
+    """
+    if not isinstance(value, str) or "${" not in value:
+        return value
+    import re as _re
+    pattern = _re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+    def _replace(match):
+        var_name = match.group(1)
+        return os.environ.get(var_name, match.group(0))  # 未设置时保留原样
+    return pattern.sub(_replace, value)
 
 # 模块级常量：路径替换时的边界字符集（在 _build_task_md 和 run_subtask 中共享）
 _BOUNDARY_CHARS = r'\s"\'\(\):/：，。、'
@@ -263,7 +282,6 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
     """Run Claude in headless or interactive mode. Returns (result, sandbox_type, claude_time)."""
     claude_start = time.time()
 
-    console = get_default_console()
 
     if headless:
         sandbox_type = "headless"
@@ -283,7 +301,7 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
             result = subprocess.run(claude_cmd, env=env, cwd=str(worktree))
             sandbox_type = "greywall" if greywall_bin else "native"
         except FileNotFoundError:
-            console.print("   ⚠️ Greywall 未安装，降级原生")
+            console.warning("Greywall 未安装，降级原生")
             result = subprocess.run(["claude", str(worktree)], env=env, cwd=str(worktree))
             sandbox_type = "native"
 
@@ -484,6 +502,26 @@ def _persist_verify_state(
         _mod_logger.debug(f"写入 verify_state.json 失败: {e}")
 
 
+def _install_subtask_sigterm_handler(task_dir: Path, sub_id: str) -> None:
+    """P2 Layer 3：subtask SIGTERM handler — 收到信号时写 verify_state.json + interrupted 标记。
+
+    handler 必须 async-signal-safe（不能做文件 I/O），所以这里只设置一个标志。
+    实际写入由 _run_headless 循环检查标志后调用 _persist_verify_state 完成。
+    """
+    _SUBTASK_INTERRUPTED.set()
+    # 立即写一个最小化的 interrupted checkpoint（async-signal-safe write）
+    try:
+        path = _verify_state_path(task_dir, sub_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"interrupted": true, "subtask_id": "' + sub_id + '"}\n')
+    except (OSError, IOError):
+        pass
+
+
+_SUBTASK_INTERRUPTED = threading.Event()  # P2 Layer 3 用的全局中断标志
+
+
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
                     task_dir=None, config=None):
@@ -648,10 +686,39 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 logger.info(f"验证全部通过 (attempt={attempt_label})")
                 break
 
-            # 4. 交互模式：遇到失败即停止
+            # 4. 交互模式：显示验证卡片 + 用户决策
             if not headless:
-                verify_ok = False
-                break
+                console.print("")  # ensures clean line position
+                console.sep("━", 58)
+                console.error(f"{sub_id}: 验证失败")
+                for _i, _cmd in enumerate(failed_cmds):
+                    console.print(f"   📋 验证命令: {_cmd[:80]}")
+                if failed_outputs:
+                    _tail = failed_outputs[-1].split("\n")[-6:]
+                    console.warning(f"失败输出（尾部 {len(_tail)} 行）:")
+                    for _l in _tail:
+                        console.print(f"      {_l[:76]}")
+                if summary:
+                    console.print(f"   📁 文件变更: {summary[:76]}")
+                console.sep("━", 58)
+                console.print(f"重试: {retry_count}/{max_retries}")
+                _user_skip = False
+                while True:
+                    _c = safe_input("[R]重试  [C]跳过  [A]中止\n> ").strip().upper()
+                    if _c in ("R", "RETRY"):
+                        _user_skip = False
+                        break
+                    elif _c in ("C", "CONTINUE"):
+                        _user_skip = True
+                        break
+                    elif _c in ("A", "ABORT"):
+                        console.error("任务已中止")
+                        sys.exit(0)
+                    console.print("无效输入（R=重试, C=跳过, A=中止）")
+                if _user_skip:
+                    verify_ok = False
+                    break  # break retry loop, go to result
+                # else fall through to retry logic at #6
 
             # 5. 已达最大重试次数 → 退出
             if retry_count >= max_retries:
@@ -803,9 +870,19 @@ def _is_simple_task(subtask: dict) -> bool:
 
 def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path="", config=None):
     sub_id = subtask["id"]
-    console = get_default_console()
     sub_dir = task_dir / sub_id
     sub_dir.mkdir(parents=True, exist_ok=True)
+
+    # P2 Layer 3：注册 SIGTERM handler 写 verify_state.json interrupted 标记
+    # 当 bench 触发 cooperative timeout 时，pipeline 会 SIGTERM claude，
+    # handler 写 interrupted checkpoint，executor 后续可检测到
+    try:
+        import signal as _sig
+        _sig.signal(_sig.SIGTERM,
+                    lambda s, f: _install_subtask_sigterm_handler(task_dir, sub_id))
+    except (ValueError, OSError):
+        # SIGTERM handler 在子线程或某些环境下可能无法设置
+        pass
 
     logger.info(f"─── {sub_id} START: {subtask['title']} ───")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
@@ -882,6 +959,23 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         env["AGENT_GO_GOAL_ENABLED"] = "1" if goal_cfg.get("enabled", True) else "0"
         env["AGENT_GO_GOAL_MAX_TURNS"] = str(goal_cfg.get("max_turns", 20))
         env["AGENT_GO_GOAL_TIMEOUT"] = str(goal_cfg.get("timeout_seconds", 600))
+
+        # 关键修复（用户需求）：把 plan_api 的 API 信息通过环境变量传给 claude 子进程。
+        # 这样配置 plan_api=deepseek 后，claude -p 会用 deepseek 的 base_url + api_key（只要该端点是 Anthropic 兼容的，如 kimi-coding / 自建网关）。
+        # 注意：deepseek 官方 API 是 OpenAI 格式，与 Anthropic 不兼容，无法通过此方式直接使用；
+        #       但支持任意 ${VAR} 占位符（resolve_env_value 做 env 变量展开）。
+        _plan_api = config.get("plan_api", {})
+        _base_url = _resolve_env_value(_plan_api.get("base_url", ""))
+        _api_key = _resolve_env_value(_plan_api.get("api_key", ""))
+        if _base_url:
+            env["ANTHROPIC_BASE_URL"] = _base_url
+        if _api_key:
+            env["ANTHROPIC_API_KEY"] = _api_key
+        # Worker max_tokens 透传到 claude -p 子进程（Claude Code 用 CLAUDE_CODE_MAX_OUTPUT_TOKENS）
+        # opus-4-7 上限 128K，256K 会被 API 自动截断
+        _worker_max_tokens = _plan_api.get("worker_max_tokens", "")
+        if _worker_max_tokens:
+            env["AGENT_GO_MAX_TOKENS"] = str(_worker_max_tokens)
 
     # 4. Agent type configuration
     agent_type_name = subtask.get("agent_type", "developer")

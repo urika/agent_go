@@ -5,6 +5,9 @@ from typing import Any, Optional
 from .config import safe_input, log_event
 from .utils import read_reference_docs
 from .api import generate_plan
+from .console import _LazyConsole
+
+console = _LazyConsole()
 
 __all__ = [
     "plan_to_md", "print_plan", "confirm_plan",
@@ -104,58 +107,58 @@ def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
     """展示 Plan，包含 Agent Prompt 和资源清单。"""
     behavior = config.get("behavior", {})
 
-    print("\n" + "=" * 70)
-    print("📋 执行方案（Plan Mode）")
-    print("=" * 70)
-    print(f"\n📝 概述: {plan.get('overview', 'N/A')}")
-    print(f"⏱️  预估工作量: {plan.get('estimated_effort', 'N/A')}")
+    console.print("\n" + "=" * 70)
+    console.print("📋 执行方案（Plan Mode）")
+    console.sep("=", 70)
+    console.print(f"\n📝 概述: {plan.get('overview', 'N/A')}")
+    console.print(f"⏱ ️  预估工作量: {plan.get('estimated_effort', 'N/A')}")
     # 时间估算（M4）
     parallel = config.get("_parallel", 1)
     duration = _estimate_duration(plan, parallel)
-    print(f"⏱️  预计耗时: {duration}")
+    console.print(f"⏱ ️  预计耗时: {duration}")
 
     # 共享资源清单
     sr = plan.get("shared_resources", {})
     if sr and behavior.get("show_resource_map", True):
-        print(f"\n📦 共享资源清单:")
+        console.print(f"\n📦 共享资源清单:")
         if sr.get("git_remote"):
-            print(f"   🔗 Git 远程: {sr['git_remote']}")
+            console.print(f"🔗 Git 远程: {sr['git_remote']}")
         if sr.get("git_branch"):
-            print(f"   🌿 当前分支: {sr['git_branch']}")
+            console.print(f"🌿 当前分支: {sr['git_branch']}")
         if sr.get("directories"):
-            print(f"   📁 关键目录: {', '.join(sr['directories'])}")
+            console.print(f"📁 关键目录: {', '.join(sr['directories'])}")
         if sr.get("config_files"):
-            print(f"   ⚙️  配置文件: {', '.join(sr['config_files'])}")
+            console.print(f"⚙️  配置文件: {', '.join(sr['config_files'])}")
         if sr.get("env_vars"):
-            print(f"   🔐 环境变量: {', '.join(sr['env_vars'])}")
+            console.print(f"🔐 环境变量: {', '.join(sr['env_vars'])}")
 
-    print(f"\n📌 执行步骤:")
+    console.print(f"\n📌 执行步骤:")
     for step in plan.get("steps", []):
-        print(f"\n[{step['id']}] {step['title']}")
-        print(f"      {step['description']}")
-        print(f"      📁 文件: {', '.join(step.get('files', []))}")
-        print(f"      ✅ 验证: {step.get('verification', 'N/A')}")
+        console.print(f"\n[{step['id']}] {step['title']}")
+        console.print(f"{step['description']}")
+        console.print(f"📁 文件: {', '.join(step.get('files', []))}")
+        console.print(f"✅ 验证: {step.get('verification', 'N/A')}")
         if step.get("risks"):
-            print(f"      ⚠️  风险: {', '.join(step['risks'])}")
+            console.print(f"⚠️  风险: {', '.join(step['risks'])}")
 
         # Agent Prompt
         if behavior.get("show_agent_prompt", True) and step.get("agent_prompt"):
             prompt_preview = step["agent_prompt"][:200] + "..." if len(step["agent_prompt"]) > 200 else step["agent_prompt"]
-            print(f"      🤖 Agent Prompt: {prompt_preview}")
+            console.print(f"🤖 Agent Prompt: {prompt_preview}")
 
     deps = plan.get("dependencies", {})
     if deps:
-        print(f"\n🔗 依赖关系:")
+        console.print(f"\n🔗 依赖关系:")
         for sid, prereqs in deps.items():
-            print(f"      步骤 {sid} 依赖: {prereqs}")
-    print("=" * 70)
+            console.print(f"步骤 {sid} 依赖: {prereqs}")
+    console.sep("=", 70)
 
 def _prompt_fallback(logger: logging.Logger) -> str:
     """交互式询问用户是否降级到规则拆解。返回 True=降级, False=重试。"""
-    print("\n⚠️ API 重新生成失败。请选择:")
-    print("  [F] 降级到本地规则拆解（不依赖 API）")
-    print("  [R] 重试（再次调用 API）")
-    print("  [N] 取消任务")
+    console.force("\n⚠️ API 重新生成失败。请选择:")
+    console.force("  [F] 降级到本地规则拆解（不依赖 API）")
+    console.force("  [R] 重试（再次调用 API）")
+    console.force("  [N] 取消任务")
     while True:
         c = safe_input("\n> ").strip().upper()
         if c == "F":
@@ -166,9 +169,9 @@ def _prompt_fallback(logger: logging.Logger) -> str:
             return "retry"
         elif c == "N":
             logger.info("用户取消")
-            print("❌ 已取消")
+            console.error("已取消")
             sys.exit(0)
-        print("无效输入（F=降级, R=重试, N=取消）")
+        console.print("无效输入（F=降级, R=重试, N=取消）")
 
 def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "") -> tuple[Optional[dict[str, Any]], Optional[list[str]]]:
     """
@@ -191,8 +194,8 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
 
         # 默认同意模式
         if auto_confirm and iteration == 1:
-            print(f"\n⚡ 默认同意模式已开启（来自配置 behavior.auto_confirm_plan）")
-            print(f"   按 Enter 直接确认，或输入任意键进入交互模式...")
+            console.force(f"\n⚡ 默认同意模式已开启（来自配置 behavior.auto_confirm_plan）")
+            console.force(f"   按 Enter 直接确认，或输入任意键进入交互模式...")
             quick = safe_input("\n> ").strip()
             if not quick:
                 logger.info("默认同意模式：自动确认 Plan")
@@ -201,13 +204,13 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
             # 用户输入了内容，进入交互模式
             auto_confirm = False
 
-        print("\n请选择操作:")
-        print("  [Y] 确认方案，拆解为子任务并执行")
-        print("  [S] 补充输入/修正需求（重新生成）")
-        print("  [D] 挂载参考文档（重新生成）")
-        print("  [E] 编辑某个步骤")
-        print("  [R] 重新生成方案")
-        print("  [N] 取消任务")
+        console.force("\n请选择操作:")
+        console.force("  [Y] 确认方案，拆解为子任务并执行")
+        console.force("  [S] 补充输入/修正需求（重新生成）")
+        console.force("  [D] 挂载参考文档（重新生成）")
+        console.force("  [E] 编辑某个步骤")
+        console.force("  [R] 重新生成方案")
+        console.force("  [N] 取消任务")
 
         choice = safe_input("\n> ").strip().upper()
         log_event(logger, "user_plan_choice", {"choice": choice, "iteration": iteration, "auto_confirm": auto_confirm})
@@ -217,7 +220,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
             return plan, reference_doc_paths
         elif choice == "N":
             logger.info("用户取消")
-            print("❌ 已取消")
+            console.force("❌ 已取消")
             sys.exit(0)
         elif choice == "R":
             logger.info("用户请求重新生成")
@@ -237,7 +240,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 if new_prompt: step["agent_prompt"] = new_prompt
                 logger.info(f"用户编辑步骤 {step['id']}")
         elif choice == "S":
-            print("\n✏️  请输入补充内容（支持多行，空行结束）：")
+            console.force("\n✏️  请输入补充内容（支持多行，空行结束）：")
             lines = []
             while True:
                 line = safe_input()
@@ -246,7 +249,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 lines.append(line)
             supplement = "\n".join(lines).strip()
             if not supplement:
-                print("补充为空，未重新生成")
+                console.force("补充为空，未重新生成")
                 continue
             logger.info(f"用户补充: {supplement[:200]}...")
             existing_docs = read_reference_docs(reference_doc_paths, repo, logger) if reference_doc_paths else ""
@@ -256,10 +259,10 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 plan = generate_plan(original, repo, config, logger, supplement, existing_docs, iteration)
                 plan["_original_task"] = original
                 plan_api_failure_count = 0
-                print(f"\n🔄 已重新生成（第 {iteration} 版）")
+                console.force(f"\n🔄 已重新生成（第 {iteration} 版）")
             except Exception as e:
                 logger.error(f"重新生成失败: {e}")
-                print(f"⚠️ 失败: {e}")
+                console.force(f"⚠️ 失败: {e}")
                 plan_api_failure_count += 1
                 if plan_api_failure_count >= max_plan_api_failures:
                     fallback_choice = _prompt_fallback(logger)
@@ -267,7 +270,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                         return ("__FALLBACK__", None)
                     plan_api_failure_count = 0  # 用户选择重试，重置计数
         elif choice == "D":
-            print("\n📎 输入参考文档路径（多个逗号分隔，目录自动读 .md）：")
+            console.force("\n📎 输入参考文档路径（多个逗号分隔，目录自动读 .md）：")
             doc_input = safe_input("\n> ").strip()
             if not doc_input:
                 continue
@@ -276,7 +279,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
             reference_doc_paths = list(dict.fromkeys(reference_doc_paths))
             docs_content = read_reference_docs(reference_doc_paths, repo, logger)
             if not docs_content:
-                print("⚠️ 未读取到有效文档")
+                console.force("⚠️ 未读取到有效文档")
                 continue
             logger.info(f"挂载 {len(reference_doc_paths)} 个文档，重新生成")
             iteration += 1
@@ -285,10 +288,10 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 plan = generate_plan(original, repo, config, logger, "", docs_content, iteration)
                 plan["_original_task"] = original
                 plan_api_failure_count = 0
-                print(f"\n🔄 已重新生成（第 {iteration} 版）")
+                console.force(f"\n🔄 已重新生成（第 {iteration} 版）")
             except Exception as e:
                 logger.error(f"重新生成失败: {e}")
-                print(f"⚠️ 失败: {e}")
+                console.force(f"⚠️ 失败: {e}")
                 plan_api_failure_count += 1
                 if plan_api_failure_count >= max_plan_api_failures:
                     fallback_choice = _prompt_fallback(logger)
@@ -299,11 +302,11 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
             if choice == "":
                 empty_count += 1
                 if empty_count > 5:
-                    print("⚠️ 检测到非交互模式，请输入有效选项或使用 --yes 标志")
+                    console.force("⚠️ 检测到非交互模式，请输入有效选项或使用 --yes 标志")
                     sys.exit(1)
             else:
                 empty_count = 0
-            print("无效输入")
+            console.force("无效输入")
 
 def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optional[Path] = None) -> list[dict[str, Any]]:
     """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。
@@ -369,29 +372,29 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
 
 def print_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any]) -> None:
     behavior = config.get("behavior", {})
-    print("\n" + "─" * 60)
-    print("📋 子任务列表")
-    print("─" * 60)
+    console.print("\n" + "─" * 60)
+    console.print("📋 子任务列表")
+    console.sep("─", 60)
     for st in subtasks:
-        print(f"\n[{st['id']}] {st['title']}")
+        console.print(f"\n[{st['id']}] {st['title']}")
         # 标注 Agent 角色来源
         agent_type = st.get("agent_type", "developer")
         source = st.get("_agent_type_source", "default")
         source_tag = {"llm": "", "rule": " [规则匹配]", "default": "", "inferred": " [自动推断]"}.get(source, "")
-        print(f"      \U0001f464 Agent: {agent_type}{source_tag}")
+        console.print(f"\U0001f464 Agent: {agent_type}{source_tag}")
         skills = st.get("skills", [])
         if skills:
-            print(f"      \U0001f9e0 Skill: {', '.join(skills)}")
+            console.print(f"\U0001f9e0 Skill: {', '.join(skills)}")
         # 只展示描述前200字符，避免太长
         desc = st.get("description", "")
         preview = desc[:200] + "..." if len(desc) > 200 else desc
-        print(f"      {preview}")
+        console.print(f"{preview}")
         if st.get("files_hint"):
-            print(f"      \U0001f4c1 涉及文件: {st['files_hint']}")
+            console.print(f"\U0001f4c1 涉及文件: {st['files_hint']}")
         if behavior.get("show_agent_prompt", True) and st.get("agent_prompt"):
             prompt_preview = st["agent_prompt"][:150] + "..." if len(st["agent_prompt"]) > 150 else st["agent_prompt"]
-            print(f"      \U0001f916 Agent Prompt: {prompt_preview}")
-    print("\n" + "─" * 60)
+            console.print(f"\U0001f916 Agent Prompt: {prompt_preview}")
+    console.print("\n" + "─" * 60)
 
 def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], logger: logging.Logger) -> list[dict[str, Any]]:
     behavior = config.get("behavior", {})
@@ -404,8 +407,8 @@ def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], log
     print_subtasks(subtasks, config)
 
     if auto_confirm:
-        print(f"\n⚡ 默认同意模式已开启（behavior.auto_confirm_subtasks）")
-        print(f"   按 Enter 直接执行，或输入任意键进入交互...")
+        console.force(f"\n⚡ 默认同意模式已开启（behavior.auto_confirm_subtasks）")
+        console.force(f"   按 Enter 直接执行，或输入任意键进入交互...")
         quick = safe_input("\n> ").strip()
         if not quick:
             logger.info("默认同意模式：自动确认子任务")
@@ -413,12 +416,12 @@ def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], log
             return subtasks
         auto_confirm = False
 
-    print("\n请选择操作:")
-    print("  [Y] 全部确认并执行")
-    print("  [N] 取消任务")
-    print("  [E] 编辑某个子任务")
-    print("  [A] 添加新子任务")
-    print("  [D] 删除某个子任务")
+    console.force("\n请选择操作:")
+    console.force("  [Y] 全部确认并执行")
+    console.force("  [N] 取消任务")
+    console.force("  [E] 编辑某个子任务")
+    console.force("  [A] 添加新子任务")
+    console.force("  [D] 删除某个子任务")
 
     empty_count = 0
     while True:
@@ -460,15 +463,15 @@ def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], log
             if choice == "":
                 empty_count += 1
                 if empty_count > 5:
-                    print("⚠️ 检测到非交互模式，请输入有效选项或使用 --yes 标志")
+                    console.force("⚠️ 检测到非交互模式，请输入有效选项或使用 --yes 标志")
                     sys.exit(1)
             else:
                 empty_count = 0
-            print("无效输入")
+            console.force("无效输入")
 
 def verify_subtask(current: int, total: int, summary: str, logger: logging.Logger, config: Optional[dict[str, Any]] = None) -> str:
-    print(f"\n{'='*60}\n✅ {current}/{total} 完成\n{'='*60}")
-    print(f"📊 {summary}\n[C]继续 [R]重试 [M]修改 [A]中止")
+    console.force(f"\n{'='*60}\n✅ {current}/{total} 完成\n{'='*60}")
+    console.force(f"📊 {summary}\n[C]继续 [R]重试 [M]修改 [A]中止")
     auto_verify = config.get("behavior", {}).get("auto_verify_subtask", False) if config else False
     while True:
         c = safe_input("\n> ").strip().upper()

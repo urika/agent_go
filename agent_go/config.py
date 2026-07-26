@@ -101,7 +101,8 @@ DEFAULT_CONFIG = {
 
 DECOMPOSE_RULES = [
     {
-        "patterns": ["JWT", "jwt", "auth", "认证", "token"],
+        # 注意：pattern 不能太宽泛，否则 "10 万 tokens" 这种常见词会误触发
+        "patterns": ["JWT 签名", "jwt 签名", "auth 模块", "登录认证", "access token", "refresh token", "OAuth"],
         "subtasks": [
             {"id": "sub-1", "title": "后端JWT签名迁移", "description": "将后端JWT签名算法从HS256迁移至RS256，生成RSA密钥对并更新签名/验证逻辑", "files_hint": "src/auth/**"},
             {"id": "sub-2", "title": "前端登录适配", "description": "前端适配新的公钥获取流程，更新登录页JWT解析和验证逻辑", "files_hint": "src/pages/login/**"},
@@ -109,7 +110,8 @@ DECOMPOSE_RULES = [
         ]
     },
     {
-        "patterns": ["test", "测试", "coverage"],
+        # pattern 加 "覆盖率报告" 等具体词，避免误触发
+        "patterns": ["测试覆盖率", "test coverage", "unit test", "编写测试", "补充测试"],
         "subtasks": [
             {"id": "sub-1", "title": "分析现有测试覆盖", "description": "识别当前测试未覆盖的模块和函数", "files_hint": "tests/**, src/**"},
             {"id": "sub-2", "title": "编写补充测试", "description": "为未覆盖模块添加单元测试和集成测试", "files_hint": "tests/**"},
@@ -131,11 +133,11 @@ def load_config() -> dict[str, Any]:
             saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
             # 配置文件损坏或读取失败：告警并回退默认配置，不覆写原文件
-            console.print(f"⚠️  配置文件损坏或无法读取 ({CONFIG_PATH}): {e}，已回退默认配置。请检查或删除该文件。")
+            console.warning(f"配置文件损坏或无法读取 ({CONFIG_PATH}): {e}，已回退默认配置。请检查或删除该文件。")
             return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
         if not isinstance(saved, dict):
             # 合法 JSON 但非 dict（如 [1,2]），同样回退默认配置
-            console.print(f"⚠️  配置文件格式无效 ({CONFIG_PATH}): 顶层应为 JSON 对象，已回退默认配置。请检查或删除该文件。")
+            console.warning(f"配置文件格式无效 ({CONFIG_PATH}): 顶层应为 JSON 对象，已回退默认配置。请检查或删除该文件。")
             return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
         merged = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
         for key, value in saved.items():

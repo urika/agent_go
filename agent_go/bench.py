@@ -23,15 +23,61 @@ except ImportError:
     yaml = None  # yaml 不是 stdlib，bench 启动时提示安装
 
 from .console import _LazyConsole
-from .config import AGENT_GO_DIR
+from .config import AGENT_GO_DIR, CONFIG_PATH
 from .eval import _read_jsonl, _read_json
 from .pricing import MODEL_PRICES
 
 __all__ = ["cmd_bench", "analyze_model_productivity"]
 console = _LazyConsole()
 
-# 默认 agent_go 入口（从仓库根目录或 PYTHONPATH 找到）
-_AGENT_GO_ENTRY = Path(__file__).resolve().parent.parent / "agent_go.py"
+
+def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 60):
+    """P1 Layer 1：cooperative timeout —— 不直接 SIGKILL，先 SIGTERM 给 agent_go 写 meta 的机会。
+
+    Returns: (stdout, stderr) bytes
+
+    流程：
+    1. 监控子进程，最多 hard_timeout 秒
+    2. 剩余 grace_sec 秒时，发 SIGTERM（让 pipeline.py handler 触发 save meta.json）
+    3. 再等 grace_sec 秒
+    4. 仍未退出 → SIGKILL（实在不行）
+    """
+    import time as _time
+    deadline = _time.time() + hard_timeout
+    poll_interval = min(5, hard_timeout // 20)  # 至少每 5s 查一次
+    while True:
+        remaining = deadline - _time.time()
+        if proc.poll() is not None:
+            break  # 已退出
+        if remaining <= 0:
+            # 超硬超时：SIGTERM
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            break
+        if remaining <= grace_sec and not getattr(proc, "_terminated", False):
+            # 剩余 grace 秒：发 SIGTERM
+            try:
+                proc.terminate()
+                proc._terminated = True
+            except ProcessLookupError:
+                pass
+        _time.sleep(min(poll_interval, remaining))
+    # 等 SIGTERM 后的 grace
+    try:
+        stdout, stderr = proc.communicate(timeout=grace_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
+    return type("R", (), {"stdout": stdout, "stderr": stderr})()
+
+# 默认 agent_go 入口：用脚本绝对路径（不依赖 pip 安装或 PYTHONPATH，
+# 避免子进程 cwd 在 fixture repo 内时找不到 agent_go 包）
+_AGENT_GO_ENTRY = [str(Path(__file__).resolve().parent.parent / "agent_go.py")]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -41,21 +87,33 @@ _AGENT_GO_ENTRY = Path(__file__).resolve().parent.parent / "agent_go.py"
 def cmd_bench(args=None) -> None:
     """对照运行编排器主函数。"""
     if yaml is None:
-        console.print("⚠️  需要 PyYAML 以解析任务文件：pip install pyyaml")
+        console.warning("需要 PyYAML 以解析任务文件：pip install pyyaml")
         sys.exit(1)
 
-    tasks_dir = Path(args.tasks if args and hasattr(args, "tasks") else "eval_suite")
+    # 关键修复：用 bench.py 所在目录（agent_go workspace）作为基准解析相对路径
+    # 这样不依赖 caller cwd（修复 macOS xcrun shim + cwd 漂移导致的 "can't open file" 错误）
+    _workspace = Path(__file__).resolve().parent.parent
+
+    tasks_arg = args.tasks if args and hasattr(args, "tasks") else "eval_suite"
+    tasks_dir = Path(tasks_arg)
+    if not tasks_dir.is_absolute():
+        tasks_dir = _workspace / tasks_dir
+
+    output_arg = getattr(args, "output", None) or "eval_suite/results.jsonl"
+    output_path = Path(output_arg)
+    if not output_path.is_absolute():
+        output_path = _workspace / output_path
+
     models = [m.strip() for m in (getattr(args, "candidate_models", None) or "").split(",") if m.strip()]
     repeat = int(getattr(args, "repeat", 3) or 3)
-    output_path = Path(getattr(args, "output", "eval_suite/results.jsonl") or "eval_suite/results.jsonl")
 
     if not models:
-        console.print("❌ 至少指定一个 --candidate-models（逗号分隔）")
+        console.error("至少指定一个 --candidate-models（逗号分隔）")
         sys.exit(1)
 
     task_files = sorted(tasks_dir.glob("tasks/*.yaml"))
     if not task_files:
-        console.print(f"❌ 未找到任务文件: {tasks_dir}/tasks/*.yaml")
+        console.error(f"未找到任务文件: {tasks_dir}/tasks/*.yaml")
         sys.exit(1)
 
     console.print(f"🚀 bench 开始: {len(task_files)} 任务 × {len(models)} 模型 × {repeat} 重复 = {len(task_files)*len(models)*repeat} 次执行")
@@ -98,14 +156,32 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     """
     start = time.time()
 
-    # 1. 写临时 config（注入被测模型到 worker_models.medium）
+    # 1. 写临时 config：继承用户的 plan_api，只覆盖 worker_models 为被测模型
+    # 关键修复（ISSUE bench 空 api_key）：之前硬编码 anthropic + api_key="" 导致
+    # plan 生成回落到本地模型（offline）→ 全部 [no_changes] / pass_rate=0%。
+    # 现在从用户 ~/.agent_go/config.json 读取 plan_api，保留其 provider/base_url/api_key/model。
+    user_config: dict = {}
+    if CONFIG_PATH.exists():
+        try:
+            user_config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            user_config = {}
+
+    plan_api = dict(user_config.get("plan_api", {}))  # 深拷贝，保留用户的 key
+    if not plan_api or not plan_api.get("api_key"):
+        # 退化：用户 config 没设 plan_api 时用 deepseek 默认（不写死 anthropic）
+        plan_api = {
+            "provider": "deepseek",
+            "base_url": "http://127.0.0.1:4000",
+            "api_key": "${DEEPSEEK_API_KEY}",
+            "model": "sonnet[1m]",
+            "max_tokens": 4096,
+            "temperature": 0.2,
+        }
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
         config = {
-            "plan_api": {
-                "provider": "anthropic", "model": "claude-sonnet-5",
-                "base_url": "https://api.anthropic.com/v1/messages", "api_key": "",
-                "max_tokens": 4096, "temperature": 0.2,
-            },
+            "plan_api": plan_api,
             "worker_models": {"easy": model, "medium": model, "hard": model},
             "behavior": {"auto_confirm_plan": True, "auto_confirm_subtasks": True},
         }
@@ -113,17 +189,31 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
         tmp_config = tf.name
 
     # 2. subprocess 调 agent_go run（进程级隔离，不 import 核心）
-    agent_go_entry = _AGENT_GO_ENTRY
+    # 关键修复：用绝对路径调 agent_go.py，cwd 设为 agent_go 工作目录（不是 fixture 父目录）
+    # 这样 agent_go 子进程能找到 agent_go 包（fixture 父目录下没有 agent_go 包）。
+    agent_go_cmd = [sys.executable] + _AGENT_GO_ENTRY
+    # 工作目录用 agent_go.py 的父目录（workspace），不是 fixture 父目录
+    workspace_dir = Path(__file__).resolve().parent.parent
     # 快照现有任务目录，用于精确匹配 subprocess 创建的任务（避免竞态）
     _before_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
     try:
-        result = subprocess.run(
-            [sys.executable, str(agent_go_entry), "run",
+        # P1 Layer 1：cooperative timeout —— 用 Popen + 监控代替硬 timeout
+        # 剩余 grace_sec 秒时发 SIGTERM，让 agent_go 完成当前步骤 + save meta
+        # grace_sec 后才 SIGKILL（实在不行才硬杀）
+        hard_timeout = task.get("timeout", 1800)
+        grace_sec = 60
+        proc = subprocess.Popen(
+            agent_go_cmd + ["run",
              str(repo), task["task"],
              "--yes", "--headless", "--preserve-worktrees",
              "--config", tmp_config],
-            capture_output=True, text=True, timeout=task.get("timeout", 600),
-            cwd=str(repo.parent if repo.parent != repo else repo),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=str(workspace_dir),
+        )
+        result = _run_with_grace(proc, hard_timeout=hard_timeout, grace_sec=grace_sec)
+        result = subprocess.CompletedProcess(
+            args=proc.args, returncode=proc.returncode,
+            stdout=result.stdout, stderr=result.stderr,
         )
         exit_code = result.returncode
         stderr_tail = result.stderr[-500:] if result.stderr else ""
@@ -270,7 +360,7 @@ def cmd_models(args=None) -> None:
     data = analyze_model_productivity(results_path)
 
     if "error" in data:
-        console.print(f"⚠️  {data['error']} → 先跑 agent_go eval bench")
+        console.warning(f"{data['error']} → 先跑 agent_go eval bench")
         return
 
     console.print(f"\n📊 模型生产力评估（{data['total_runs']} 次执行）")

@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 
 from .config import load_config, safe_input, setup_logger, AGENT_GO_DIR, log_event, get_api_key
-from .console import Console, set_default_console
+from .console import Console, set_default_console, _LazyConsole
 from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
@@ -15,8 +15,11 @@ from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
+from .git_utils import init_git_repo
 
 logger = logging.getLogger(__name__)
+
+console = _LazyConsole()
 
 __all__ = [
     "main", "cmd_run", "cmd_resume", "cmd_list", "cmd_show",
@@ -30,6 +33,8 @@ def _build_parser():
         prog="agent_go",
         description="Plan Mode orchestration tool - wraps Claude Code with structured Plan -> Decompose -> Execute workflow",
     )
+    parser.add_argument("--json", action="store_true", dest="json_mode",
+                        help="Output JSON Lines (machine-readable, stderr for interactive prompts)")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # run 子命令
@@ -43,6 +48,8 @@ def _build_parser():
     run_parser.add_argument("--headless", action="store_true", help="Run subtasks in headless mode")
     run_parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output")
     run_parser.add_argument("--verbose", action="store_true", help="Show debug/diagnostic output")
+    run_parser.add_argument("--json", action="store_true", dest="json_mode",
+                            help="Output JSON Lines (machine-readable)")
     run_parser.add_argument("--issue", type=int, dest="issue_ref", help="GitHub issue number to link")
     run_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks (default: 1)")
     run_parser.add_argument("--remote", help="Push worktree branches to remote URL")
@@ -67,6 +74,9 @@ def _build_parser():
                             help="注入 Stop Hook（.claude/settings.json + verify-goal.sh，默认关闭）")
     run_parser.add_argument("--agent-loop", action="store_true",
                             help="启用混合策略：简单任务走直接 API，复杂任务保留 claude -p（默认关闭）")
+    run_parser.add_argument("--auto-init", action="store_true",
+                            help="目标目录非 git 仓库时自动 git init + 首次 commit（默认关闭）")
+    run_parser.add_argument("--config", help="Path to config JSON file (default: ~/.agent_go/config.json)")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -74,6 +84,8 @@ def _build_parser():
     resume_parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmations")
     resume_parser.add_argument("--headless", action="store_true", help="Run in headless mode")
     resume_parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output")
+    resume_parser.add_argument("--json", action="store_true", dest="json_mode",
+                               help="Output JSON Lines (machine-readable)")
     resume_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks")
     resume_parser.add_argument("--remote", help="Push worktree branches to remote URL")
     resume_parser.add_argument("--max-retries", type=int, default=None,
@@ -141,6 +153,12 @@ def _build_parser():
     cache_parser = subparsers.add_parser("cache", help="Plan cache management")
     cache_parser.add_argument("subcommand", nargs="?", choices=["list", "clean", "clear", "stats"],
                               help="Cache operation: list|clean|clear|stats")
+
+    # recover 子命令（异常中断后从 worktree 重建 meta.json）
+    recover_parser = subparsers.add_parser("recover", help="从 worktree 状态重建被异常中断的任务 meta.json")
+    recover_parser.add_argument("task_id", help="Task ID to recover (e.g., task-20260725-224612-955-fd40)")
+    recover_parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                                 help="只扫描，不更新 meta.json")
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
@@ -240,9 +258,10 @@ def cmd_run(args=None):
     parallel = args.parallel
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)
+    json_mode = getattr(args, "json_mode", False)
 
     # 初始化 Console 实例（headless / --yes 隐含 quiet 模式）
-    console = Console(quiet=quiet or headless, verbose=verbose)
+    console = Console(quiet=quiet or headless, verbose=verbose, json_mode=json_mode)
     set_default_console(console)
 
     # 并发模式要求 headless（避免同时打开多个交互式 Claude Code 终端）
@@ -253,6 +272,16 @@ def cmd_run(args=None):
     if not repo.exists():
         console.error(f"路径不存在: {repo}")
         sys.exit(1)
+
+    # --auto-init：目标目录非 git 仓库时自动 init + 首次 commit，
+    # 保证 worktree / commit / tag / merge 机制可用
+    if getattr(args, "auto_init", False) and not (repo / ".git").exists():
+        console.warning(f"{repo} 不是 git 仓库，自动初始化 (--auto-init)")
+        ok, err = init_git_repo(repo)
+        if not ok:
+            console.error(f"git init 失败: {err}")
+            sys.exit(1)
+        console.print("✓ git 初始化完成（本地，无 remote）")
 
     config = load_config()
     config["_parallel"] = parallel  # M4: 时间预估用
@@ -315,7 +344,7 @@ def cmd_run(args=None):
         if skills:
             logger.info(f"已加载 Skill: {[s.name for s in skills]}")
         else:
-            console.print(f"⚠️  未找到 Skill: {skill_names}")
+            console.warning(f"未找到 Skill: {skill_names}")
     elif config.get("skills", {}).get("auto_discover", False):
         max_auto = config.get("skills", {}).get("max_auto_skills", 3)
         skills = discover_skills(task, repo, max_auto)
@@ -395,7 +424,7 @@ def cmd_run(args=None):
                     break
 
         if confirmed_plan is None and 'subtasks' not in locals():
-            console.print(f"⚠️ 达到最大迭代次数 {max_iter}，使用最后版本")
+            console.warning(f"达到最大迭代次数 {max_iter}，使用最后版本")
             confirmed_plan = plan
 
         if confirmed_plan is not None:
@@ -453,19 +482,19 @@ def cmd_resume(args=None):
         if getattr(args, 'no_preserve', False):
             preserve_worktrees = False
     elif len(sys.argv) < 3:
-        print("Usage: agent_go resume <task-id> [--yes] [--headless] [--parallel N] [--remote <url>]")
+        console.print("Usage: agent_go resume <task-id> [--yes] [--headless] [--parallel N] [--remote <url>]")
         sys.exit(1)
     else:
         task_id = sys.argv[2]
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
-        print(f"任务不存在: {task_id}")
+        console.print(f"任务不存在: {task_id}")
         sys.exit(1)
     # logger 需在 result.json 恢复循环之前初始化，否则损坏文件触发 UnboundLocalError
     logger = setup_logger(task_id, task_dir)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
-    if meta.get("status") not in ("running", "paused"):
-        print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused 状态可恢复")
+    if meta.get("status") not in ("running", "paused", "interrupted"):
+        console.print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused/interrupted 状态可恢复")
         sys.exit(1)
 
     confirmed = meta.get("subtasks", [])
@@ -489,7 +518,11 @@ def cmd_resume(args=None):
         if wt.exists() and (wt / ".git").exists():
             worktree_map[wid] = wt
         results_map[wid] = r
-        if r.get("status") in ("completed", "no_changes", "degraded"):
+        if r.get("status") == "completed":
+            completed_ids.add(wid)
+        elif r.get("status") in ("no_changes", "degraded") and not r.get("recovered"):
+            # 正常 pipeline 的 no_changes/degraded → 当作已完成（pipeline 自己认定的状态）
+            # 但 recover 推断的 no_changes（有 recovered=True）→ 不算完成（没有 commit）
             completed_ids.add(wid)
 
     repo = Path(meta["repo"])
@@ -569,7 +602,7 @@ def cmd_inspect(args) -> None:
     show_all = getattr(args, 'all', False)
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
-        print(f"任务不存在: {task_id}")
+        console.print(f"任务不存在: {task_id}")
         return
 
     meta_path = task_dir / "meta.json"
@@ -631,46 +664,46 @@ def cmd_inspect(args) -> None:
 
     if as_json:
         import json as _json
-        print(_json.dumps({"task_id": task_id, "entries": entries}, indent=2, ensure_ascii=False))
+        console.print(_json.dumps({"task_id": task_id, "entries": entries}, indent=2, ensure_ascii=False))
         return
 
     if not entries:
-        print(f"任务 {task_id} 中没有保留的 worktree（--all 可查看全部）")
+        console.print(f"任务 {task_id} 中没有保留的 worktree（--all 可查看全部）")
         return
 
-    print(f"\n🔍 保留现场: {task_id}")
-    print(f"📁 任务目录: {task_dir}")
-    print("─" * 70)
+    console.print(f"\n🔍 保留现场: {task_id}")
+    console.print(f"📁 任务目录: {task_dir}")
+    console.sep("─", 70)
     for e in entries:
         icon_map = {"failed": "❌", "blocked": "🔗", "completed": "✅", "no_changes": "⏭️", "running": "🔄"}
         icon = icon_map.get(e["status"], "❓")
         preserved_tag = " [保留]" if e["is_preserved"] else ""
-        print(f"\n{icon} {e['id']}{preserved_tag}: {e['title']}")
-        print(f"   状态: {e['status']}")
+        console.print(f"\n{icon} {e['id']}{preserved_tag}: {e['title']}")
+        console.print(f"状态: {e['status']}")
         if e["failure_reason"]:
-            print(f"   原因: {e['failure_reason']}")
+            console.print(f"原因: {e['failure_reason']}")
         if e["summary"]:
-            print(f"   摘要: {e['summary']}")
+            console.print(f"摘要: {e['summary']}")
         if e["verify_ok"] is not None:
-            print(f"   验证: {'通过' if e['verify_ok'] else '失败'}")
+            console.print(f"验证: {'通过' if e['verify_ok'] else '失败'}")
         if e["worktree_exists"]:
-            print(f"   📁 {e['worktree_path']}")
-            print(f"   🔗 git branch: {e['branch']}")
+            console.print(f"📁 {e['worktree_path']}")
+            console.print(f"🔗 git branch: {e['branch']}")
             if e["has_task_md"]:
-                print(f"   📝 TASK.md | result.json")
+                console.print(f"📝 TASK.md | result.json")
         else:
-            print(f"   (worktree 不存在 — 已清理或未创建)")
-    print("─" * 70)
-    print(f"提示: cd 到 worktree 路径查看完整文件状态")
+            console.print(f"(worktree 不存在 — 已清理或未创建)")
+    console.sep("─", 70)
+    console.print(f"提示: cd 到 worktree 路径查看完整文件状态")
 
 
 def cmd_list() -> None:
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
     if not tasks:
-        print("暂无任务")
+        console.print("暂无任务")
         return
-    print(f"{'任务ID':<26} {'状态':<12} {'子任务':<8} {'参考文档':<12} {'描述'}")
-    print("─" * 90)
+    console.print(f"{'任务ID':<26} {'状态':<12} {'子任务':<8} {'参考文档':<12} {'描述'}")
+    console.sep("─", 90)
     for t in tasks:
         meta_path = t / "meta.json"
         if not meta_path.exists():
@@ -679,47 +712,47 @@ def cmd_list() -> None:
         status = meta.get("status", "unknown")
         icon = {"completed": "🟢", "aborted": "🟡", "failed": "🔴"}.get(status, "⚪")
         docs = ",".join(meta.get("reference_docs", []))[:15]
-        print(f"{t.name:<25} {icon} {status:<10} {len(meta.get('subtasks',[])):<8} {docs:<12} {meta.get('task','')[:30]}")
+        console.print(f"{t.name:<25} {icon} {status:<10} {len(meta.get('subtasks',[])):<8} {docs:<12} {meta.get('task','')[:30]}")
 
 def cmd_show(args=None):
     if args and hasattr(args, 'task_id'):
         task_id = args.task_id
     elif len(sys.argv) < 3:
-        print("Usage: agent_go show <task-id>")
+        console.print("Usage: agent_go show <task-id>")
         sys.exit(1)
     else:
         task_id = sys.argv[2]
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
-        print("任务不存在")
+        console.print("任务不存在")
         sys.exit(1)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
-    print(f"\n🆔 {task_id}")
-    print(f"📝 {meta['task']}")
-    print(f"📁 {meta['repo']}")
-    print(f"📊 {meta.get('status','unknown')}")
+    console.print(f"\n🆔 {task_id}")
+    console.print(f"📝 {meta['task']}")
+    console.print(f"📁 {meta['repo']}")
+    console.print(f"📊 {meta.get('status','unknown')}")
     if meta.get("reference_docs"):
-        print(f"📎 参考文档: {', '.join(meta['reference_docs'])}")
+        console.print(f"📎 参考文档: {', '.join(meta['reference_docs'])}")
     results = meta.get("results", [])
     for i, st in enumerate(meta.get("subtasks", [])):
         r = results[i] if i < len(results) else None
         icon = "✅" if r and r["status"] == "completed" else "❌" if r else "⏳"
-        print(f"\n{icon} [{st['id']}] {st['title']}")
+        console.print(f"\n{icon} [{st['id']}] {st['title']}")
         if st.get("agent_prompt"):
-            print(f"       🤖 Agent Prompt: {st['agent_prompt'][:100]}...")
+            console.print(f"🤖 Agent Prompt: {st['agent_prompt'][:100]}...")
         # Agent 角色和 Skill 可观测性
         agent_type = st.get("agent_type", "developer")
         source = r.get("agent_type_source", "default") if r else st.get("_agent_type_source", "default")
         source_label = {"llm": "LLM", "rule": "规则", "default": "默认", "inferred": "推断"}.get(source, source)
-        print(f"       👤 Agent: {agent_type} (来源: {source_label})")
+        console.print(f"👤 Agent: {agent_type} (来源: {source_label})")
         skills = st.get("skills", [])
         if skills:
-            print(f"       🧠 Skill: {', '.join(skills)}")
+            console.print(f"🧠 Skill: {', '.join(skills)}")
         unresolved = r.get("skills_unresolved", []) if r else []
         if unresolved:
-            print(f"       ⚠️  Skill 未找到: {', '.join(unresolved)}")
+            console.print(f"⚠️  Skill 未找到: {', '.join(unresolved)}")
         if r:
-            print(f"       📊 {r['summary']}")
+            console.print(f"📊 {r['summary']}")
 
 def cmd_review(args=None):
     """审查任务结果或代码变更。"""
@@ -769,11 +802,11 @@ def cmd_review(args=None):
 
     # 代码审查（原有逻辑）
     if not repo_path:
-        print("Usage: agent_go review <repo-path> [--pr <N>] [--yes] | --task <task-id>")
+        console.print("Usage: agent_go review <repo-path> [--pr <N>] [--yes] | --task <task-id>")
         return
     repo = Path(repo_path).resolve()
     if not repo.exists():
-        print(f"路径不存在: {repo}")
+        console.print(f"路径不存在: {repo}")
         return
 
     prompt = "请审查当前项目的代码变更，输出审查报告。重点检查：安全性、错误处理、代码质量、潜在bug。"
@@ -785,7 +818,7 @@ def cmd_review(args=None):
         result = subprocess.run(
             ["claude", "-p", prompt, "--permission-mode", "bypassPermissions", "--no-session-persistence"],
             cwd=str(repo))
-        print(f"\n审查完成 (exit: {result.returncode})")
+        console.print(f"\n审查完成 (exit: {result.returncode})")
     else:
         import subprocess
         subprocess.run(["claude", str(repo)])
@@ -799,22 +832,20 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
     Args:
         deep_review: 是否启用深层审查（独立模型分析每个子任务的 diff）
     """
-    from .console import get_default_console
-    console = get_default_console()
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
-        console.print(f"❌ 任务不存在: {task_id}")
+        console.error(f"任务不存在: {task_id}")
         return
 
     meta_path = task_dir / "meta.json"
     if not meta_path.exists():
-        console.print(f"❌ 任务元数据不存在: {meta_path}")
+        console.error(f"任务元数据不存在: {meta_path}")
         return
 
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        console.print(f"❌ 无法读取任务元数据: {e}")
+        console.error(f"无法读取任务元数据: {e}")
         return
 
     subtasks = meta.get("subtasks", [])
@@ -1128,8 +1159,6 @@ def _save_plan_snapshot(task_dir: Path, plan: dict, version: int) -> None:
 
 def _show_plan_history(task_dir: Path) -> None:
     """显示 Plan 版本历史。"""
-    from .console import get_default_console
-    console = get_default_console()
     plans_dir = task_dir / "plans"
     if not plans_dir.exists():
         console.print("📋 Plan 版本历史")
@@ -1163,24 +1192,22 @@ def _show_plan_history(task_dir: Path) -> None:
 
 def _show_plan_diff(task_dir: Path, v1: int, v2: Optional[int] = None) -> None:
     """对比两个 Plan 版本的差异。"""
-    from .console import get_default_console
-    console = get_default_console()
     plans_dir = task_dir / "plans"
     if not plans_dir.exists():
-        console.print("❌ 无 Plan 版本历史")
+        console.error("无 Plan 版本历史")
         return
 
     versions = sorted(
         [int(f.stem[1:]) for f in plans_dir.glob("v*.json")],
     )
     if not versions:
-        console.print("❌ 无 Plan 版本历史")
+        console.error("无 Plan 版本历史")
         return
 
     if v2 is None:
         v2 = versions[-1]
     if v1 not in versions or v2 not in versions:
-        console.print(f"❌ 版本不存在 (可用: {versions})")
+        console.error(f"版本不存在 (可用: {versions})")
         return
 
     data1 = json.loads((plans_dir / f"v{v1}.json").read_text(encoding="utf-8"))
@@ -1225,7 +1252,7 @@ def cmd_pr(args=None):
         do_push = getattr(args, 'push', False)
         remote = getattr(args, 'remote', "origin")
     elif len(sys.argv) < 3:
-        print("Usage: agent_go pr <task-id> [--offline] [--push] [--remote <name>]")
+        console.print("Usage: agent_go pr <task-id> [--offline] [--push] [--remote <name>]")
         sys.exit(1)
     else:
         task_id = sys.argv[2]
@@ -1239,7 +1266,7 @@ def cmd_pr(args=None):
                 pass
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
-        print(f"任务不存在: {task_id}")
+        console.print(f"任务不存在: {task_id}")
         sys.exit(1)
 
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
@@ -1298,16 +1325,16 @@ def cmd_pr(args=None):
                 cwd=str(Path(repo)), capture_output=True, text=True,
             )
             if push_result.returncode == 0:
-                print(f"✅ 分支已推送到 {remote}/{branch}")
+                console.success(f"分支已推送到 {remote}/{branch}")
             else:
-                print(f"⚠️ 推送失败: {push_result.stderr.strip()[:200]}")
+                console.print(f"⚠ ️ 推送失败: {push_result.stderr.strip()[:200]}")
 
     if offline:
         out = task_dir / "PR.md"
         out.write_text(pr_body, encoding="utf-8")
-        print(f"PR 描述已写入 {out}")
+        console.print(f"PR 描述已写入 {out}")
         push_hint = f" --push" if not do_push else ""
-        print(f"请手动创建 PR 或稍后执行: agent_go pr {task_id}{push_hint}")
+        console.print(f"请手动创建 PR 或稍后执行: agent_go pr {task_id}{push_hint}")
     else:
         # 在线模式：通过 gh CLI 创建 PR
         import tempfile
@@ -1317,9 +1344,9 @@ def cmd_pr(args=None):
         title = meta.get("task", "agent_go task")[:72]
         base = meta.get("base_branch", "main")
         if not shutil.which("gh"):
-            print("❌ 未安装 gh CLI。请先安装: brew install gh")
+            console.error("未安装 gh CLI。请先安装: brew install gh")
             (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
-            print(f"PR 描述已备份到 {task_dir}/PR.md")
+            console.print(f"PR 描述已备份到 {task_dir}/PR.md")
             os.unlink(pr_file)
             return
         result = subprocess.run([
@@ -1327,11 +1354,11 @@ def cmd_pr(args=None):
             "--body-file", pr_file, "--base", base,
         ], capture_output=True, text=True)
         if result.returncode == 0:
-            print(result.stdout.strip())
+            console.print(result.stdout.strip())
         else:
-            print(f"❌ gh pr create 失败: {result.stderr.strip()}")
+            console.error(f"gh pr create 失败: {result.stderr.strip()}")
             (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
-            print(f"PR 描述已备份到 {task_dir}/PR.md")
+            console.print(f"PR 描述已备份到 {task_dir}/PR.md")
         os.unlink(pr_file)
 
 def cmd_status(args=None):
@@ -1446,7 +1473,7 @@ def _cmd_status_text(args=None):
     while True:
         tasks_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
         if not tasks_dirs:
-            print("暂无任务")
+            console.print("暂无任务")
             return
 
         rows = [_get_task_status(td) for td in tasks_dirs]
@@ -1455,20 +1482,20 @@ def _cmd_status_text(args=None):
         if watch:
             os.system("clear" if os.name == "posix" else "cls")
 
-        print(f"{'任务ID':<24} {'状态':<6} {'进度':<8} {'耗时':<8} {'Issue':<6} {'当前子任务'}")
-        print("─" * 110)
+        console.print(f"{'任务ID':<24} {'状态':<6} {'进度':<8} {'耗时':<8} {'Issue':<6} {'当前子任务'}")
+        console.sep("─", 110)
         for r in rows:
             issue_str = f"#{r['issue']}" if r['issue'] else "-"
-            print(f"{r['id']:<24} {r['icon']} {r['status']:<4} {r['progress']:<8} "
+            console.print(f"{r['id']:<24} {r['icon']} {r['status']:<4} {r['progress']:<8} "
                   f"{r['elapsed']:<8} {issue_str:<6} {r['current'][:50]}")
             if r["tail"]:
                 for tl in r["tail"]:
                     line_text = tl.split(" | ")[-1] if " | " in tl else tl
-                    print(f"  └ {line_text.strip()[:90]}")
-        print("─" * 110)
+                    console.print(f"└ {line_text.strip()[:90]}")
+        console.sep("─", 110)
         flags = " --watch" if watch else ""
         flags += " --verbose" if verbose else ""
-        print(f"共 {len(rows)} 个任务 | agent_go status{flags} | Ctrl+C 退出\n")
+        console.print(f"共 {len(rows)} 个任务 | agent_go status{flags} | Ctrl+C 退出\n")
 
         if not watch:
             break
@@ -1476,17 +1503,17 @@ def _cmd_status_text(args=None):
 
 def cmd_config() -> None:
     config = load_config()
-    print(json.dumps(config, indent=2, ensure_ascii=False))
+    console.print(json.dumps(config, indent=2, ensure_ascii=False))
 
 def cmd_clean() -> None:
     import shutil as _shutil
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
     if not tasks:
-        print("暂无任务")
+        console.print("暂无任务")
         return
-    print(f"将清理 {len(tasks)} 个任务目录:")
+    console.print(f"将清理 {len(tasks)} 个任务目录:")
     for t in tasks:
-        print(f"  {t.name}")
+        console.print(f"{t.name}")
     confirm = safe_input("\n确认删除? [y/N]: ").strip().lower()
     if confirm == "y":
         # repo → 该仓库关联的 task_id 集合（用于 worktree prune + tag 清理）
@@ -1512,23 +1539,23 @@ def cmd_clean() -> None:
                 for tag in tag_list.stdout.strip().split("\n"):
                     if tag:
                         subprocess.run(["git", "tag", "-d", tag], cwd=repo_path, capture_output=True)
-        print(f"已清理 {len(tasks)} 个任务")
+        console.print(f"已清理 {len(tasks)} 个任务")
     else:
-        print("已取消")
+        console.print("已取消")
 
 def cmd_skills() -> None:
     """列出所有可用的 Skill。"""
     skills = list_skills()
     if not skills:
-        print("\n暂无可用 Skill。在 ~/.agent_go/skills/<name>/SKILL.md 创建。")
-        print("示例 Skill 格式: YAML frontmatter + Markdown body")
+        console.print("\n暂无可用 Skill。在 ~/.agent_go/skills/<name>/SKILL.md 创建。")
+        console.print("示例 Skill 格式: YAML frontmatter + Markdown body")
         return
-    print(f"\n📚 可用 Skill ({len(skills)} 个)")
-    print("─" * 55)
+    console.print(f"\n📚 可用 Skill ({len(skills)} 个)")
+    console.sep("─", 55)
     for s in skills:
         desc = s["description"][:45] + "..." if len(s["description"]) > 45 else s["description"]
-        print(f"  {s['name']:<30} {desc}")
-    print("─" * 55)
+        console.print(f"{s['name']:<30} {desc}")
+    console.sep("─", 55)
 
 def cmd_cache(args=None):
     """Plan 缓存管理。"""
@@ -1537,7 +1564,7 @@ def cmd_cache(args=None):
     if args and hasattr(args, 'subcommand'):
         sub = args.subcommand
     elif len(sys.argv) < 3:
-        print("Usage: agent_go cache <list|clean|clear|stats>")
+        console.print("Usage: agent_go cache <list|clean|clear|stats>")
         return
     else:
         sub = sys.argv[2]
@@ -1546,20 +1573,20 @@ def cmd_cache(args=None):
     if sub == "list":
         entries = list_cache_entries()
         if not entries:
-            print("暂无缓存")
+            console.print("暂无缓存")
             return
-        print(f"{'缓存键':<14} {'任务':<30} {'创建':<18} {'命中':<6}")
-        print("─" * 70)
+        console.print(f"{'缓存键':<14} {'任务':<30} {'创建':<18} {'命中':<6}")
+        console.sep("─", 70)
         for e in entries:
             m = e.get("meta", {})
             key = e.get("cache_key", "")[:12]
             task = m.get("task", "?")[:30]
             created = m.get("created_at", "?")[:16]
             hits = m.get("hit_count", 0)
-            print(f"{key:<14} {task:<30} {created:<18} {hits:<6}")
+            console.print(f"{key:<14} {task:<30} {created:<18} {hits:<6}")
     elif sub == "clean":
         removed = clean_expired_cache(config)
-        print(f"清理 {removed} 条过期缓存")
+        console.print(f"清理 {removed} 条过期缓存")
     elif sub == "clear":
         import shutil
         from .api import _cache_dir
@@ -1567,16 +1594,16 @@ def cmd_cache(args=None):
         if d.exists():
             shutil.rmtree(d)
             d.mkdir(parents=True, exist_ok=True)
-        print("已清除所有缓存")
+        console.print("已清除所有缓存")
     elif sub == "stats":
         entries = list_cache_entries()
-        print(f"缓存条目: {len(entries)}")
+        console.print(f"缓存条目: {len(entries)}")
         if entries:
             total_hits = sum(e.get("meta", {}).get("hit_count", 0) for e in entries)
-            print(f"总命中: {total_hits}")
-            print(f"磁盘: {_cache_size()}")
+            console.print(f"总命中: {total_hits}")
+            console.print(f"磁盘: {_cache_size()}")
     else:
-        print(f"未知子命令: {sub}。可用: list, clean, clear, stats")
+        console.print(f"未知子命令: {sub}。可用: list, clean, clear, stats")
 
 
 def _cache_size() -> str:
@@ -1590,6 +1617,54 @@ def _cache_size() -> str:
     elif total < 1024 * 1024:
         return f"{total / 1024:.1f}KB"
     return f"{total / 1024 / 1024:.1f}MB"
+
+
+def cmd_recover(args) -> None:
+    """从 worktree 状态重建被异常中断的任务 meta.json。
+
+    适用场景：
+    - bench subprocess timeout → agent_go 被 SIGKILL → meta.json 永远停在 plan 阶段
+    - 用户 Ctrl-C 在 verify 阶段
+    - 任何 meta.status=running + meta.results=[] 但 worktree 有产出的情况
+
+    工作流：
+    1. 扫描每个 sub-N/work 的 git log 推断 commits 数量
+    2. 如果有未提交的 orphan 工作，自动 commit（保留 claude 在 SIGKILL 前的工作）
+    3. 从 execution.log 推断 verify 结果
+    4. 原子写 meta.json（recovered=true 标记）
+    """
+    task_id = args.task_id
+    dry_run = getattr(args, "dry_run", False)
+
+    # 延迟导入（避免 core import 增强模块时拉起 recover）
+    from .recover import recover_task
+
+    console.print(f"🔧 恢复任务 {task_id}")
+    console.print(f"   dry_run={dry_run}")
+
+    result = recover_task(
+        task_id,
+        update_meta=not dry_run,
+    )
+
+    if "error" in result:
+        console.error(f"{result['error']}")
+        sys.exit(1)
+
+    console.print(f"\n📊 扫描结果：")
+    for sub in result.get("recovered", []):
+        marker = "🆕" if sub.get("recovered") and sub.get("recovered_at") else "📦"
+        orphan = " (orphan reset)" if sub.get("orphan_reset") else ""
+        verify_str = f"verify_ok={sub.get('verify_ok')}" if sub.get("verify_ok") is not None else "verify=unknown"
+        console.print(f"   {marker} {sub['subtask_id']:8s}: status={sub['status']:12s}  "
+                      f"commits={sub.get('commits', 0)}  {verify_str}{orphan}")
+
+    overall = result.get("overall_status", "unknown")
+    console.print(f"\n   overall_status: {overall}")
+    if dry_run:
+        console.print(f"   (dry-run，未写入 meta.json)")
+    else:
+        console.print(f"   ✓ meta.json 已更新（recovered_at={result.get('recovered_at', '?')[:19]}）")
 
 
 def cmd_router(args=None) -> None:
@@ -1608,14 +1683,14 @@ def cmd_router(args=None) -> None:
     if subcmd == "enable":
         router_cfg["enabled"] = True
         CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-        print("✅ 角色感知路由已启用")
+        console.success("角色感知路由已启用")
         _print_router_config(router_cfg)
         return
 
     if subcmd == "disable":
         router_cfg["enabled"] = False
         CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-        print("✅ 角色感知路由已禁用（回退到 plan_api）")
+        console.success("角色感知路由已禁用（回退到 plan_api）")
         return
 
     if subcmd == "set-role":
@@ -1633,39 +1708,39 @@ def cmd_router(args=None) -> None:
                 "base_url": args.fallback_base_url,
             }
         elif args.fallback_provider:
-            print("⚠️  --fallback-provider 需要同时指定 --fallback-model 和 --fallback-base-url")
+            console.print("⚠ ️  --fallback-provider 需要同时指定 --fallback-model 和 --fallback-base-url")
 
         # Planner 铁律：不允许配置降级到弱模型
         if role == "planner" and "fallback" in role_cfg:
-            print("⚠️  政策违规：Planner 角色配置了 fallback 降级（规划 token 省小钱，Worker token 数倍膨胀）")
-            print("   路由执行时 metering 将标记 policy_violation=planner_fallback_configured")
-            print("   建议移除 fallback: agent_go router set-role planner --provider ... --model ... --base-url ...")
+            console.print("⚠ ️  政策违规：Planner 角色配置了 fallback 降级（规划 token 省小钱，Worker token 数倍膨胀）")
+            console.print("路由执行时 metering 将标记 policy_violation=planner_fallback_configured")
+            console.print("建议移除 fallback: agent_go router set-role planner --provider ... --model ... --base-url ...")
 
         CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"✅ {role} 角色已配置")
+        console.success(f"{role} 角色已配置")
         _print_role_config(role, router_cfg)
         return
 
-    print(f"未知操作: {subcmd}。可用: show | enable | disable | set-role")
+    console.print(f"未知操作: {subcmd}。可用: show | enable | disable | set-role")
 
 
 def _print_router_config(router_cfg: dict) -> None:
     """打印路由器配置摘要。"""
     enabled = router_cfg.get("enabled", False)
     status = "🟢 启用" if enabled else "⚪ 禁用"
-    print(f"\n🔀 角色感知路由: {status}")
-    print(f"   熔断: {router_cfg.get('circuit_breaker', {}).get('failure_threshold', 5)} 次失败 → "
+    console.print(f"\n🔀 角色感知路由: {status}")
+    console.info(f"   熔断: {router_cfg.get('circuit_breaker', {}).get('failure_threshold', 5)} 次失败 → "
           f"{router_cfg.get('circuit_breaker', {}).get('cooldown_seconds', 60)}s 冷却")
-    print(f"   Agent 映射: {json.dumps(router_cfg.get('agent_type_mapping', {}), ensure_ascii=False)}")
+    console.print(f"Agent 映射: {json.dumps(router_cfg.get('agent_type_mapping', {}), ensure_ascii=False)}")
 
     roles = router_cfg.get("roles", {})
     if roles:
-        print("   角色配置:")
+        console.print("角色配置:")
         for role_name in ["planner", "worker", "reviewer"]:
             if role_name in roles:
                 _print_role_config(role_name, router_cfg)
     else:
-        print("   ⚠️  未配置任何角色，请使用 'agent_go router set-role' 配置")
+        console.print("⚠️  未配置任何角色，请使用 'agent_go router set-role' 配置")
 
 
 def _print_role_config(role_name: str, router_cfg: dict) -> None:
@@ -1676,21 +1751,80 @@ def _print_role_config(role_name: str, router_cfg: dict) -> None:
     model = rc.get("model", "?")
     fallback = rc.get("fallback")
     fb_str = f" → fallback: {fallback['provider']}:{fallback['model']}" if fallback else " (不降级)"
-    print(f"     {role_name}: {provider}:{model}{fb_str}")
+    console.print(f"{role_name}: {provider}:{model}{fb_str}")
 
 
 def cmd_agents() -> None:
     """列出所有可用的 Agent 类型。"""
     agents = list_agent_types()
-    print(f"\n🤖 Agent 类型 ({len(agents)} 种)")
-    print("─" * 55)
+    console.print(f"\n🤖 Agent 类型 ({len(agents)} 种)")
+    console.sep("─", 55)
     for a in agents:
         src = "内置" if a.get("source") == "builtin" else "用户"
         desc = a["description"][:40] + "..." if len(a["description"]) > 40 else a["description"]
-        print(f"  {a['type']:<25} [{src}] {desc}")
-    print("─" * 55)
+        console.print(f"{a['type']:<25} [{src}] {desc}")
+    console.sep("─", 55)
+
+def _install_sigterm_handler() -> None:
+    """P0 Layer 2：注册 SIGTERM/SIGINT handler 优雅退出。
+
+    收到信号时（来自 bench 的 cooperative timeout，或用户 Ctrl-C）：
+    - re-raise 信号让 pipeline.py 已有的 handler 处理（kill children + save meta.json）
+    - cli.py 层只确保信号不被静默吞掉
+    """
+    import signal as _sig
+    def _re_raise(signum, frame):
+        import os
+        os.kill(os.getpid(), signum)
+    _sig.signal(_sig.SIGTERM, _re_raise)
+    _sig.signal(_sig.SIGINT, _re_raise)
+
+
+def _cleanup_stale_tasks(max_age_hours: int = 1) -> int:
+    """P3 Layer 5：清理卡死的 running task。
+
+    场景：agent_go run 被 SIGKILL 后 meta.json 永远 status=running，
+    下次启动时这些 task 会阻塞 bench/recover。
+
+    策略：扫描 ~/.agent_go/task-* 中所有 meta.json：
+    - status=running 且 meta.json mtime > max_age_hours → 标记为 stale_aborted
+    - 保留结果列表（不删除），让 recover 能继续处理
+
+    Returns: 清理的 task 数量
+    """
+    import json as _json
+    import time as _time
+    cutoff = _time.time() - max_age_hours * 3600
+    cleaned = 0
+    if not AGENT_GO_DIR.exists():
+        return 0
+    for task_dir in AGENT_GO_DIR.glob("task-*"):
+        meta_path = task_dir / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            mtime = meta_path.stat().st_mtime
+            if mtime < cutoff:
+                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta.get("status") == "running":
+                    meta["status"] = "stale_aborted"
+                    meta["stale_aborted_at"] = _time.time()
+                    meta_path.write_text(_json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                    cleaned += 1
+        except (OSError, _json.JSONDecodeError):
+            continue
+    return cleaned
+
 
 def main() -> None:
+    # P0 Layer 2：先注册 SIGTERM handler（确保 bench timeout 触发的信号被优雅处理）
+    _install_sigterm_handler()
+
+    # P3 Layer 5：启动时清理卡死的 running task（避免历史脏数据阻塞 bench/recover）
+    stale_count = _cleanup_stale_tasks(max_age_hours=1)
+    if stale_count > 0:
+        console.print(f"⚠ ️  已清理 {stale_count} 个卡死的 stale task（meta.json 标记为 stale_aborted）")
+
     try:
         parser = _build_parser()
         args = parser.parse_args()
@@ -1729,22 +1863,24 @@ def main() -> None:
             cmd_eval(args)
         elif args.command == "router":
             cmd_router(args)
+        elif args.command == "recover":
+            cmd_recover(args)
         elif args.command == "inspect":
             cmd_inspect(args)
         elif args.command == "plan-history":
             task_dir = AGENT_GO_DIR / args.task_id
             if not task_dir.exists():
-                console.print(f"❌ 任务不存在: {args.task_id}")
+                console.error(f"任务不存在: {args.task_id}")
             else:
                 _show_plan_history(task_dir)
         elif args.command == "plan-diff":
             task_dir = AGENT_GO_DIR / args.task_id
             if not task_dir.exists():
-                console.print(f"❌ 任务不存在: {args.task_id}")
+                console.error(f"任务不存在: {args.task_id}")
             else:
                 _show_plan_diff(task_dir, args.v1, args.v2)
     except KeyboardInterrupt:
-        print("\n\n⏹️  用户中断（Ctrl+C）")
+        console.print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)
     except BrokenPipeError:
         sys.exit(0)

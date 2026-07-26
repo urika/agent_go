@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-from .console import get_default_console
+from .console import _LazyConsole
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 # 解耦：notify 是可选增强，删除模块级 import 以匹配 architecture.md 解耦原则
@@ -12,7 +12,24 @@ from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 
 logger = logging.getLogger(__name__)
 
+console = _LazyConsole()
+
 __all__: list[str] = []
+
+
+def _save_meta_atomic(meta: dict, task_dir: Path) -> None:
+    """原子写 meta.json：先写 .tmp，再 rename（POSIX 保证原子性）。
+
+    用于 P0 Layer 4 — 每个 subtask 完成后立即持久化。
+    即使后续进程被 SIGKILL，partial write 也不会损坏 meta.json。
+    """
+    meta_path = task_dir / "meta.json"
+    tmp_path = task_dir / "meta.json.tmp"
+    tmp_path.write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, meta_path)
 
 
 def _record_subtask_result(
@@ -28,10 +45,13 @@ def _record_subtask_result(
     meta_lock: threading.Lock,
     config: dict,
 ) -> int:
-    """记录 subtask 结果到共享状态、写 result.json、标记完成、失败时通知。
+    """记录 subtask 结果到共享状态、写 result.json + meta.json、标记完成、失败时通知。
 
     串行和并发路径共用此函数，避免双分支代码不一致导致的缩进/语义错误。
     返回更新后的 degraded_count（int 不可变，需传值返回）。
+
+    关键改进（P0 Layer 4）：每个 subtask 完成立即原子写 meta.json。
+    即使后续被 SIGKILL，已完成的 subtask 状态也不会丢失，recover 不再需要。
     """
     with meta_lock:
         worktree_map[st["id"]] = task_dir / st["id"] / "work"
@@ -42,6 +62,16 @@ def _record_subtask_result(
         result_file = task_dir / st["id"] / "result.json"
         result_file.parent.mkdir(parents=True, exist_ok=True)
         result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        # P0 Layer 4：原子写 meta.json（write tmp + rename），保证 partial write 不损坏
+        # 把当前 subtask 结果也存进 meta.json 的 results 数组
+        meta.setdefault("results", [])
+        # 替换已有的（如果重跑同 id），否则追加
+        existing_idx = next((i for i, r in enumerate(meta["results"]) if r.get("subtask_id") == st["id"]), None)
+        if existing_idx is not None:
+            meta["results"][existing_idx] = result
+        else:
+            meta["results"].append(result)
+        _save_meta_atomic(meta, task_dir)
     completed_ids.add(st["id"])
     if result.get("status") == "failed":
         failed_ids.add(st["id"])
@@ -70,7 +100,6 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
       False → 强制清理所有 worktree
     """
     worktree_map = worktree_map or {}
-    console = get_default_console()
     results_map = results_map or {}
     completed_ids = completed_ids or set()
     # M6: 追踪失败和阻断的子任务 ID，下游依赖失败的上游时自动阻断
@@ -96,14 +125,15 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     _interrupted = threading.Event()
 
     # 注册中断信号处理
+    # P0 Layer 2 增强：先用 SIGTERM（graceful），30s 内 claude 不退出才 SIGKILL
     def _on_interrupt(signum: int, frame: Any) -> None:
         _interrupted.set()
-        # 立即 kill 子进程（这是 async-signal-safe 的）
+        # 先发 SIGTERM（让 claude 完成当前工具调用、写 checkpoint）
         with active_pids_lock:
             pids_to_kill = list(active_pids)
         for pid in pids_to_kill:
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
 

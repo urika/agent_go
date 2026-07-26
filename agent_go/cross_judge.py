@@ -57,15 +57,15 @@ def cmd_judge(args=None) -> None:
     output_path = Path(getattr(args, "output", "cross_judge_scores.jsonl") or "cross_judge_scores.jsonl")
 
     if not judge_models:
-        console.print("❌ 至少指定一个 --judge-models（逗号分隔）")
+        console.error("至少指定一个 --judge-models（逗号分隔）")
         sys.exit(1)
 
     results = _read_jsonl(results_path)
     if not results:
-        console.print(f"⚠️  无数据: {results_path} → 先跑 agent_go eval bench")
+        console.warning(f"无数据: {results_path} → 先跑 agent_go eval bench")
         return
 
-    console.print(f"🔍 交叉评判: {len(results)} 条 bench 结果 × {len(judge_models)} 评判者")
+    console.debug(f"交叉评判: {len(results)} 条 bench 结果 × {len(judge_models)} 评判者")
     console.print(f"   评判模型: {', '.join(judge_models)}")
     console.print(f"   输出: {output_path}")
 
@@ -399,7 +399,7 @@ def _print_cross_judge_summary(scores: list[dict], judge_models: list[str]) -> N
 def _print_calibration(cal: dict[str, Any]) -> None:
     """打印人工校准报告。"""
     if "error" in cal:
-        console.print(f"⚠️  {cal['error']}")
+        console.warning(f"{cal['error']}")
         return
 
     console.print(f"\n📋 人工校准报告（{cal['total_matches']} 次匹配）")
