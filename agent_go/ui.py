@@ -1,4 +1,4 @@
-import sys, os, logging
+import sys, os, logging, subprocess, tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -195,54 +195,93 @@ def _estimate_duration(plan: dict[str, Any], parallel: int = 1) -> str:
 
 
 def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
-    """展示 Plan，包含 Agent Prompt 和资源清单。"""
+    """紧凑展示 Plan（P0-5）。低信息密度字段折叠，水平布局减少行数。"""
     behavior = config.get("behavior", {})
-
-    console.print("\n" + "=" * 70)
-    console.print("📋 执行方案（Plan Mode）")
-    console.sep("=", 70)
-    console.print(f"\n📝 概述: {plan.get('overview', 'N/A')}")
-    console.print(f"⏱ ️  预估工作量: {plan.get('estimated_effort', 'N/A')}")
-    # 时间估算（M4）
+    verbose = behavior.get("show_agent_prompt", True)
     parallel = config.get("_parallel", 1)
     duration = _estimate_duration(plan, parallel)
-    console.print(f"⏱ ️  预计耗时: {duration}")
 
-    # 共享资源清单
+    console.sep("=", 70)
+    console.title("📋 执行方案")
+    console.print(f"概述: {plan.get('overview', 'N/A')}")
+    console.print(f"工作量: {plan.get('estimated_effort', 'N/A')}  |  预计耗时: {duration}")
+    if parallel > 1:
+        console.print(f"并行度: {parallel}")
+
+    # 共享资源（紧凑单行）
     sr = plan.get("shared_resources", {})
     if sr and behavior.get("show_resource_map", True):
-        console.print(f"\n📦 共享资源清单:")
-        if sr.get("git_remote"):
-            console.print(f"🔗 Git 远程: {sr['git_remote']}")
-        if sr.get("git_branch"):
-            console.print(f"🌿 当前分支: {sr['git_branch']}")
-        if sr.get("directories"):
-            console.print(f"📁 关键目录: {', '.join(sr['directories'])}")
-        if sr.get("config_files"):
-            console.print(f"⚙️  配置文件: {', '.join(sr['config_files'])}")
-        if sr.get("env_vars"):
-            console.print(f"🔐 环境变量: {', '.join(sr['env_vars'])}")
+        _parts = []
+        if sr.get("git_remote"): _parts.append(f"🔗 {sr['git_remote']}")
+        if sr.get("git_branch"): _parts.append(f"🌿 {sr['git_branch']}")
+        if sr.get("directories"): _parts.append(f"📁 {', '.join(sr['directories'])}")
+        if _parts:
+            console.print(" | ".join(_parts))
 
-    console.print(f"\n📌 执行步骤:")
-    for step in plan.get("steps", []):
-        console.print(f"\n[{step['id']}] {step['title']}")
-        console.print(f"{step['description']}")
-        console.print(f"📁 文件: {', '.join(step.get('files', []))}")
-        console.print(f"✅ 验证: {step.get('verification', 'N/A')}")
-        if step.get("risks"):
-            console.print(f"⚠️  风险: {', '.join(step['risks'])}")
-
-        # Agent Prompt
-        if behavior.get("show_agent_prompt", True) and step.get("agent_prompt"):
-            prompt_preview = step["agent_prompt"][:200] + "..." if len(step["agent_prompt"]) > 200 else step["agent_prompt"]
-            console.print(f"🤖 Agent Prompt: {prompt_preview}")
-
+    # 步骤（紧凑 2-3 行）
+    console.subtitle("步骤")
+    steps = plan.get("steps", [])
     deps = plan.get("dependencies", {})
+    _max_id_width = max(len(str(s["id"])) for s in steps) if steps else 2
+
+    for step in steps:
+        _sid = f"[{step['id']:>{_max_id_width}}]"
+        _tag = f" · {step.get('difficulty', 'medium')}" if step.get('difficulty') else ""
+        _tag += f" · {step.get('agent_type', 'developer')}" if step.get('agent_type') else ""
+        _files = step.get("files", [])
+        _file_hint = f" · {len(_files)} 文件" if _files else ""
+        _ver = step.get("verification", "")
+        _v_hint = f"  ✅ {_ver}" if _ver else ""
+        console.print(f"{_sid} {step['title']}{_tag}{_file_hint}")
+        console.print(f"    {step.get('description', '')}{_v_hint}")
+        if verbose and step.get("risks"):
+            console.print(f"    ⚠️  {'; '.join(step['risks'][:3])}")
+        if verbose and step.get("agent_prompt"):
+            _ap = step["agent_prompt"][:120] + "..." if len(step["agent_prompt"]) > 120 else step["agent_prompt"]
+            console.print(f"    🤖 {_ap}")
+
+    # 依赖（紧凑行内）
     if deps:
-        console.print(f"\n🔗 依赖关系:")
+        _dep_lines = []
         for sid, prereqs in deps.items():
-            console.print(f"步骤 {sid} 依赖: {prereqs}")
+            _dep_lines.append(f"  step {sid} → {' → '.join(str(p) for p in prereqs)}")
+        console.subtitle("依赖")
+        console.print("\n".join(_dep_lines))
     console.sep("=", 70)
+
+
+def _edit_plan_via_editor(plan: dict[str, Any], logger: logging.Logger) -> None:
+    """用 $EDITOR 编辑完整 Plan。编辑后原地修改 plan dict。"""
+    editor = os.environ.get("EDITOR", "vi")
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as tf:
+        tf.write(plan_to_md(plan))
+        tmp_path = tf.name
+    try:
+        logger.info(f"$EDITOR ({editor}) 打开: {tmp_path}")
+        console.force(f"✏️  正在用 {editor} 打开 Plan（{tmp_path}）...")
+        console.force("   保存后退出编辑器即可生效")
+        ret = subprocess.run([editor, tmp_path], check=False)
+        if ret.returncode != 0:
+            console.error(f"编辑器退出码 {ret.returncode}，放弃本版修改")
+            return
+        edited = Path(tmp_path).read_text(encoding="utf-8").strip()
+        if not edited:
+            console.error("编辑后文件为空，放弃修改")
+            return
+        new_plan = _parse_plan_md(edited)
+        if not new_plan.get("steps"):
+            console.error("编辑后 Plan 不包含任何步骤，放弃修改")
+            return
+        plan.clear()
+        plan.update(new_plan)
+        console.success("Plan 已更新")
+        logger.info("$EDITOR 编辑成功: Plan 已更新")
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
 
 def _prompt_fallback(logger: logging.Logger) -> str:
     """交互式询问用户是否降级到规则拆解。返回 True=降级, False=重试。"""
@@ -300,6 +339,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
         console.force("  [S] 补充输入/修正需求（重新生成）")
         console.force("  [D] 挂载参考文档（重新生成）")
         console.force("  [E] 编辑某个步骤")
+        console.force("  [M] 用 $EDITOR 编辑完整方案")
         console.force("  [R] 重新生成方案")
         console.force("  [N] 取消任务")
 
@@ -330,6 +370,9 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 if new_files: step["files"] = [f.strip() for f in new_files.split(",")]
                 if new_prompt: step["agent_prompt"] = new_prompt
                 logger.info(f"用户编辑步骤 {step['id']}")
+        elif choice == "M":
+            logger.info("用户选择 $EDITOR 编辑完整方案")
+            _edit_plan_via_editor(plan, logger)
         elif choice == "S":
             console.force("\n✏️  请输入补充内容（支持多行，空行结束）：")
             lines = []

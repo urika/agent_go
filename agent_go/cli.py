@@ -1223,7 +1223,7 @@ def _show_plan_history(task_dir: Path) -> None:
 
 
 def _show_plan_diff(task_dir: Path, v1: int, v2: Optional[int] = None) -> None:
-    """对比两个 Plan 版本的差异。"""
+    """对比两个 Plan 版本的差异（P2-2：增强对比）。"""
     plans_dir = task_dir / "plans"
     if not plans_dir.exists():
         console.error("无 Plan 版本历史")
@@ -1249,31 +1249,80 @@ def _show_plan_diff(task_dir: Path, v1: int, v2: Optional[int] = None) -> None:
     steps1 = plan1.get("steps", plan1.get("subtasks", []))
     steps2 = plan2.get("steps", plan2.get("subtasks", []))
 
-    lines = [
-        f"## 🔍 Plan Diff: v{v1} → v{v2}",
-        f"",
-        f"| 维度 | v{v1} | v{v2} |",
-        f"|------|------|------|",
-        f"| 步骤数 | {len(steps1)} | {len(steps2)} |",
-        f"| 保存时间 | {data1.get('saved_at', '?')[:19]} | {data2.get('saved_at', '?')[:19]} |",
-        f"",
-    ]
+    console.sep("=", 68)
+    console.title(f"🔍 Plan Diff: v{v1} → v{v2}")
+    console.print(f"保存: {data1.get('saved_at', '?')[:19]} → {data2.get('saved_at', '?')[:19]}")
 
-    # 对比步骤
-    max_steps = max(len(steps1), len(steps2))
-    lines.append("### 步骤对比")
-    lines.append("")
-    lines.append("| # | v1 | v2 |")
-    lines.append("|---|-----|-----|")
-    for i in range(max_steps):
-        s1 = steps1[i] if i < len(steps1) else None
-        s2 = steps2[i] if i < len(steps2) else None
-        t1 = s1.get("title", "")[:40] if s1 else "(无)"
-        t2 = s2.get("title", "")[:40] if s2 else "(无)"
-        marker = " " if t1 == t2 else "← 差异"
-        lines.append(f"| {i+1} | {t1} | {t2} {marker}|")
+    # 概览统计
+    _s1_ids = {s["id"] for s in steps1}
+    _s2_ids = {s["id"] for s in steps2}
+    _added = _s2_ids - _s1_ids
+    _removed = _s1_ids - _s2_ids
+    _matched = _s1_ids & _s2_ids
+    console.subtitle("概览")
+    console.print(f"  步骤: {len(steps1)} → {len(steps2)}  ({'+' if _added else ''}{len(_added)}/-{len(_removed)}/={len(_matched)})")
+    if plan1.get("overview") != plan2.get("overview"):
+        console.print(f"  📝 概述: ✏️ 已修改")
 
-    console.print("\n".join(lines))
+    # 全局字段对比
+    _global_keys = ["estimated_effort"]
+    _global_diffs = [(k, plan1.get(k, ""), plan2.get(k, "")) for k in _global_keys if plan1.get(k) != plan2.get(k)]
+    if _global_diffs:
+        console.subtitle("全局变更")
+        for _k, _v1, _v2 in _global_diffs:
+            console.print(f"  {_k}: \"{str(_v1)[:60]}\" → \"{str(_v2)[:60]}\"")
+
+    # 步骤对比详情
+    console.subtitle("步骤详情")
+    _TITLE = 0; _DESC = 1; _FILES = 2; _VER = 3; _DIFF = 4; _AGENT = 5; _SKILL = 6
+    _headers = ["#", "标题", "变更"]
+    _rows: list[list[str]] = []
+    _all_ids = sorted(_s1_ids | _s2_ids)
+    for sid in _all_ids:
+        s1 = next((s for s in steps1 if s["id"] == sid), None)
+        s2 = next((s for s in steps2 if s["id"] == sid), None)
+        if not s1:
+            _rows.append([str(sid), s2["title"][:50], "🆕 新增"])
+            continue
+        if not s2:
+            _rows.append([str(sid), s1["title"][:50], "🗑️ 删除"])
+            continue
+        _changes = []
+        # Compare each field
+        for _field, _label in [("description", "描述"), ("files", "文件"), ("verification", "验证"),
+                               ("difficulty", "难度"), ("agent_type", "代理"), ("skills", "技能"), ("risks", "风险")]:
+            _v1 = s1.get(_field)
+            _v2 = s2.get(_field)
+            if _field in ("files", "skills"):
+                _v1_set = set(_v1) if _v1 else set()
+                _v2_set = set(_v2) if _v2 else set()
+                if _v1_set != _v2_set:
+                    _changes.append(_label)
+            elif _field == "risks":
+                if (_v1 or []) != (_v2 or []):
+                    _changes.append(_label)
+            elif str(_v1) != str(_v2):
+                _changes.append(_label)
+        if not _changes and s1.get("title") != s2.get("title"):
+            _changes.append("标题")
+        _tag = ", ".join(_changes) if _changes else "—"
+        _row_tag = "✏️  修改" if _changes else "✓"
+        _rows.append([str(sid), s1["title"][:50], _row_tag if not _changes else f"✏️  {_tag}"])
+    if _rows:
+        console.table(_headers, _rows)
+
+    # 依赖对比
+    deps1 = plan1.get("dependencies", {})
+    deps2 = plan2.get("dependencies", {})
+    if deps1 != deps2:
+        console.subtitle("依赖变更")
+        _all_sids = sorted(set(deps1.keys()) | set(deps2.keys()))
+        for sid in _all_sids:
+            _d1 = deps1.get(sid, [])
+            _d2 = deps2.get(sid, [])
+            if _d1 != _d2:
+                console.print(f"  步骤 {sid}: {_d1} → {_d2}")
+    console.sep("=", 68)
 
 
 def cmd_pr(args=None):
