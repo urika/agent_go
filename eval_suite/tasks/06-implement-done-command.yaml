@@ -1,6 +1,6 @@
 id: implement-done-command
 difficulty: medium
-repo: eval_suite/fixtures/task-mgr
+repo: /Users/jinsongwang/test-target/task-mgr
 task: |
   在 src/cli.py 中实现 cmd_done 命令（标记任务为完成）：
   - 接收 task_id 参数（如 `done abc123`）

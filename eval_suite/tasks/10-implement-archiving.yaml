@@ -1,0 +1,26 @@
+id: implement-archiving
+difficulty: hard
+repo: /Users/jinsongwang/test-target/task-mgr
+task: |
+  为 task-mgr 增加任务归档功能：
+
+  1. `storage.py`:
+     - 新增 `archive(days: int = 30)` 方法：将 `done` 状态且超过 days 天的任务移动到归档文件 `tasks.archive.json`
+     - 新增 `load_archived()` 方法：读取归档文件
+     - `load_all()` 不返回已归档任务
+  2. `cli.py`:
+     - 新增 `archive <days>` 命令：执行归档操作并报告归档了多少条
+     - 新增 `list-archived` 命令：列出已归档任务（仅显示 id + description）
+  3. `models.py`:
+     - Task 类增加 `is_archived: bool = False` 字段
+     - 增加 `age_days() -> int` 方法返回任务创建至今的天数
+
+  约束：
+  - 归档文件路径：`tasks.archive.json`（与 tasks.json 同目录）
+  - 不修改 tasks.json 中的内容，仅删除已归档条目
+  - 所有新功能必须有测试（tests/test_archive.py）
+verification:
+  - "python -m pytest tests/test_archive.py -q"
+  - "python -c \"from src.storage import TaskStorage; import tempfile, pathlib; p=pathlib.Path(tempfile.mktemp()); s=TaskStorage(p); s.save('oldtask'); assert s.load_archived() == []; print('OK')\""
+  - "python -c \"from src.models import Task; t=Task.from_dict({'description':'x'}); assert t.age_days() >= 0; print('OK')\""
+timeout: 600

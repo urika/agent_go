@@ -144,6 +144,22 @@ class Console:
             row_line = "".join(f"{str(cell):<{w}}" for cell, w in zip(row, col_widths))
             self.print(row_line)
 
+    def emit(self, event: str, data: dict[str, Any]) -> None:
+        """Emit a structured machine-readable lifecycle event.
+
+        In json_mode:  emitted as JSON Lines event with level="event".
+        In human mode: emitted as "[event] {data}" on stderr so it doesn't
+                       pollute stdout pipelines but is still visible.
+
+        These events enable the MCP server to track progress in real-time
+        without polling meta.json.
+        """
+        if self.json_mode:
+            self._json_emit(event, "event", data)
+        elif not self.quiet:
+            import json as _json
+            print(f"[{event}] {_json.dumps(data, default=str)}", file=sys.stderr)
+
     def data(self, data: Any) -> None:
         """Pretty-print structured data (JSON). In JSON mode emits as event."""
         import json as _json

@@ -11,44 +11,53 @@ No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `j
 ## Commands
 
 ```bash
+# Install
+pip install -e .
+
 export AGENT_GO_API_KEY="sk-ant-..."
 
 # Run a task
-python3 agent_go.py run <repo-path> '<task>'
+agent_go run <repo-path> '<task>'
 
 # Headless with concurrency and remote push
-python3 agent_go.py run <repo-path> '<task>' --yes --parallel 3 --remote origin
+agent_go run <repo-path> '<task>' --yes --parallel 3 --remote origin
 
 # With explicit skills and agent type
-python3 agent_go.py run <repo-path> '<task>' --skill security-review --agent-type reviewer
+agent_go run <repo-path> '<task>' --skill security-review --agent-type reviewer
 
 # With verification loop and worktree preservation
-python3 agent_go.py run <repo-path> '<task>' --max-retries 5 --preserve-worktrees
+agent_go run <repo-path> '<task>' --max-retries 5 --preserve-worktrees
+
+# Auto git init for non-git target dir (local-only, no remote)
+agent_go run <repo-path> '<task>' --auto-init
+
+# With custom config file
+agent_go --config /path/to/config.json run <repo-path> '<task>'
 
 # Resume an interrupted task
-python3 agent_go.py resume <task-id>
+agent_go resume <task-id>
 
 # Inspect preserved worktrees after failed task
-python3 agent_go.py inspect <task-id>
-python3 agent_go.py inspect <task-id> --all    # show all subtasks
-python3 agent_go.py inspect <task-id> --json   # machine-readable
+agent_go inspect <task-id>
+agent_go inspect <task-id> --all    # show all subtasks
+agent_go inspect <task-id> --json   # machine-readable
 
 # Aggregate result review (M7): per-file diff summary + approve/reject
-python3 agent_go.py review --task <task-id>
-python3 agent_go.py review --task <task-id> --deep          # independent-model per-subtask analysis
-python3 agent_go.py review --task <task-id> --approve       # or --reject / --changes-requested
+agent_go review --task <task-id>
+agent_go review --task <task-id> --deep          # independent-model per-subtask analysis
+agent_go review --task <task-id> --approve       # or --reject / --changes-requested
 
 # Plan version history
-python3 agent_go.py plan-history <task-id>
-python3 agent_go.py plan-diff <task-id> --v1 1 --v2 2
+agent_go plan-history <task-id>
+agent_go plan-diff <task-id> --v1 1 --v2 2
 
 # Monitor running tasks
-python3 agent_go.py status --watch
+agent_go status --watch
 
 # List / show / clean
-python3 agent_go.py list
-python3 agent_go.py show <task-id>
-python3 agent_go.py clean
+agent_go list
+agent_go show <task-id>
+agent_go clean
 ```
 
 ## Architecture

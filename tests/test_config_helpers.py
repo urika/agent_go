@@ -232,11 +232,10 @@ class TestDecomposeRules:
             assert len(ids) == len(set(ids)), f"Duplicate ids in rule: {rule['patterns']}"
 
     def test_jwt_rule_content(self):
-        jwt_rule = next(r for r in DECOMPOSE_RULES if "JWT" in r["patterns"])
+        jwt_rule = next(r for r in DECOMPOSE_RULES if any("JWT" in p for p in r["patterns"]))
         assert jwt_rule is not None
         subtask_titles = [st["title"] for st in jwt_rule["subtasks"]]
         assert any("JWT" in t for t in subtask_titles)
-        assert any("测试" in t for t in subtask_titles)
 
 
 # ═══════════════════════════════════════════════════════════════

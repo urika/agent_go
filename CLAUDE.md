@@ -11,27 +11,33 @@ No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `j
 ## Commands
 
 ```bash
+# Install
+pip install -e .
+
 export AGENT_GO_API_KEY="sk-ant-..."
 
-# Run a task
-python3 agent_go.py run <repo-path> '<task>'
+# Run a task (also: python3 -m agent_go run, python3 agent_go.py run)
+agent_go run <repo-path> '<task>'
 
 # Headless with concurrency and remote push
-python3 agent_go.py run <repo-path> '<task>' --yes --parallel 3 --remote origin
+agent_go run <repo-path> '<task>' --yes --parallel 3 --remote origin
 
 # With explicit skills and agent type
-python3 agent_go.py run <repo-path> '<task>' --skill security-review --agent-type reviewer
+agent_go run <repo-path> '<task>' --skill security-review --agent-type reviewer
+
+# With custom config file
+agent_go --config /path/to/config.json run <repo-path> '<task>'
 
 # Resume an interrupted task
-python3 agent_go.py resume <task-id>
+agent_go resume <task-id>
 
 # Monitor running tasks
-python3 agent_go.py status --watch
+agent_go status --watch
 
 # List / show / clean
-python3 agent_go.py list
-python3 agent_go.py show <task-id>
-python3 agent_go.py clean
+agent_go list
+agent_go show <task-id>
+agent_go clean
 
 # Dev: lint, type-check, and test
 pip install pytest pytest-mock ruff mypy

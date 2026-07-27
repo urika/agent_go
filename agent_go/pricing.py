@@ -24,6 +24,7 @@ MODEL_PRICES = {
     "claude-sonnet-4-6":       {"prompt": 3.0,  "completion": 15.0},   # Sonnet 4.6 稳定版
     "claude-sonnet-4":         {"prompt": 3.0,  "completion": 15.0},   # ⚠️ Sonnet 4（与 4.6 同价）
     "claude-sonnet-4-20250514": {"prompt": 3.0, "completion": 15.0},   # ⚠️ Sonnet 4 精确版本号
+    "sonnet[1m]":            {"prompt": 2.0,  "completion": 10.0},   # 代理路由别名：本地代理 → sonnet[1m] = Sonnet 5 intro 价
     "claude-haiku-4-5":        {"prompt": 1.0,  "completion": 5.0},    # 轻量，当前最新 Haiku
     "claude-haiku-4-5-20251001": {"prompt": 1.0, "completion": 5.0},   # 同款，版本号精确
 
