@@ -19,6 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install -e .
           pip install pytest pytest-mock ruff mypy
 
       - name: Run tests
@@ -30,7 +31,7 @@ jobs:
       # 有数据后超阈即红。基线 0.05 = PRD Q3 目标。
       - name: $/pass rate gate
         run: |
-          python agent_go.py eval gate --baseline 0.05
+          agent_go eval gate --baseline 0.05
 
       - name: Ruff lint (includes F401 unused-import)
         run: |

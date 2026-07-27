@@ -158,7 +158,7 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
     # Skill 表限制条目
     SKILL_TABLE_MAX = 10
 
-    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件",\n"skills": ["从已安装 Skill 清单中选择匹配的 Skill 名称（如无匹配则为空数组）"],\n"agent_type": "必须指定。developer=编码实现, architect=只读分析设计, reviewer=代码审查, tester=测试编写",\n"difficulty": "必须指定。easy=简单明确(文案/单文件小改), medium=常规(单功能实现), hard=复杂(跨文件架构/深层推理)"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行\n4. agent_type 必须根据步骤性质指定合适的 Agent 类型\n5. skills 从已安装 Skill 清单中选取，不匹配则使用空数组 []\n6. difficulty 必须根据步骤复杂度标注：easy/medium/hard，用于执行阶段的模型路由（hard 走强模型）"""
+    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件",\n"skills": ["从已安装 Skill 清单中选择匹配的 Skill 名称（如无匹配则为空数组）"],\n"agent_type": "必须指定。developer=编码实现, architect=只读分析设计, reviewer=代码审查, tester=测试编写",\n"difficulty": "必须指定。easy=简单明确(文案/单文件小改), medium=常规(单功能实现), hard=复杂(跨文件架构/深层推理)"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行\n4. agent_type 必须根据步骤性质指定合适的 Agent 类型\n5. skills 从已安装 Skill 清单中选取，不匹配则使用空数组 []\n6. difficulty 必须根据步骤复杂度标注：easy/medium/hard，用于执行阶段的模型路由（hard 走强模型）\n7. **【输出预算约束】每个 step 的 agent_prompt 必须包含明确的「输出上限」指令（例如「最多输出 X 千字符」或「分多次保存到不同文件」），避免单次调用超出 Worker 模型的 max_tokens 上限（见下方 OUTPUT BUDGET 段）。如果任务整体超过预算，必须拆成多个 step，每个 step 的输出分别落在不同文件中。**"""
 
     # F-1: 注入已安装 Skill 清单（限制条目数）
     installed = list_skills(repo)
@@ -170,6 +170,23 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
         if len(installed) > SKILL_TABLE_MAX:
             skill_table += f"\n... 还有 {len(installed) - SKILL_TABLE_MAX} 个 Skill 未展示\n"
         system_prompt += f"\n## 项目已安装的 Skill（可在 steps[].skills 中引用）\n{skill_table}\n"
+
+    # 注入 OUTPUT BUDGET 段：告诉 plan LLM 当前 worker 的输出预算，让它自动拆任务
+    _plan_api_cfg = config.get("plan_api", {})
+    _worker_max_tokens = int(_plan_api_cfg.get("worker_max_tokens", 0) or 0)
+    _plan_max_tokens = int(_plan_api_cfg.get("max_tokens", 4096) or 4096)
+    # 估算 worker 单次可用输出：扣除 prompt + tool 调度 overhead，预留 30% 安全边界
+    _safe_output_chars = max(1000, int(_worker_max_tokens * 0.7 * 1.5))  # 中文 1.5 char/token
+    _safe_output_chars = min(_safe_output_chars, 60000)  # 单个 step 上限 6 万中文字符（防失控）
+    system_prompt += (
+        f"\n## OUTPUT BUDGET（输出预算）\n"
+        f"- Plan 阶段 max_tokens: {_plan_max_tokens}\n"
+        f"- Worker 阶段 max_tokens: {_worker_max_tokens or '未设置（默认 ~8K）'}\n"
+        f"- **每个 step 估算最大输出 ≈ {_safe_output_chars} 中文字符**（约 {_safe_output_chars // 1000}K 字）\n"
+        f"- **拆任务规则**：如果任务整体产出 > {_safe_output_chars} 字，必须拆成多个 step，"
+        f"每个 step 的输出分别落在不同文件（例如 chapter-01.md, chapter-02.md ...）。\n"
+        f"- 在每个 step 的 agent_prompt 里显式写：「**本次输出上限 {_safe_output_chars} 中文字符，分多次 Write 完成**」。\n"
+    )
 
     # F-1: 注入角色-Skill 映射规则摘要
     role_map = load_role_skill_map(repo)

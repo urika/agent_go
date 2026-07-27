@@ -1,6 +1,6 @@
 id: add-simple-caching
 difficulty: medium
-repo: eval_suite/fixtures/task-mgr
+repo: /Users/jinsongwang/test-target/task-mgr
 task: |
   在 src/utils.py 中新增一个简单的缓存装饰器 `cached(func)`，并在 src/storage.py 中使用它来缓存 load_all 的结果，避免重复读文件。
   

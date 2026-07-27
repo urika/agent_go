@@ -77,7 +77,7 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
 
 # 默认 agent_go 入口：用脚本绝对路径（不依赖 pip 安装或 PYTHONPATH，
 # 避免子进程 cwd 在 fixture repo 内时找不到 agent_go 包）
-_AGENT_GO_ENTRY = [str(Path(__file__).resolve().parent.parent / "agent_go.py")]
+_AGENT_GO_ENTRY = ["-m", "agent_go"]
 
 
 # ═══════════════════════════════════════════════════════════════

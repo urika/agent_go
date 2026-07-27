@@ -223,7 +223,7 @@ class TestFallbackCoverage:
     def test_matching_jwt_pattern_returns_specific_subtasks(self):
         """JWT 关键词命中 → 3 个专门子任务"""
         subtasks = decompose_fallback(
-            "JWT auth migration to RS256",
+            "后端 JWT 签名迁移到 RS256",
             Path("/tmp"), {}, MagicMock(),
         )
         assert len(subtasks) == 3

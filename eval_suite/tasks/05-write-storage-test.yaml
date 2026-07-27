@@ -1,6 +1,6 @@
 id: write-storage-test
 difficulty: easy
-repo: eval_suite/fixtures/task-mgr
+repo: /Users/jinsongwang/test-target/task-mgr
 task: |
   在 tests/test_storage.py 中新增测试函数 test_save_multiple_tasks：
   - 创建 3 个不同 description 的 Task 并保存

@@ -161,6 +161,11 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             _, _, _ = _set_gc_auto(repo, original_gc_value)
         return
 
+    console.emit("pipeline_start", {
+        "task_id": task_id,
+        "total_subtasks": total,
+        "parallel": parallel,
+    })
     wave_num = 0
     if parallel > 1 and total > 1:
         logger.info(f"[并发] max_workers={parallel}, 拓扑调度，剩余 {len(remaining)} 个子任务")
@@ -209,6 +214,11 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
 
         logger.info(f"[Wave {wave_num}] {', '.join(st['id'] for st in wave)}")
         actual_workers = min(parallel, len(wave)) if parallel > 1 else 1
+        console.emit("wave_start", {
+            "wave_idx": wave_num,
+            "subtask_ids": [st["id"] for st in wave],
+            "parallel": actual_workers,
+        })
 
         # P1-4: 每波前确认（仅 CLI 非 TUI 模式，step_confirm=True）
         if step_confirm and not _interrupted.is_set():
@@ -234,6 +244,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                         }
                     completed_ids.add(st["id"])
                 remaining = [st for st in remaining if st["id"] not in completed_ids]
+                console.emit("wave_complete", {"wave_idx": wave_num, "skipped": True})
                 wave_num += 1
                 continue
 
@@ -267,6 +278,8 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                         worktree_map, results_map, completed_ids, failed_ids,
                         degraded_count, meta_lock, config,
                     )
+
+        console.emit("wave_complete", {"wave_idx": wave_num})
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
         if _interrupted.is_set():
@@ -385,6 +398,19 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     has_blocked = any(r.get("status") == "blocked" for r in results_map.values())
     meta["status"] = "failed" if has_failed else "completed"
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    _total_time = sum(r.get("duration_sec", 0) for r in results_map.values())
+    _total_cost = sum(r.get("claude_cost", 0) for r in results_map.values() if r.get("claude_cost"))
+    console.emit("pipeline_complete", {
+        "task_id": task_id,
+        "status": meta["status"],
+        "total_subtasks": total,
+        "completed": len(completed_ids),
+        "failed": sum(1 for r in results_map.values() if r.get("status") == "failed"),
+        "blocked": sum(1 for r in results_map.values() if r.get("status") == "blocked"),
+        "duration_sec": round(_total_time, 2),
+        "cost_usd": round(_total_cost, 4) if _total_cost else 0.0,
+    })
 
     blocked_count = sum(1 for r in results_map.values() if r.get("status") == "blocked")
     summary_icon = "❌" if has_failed else "🎉"

@@ -1,0 +1,22 @@
+id: add-tag-system
+difficulty: hard
+repo: /Users/jinsongwang/test-target/task-mgr
+task: |
+  为 task-mgr 增加标签（tag）系统，支持给任务添加/移除标签，以及按标签过滤：
+
+  1. `models.py`: Task 类增加 `tags: list[str] = []` 字段，from_dict 支持反序列化，to_dict 序列化输出
+  2. `storage.py`: TaskStorage 增加 `save_tags(task_id, tags)` 和 `find_by_tag(tag)` 方法
+  3. `cli.py`: 新增三个命令：
+     - `tag <id> <tag>` — 给任务添加一个标签（可多个，逗号分隔）
+     - `untag <id> <tag>` — 移除一个标签
+     - `list --tag <tag>` — 按标签过滤列出任务
+
+  约束：
+  - 所有新功能必须有测试（tests/ 目录下新增 test_tags.py）
+  - 标签名仅允许小写字母、数字、下划线，长度 1-20
+  - 空标签列表不显示在输出中
+verification:
+  - "python -m pytest tests/test_tags.py -q"
+  - "python -c \"from src.models import Task; t=Task.from_dict({'description':'x'}); assert t.tags == []; t2=Task.from_dict({'description':'x','tags':['bug']}); assert t2.tags == ['bug']; print('OK')\""
+  - "python -c \"from src.storage import TaskStorage; import tempfile, pathlib; p=pathlib.Path(tempfile.mktemp()); s=TaskStorage(p); s.save('tagtest'); s.save_tags('tagtest',['urgent']); found=s.find_by_tag('urgent'); assert len(found)==1; assert found[0].id=='tagtest'; print('OK')\""
+timeout: 600

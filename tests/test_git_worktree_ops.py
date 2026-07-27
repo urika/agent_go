@@ -13,7 +13,9 @@ from agent_go.git_utils import (
     _worktree_remove,
     _worktree_prune,
     _set_gc_auto,
+    init_git_repo,
 )
+import subprocess
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -280,3 +282,82 @@ class TestSetGcAuto:
         assert isinstance(original, str)
         assert isinstance(ok, bool)
         assert isinstance(err, str)
+
+
+# ═══════════════════════════════════════════════════════════════
+# init_git_repo（--auto-init 用）
+# ═══════════════════════════════════════════════════════════════
+
+class TestInitGitRepo:
+    """测试 --auto-init 的 helper（真实 git，不 mock）"""
+
+    def test_init_empty_dir_success(self, tmp_path):
+        """空目录 → init 成功，自动建 .gitkeep 让 commit 通过"""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        ok, err = init_git_repo(repo)
+
+        assert ok is True, f"err: {err}"
+        assert err == ""
+        assert (repo / ".git").is_dir()
+        assert (repo / ".gitkeep").is_file()  # 空目录自动建占位文件
+        # 有 1 个 commit
+        r = subprocess.run(["git", "log", "--oneline"], cwd=str(repo),
+                           capture_output=True, text=True)
+        assert r.returncode == 0
+        assert "init (auto-created by agent_go)" in r.stdout
+
+    def test_init_with_existing_files(self, tmp_path):
+        """已有文件的目录 → init 成功，文件被 commit"""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "main.py").write_text("print('hi')\n", encoding="utf-8")
+        (repo / "src").mkdir()
+        (repo / "src" / "util.py").write_text("# util\n", encoding="utf-8")
+
+        ok, err = init_git_repo(repo)
+
+        assert ok is True, f"err: {err}"
+        assert not (repo / ".gitkeep").exists()  # 有文件就不建占位
+        # 文件已入版本库
+        r = subprocess.run(["git", "ls-files"], cwd=str(repo),
+                           capture_output=True, text=True)
+        assert "main.py" in r.stdout
+        assert "src/util.py" in r.stdout
+
+    def test_init_branch_name(self, tmp_path):
+        """init 后默认分支为 main"""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        ok, err = init_git_repo(repo)
+        assert ok is True
+
+        r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                           cwd=str(repo), capture_output=True, text=True)
+        assert r.stdout.strip() == "main"
+
+    def test_init_does_not_set_global_config(self, tmp_path):
+        """identity 通过 -c 内联，不写 repo-local config（不影响 --local 配置）"""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        ok, err = init_git_repo(repo)
+        assert ok is True
+
+        # repo-local（--local）user.email 不应被写入；用 --local 严格隔离全局配置
+        r = subprocess.run(["git", "config", "--local", "user.email"],
+                           cwd=str(repo), capture_output=True, text=True)
+        # 失败说明 repo-local 没设置（exit code 1）—— 符合预期
+        assert r.returncode != 0, "identity 不应写入 repo-local config"
+
+    def test_init_failure_git_not_found(self, tmp_path):
+        """git 命令不存在时返回失败（mock subprocess.run 抛 FileNotFoundError）"""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
+            ok, err = init_git_repo(repo)
+        assert ok is False
+        assert "git not found" in err

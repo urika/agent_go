@@ -4,7 +4,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["analyze_project", "get_git_info", "get_resource_map"]
+__all__ = ["analyze_project", "get_git_info", "get_resource_map", "init_git_repo"]
 
 def analyze_project(repo: Path) -> str:
     """分析项目结构，返回文件列表和关键目录。"""
@@ -86,6 +86,53 @@ def _set_gc_auto(repo: Path, value: str = "0") -> tuple[str, bool, str]:
     )
     err_msg = set_result.stderr.decode("utf-8", errors="replace").strip()[:200] if set_result.returncode != 0 else ""
     return original, set_result.returncode == 0, err_msg
+
+
+def init_git_repo(repo: Path) -> tuple[bool, str]:
+    """初始化一个本地 git 仓库（含首次 commit）。返回 (success, error_msg)。
+
+    用于 --auto-init：目标目录非 git 仓库时，自动 init + 首次提交，
+    保证 worktree / commit / tag / merge 机制可用。
+    identity 通过 -c 内联传入，不写 repo-local config、不依赖全局 config
+    （CI / 容器 / 陌生机器都能跑，零副作用）。
+    空目录会自动创建 .gitkeep 以确保 commit 成功。
+    """
+    inline_identity = [
+        "-c", "user.email=agent_go@local",
+        "-c", "user.name=agent_go",
+    ]
+    try:
+        # 1. git init -b main（git < 2.28 不支持 -b，回退到 init + branch -m）
+        r = subprocess.run(["git", "init", "-b", "main"], cwd=str(repo),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            r = subprocess.run(["git", "init"], cwd=str(repo),
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                return False, r.stderr.strip()[:200]
+            subprocess.run(["git", "branch", "-m", "main"],
+                           cwd=str(repo), capture_output=True)
+
+        # 2. 空目录保护：git commit 需要至少一个文件
+        files = [p for p in repo.iterdir() if p.name != ".git"]
+        if not files:
+            (repo / ".gitkeep").write_text("", encoding="utf-8")
+
+        # 3. git add -A
+        r = subprocess.run(["git", "add", "-A"], cwd=str(repo),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return False, r.stderr.strip()[:200]
+
+        # 4. git commit（用 -c 内联 identity）
+        r = subprocess.run(["git"] + inline_identity +
+                           ["commit", "-m", "init (auto-created by agent_go)"],
+                           cwd=str(repo), capture_output=True, text=True)
+        if r.returncode != 0:
+            return False, r.stderr.strip()[:200]
+        return True, ""
+    except (FileNotFoundError, subprocess.SubprocessError) as e:
+        return False, str(e)[:200]
 
 
 def get_resource_map(repo: Path, git_info: dict[str, str]) -> dict[str, Any]:

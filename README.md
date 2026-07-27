@@ -30,17 +30,21 @@ Give Claude Code a complex task — refactoring auth, upgrading dependencies, ad
 ```bash
 git clone https://github.com/urika/agent_go.git
 cd agent_go
+pip install -e .
 
 export AGENT_GO_API_KEY="sk-ant-..."
 
 # Run a task
-python3 agent_go.py run ~/my-project "重构认证模块，从 JWT 迁移到 OAuth2"
+agent_go run ~/my-project "重构认证模块，从 JWT 迁移到 OAuth2"
 
 # Headless with concurrency and remote push
-python3 agent_go.py run ~/my-project "升级所有依赖" --yes --parallel 3 --remote origin
+agent_go run ~/my-project "升级所有依赖" --yes --parallel 3 --remote origin
 
 # With explicit skills
-python3 agent_go.py run ~/my-project "安全审查" --skill security-review --docs "README.md,docs/spec.md"
+agent_go run ~/my-project "安全审查" --skill security-review --docs "README.md,docs/spec.md"
+
+# With custom config file
+agent_go --config /path/to/config.json run ~/my-project "<task>"
 ```
 
 ## Commands

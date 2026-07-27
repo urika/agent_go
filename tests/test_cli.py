@@ -877,3 +877,95 @@ class TestCmdInspect:
         assert e["status"] == "completed"
         assert e["worktree_exists"] is False
         assert e["worktree_path"] == ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# --auto-init flag（cmd_run 自动 git init）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCmdRunAutoInit:
+    """cmd_run 的 --auto-init flag"""
+
+    def _make_args(self, repo, auto_init=False):
+        parser = _build_parser()
+        tokens = ["run", str(repo), "test task"]
+        if auto_init:
+            tokens.append("--auto-init")
+        return parser.parse_args(tokens)
+
+    def _run_cmd_run(self, args, tmp_path):
+        """复用 TestCmdRunFallback 的 mock 套路，跑 cmd_run 但不打断流程。"""
+        from agent_go.cli import cmd_run
+        home = tmp_path / "agent_go_home"
+        plan = {"overview": "o", "steps": [{"id": "s1", "title": "t", "description": "d"}]}
+        with patch("agent_go.cli.AGENT_GO_DIR", home), \
+             patch("agent_go.cli.load_config", return_value={"behavior": {}}), \
+             patch("agent_go.cli.setup_logger", return_value=MagicMock()), \
+             patch("agent_go.cli._detect_tool_versions", return_value={}), \
+             patch("agent_go.cli.load_agent_type", return_value=None), \
+             patch("agent_go.cli.generate_plan", return_value=plan), \
+             patch("agent_go.cli.confirm_plan", return_value=(plan, [])), \
+             patch("agent_go.cli.plan_to_subtasks", return_value=[{"id": "s1", "title": "t"}]), \
+             patch("agent_go.cli.plan_to_md", return_value="# plan"), \
+             patch("agent_go.cli.confirm_subtasks", side_effect=lambda subs, cfg, log: subs), \
+             patch("agent_go.cli._run_pipeline"):
+            cmd_run(args)
+
+    def test_parser_default_off(self):
+        """默认不开 --auto-init"""
+        parser = _build_parser()
+        args = parser.parse_args(["run", "/tmp/repo"])
+        assert args.auto_init is False
+
+    def test_parser_flag_on(self):
+        """--auto-init 解析为 True"""
+        parser = _build_parser()
+        args = parser.parse_args(["run", "/tmp/repo", "--auto-init"])
+        assert args.auto_init is True
+
+    def test_auto_init_creates_git_for_non_git_dir(self, tmp_path):
+        """非 git 目录 + --auto-init → 跑完后 .git 存在且有 commit"""
+        import subprocess
+        repo = tmp_path / "target"
+        repo.mkdir()
+        (repo / "main.py").write_text("print('hi')\n", encoding="utf-8")
+        assert not (repo / ".git").exists()
+
+        self._run_cmd_run(self._make_args(repo, auto_init=True), tmp_path)
+
+        assert (repo / ".git").is_dir()
+        r = subprocess.run(["git", "log", "--oneline"], cwd=str(repo),
+                           capture_output=True, text=True)
+        assert r.returncode == 0
+        assert "init (auto-created by agent_go)" in r.stdout
+
+    def test_auto_init_skipped_when_already_git(self, tmp_path):
+        """已是 git 仓库 → --auto-init 不再 init（不破坏已有历史）"""
+        import subprocess
+        repo = tmp_path / "target"
+        repo.mkdir()
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "-m", "original-init"], cwd=str(repo), check=True)
+        original_head = subprocess.run(["git", "rev-parse", "HEAD"],
+                                       cwd=str(repo), capture_output=True, text=True).stdout.strip()
+
+        self._run_cmd_run(self._make_args(repo, auto_init=True), tmp_path)
+
+        # HEAD 不应改变（没有追加 auto-init 的 commit）
+        new_head = subprocess.run(["git", "rev-parse", "HEAD"],
+                                  cwd=str(repo), capture_output=True, text=True).stdout.strip()
+        assert original_head == new_head
+
+    def test_auto_init_off_does_not_touch_non_git(self, tmp_path):
+        """默认（不开 --auto-init）→ 非 git 目录保持原样"""
+        repo = tmp_path / "target"
+        repo.mkdir()
+        (repo / "main.py").write_text("print('hi')\n", encoding="utf-8")
+
+        self._run_cmd_run(self._make_args(repo, auto_init=False), tmp_path)
+
+        assert not (repo / ".git").exists()
