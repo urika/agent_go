@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (28 modules, ~10,300 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, worktree preservation for failed tasks, and remote branch push.
+agent_go is a modular Python CLI tool (31 modules, ~12,000 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, worktree preservation for failed tasks, and remote branch push.
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -50,6 +50,17 @@ agent_go review --task <task-id> --approve       # or --reject / --changes-reque
 # Plan version history
 agent_go plan-history <task-id>
 agent_go plan-diff <task-id> --v1 1 --v2 2
+
+# Execution replay (timeline visualization)
+agent_go replay <task-id>
+agent_go replay <task-id> --json
+
+# Checkpoint management (worktree file snapshots)
+agent_go checkpoint list <task-id>
+agent_go checkpoint restore <task-id> --sub <sub-id> --id <checkpoint-id>
+
+# MCP server (JSON-RPC 2.0 over stdio)
+agent_go mcp
 
 # Monitor running tasks
 agent_go status --watch
@@ -119,6 +130,9 @@ cmd_run()
 | `eval.py` | Quality/perf/cost (per-role)/reliability/UX analysis + eval gate ($/pass baseline + regression) |
 | `planning.py` | Planning helpers: estimate_task_duration |
 | `pricing.py` | Model price table (22 models), MODEL_TIER, provider defaults |
+| `replay.py` | Execution replay timeline: load meta/metering/results, ASCII/JSON visualization |
+| `checkpoint.py` | Worktree file snapshot manager: take/restore/delete |
+| `mcp_server.py` | MCP JSON-RPC 2.0 server over stdio (4 tools + lifecycle event stream) |
 | `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks |
 | `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
 | `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
@@ -139,16 +153,18 @@ cmd_run()
 - **Verification loop**: Failed subtasks auto-retry with full failure context (stdout/stderr/git diff) injected into fix prompt. Configurable max retries (`--max-retries`). Worktree preserved for manual inspection on final failure.
 - **Worktree preservation**: Failed/blocked subtask worktrees are preserved after pipeline completion. `agent_go inspect <task-id>` lists paths and branch names for manual review.
 - **Result review (M7)**: `agent_go review --task <task-id>` aggregates per-file diff summaries across subtasks with approve/reject/changes-requested decisions; `--deep` runs independent-model per-subtask analysis.
-- **Difficulty routing**: Planner tags subtasks with `difficulty`; `worker_models` config maps difficulty to a model passed via `claude --model`; difficulty and actual model recorded in metering.
+- **Difficulty routing**: Planner tags subtasks with `difficulty`; `worker_models` config maps difficulty to a model name passed via `claude --model`; `worker_backends` maps model names to API base URLs (per-subtask `ANTHROPIC_BASE_URL` injection, overrides `worker_base_url`); difficulty and actual model recorded in metering.
+- **Planner API isolation**: `planner_api` config block overrides `plan_api` for plan generation only — supports independent model/provider for planning vs execution.
 - **Config**: `~/.agent_go/config.json` (auto-created). Shallow-merged with `DEFAULT_CONFIG`.
-- **API key**: `AGENT_GO_API_KEY` env var > `config.json` `api_key`.
+- **API key**: `AGENT_GO_API_KEY` env var > `config.json` `api_key`. Template vars (`${VAR_NAME}`) resolved from environment.
+- **Local model cost tracking**: `local_models` list marks model names routed to local backends — metering cost is zeroed for matched models.
 - **Logging**: Dual-format — INFO human-readable + DEBUG JSON events.
 - **Sandbox**: Prefers `greywall`, falls back to native `claude`.
 
 ## Testing
 
 ```bash
-pytest tests/           # 1130 tests (~17s)
+pytest tests/           # 1264 tests (~24s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -205,8 +221,8 @@ for fut in as_completed(futures):
 
 ```
 	agent_go/           # 29 Python modules (~10,400 lines)
-	tests/              # 47 test files, 1149 tests
-eval_suite/         # Standard task suite for eval bench (8 tasks + fixtures)
+	tests/              # 47 test files, 1264 tests
+eval_suite/         # Standard task suite for eval bench (12 tasks + fixtures)
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records
 ```

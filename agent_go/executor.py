@@ -628,12 +628,21 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     verification_ms = 0
     verification_history: list[dict] = []
 
-    # Phase 3: 读取 LLM 语义评估配置（运行时 config 优先，CLI --semantic-eval 可覆盖）
-    _full_cfg: dict = _effective_config(config)
-    evaluator_cfg = _full_cfg.get("evaluator", {})
-    evaluator_enabled = bool(evaluator_cfg.get("enabled", False))
+	    # Phase 3: 读取 LLM 语义评估配置（运行时 config 优先，CLI --semantic-eval 可覆盖）
+	    _full_cfg: dict = _effective_config(config)
+	    evaluator_cfg = _full_cfg.get("evaluator", {})
+	    evaluator_enabled = bool(evaluator_cfg.get("enabled", False))
 
-    semantic_feedback: Optional[dict] = None
+	    # L1: 自动启用语义评估 — 对 heuristic/manual 验证即使未配置也强制开启
+	    auto_triggered = False
+	    if not evaluator_enabled and headless and has_changes and verification:
+	        _l1_level = _assess_verification_confidence(verification, True).get("level", "")
+	        if _l1_level in ("heuristic", "manual"):
+	            evaluator_enabled = True
+	            auto_triggered = True
+	            logger.info(f"L1 auto: 验证置信度={_l1_level}，自动启用语义评估")
+
+	    semantic_feedback: Optional[dict] = None
     if verification and has_changes:
         cmds = [verification] if isinstance(verification, str) else verification
 
@@ -1030,18 +1039,27 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         # 这样配置 plan_api=deepseek 后，claude -p 会用 deepseek 的 base_url + api_key（只要该端点是 Anthropic 兼容的，如 kimi-coding / 自建网关）。
         # 注意：deepseek 官方 API 是 OpenAI 格式，与 Anthropic 不兼容，无法通过此方式直接使用；
         #       但支持任意 ${VAR} 占位符（resolve_env_value 做 env 变量展开）。
+        #       另外可用 worker_base_url 单独指定 worker 的 ANTHROPIC_BASE_URL（proxy/网关场景必用）。
         _plan_api = config.get("plan_api", {})
         _base_url = _resolve_env_value(_plan_api.get("base_url", ""))
         _api_key = _resolve_env_value(_plan_api.get("api_key", ""))
-        if _base_url:
-            env["ANTHROPIC_BASE_URL"] = _base_url
         if _api_key:
             env["ANTHROPIC_API_KEY"] = _api_key
+        # worker_base_url：显式设置时传给 ANTHROPIC_BASE_URL（Claude Code 追加 /v1/messages）。
+        # 仅适用于 Anthropic 兼容的 proxy/网关（如 LiteLLM）。空值 = 不覆盖，Claude Code 用默认
+        # Anthropic API endpoint（api.anthropic.com），与 DeepSeek 原生 API 无关。
+        _worker_url = _resolve_env_value(_plan_api.get("worker_base_url", ""))
+        if _worker_url:
+            env["ANTHROPIC_BASE_URL"] = _worker_url
         # Worker max_tokens 透传到 claude -p 子进程（Claude Code 用 CLAUDE_CODE_MAX_OUTPUT_TOKENS）
         # opus-4-7 上限 128K，256K 会被 API 自动截断
         _worker_max_tokens = _plan_api.get("worker_max_tokens", "")
         if _worker_max_tokens:
             env["AGENT_GO_MAX_TOKENS"] = str(_worker_max_tokens)
+        # local_models：经过 proxy 路由到本地模型（cost=0）的模型名列表
+        _local_models = _plan_api.get("local_models", [])
+        if _local_models:
+            env["AGENT_GO_LOCAL_MODELS"] = ",".join(str(m) for m in _local_models)
 
     # 4. Agent type configuration
     agent_type_name = subtask.get("agent_type", "developer")
@@ -1065,6 +1083,13 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         env["AGENT_GO_CLAUDE_MODEL"] = routed_model
         logger.info(f"[S4] {sub_id} difficulty={difficulty} → model={routed_model}")
         log_event(logger, "model_routing", {"sub_id": sub_id, "difficulty": difficulty, "model": routed_model})
+    # worker_backends：按模型名映射 ANTHROPIC_BASE_URL（覆盖 worker_base_url 的统一值）
+    _worker_backends = _effective_config(config).get("worker_backends", {})
+    if routed_model and _worker_backends and routed_model in _worker_backends:
+        _backend_url = _resolve_env_value(_worker_backends[routed_model])
+        if _backend_url:
+            env["ANTHROPIC_BASE_URL"] = _backend_url
+            logger.info(f"[worker_backend] {routed_model} → {_backend_url}")
 
     # 5. Run Claude（含混合策略分支：简单任务 → 直接 API）
     _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)

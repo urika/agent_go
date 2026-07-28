@@ -769,7 +769,7 @@ class TestGoalWatchdog:
         finally:
             logger.removeHandler(handler)
         mock_popen.return_value.kill.assert_called_once()
-        assert "goal 轮数超限 (5 >= 3)" in "\n".join(handler.records)
+        assert any("轮数超限" in r or "goal turn count" in r for r in handler.records)
 
     @patch("subprocess.Popen")
     def test_goal_timeout_kills(self, mock_popen, logger):

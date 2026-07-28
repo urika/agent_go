@@ -20,7 +20,8 @@ __all__ = [
 ]
 
 def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: logging.Logger) -> str:
-    api_cfg = config["plan_api"]
+    # planner_api 独立配置（如配置则优先用于 plan 生成，不走 proxy）
+    api_cfg = config.get("planner_api") or config["plan_api"]
     provider = api_cfg.get("provider", "anthropic")
     base_url = api_cfg["base_url"]
     api_key = get_api_key(config)
@@ -43,8 +44,9 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
     import urllib.request, urllib.error
     req = urllib.request.Request(base_url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     start = time.time()
+    _timeout_sec = api_cfg.get("timeout_ms", 120000) / 1000.0
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=_timeout_sec) as resp:
             latency = time.time() - start
             raw_body = resp.read()
             try:
@@ -57,11 +59,14 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
                 raise RuntimeError(f"API 返回无法解析为 JSON: {e}") from e
             # 解析响应内容
             try:
+
                 if provider == "anthropic":
-                    content = data["content"][0]["text"]
+                    _blocks = data.get("content", [])
+                    _text_block = next((b for b in _blocks if isinstance(b, dict) and b.get("type") == "text"), None)
+                    content = _text_block["text"] if _text_block else _blocks[0].get("text", str(_blocks[0]))
                 else:
                     content = data["choices"][0]["message"]["content"]
-            except (KeyError, IndexError, TypeError) as e:
+            except (KeyError, IndexError, TypeError, AttributeError) as e:
                 log_event(logger, "api_error", {
                     "provider": provider, "error": "structure",
                     "message": f"响应结构异常: {e}", "keys": list(data.keys())[:10] if isinstance(data, dict) else str(type(data)),
@@ -158,7 +163,56 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
     # Skill 表限制条目
     SKILL_TABLE_MAX = 10
 
-    system_prompt = """你是一位资深软件架构师。请为以下开发任务制定详细的执行方案。\n输出必须是合法的 JSON，不要包含任何其他文字。结构：\n{\n"overview": "任务概述，2-3句话",\n"steps": [\n{\n"id": 1,\n"title": "步骤标题",\n"description": "详细描述该步骤做什么",\n"files": ["涉及文件路径1"],\n"verification": "可执行的验证命令，如 go build ./...",\n"risks": ["潜在风险1"],\n"agent_prompt": "给执行Agent的完整Prompt，包含具体指令、上下文、约束条件",\n"skills": ["从已安装 Skill 清单中选择匹配的 Skill 名称（如无匹配则为空数组）"],\n"agent_type": "必须指定。developer=编码实现, architect=只读分析设计, reviewer=代码审查, tester=测试编写",\n"difficulty": "必须指定。easy=简单明确(文案/单文件小改), medium=常规(单功能实现), hard=复杂(跨文件架构/深层推理)"\n}\n],\n"dependencies": {"2": [1]},\n"estimated_effort": "预估工作量",\n"shared_resources": {\n"directories": ["关键目录1"],\n"git_remote": "git远程地址",\n"git_branch": "当前分支",\n"config_files": ["配置文件1"],\n"env_vars": ["环境变量1"]\n}\n}\n要求：\n1. 每个 step 必须包含 agent_prompt 字段，这是给 Claude Code 执行该步骤时的完整指令\n2. shared_resources 描述所有子任务共享的资源和上下文\n3. 步骤 2-5 个，可独立执行\n4. agent_type 必须根据步骤性质指定合适的 Agent 类型\n5. skills 从已安装 Skill 清单中选取，不匹配则使用空数组 []\n6. difficulty 必须根据步骤复杂度标注：easy/medium/hard，用于执行阶段的模型路由（hard 走强模型）\n7. **【输出预算约束】每个 step 的 agent_prompt 必须包含明确的「输出上限」指令（例如「最多输出 X 千字符」或「分多次保存到不同文件」），避免单次调用超出 Worker 模型的 max_tokens 上限（见下方 OUTPUT BUDGET 段）。如果任务整体超过预算，必须拆成多个 step，每个 step 的输出分别落在不同文件中。**"""
+    system_prompt = """You are a senior software architect. Output ONLY valid JSON. No markdown, no explanation.
+
+SCHEMA:
+{
+  "overview": "task overview (2-3 sentences)",
+  "steps": [
+    {
+      "id": 1,
+      "title": "step title",
+      "description": "what to do",
+      "files": ["relative/file/path"],
+      "verification": "verification command",
+      "risks": ["risk description"],
+      "agent_prompt": "detailed instructions for the agent executing this step",
+      "skills": ["skill-name"],
+      "agent_type": "developer|architect|reviewer|tester",
+      "difficulty": "easy|medium|hard"
+    }
+  ],
+  "dependencies": {"2": [1]},
+  "estimated_effort": "estimated effort",
+  "shared_resources": {
+    "directories": ["dirs"],
+    "git_remote": "remote url",
+    "git_branch": "branch",
+    "config_files": ["configs"],
+    "env_vars": ["env vars"]
+  }
+}
+
+REQUIREMENTS:
+- 2-5 steps, independently executable
+- Each step MUST have: agent_type, difficulty, agent_prompt
+- agent_type: developer=coding, architect=read-only design, reviewer=code review, tester=testing
+- difficulty: easy=single file small change, medium=single feature, hard=cross-file architecture
+- Use empty array [] when no skills match
+- Dependencies map step IDs to prerequisite step IDs
+
+EXAMPLE (3-step plan):
+{
+  "overview": "Add user authentication module with JWT tokens",
+  "steps": [
+    {"id": 1, "title": "Create auth middleware", "description": "Implement JWT verification middleware", "files": ["src/middleware/auth.py"], "verification": "python -m pytest tests/test_auth_middleware.py -v", "risks": ["Token expiration handling"], "agent_prompt": "Create src/middleware/auth.py with JWT decode/verify functions. Use PyJWT library.", "skills": ["security-review"], "agent_type": "developer", "difficulty": "medium"},
+    {"id": 2, "title": "Add login endpoint", "description": "Create login API that returns JWT", "files": ["src/api/login.py"], "verification": "python -m pytest tests/test_login_api.py -v", "risks": ["Password hashing"], "agent_prompt": "Create login endpoint that validates credentials and returns JWT token.", "skills": [], "agent_type": "developer", "difficulty": "medium"},
+    {"id": 3, "title": "Write auth tests", "description": "Test auth middleware and login", "files": ["tests/test_auth.py"], "verification": "python -m pytest tests/test_auth.py -v", "risks": [], "agent_prompt": "Write tests covering token validation, expiration, and invalid tokens.", "skills": [], "agent_type": "tester", "difficulty": "easy"}
+  ],
+  "dependencies": {"2": [1], "3": [1, 2]},
+  "estimated_effort": "2-3 hours",
+  "shared_resources": {"directories": ["src", "tests"], "git_remote": "", "git_branch": "main", "config_files": [], "env_vars": ["JWT_SECRET"]}
+}"""
 
     # F-1: 注入已安装 Skill 清单（限制条目数）
     installed = list_skills(repo)
@@ -172,7 +226,7 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
         system_prompt += f"\n## 项目已安装的 Skill（可在 steps[].skills 中引用）\n{skill_table}\n"
 
     # 注入 OUTPUT BUDGET 段：告诉 plan LLM 当前 worker 的输出预算，让它自动拆任务
-    _plan_api_cfg = config.get("plan_api", {})
+    _plan_api_cfg = config.get("planner_api") or config.get("plan_api", {})
     _worker_max_tokens = int(_plan_api_cfg.get("worker_max_tokens", 0) or 0)
     _plan_max_tokens = int(_plan_api_cfg.get("max_tokens", 4096) or 4096)
     # 估算 worker 单次可用输出：扣除 prompt + tool 调度 overhead，预留 30% 安全边界

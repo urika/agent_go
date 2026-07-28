@@ -23,8 +23,13 @@ DEFAULT_CONFIG = {
         "api_key": "",
         "model": "claude-sonnet-4-20250514",
         "max_tokens": 4096,
-        "temperature": 0.2
+        "temperature": 0.2,
+        "timeout_ms": 180000,
+        "worker_base_url": "",
+        "worker_max_tokens": 0,
+        "local_models": []
     },
+    "planner_api": {},              # Plan 生成专用 API 配置（非空时覆盖 plan_api，直连 LLM 不走 proxy）
     "behavior": {
         "auto_confirm_plan": False,         # 默认同意 Plan 方案
         "auto_confirm_subtasks": False,     # 默认同意子任务列表
@@ -152,7 +157,11 @@ def load_config() -> dict[str, Any]:
     return DEFAULT_CONFIG
 
 def get_api_key(config: dict[str, Any]) -> str:
-    return os.environ.get("AGENT_GO_API_KEY", "") or config.get("plan_api", {}).get("api_key", "")
+    key = os.environ.get("AGENT_GO_API_KEY", "") or config.get("plan_api", {}).get("api_key", "")
+    if isinstance(key, str) and "${" in key:
+        import re
+        key = re.sub(r"\$\{([A-Z_][A-Z0-9_]*)\}", lambda m: os.environ.get(m.group(1), m.group(0)), key)
+    return key
 
 def setup_logger(task_id: str, task_dir: Path) -> logging.Logger:
     logger = logging.getLogger(f"agent_go.{task_id}")
