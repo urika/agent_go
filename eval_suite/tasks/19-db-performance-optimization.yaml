@@ -1,0 +1,40 @@
+id: db-performance-optimization
+difficulty: hard
+repo: /Users/jinsongwang/test-target/django-blog
+initial_tag: v0.1-initial
+task: |
+  Optimize the Django blog API's database performance to reduce query count
+  from N+1 (41+ queries for 10 posts) to ≤5 queries on the post listing endpoint.
+
+  Prerequisites:
+    - PostgreSQL running on 127.0.0.1:15432 (docker compose up -d)
+    - Fixture at tag v0.1-initial (git checkout v0.1-initial if modified)
+
+  The code has these intentional anti-patterns:
+
+  1. **N+1 queries** in PostListSerializer — each post triggers 4 extra queries
+     (author profile via SerializerMethodField, comment_count, tag names).
+     Fix: select_related('author__profile', 'category') + annotate(comment_count)
+     + prefetch_related('tags'). Performance test expects ≤5 queries for 10 posts.
+
+  2. **Missing indexes** — created_at (archive queries), author_id
+     (author filter), (post_id, created_at) composite (comment listing).
+     Add db_index or Meta.indexes in models.py + migration.
+
+  3. **Inefficient loop aggregation** — category_stats view does N+1 COUNT queries
+     per category. Fix: single annotated query with .annotate(post_count=Count('posts'),
+     avg_views=Avg('view_count')). Performance test expects ≤2 queries.
+
+  4. **No caching** — category list and trending data recomputed on every request.
+     Add Django's cache framework (locmem for test, Redis for prod) with TTL.
+     Consider signals for cache invalidation on model save.
+
+  5. **Inefficient search** — LIKE %keyword% forces full scan. Optional:
+     migrate to PostgreSQL full-text search (SearchVector/SearchQuery).
+
+  IMPORTANT: Each optimization must preserve test_blog_api.py correctness.
+  Run test_performance.py before and after to measure improvement.
+verification:
+  - "python -m pytest tests/test_blog_api.py -q"
+  - "python -m pytest tests/test_performance.py -q -v"
+timeout: 900
