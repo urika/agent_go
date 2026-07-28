@@ -46,5 +46,5 @@ task: |
   the corresponding optimizations.
 verification:
   - "python -m pytest tests/test_blog_api.py -q"
-  - "python -m pytest tests/test_performance.py -q -v"
-timeout: 900
+  - "pip install -e . && python -m pytest tests/test_performance.py -q -v"
+timeout: 1800
