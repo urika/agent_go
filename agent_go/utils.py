@@ -133,10 +133,10 @@ _CMD_ARG_RULES = {
                     "positionals": r'^[\w./\-_]+$'}},
     "mypy":   {"": {"flags": r'^(-v|--strict|--ignore-missing-imports|--config-file=\S+|--no-error-summary|--show-error-codes|--show-error-context|--python-version=\S+|--platform=\S+|--disable-error-code=\S+|--enable-error-code=\S+)$',
                      "positionals": r'^[\w./\-_]+$'}},
-    "manage.py": {"": {"flags": r'^(--settings=\S+|--pythonpath=\S+|--no-color|--verbosity=\S+|--traceback|--dry-run)$',
-                       "positionals": r'^[\w.:\-_:]+$'}},
-    "django-admin": {"": {"flags": r'^(--settings=\S+|--pythonpath=\S+|--no-color|--verbosity=\S+|--traceback)$',
-                          "positionals": r'^[\w.:\-_]+$'}},
+    "manage.py": {"": {"flags": r'^(--settings=\S+|--pythonpath=\S+|--no-color|--verbosity=\S+|--traceback|--dry-run|--check|--list|--merge|--name=\S+|--empty|--run-syncdb|--database=\S+|--noinput|--skip-checks|--force-color|--keepdb|--parallel|--failfast|--tag=\S+|--exclude-tag=\S+)$',
+                       "positionals": r'^[\w.:\-_]+$'}},
+    "django-admin": {"": {"flags": r'^(--settings=\S+|--pythonpath=\S+|--no-color|--verbosity=\S+|--traceback|--dry-run|--check|--skip-checks)$',
+                           "positionals": r'^[\w.:\-_]+$'}},
     "black":  {"--check": {"flags": r'^(-v|--diff|--config=\S+|--line-length=\S+|--exclude=\S+)$',
                            "positionals": r'^[\w./\-_]+$'}},
     "isort":  {"--check": {"flags": r'^(-v|--diff|--profile=\S+|--config-file=\S+)$',
@@ -272,10 +272,10 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
         sub_tokens = sub.split()
         if len(remaining) >= len(sub_tokens) and remaining[:len(sub_tokens)] == sub_tokens:
             rule_val = rules_entry[sub]
-            # 子命令 alias（如 "-m pytest": "pytest"）
+            # 子命令 alias（如 "-m pytest": "pytest"；或自引用如 python manage.py → manage.py）
             if isinstance(rule_val, str):
                 target_rules = rules_entry.get(rule_val)
-                if target_rules is None:
+                if target_rules is None or isinstance(target_rules, str):
                     # alias 指向其他顶层命令（如 "pytest"）
                     target_entry = _CMD_ARG_RULES.get(rule_val)
                     if target_entry is None or isinstance(target_entry, str):
