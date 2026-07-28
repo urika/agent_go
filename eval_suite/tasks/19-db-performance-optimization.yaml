@@ -1,6 +1,6 @@
 id: db-performance-optimization
 difficulty: hard
-repo: /Users/jinsongwang/test-target/django-blog
+repo: eval_suite/fixtures/django-blog
 initial_tag: v0.1-initial
 task: |
   Optimize the Django blog API's database performance to reduce query count
@@ -32,8 +32,18 @@ task: |
   5. **Inefficient search** — LIKE %keyword% forces full scan. Optional:
      migrate to PostgreSQL full-text search (SearchVector/SearchQuery).
 
+  6. **No caching** — implement Django cache for post_list. Enable Q6 test
+     by removing `@pytest.mark.skip` in test_performance.py. Target: warm
+     response < 30% of cold response time.
+
+  7. **High concurrent P95** — N+1 amplifies under load. Enable Q7 test
+     after implementing select_related + caching + indexing. Target:
+     P95 < 500ms with 50 concurrent requests, zero errors.
+
   IMPORTANT: Each optimization must preserve test_blog_api.py correctness.
   Run test_performance.py before and after to measure improvement.
+  Enable Q6/Q7 tests by removing @pytest.mark.skip after implementing
+  the corresponding optimizations.
 verification:
   - "python -m pytest tests/test_blog_api.py -q"
   - "python -m pytest tests/test_performance.py -q -v"
