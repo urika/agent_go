@@ -14,6 +14,7 @@ from agent_go.git_utils import (
     _worktree_prune,
     _set_gc_auto,
     init_git_repo,
+    resolve_project_id,
 )
 import subprocess
 
@@ -361,3 +362,90 @@ class TestInitGitRepo:
             ok, err = init_git_repo(repo)
         assert ok is False
         assert "git not found" in err
+
+
+# ═══════════════════════════════════════════════════════════════
+# resolve_project_id（marker 文件 + git + 目录路径兜底）
+# ═══════════════════════════════════════════════════════════════
+
+class TestResolveProjectId:
+    """测试项目身份解析的三种优先级"""
+
+    def test_marker_file_priority(self, tmp_path):
+        """marker 文件优于 git remote"""
+        repo = tmp_path / "project"
+        repo.mkdir()
+        (repo / ".agent-go-project").write_text("")
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "remote", "add", "origin", "git@github.com:user/repo.git"],
+                       cwd=str(repo), capture_output=True)
+
+        pid = resolve_project_id(repo)
+        assert len(pid) == 16
+        assert pid.isalnum()
+
+    def test_git_remote_fallback(self, tmp_path):
+        """无 marker 文件时使用 git remote"""
+        repo = tmp_path / "project"
+        repo.mkdir()
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "remote", "add", "origin", "git@github.com:user/repo.git"],
+                       cwd=str(repo), capture_output=True)
+
+        pid = resolve_project_id(repo)
+        assert len(pid) == 16
+        assert pid.isalnum()
+
+    def test_path_fallback_no_git(self, tmp_path):
+        """非 git 目录且无 marker → 目录路径 sha256"""
+        repo = tmp_path / "some-dir"
+        repo.mkdir()
+
+        pid = resolve_project_id(repo)
+        assert len(pid) == 16
+        assert pid.isalnum()
+
+    def test_marker_upwards_resolution(self, tmp_path):
+        """marker 在父目录时也能找到"""
+        root = tmp_path / "monorepo"
+        sub = root / "packages" / "sub-a"
+        sub.mkdir(parents=True)
+        (root / ".agent-go-project").write_text("")
+
+        pid = resolve_project_id(sub)
+        assert len(pid) == 16
+
+    def test_stable_across_calls(self, tmp_path):
+        """同一项目多次调用返回相同 ID"""
+        repo = tmp_path / "stable"
+        repo.mkdir()
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "remote", "add", "origin", "git@github.com:user/repo.git"],
+                       cwd=str(repo), capture_output=True)
+
+        pid1 = resolve_project_id(repo)
+        pid2 = resolve_project_id(repo)
+        assert pid1 == pid2
+
+    def test_different_remotes_different_ids(self, tmp_path):
+        """不同 remote → 不同 ID"""
+        repo_a = tmp_path / "a"
+        repo_b = tmp_path / "b"
+        for r in (repo_a, repo_b):
+            r.mkdir()
+            import subprocess
+            subprocess.run(["git", "init", "-q"], cwd=str(r), capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "remote", "add", "origin", "git@github.com:user/a.git"],
+                       cwd=str(repo_a), capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "remote", "add", "origin", "git@github.com:user/b.git"],
+                       cwd=str(repo_b), capture_output=True)
+
+        assert resolve_project_id(repo_a) != resolve_project_id(repo_b)

@@ -153,12 +153,17 @@ class Console:
 
         These events enable the MCP server to track progress in real-time
         without polling meta.json.
+
+        Fail-open: 所有 emit 错误（JSON 序列化失败等）不会中断主流程。
         """
-        if self.json_mode:
-            self._json_emit(event, "event", data)
-        elif not self.quiet:
-            import json as _json
-            print(f"[{event}] {_json.dumps(data, default=str)}", file=sys.stderr)
+        try:
+            if self.json_mode:
+                self._json_emit(event, "event", data)
+            elif not self.quiet:
+                import json as _json
+                print(f"[{event}] {_json.dumps(data, default=str)}", file=sys.stderr)
+        except Exception:
+            pass  # fail-open: lifecycle events are non-critical
 
     def data(self, data: Any) -> None:
         """Pretty-print structured data (JSON). In JSON mode emits as event."""

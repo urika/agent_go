@@ -1,10 +1,10 @@
 import subprocess, logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["analyze_project", "get_git_info", "get_resource_map", "init_git_repo"]
+__all__ = ["analyze_project", "get_git_info", "get_resource_map", "init_git_repo", "resolve_project_id"]
 
 def analyze_project(repo: Path) -> str:
     """分析项目结构，返回文件列表和关键目录。"""
@@ -159,3 +159,45 @@ def get_resource_map(repo: Path, git_info: dict[str, str]) -> dict[str, Any]:
             resources["key_files"].append(pattern)
 
     return resources
+
+
+def resolve_project_id(repo: Path) -> str:
+    """解析项目身份标识，用于会话归属、记忆分片等场景。
+
+    优先级（从高到低）：
+    1. 向上遍历目录树查找 .agent-go-project marker 文件
+       → 以其所在目录的 sha256 前 16 位为项目 ID
+       → 支持 monorepo 子项目显式分片
+    2. git remote get-url origin
+       → 每个物理 git 仓库独立身份
+    3. 当前目录路径的 sha256
+       → 非 git 项目也有稳定 ID
+    """
+    import hashlib
+    # 1. Marker 文件
+    marker = _find_marker_upwards(repo, ".agent-go-project")
+    if marker is not None:
+        return hashlib.sha256(marker.encode()).hexdigest()[:16]
+    # 2. Git remote
+    git_info = get_git_info(repo)
+    if git_info.get("remote"):
+        return hashlib.sha256(git_info["remote"].encode()).hexdigest()[:16]
+    # 3. 目录路径兜底
+    return hashlib.sha256(str(repo.resolve()).encode()).hexdigest()[:16]
+
+
+def _find_marker_upwards(start: Path, marker_name: str) -> Optional[str]:
+    """从 start 目录向上遍历，返回第一个 marker 文件的绝对路径，找不到返回 None。
+
+    遇到 / 或文件系统边界时停止（避免无限循环）。
+    """
+    current = start.resolve()
+    for _ in range(64):
+        marker = current / marker_name
+        if marker.exists() and marker.is_file():
+            return str(marker)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
