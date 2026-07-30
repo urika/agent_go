@@ -1,9 +1,9 @@
-import os, subprocess, re, time, shlex, shutil, logging, json, threading, signal
+import os, subprocess, re, sys, time, shlex, shutil, logging, json, threading, signal
 from pathlib import Path
 from typing import Optional, Any
 
 from .console import _LazyConsole
-from .config import log_event, safe_input
+from .config import log_event, safe_input, meter_event
 from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
@@ -14,6 +14,7 @@ from .metrics import collect_timing, collect_change_stats, collect_merge_result
 from .config import get_api_key
 
 console = _LazyConsole()
+_SUBTASK_INTERRUPTED = threading.Event()
 __all__ = ["run_subtask"]
 
 
@@ -80,8 +81,8 @@ def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, lo
         result_entry["exit_code"] = vr.returncode
         result_entry["duration_ms"] = round((time.time() - v_start) * 1000)
         # S2 全量失败反馈：保留输出尾部供修复 prompt 注入
-        result_entry["stdout_tail"] = (vr.stdout or "")[-1500:]
-        result_entry["stderr_tail"] = (vr.stderr or "")[-1500:]
+        result_entry["stdout_tail"] = (vr.stdout or "")[-3000:]
+        result_entry["stderr_tail"] = (vr.stderr or "")[-3000:]
     except (FileNotFoundError, OSError, ValueError):
         logger.warning(f"验证命令无法解析为 argv (跳过): {vcmd[:100]}")
         # 不降级到 shell=True（安全策略）
@@ -195,6 +196,8 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
         "## 执行要求",
         "- 在此隔离 worktree 中完成修改",
         "- 变更保留在此目录",
+        "- **你必须生成实际的代码变更。仅分析/阅读代码而不做修改将被视为任务失败。**",
+        "- **不要仅输出想法或计划 — 直接修改代码文件。**",
     ]
     if verification:
         exec_requirements.append(f"- **必须执行验证**: `{verification}`，确保通过后再完成")
@@ -278,7 +281,7 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     return task_md, verification, skill_names, unresolved_skills
 
 
-def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger):
+def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger, config=None):
     """Run Claude in headless or interactive mode. Returns (result, sandbox_type, claude_time)."""
     claude_start = time.time()
 
@@ -322,7 +325,8 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
         try:
             result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids,
                                    active_pids_lock=active_pids_lock, allowed_tools=allowed_tools,
-                                   shared_activity=shared_activity)
+                                   shared_activity=shared_activity,
+                                   config=_effective_config(config))
         finally:
             _progress_stop.set()
             t.join(timeout=2)
@@ -545,10 +549,10 @@ def _persist_verify_state(
 
 
 def _install_subtask_sigterm_handler(task_dir: Path, sub_id: str) -> None:
-    """P2 Layer 3：subtask SIGTERM handler — 收到信号时写 verify_state.json + interrupted 标记。
+    """P2 Layer 3：subtask SIGTERM handler — 设置全局中断标记。
 
-    handler 必须 async-signal-safe（不能做文件 I/O），所以这里只设置一个标志。
-    实际写入由 _run_headless 循环检查标志后调用 _persist_verify_state 完成。
+    handler 必须 async-signal-safe（不能做文件 I/O），所以只设置 Event 标志。
+    实际写入由 _verify_changes 循环检查 _SUBTASK_INTERRUPTED 后调用 _persist_verify_state 完成。
     """
     _SUBTASK_INTERRUPTED.set()
     # 立即写一个最小化的 interrupted checkpoint（async-signal-safe write）
@@ -561,16 +565,21 @@ def _install_subtask_sigterm_handler(task_dir: Path, sub_id: str) -> None:
         pass
 
 
-_SUBTASK_INTERRUPTED = threading.Event()  # P2 Layer 3 用的全局中断标志
-
-
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
-                    task_dir=None, config=None):
+                    task_dir=None, config=None, interrupt_event=None):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
     # Phase 1: 从运行时 config 读取 max_retries（默认 3，CLI --max-retries 可覆盖）
     _cfg = _effective_config(config)
     max_retries = _cfg.get("verification", {}).get("max_retries", 3)
+
+    # Phase 2: 清除上一轮可能残留的中断标记（确保验证循环能正常开始）
+    _SUBTASK_INTERRUPTED.clear()
+
+    # 按 difficulty 缩减重试预算：easy → 2, medium → 3, hard → 5
+    difficulty = subtask.get("difficulty", "medium")
+    _difficulty_caps = {"easy": 2, "medium": 3, "hard": 5}
+    max_retries = min(max_retries, _difficulty_caps.get(difficulty, 3))
 
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
@@ -622,27 +631,35 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 
     # Phase 1 验证循环：可配置的多轮修复重试
     verification = subtask.get("verification", "")
-    verify_ok = True
+    # 有验证命令但无变更 = 直接失败（防止 Agent 旁路验证）
+    # 但 architect/reviewer 只读诊断不在此列
+    agent_type_check = subtask.get("agent_type", "developer")
+    if not has_changes and verification and agent_type_check not in ("architect", "reviewer"):
+        verify_ok = False
+        logger.warning("无文件变更且存在验证命令 — 标记为失败")
+    else:
+        verify_ok = True
     retry_count = 0
     verification_results = []
     verification_ms = 0
     verification_history: list[dict] = []
 
-	    # Phase 3: 读取 LLM 语义评估配置（运行时 config 优先，CLI --semantic-eval 可覆盖）
-	    _full_cfg: dict = _effective_config(config)
-	    evaluator_cfg = _full_cfg.get("evaluator", {})
-	    evaluator_enabled = bool(evaluator_cfg.get("enabled", False))
+    # Phase 3: 读取 LLM 语义评估配置（运行时 config 优先，CLI --semantic-eval 可覆盖）
+    _full_cfg: dict = _effective_config(config)
+    evaluator_cfg = _full_cfg.get("evaluator", {})
+    evaluator_enabled = bool(evaluator_cfg.get("enabled", False))
 
-	    # L1: 自动启用语义评估 — 对 heuristic/manual 验证即使未配置也强制开启
-	    auto_triggered = False
-	    if not evaluator_enabled and headless and has_changes and verification:
-	        _l1_level = _assess_verification_confidence(verification, True).get("level", "")
-	        if _l1_level in ("heuristic", "manual"):
-	            evaluator_enabled = True
-	            auto_triggered = True
-	            logger.info(f"L1 auto: 验证置信度={_l1_level}，自动启用语义评估")
+    # L1: 自动启用语义评估 — 对 heuristic/manual 验证即使未配置也强制开启
+    auto_triggered = False
+    _l1_confidence_dict: Optional[dict] = None
+    if not evaluator_enabled and headless and has_changes and verification:
+        _l1_confidence_dict = _assess_verification_confidence(verification, True)
+        if _l1_confidence_dict.get("level") in ("heuristic", "manual"):
+            evaluator_enabled = True
+            auto_triggered = True
+            logger.info(f"L1 auto: 验证置信度={_l1_confidence_dict['level']}，自动启用语义评估")
 
-	    semantic_feedback: Optional[dict] = None
+    semantic_feedback: Optional[dict] = None
     if verification and has_changes:
         cmds = [verification] if isinstance(verification, str) else verification
 
@@ -655,12 +672,27 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 saved_results = saved_state.get("verification_results", [])
                 retry_count = min(saved_attempts - 1, max_retries)
                 verification_history = saved_history[-max(0, retry_count):]
-                verification_results = saved_results
-                logger.info(f"从 verify_state.json 恢复: 已尝试 {saved_attempts} 次")
+                # 截断 verification_results：只保留低于当前 attempt 的 shell 结果，
+                # 丢弃语义评估结果（循环中会重新评估）。当前 attempt 的 cmd 结果
+                # 可能是中断时部分执行的，需丢弃让循环重新生成——避免 resume 时重复累积。
+                _cur_attempt = retry_count + 1
+                verification_results = [
+                    r for r in saved_results
+                    if r.get("type") != "semantic"
+                    and r.get("attempt", 0) and r.get("attempt", 0) < _cur_attempt
+                ]
+                logger.info(f"从 verify_state.json 恢复: 已尝试 {saved_attempts} 次, "
+                            f"截断 verification_results: {len(saved_results)}→{len(verification_results)}")
 
         console.emit("subtask_activity", {"sub_id": sub_id, "activity": "Verifying changes"})
 
+        _verify_loop_start = time.time()
+
         while retry_count <= max_retries:
+            # P2 Layer 3b: 中断信号→退出验证循环（由 _install_subtask_sigterm_handler 设置）
+            if _SUBTASK_INTERRUPTED.is_set():
+                logger.warning(f"收到 SIGTERM 信号，退出验证循环")
+                break
             # 1. 执行所有验证命令
             all_pass = True
             failed_cmds: list[str] = []
@@ -712,11 +744,14 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     verification_history, _full_cfg, logger,
                     fallback={
                         "passed": True,
+                        "confidence": 0.5,
                         "reason": "语义评估失败（已跳过）",
                         "cost_usd": 0.0,
                         "latency_ms": 0.0,
                     },
                     label="evaluator.evaluate_semantic",
+                    assessment_path=str(task_dir) if task_dir else "",
+                    verification_confidence=_l1_confidence_dict if auto_triggered else None,
                 )
                 verification_results.append({
                     "type": "semantic",
@@ -725,7 +760,14 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     "cost_usd": semantic_feedback.get("cost_usd", 0.0),
                     "latency_ms": semantic_feedback.get("latency_ms", 0.0),
                 })
-                if not semantic_feedback.get("passed", True):
+                if semantic_feedback.get("evaluator_skipped"):
+                    logger.warning(f"语义评估 API 调用失败（已跳过，结果视为通过）")
+                    if _cfg.get("evaluator", {}).get("fail_closed", False):
+                        logger.warning(f"fail_closed=True，标记为失败")
+                        all_pass = False
+                        failed_cmds = ["<semantic_eval>"]
+                        failed_outputs = [f"语义评估 API 调用失败（fail_closed）: {semantic_feedback.get('reason', '')}"]
+                elif not semantic_feedback.get("passed", True):
                     logger.warning(f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')[:100]}")
                     all_pass = False
                     failed_cmds = ["<semantic_eval>"]
@@ -744,25 +786,38 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 logger.info(f"验证全部通过 (attempt={attempt_label})")
                 break
 
-            # 4. 交互模式：显示验证卡片 + 用户决策
+            # 4. 验证失败展示：交互卡片 / --yes 自动重试倒计时 / headless 静默重试
+            _elapsed_sec = int(time.time() - _verify_loop_start)
+            _ins = metrics_changes.get("insertions", 0)
+            _del = metrics_changes.get("deletions", 0)
+            _change_summary = f"+{_ins}/-{_del}" if _ins or _del else summary[:60]
+
             if not headless:
-                console.print("")  # ensures clean line position
-                console.sep("━", 58)
-                console.error(f"{sub_id}: 验证失败")
+                # ── 交互模式：结构化验证卡片 ──
+                _card_width = 62
+                console.force("")
+                console.force("┌─ " + f"❌ {sub_id} 验证失败".ljust(_card_width - 4, "─") + "┐")
+                console.force(f"│ 重试: {retry_count}/{max_retries}   耗时: {_elapsed_sec}s   变更: {_change_summary}".ljust(_card_width) + "│")
+                console.force("├─" + "─" * (_card_width - 2) + "┤")
                 for _i, _cmd in enumerate(failed_cmds):
-                    console.print(f"   📋 验证命令: {_cmd[:80]}")
+                    console.force(f"│ 📋 验证命令: {_cmd[:60]}".ljust(_card_width) + "│")
                 if failed_outputs:
-                    _tail = failed_outputs[-1].split("\n")[-6:]
-                    console.warning(f"失败输出（尾部 {len(_tail)} 行）:")
+                    _tail = failed_outputs[-1].split("\n")[-8:]
+                    console.force(f"│ ⚠️  失败输出（尾部 {len(_tail)} 行）".ljust(_card_width) + "│")
                     for _l in _tail:
-                        console.print(f"      {_l[:76]}")
+                        for _line in _l.split("\n"):
+                            _trunc = _line[:60]
+                            console.force(f"│   {_trunc}".ljust(_card_width) + "│")
                 if summary:
-                    console.print(f"   📁 文件变更: {summary[:76]}")
-                console.sep("━", 58)
-                console.print(f"重试: {retry_count}/{max_retries}")
+                    console.force(f"│ 📁 文件变更".ljust(_card_width) + "│")
+                    for _s in summary.split("\n")[:3]:
+                        console.force(f"│   {_s[:60]}".ljust(_card_width) + "│")
+                console.force("├─" + "─" * (_card_width - 2) + "┤")
+                console.force(f"│ [R] 重试  [C] 跳过  [A] 中止".ljust(_card_width) + "│")
+                console.force("└" + "─" * (_card_width - 2) + "┘")
                 _user_skip = False
                 while True:
-                    _c = safe_input("[R]重试  [C]跳过  [A]中止\n> ").strip().upper()
+                    _c = safe_input("\n> ").strip().upper()
                     if _c in ("R", "RETRY"):
                         _user_skip = False
                         break
@@ -772,11 +827,23 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     elif _c in ("A", "ABORT"):
                         console.error("任务已中止")
                         sys.exit(0)
-                    console.print("无效输入（R=重试, C=跳过, A=中止）")
+                    console.force("无效输入（R=重试, C=跳过, A=中止）")
                 if _user_skip:
                     verify_ok = False
                     break  # break retry loop, go to result
                 # else fall through to retry logic at #6
+
+            elif sys.stdin.isatty():
+                # ── --yes + TTY 模式：自动重试倒计时（允许 Ctrl+C 中止）──
+                console.force(f"\r  [R] 自动重试中... (第 {retry_count + 1}/{max_retries + 1} 次)  按 Ctrl+C 中止")
+                try:
+                    for _i in range(5, 0, -1):
+                        console.force(f"\r  [R] 自动重试中... {_i}s  ", end="")
+                        time.sleep(1)
+                except KeyboardInterrupt:
+                    console.force("\n⏸ 用户中断，跳过重试")
+                    verify_ok = False
+                    break
 
             # 5. 已达最大重试次数 → 退出
             if retry_count >= max_retries:
@@ -785,7 +852,19 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 break
 
             # 6. 构建修复 prompt 并执行修复
+            if _SUBTASK_INTERRUPTED.is_set():
+                logger.warning(f"收到 SIGTERM，跳过第 {retry_count + 1} 次修复")
+                break
             retry_count += 1
+            # retry 时升级模型：worker_models_fallback 配置了升级目标则切换
+            _fb_models = _cfg.get("worker_models_fallback", {})
+            _sub_diff = subtask.get("difficulty", "medium")
+            _fallback_model = _fb_models.get(_sub_diff, "")
+            if _fallback_model and env.get("AGENT_GO_CLAUDE_MODEL", "") != _fallback_model:
+                env["AGENT_GO_CLAUDE_MODEL"] = _fallback_model
+                logger.info(f"[model_upgrade] retry={retry_count} difficulty={_sub_diff} → {_fallback_model}")
+                log_event(logger, "model_upgrade", {"sub_id": sub_id, "retry": retry_count,
+                          "difficulty": difficulty, "model": _fallback_model})
             logger.info(f"验证失败，第 {retry_count}/{max_retries} 次修复重试")
             # S2 可观测性：每次修复重试落结构化事件，供 eval 分析
             log_event(logger, "verify_retry", {
@@ -793,6 +872,24 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 "failed_cmds": [c[:100] for c in failed_cmds],
                 "exit_codes": [vr.get("exit_code") for vr in verification_results[-len(cmds):]],
                 "duration_ms": round(verification_ms),
+            })
+            # 同时写入 metering.jsonl（统一计量审计），挂靠 role=worker
+            _cfg_for_meter = _effective_config(config)
+            meter_event(_cfg_for_meter.get("_metering_path", "") if _cfg_for_meter else "", {
+                "role": "worker",
+                "virtual_model": "agentgo-worker",
+                "actual_provider": "verification",
+                "actual_model": "verify_retry",
+                "event": "verify_retry",
+                "sub_id": sub_id,
+                "attempt": retry_count,
+                "max_retries": max_retries,
+                "failed_cmds": [c[:100] for c in failed_cmds],
+                "exit_codes": [vr.get("exit_code") for vr in verification_results[-len(cmds):]],
+                "duration_ms": round(verification_ms),
+                "result": "retry",
+                "cost_usd": 0.0,
+                "task_id": _cfg_for_meter.get("_task_id", "") if _cfg_for_meter else "",
             })
 
             # diff --stat 在 commit 前已计算（summary）；commit 后工作区干净，git diff 必为空
@@ -803,11 +900,16 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 git_diff, retry_count, max_retries, verification_history,
                 semantic_feedback=semantic_feedback)
 
-            # 修复执行带硬超时（verification.retry_timeout，此前是无人读取的死配置）
-            retry_timeout = _cfg.get("verification", {}).get("retry_timeout", 300)
+            # 修复执行带硬超时（verification.retry_timeout，按 difficulty 弹性缩放）
+            _difficulty = subtask.get("difficulty", "medium")
+            _base_timeout = _cfg.get("verification", {}).get("retry_timeout", 300)
+            _difficulty_mult = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(_difficulty, 1.5)
+            retry_timeout = min(int(_base_timeout * _difficulty_mult), 900)
+            logger.info(f"[retry_timeout] difficulty={_difficulty} base={_base_timeout}s mult={_difficulty_mult} → timeout={retry_timeout}s")
             _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
                           active_pids=active_pids, active_pids_lock=active_pids_lock,
-                          allowed_tools=allowed_tools, hard_timeout=retry_timeout)
+                          allowed_tools=allowed_tools, hard_timeout=retry_timeout,
+                          config=_cfg)
 
             # git add + commit + tag
             subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
@@ -835,6 +937,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 cwd=str(worktree), capture_output=True, text=True)
             if diff2.stdout.strip():
                 summary = diff2.stdout.strip()
+            # fix 重试后重新采集变更统计，反映修复合计的变更
+            metrics_changes = collect_change_stats(worktree)
 
     # 构建验证状态摘要
     verification_state = {
@@ -862,13 +966,16 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     }
 
 
-def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary, verification):
+def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary, verification, retry_count=0, verification_state=None):
     """Generate shared context file for downstream subtasks. Writes to context.md."""
     ctx_parts = [
         f"### {sub_id}: {subtask['title']}",
         f"- 状态: {'通过' if verify_ok else '需关注'}",
         f"- 变更: {summary}",
     ]
+    if retry_count > 0:
+        attempts = (verification_state or {}).get("attempts", retry_count + 1)
+        ctx_parts.append(f"- 修复重试: {retry_count}/{max(0, attempts - 1)} 次")
     if verification:
         ctx_parts.append(f"- 验证: `{verification}` — {'✅' if verify_ok else '❌'}")
     if subtask.get("risks"):
@@ -931,6 +1038,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     sub_dir = task_dir / sub_id
     sub_dir.mkdir(parents=True, exist_ok=True)
 
+    # 清除上一轮可能残留的中断标记（确保本次 subtask 能正常开始）
+    _SUBTASK_INTERRUPTED.clear()
+
     # P2 Layer 3：注册 SIGTERM handler 写 verify_state.json interrupted 标记
     # 当 bench 触发 cooperative timeout 时，pipeline 会 SIGTERM claude，
     # handler 写 interrupted checkpoint，executor 后续可检测到
@@ -980,8 +1090,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     try:
         from .checkpoint import take_snapshot as _take_snapshot
         _take_snapshot(task_dir, sub_id, worktree, subtask.get("files_hint", ""))
-    except Exception:
-        logger.debug(f"[checkpoint] snapshot 失败（非关键）: {sub_id}")
+    except Exception as _cp_err:
+        logger.warning(f"[checkpoint] snapshot 失败（非关键）: {sub_id}: {_cp_err}")
 
     # 3. Build TASK.md
     task_md, verification, skill_names, unresolved_skills = _build_task_md(
@@ -1144,11 +1254,13 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             except Exception as _reset_err:
                 logger.warning(f"AgentLoop fallback: worktree reset 失败 ({_reset_err})，继续 fallback（claude -p 可能在脏状态上运行）")
             result, sandbox_type, claude_time = _run_claude(
-                task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger
+                task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger,
+                config=config,
             )
     else:
         result, sandbox_type, claude_time = _run_claude(
-            task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger
+            task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger,
+            config=config,
         )
 
     # 6. Verify changes
@@ -1169,7 +1281,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     verification_results = verify_results["verification_results"]
 
     # 7. Generate context (use original verification, not path-rewritten)
-    _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary, original_verification)
+    _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary,
+                      original_verification, retry_count=retry_count,
+                      verification_state=verify_results.get("verification_state"))
 
     # 状态判定: completed(有变更) / no_changes(完成但无变更) / failed(异常)
     if result.returncode == 0 and verify_ok:

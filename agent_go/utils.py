@@ -187,7 +187,7 @@ def _build_safe_prefixes():
 SAFE_VERIFICATION_PREFIXES = _build_safe_prefixes()
 
 # shell 注入特征（精确模式，避免误伤合法的验证参数）
-_SHELL_CHAIN = re.compile(r'[;&]|&&|\|\|')                    # 命令链: ; && ||
+_SHELL_CHAIN = re.compile(r'(?<![&])&(?![&])|;|\|\|')           # 命令链: 单 & ; ||（&& 安全，允许）
 _SHELL_SUBST = re.compile(r'\$\(|`[^`]+`|\$\{')            # 命令替换: $() `` ${
 _SHELL_PIPE_EXEC = re.compile(r'\b(curl|wget)\b.*\|.*\b(ba)?sh\b')  # curl|sh
 _SHELL_DESTROY = re.compile(r'\brm\s+-r[^ ]*\s+[/~]')      # 危险 rm
@@ -247,6 +247,18 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
     for pattern, name in _injection_checks:
         if pattern.search(cmd_unquoted):
             return False, f"shell 注入特征: {name}"
+
+    # 处理 && 链：拆分为多个命令分别校验
+    # LLM 常生成 "cmd1 && cmd2" 格式的验证命令，每个子命令独立安全
+    if "&&" in cmd:
+        parts = [p.strip() for p in cmd.split("&&")]
+        for part in parts:
+            if not part:
+                continue
+            safe, reason = _is_safe_verification_command(part)
+            if not safe:
+                return False, f"&& 子命令不通过: {reason}"
+        return True, ""
 
     # Stage 3: 命令 + 子命令查找
     binary = argv[0]

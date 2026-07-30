@@ -194,19 +194,32 @@ def _estimate_duration(plan: dict[str, Any], parallel: int = 1) -> str:
     return f"约 {low}-{high} 分钟"
 
 
-def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
+def _console_force_title(msg: str) -> None:
+    console.force(f"\n{'=' * 60}")
+    console.force(f"  {msg}")
+    console.force(f"{'=' * 60}")
+
+def _console_force_subtitle(msg: str) -> None:
+    console.force(f"\n── {msg} ──")
+
+def print_plan(plan: dict[str, Any], config: dict[str, Any], force: bool = False) -> None:
     """紧凑展示 Plan（P0-5）。低信息密度字段折叠，水平布局减少行数。"""
     behavior = config.get("behavior", {})
     verbose = behavior.get("show_agent_prompt", True)
     parallel = config.get("_parallel", 1)
     duration = _estimate_duration(plan, parallel)
 
-    console.sep("=", 70)
-    console.title("📋 执行方案")
-    console.print(f"概述: {plan.get('overview', 'N/A')}")
-    console.print(f"工作量: {plan.get('estimated_effort', 'N/A')}  |  预计耗时: {duration}")
+    _out = console.force if force else console.print
+    _sep = lambda c, w: console.force(c * w) if force else console.sep(c, w)
+    _title = lambda m: _console_force_title(m) if force else console.title(m)
+    _subtitle = lambda m: _console_force_subtitle(m) if force else console.subtitle(m)
+
+    _sep("=", 70)
+    _title("📋 执行方案")
+    _out(f"概述: {plan.get('overview', 'N/A')}")
+    _out(f"工作量: {plan.get('estimated_effort', 'N/A')}  |  预计耗时: {duration}")
     if parallel > 1:
-        console.print(f"并行度: {parallel}")
+        _out(f"并行度: {parallel}")
 
     # 共享资源（紧凑单行）
     sr = plan.get("shared_resources", {})
@@ -216,10 +229,10 @@ def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
         if sr.get("git_branch"): _parts.append(f"🌿 {sr['git_branch']}")
         if sr.get("directories"): _parts.append(f"📁 {', '.join(sr['directories'])}")
         if _parts:
-            console.print(" | ".join(_parts))
+            _out(" | ".join(_parts))
 
     # 步骤（紧凑 2-3 行）
-    console.subtitle("步骤")
+    _subtitle("步骤")
     steps = plan.get("steps", [])
     deps = plan.get("dependencies", {})
     _max_id_width = max(len(str(s["id"])) for s in steps) if steps else 2
@@ -232,22 +245,22 @@ def print_plan(plan: dict[str, Any], config: dict[str, Any]) -> None:
         _file_hint = f" · {len(_files)} 文件" if _files else ""
         _ver = step.get("verification", "")
         _v_hint = f"  ✅ {_ver}" if _ver else ""
-        console.print(f"{_sid} {step['title']}{_tag}{_file_hint}")
-        console.print(f"    {step.get('description', '')}{_v_hint}")
+        _out(f"{_sid} {step['title']}{_tag}{_file_hint}")
+        _out(f"    {step.get('description', '')}{_v_hint}")
         if verbose and step.get("risks"):
-            console.print(f"    ⚠️  {'; '.join(step['risks'][:3])}")
+            _out(f"    ⚠️  {'; '.join(step['risks'][:3])}")
         if verbose and step.get("agent_prompt"):
             _ap = step["agent_prompt"][:120] + "..." if len(step["agent_prompt"]) > 120 else step["agent_prompt"]
-            console.print(f"    🤖 {_ap}")
+            _out(f"    🤖 {_ap}")
 
     # 依赖（紧凑行内）
     if deps:
         _dep_lines = []
         for sid, prereqs in deps.items():
             _dep_lines.append(f"  step {sid} → {' → '.join(str(p) for p in prereqs)}")
-        console.subtitle("依赖")
-        console.print("\n".join(_dep_lines))
-    console.sep("=", 70)
+        _subtitle("依赖")
+        _out("\n".join(_dep_lines))
+    _sep("=", 70)
 
 
 def _edit_plan_via_editor(plan: dict[str, Any], logger: logging.Logger) -> None:
@@ -320,7 +333,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
 
     empty_count = 0
     while True:
-        print_plan(plan, config)
+        print_plan(plan, config, force=console.quiet)
 
         # 默认同意模式
         if auto_confirm and iteration == 1:
@@ -489,50 +502,72 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
         installed = list_skills(repo)
         rule_result = apply_rules(step, role_map, installed)
 
+        # 自动检测缓存相关步骤，追加测试隔离提示
+        _risks = list(step.get("risks", []))
+        _step_text = (step.get("description", "") + " " + step.get("agent_prompt", "") + " " + step.get("verification", "")).lower()
+        if "cache_page" in _step_text or "@cache_page" in _step_text:
+            _cache_note = "@cache_page 需要 conftest.py 中添加 cache.clear() fixture，否则 pytest 跨测试共享缓存导致 data=[]"
+            if _cache_note not in _risks:
+                _risks.append(_cache_note)
+
+        subtask_id = f"sub-{step['id']}"
+
+        # S4 复杂度双通道：LLM 标注的 difficulty 透传到执行阶段（非法值归一为 medium）
+        _step_difficulty = step.get("difficulty", "medium")
+        if _step_difficulty not in ("easy", "medium", "hard"):
+            _step_difficulty = "medium"
+        # 自动提升：orm-optimizer skill + 多文件 → 复杂度至少 medium
+        if _step_difficulty == "easy" and "orm-optimizer" in rule_result["skills"] and len(files) >= 2:
+            _step_difficulty = "medium"
+            logger.info(f"[difficulty_bump] {subtask_id}: orm-optimizer + {len(files)} files → easy→medium")
+
         subtasks.append({
-            "id": f"sub-{step['id']}",
+            "id": subtask_id,
             "title": step.get("title", f"步骤 {step['id']}"),
             "description": desc,
             "files_hint": files_hint,
             "agent_prompt": step.get("agent_prompt", ""),
             "verification": step.get("verification", ""),
-            "risks": step.get("risks", []),
+            "risks": _risks,
             "depends_on": depends_on,
             "skills": rule_result["skills"],
             "agent_type": rule_result["agent_type"],
-            # S4 复杂度双通道：LLM 标注的 difficulty 透传到执行阶段（非法值归一为 medium）
-            "difficulty": step.get("difficulty", "medium") if step.get("difficulty") in ("easy", "medium", "hard") else "medium",
+            "difficulty": _step_difficulty,
             "_agent_type_source": "llm" if step.get("agent_type") else ("rule" if rule_result.get("matched_rules") else "default"),
         })
 
     log_event(logger, "plan_decomposed", {"count": len(subtasks)})
     return subtasks
 
-def print_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any]) -> None:
+def print_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], force: bool = False) -> None:
     behavior = config.get("behavior", {})
-    console.print("\n" + "─" * 60)
-    console.print("📋 子任务列表")
-    console.sep("─", 60)
+    _out = console.force if force else console.print
+    _out("\n" + "─" * 60)
+    _out("📋 子任务列表")
+    if force:
+        console.force("─" * 60)
+    else:
+        console.sep("─", 60)
     for st in subtasks:
-        console.print(f"\n[{st['id']}] {st['title']}")
+        _out(f"\n[{st['id']}] {st['title']}")
         # 标注 Agent 角色来源
         agent_type = st.get("agent_type", "developer")
         source = st.get("_agent_type_source", "default")
         source_tag = {"llm": "", "rule": " [规则匹配]", "default": "", "inferred": " [自动推断]"}.get(source, "")
-        console.print(f"\U0001f464 Agent: {agent_type}{source_tag}")
+        _out(f"\U0001f464 Agent: {agent_type}{source_tag}")
         skills = st.get("skills", [])
         if skills:
-            console.print(f"\U0001f9e0 Skill: {', '.join(skills)}")
+            _out(f"\U0001f9e0 Skill: {', '.join(skills)}")
         # 只展示描述前200字符，避免太长
         desc = st.get("description", "")
         preview = desc[:200] + "..." if len(desc) > 200 else desc
-        console.print(f"{preview}")
+        _out(f"{preview}")
         if st.get("files_hint"):
-            console.print(f"\U0001f4c1 涉及文件: {st['files_hint']}")
+            _out(f"\U0001f4c1 涉及文件: {st['files_hint']}")
         if behavior.get("show_agent_prompt", True) and st.get("agent_prompt"):
             prompt_preview = st["agent_prompt"][:150] + "..." if len(st["agent_prompt"]) > 150 else st["agent_prompt"]
-            console.print(f"\U0001f916 Agent Prompt: {prompt_preview}")
-    console.print("\n" + "─" * 60)
+            _out(f"\U0001f916 Agent Prompt: {prompt_preview}")
+    _out("\n" + "─" * 60)
 
 def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], logger: logging.Logger) -> list[dict[str, Any]]:
     behavior = config.get("behavior", {})
@@ -542,7 +577,7 @@ def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], log
     if os.environ.get("AGENT_GO_INTERACTIVE", "").lower() == "1":
         auto_confirm = False
 
-    print_subtasks(subtasks, config)
+    print_subtasks(subtasks, config, force=console.quiet)
 
     if auto_confirm:
         if not sys.stdin.isatty() or console.json_mode:

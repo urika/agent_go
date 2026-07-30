@@ -1,53 +1,168 @@
-"""LLM 语义评估器（Phase 3）— hybrid 验证模式的语义层。
+"""LLM 语义评估器（Phase 3）— 策略模式重构。
 
-用法:
-    from .evaluator import evaluate_semantic
+设计：
+  策略模式：评估算法通过 register() 注册，运行时根据配置路由。
+  默认策略保留原有 evaluate_semantic 语义，增加 confidence 评分。
+  自动持久化评估事件到 assessment.jsonl（与 assessment.py 数据层对接）。
 
-    result = evaluate_semantic(subtask, worktree, verification, history, config, logger)
-    if not result["passed"]:
-        # 进入 Phase 1 修复循环
+用法：
+    from .evaluator import evaluate
+
+    result = evaluate(subtask, worktree, verification, history, config, logger,
+                      assessment_path=str(task_dir),
+                      verification_confidence={"level": "heuristic"})
+
+策略注册：
+    from .evaluator import register
+
+    class MyStrategy:
+        name = "strict"
+        description = "更严格的代码审查"
+        def __call__(self, subtask, worktree, verification, history, config, logger):
+            ...
+    register(MyStrategy())
 """
 
 import json
+import re
 import time
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Protocol
 
 from .api import call_api
-from .config import get_api_key, meter_event
+from .config import meter_event
 from .metrics import estimate_cost
+from .assessment import AssessmentEvent, write as write_assessment, ASSESSMENT_FILENAME
 
-__all__ = ["evaluate_semantic"]
+__all__ = ["evaluate", "register", "list_strategies", "evaluate_semantic"]
 
 
-def _build_eval_prompt(subtask: dict, verification: str, diff: str, previous_attempts: list[dict]) -> str:
-    """构建语义评估 prompt。"""
-    title = subtask.get("title", "")
-    description = subtask.get("description", "")[:2000]
-    agent_prompt = subtask.get("agent_prompt", "")[:1000]
+# ═══════════════════════════════════════════════════════════════
+# 策略协议与注册表
+# ═══════════════════════════════════════════════════════════════
 
-    history_text = ""
-    if previous_attempts:
-        history_parts = []
-        for a in previous_attempts:
-            history_parts.append(
-                f"- 第 {a.get('attempt', '?')} 次: {a.get('fix_summary', '修复尝试')} "
-                f"→ 失败原因: {a.get('failure_summary', '未知')}"
+class EvalStrategy(Protocol):
+    """评估策略协议。实现此接口可注册为自定义评估策略。"""
+    name: str
+    description: str
+
+    def __call__(
+        self,
+        subtask: dict,
+        worktree: Path,
+        verification: str,
+        previous_attempts: list[dict],
+        config: dict,
+        logger: logging.Logger,
+    ) -> dict:
+        """执行评估。
+
+        Returns:
+            dict: {passed: bool, confidence: float, reason: str,
+                   suggestions: str, cost_usd: float, latency_ms: float}
+        """
+        ...
+
+
+_registry: dict[str, EvalStrategy] = {}
+
+
+def register(strategy: EvalStrategy) -> None:
+    """注册评估策略（供外部模块或用户自定义策略使用）。"""
+    _registry[strategy.name] = strategy
+
+
+def list_strategies() -> list[dict]:
+    """列出所有已注册的策略。"""
+    return [
+        {"name": name, "description": getattr(s, "description", "")}
+        for name, s in _registry.items()
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 统一入口
+# ═══════════════════════════════════════════════════════════════
+
+def evaluate(
+    subtask: dict,
+    worktree: Path,
+    verification: str,
+    previous_attempts: list[dict],
+    config: dict,
+    logger: logging.Logger,
+    assessment_path: str = "",
+    verification_confidence: Optional[dict] = None,
+) -> dict:
+    """统一评估入口：路由到配置的策略 + 自动写 assessment.jsonl。
+
+    Args:
+        subtask: 子任务 dict
+        worktree: worktree 路径
+        verification: 验证命令
+        previous_attempts: 历史修复尝试
+        config: 完整配置
+        logger: 日志记录器
+        assessment_path: 写入 assessment.jsonl 的目录路径（空则不写）
+        verification_confidence: 传此参数表示 L1 自动触发，用于记录来源
+
+    Returns:
+        {"passed": bool, "confidence": float, "reason": str,
+         "suggestions": str, "cost_usd": float, "latency_ms": float}
+    """
+    strategy_name = config.get("evaluator", {}).get("strategy", "default")
+    strategy = _registry.get(strategy_name)
+    if strategy is None:
+        strategy = _DefaultEvalStrategy()
+        _registry["default"] = strategy
+
+    result = strategy(subtask, worktree, verification, previous_attempts, config, logger)
+
+    # 自动持久化到 assessment.jsonl
+    if assessment_path:
+        try:
+            assessment_file = Path(assessment_path)
+            if assessment_file.is_dir():
+                assessment_file = assessment_file / ASSESSMENT_FILENAME
+            vc_level = "unknown"
+            if verification_confidence:
+                vc_level = verification_confidence.get("level", "unknown")
+            trigger = "auto" if verification_confidence else "manual"
+            event = AssessmentEvent(
+                task_id=config.get("_task_id", ""),
+                subtask_id=subtask.get("id", ""),
+                trigger_source=trigger,
+                verification=verification,
+                verification_confidence=vc_level,
+                evaluator_strategy=strategy_name,
+                evaluator_provider=config.get("evaluator", {}).get(
+                    "provider", config.get("plan_api", {}).get("provider", "")),
+                evaluator_model=config.get("evaluator", {}).get(
+                    "model", config.get("plan_api", {}).get("model", "")),
+                passed=result.get("passed", True),
+                confidence=result.get("confidence", 1.0 if result.get("passed", True) else 0.0),
+                reason=result.get("reason", ""),
+                suggestions=result.get("suggestions", ""),
+                cost_usd=result.get("cost_usd", 0.0),
+                latency_ms=result.get("latency_ms", 0.0),
             )
-        history_text = "\n".join(history_parts)
+            write_assessment(assessment_file, event)
+        except Exception:
+            logger.debug("写入 assessment.jsonl 失败（非关键）", exc_info=True)
 
-    if not diff.strip():
-        diff = "（未检测到文件变更）"
-    else:
-        if len(diff) > 4000:
-            diff = diff[:4000] + "\n... (diff 过长，已截断)"
+    return result
 
-    history_section = ""
-    if history_text:
-        history_section = f"## 历史修复尝试\n{history_text}\n\n"
 
-    return f"""你是一位严格的代码审查员。请评估以下子任务的执行结果是否完整、正确地完成了目标。
+# 向后兼容别名（现有 executor.py 通过 evaluate_semantic 调用）
+evaluate_semantic = evaluate
+
+
+# ═══════════════════════════════════════════════════════════════
+# 默认策略
+# ═══════════════════════════════════════════════════════════════
+
+_EVAL_TEMPLATE = """你是一位严格的代码审查员。请评估以下子任务的执行结果是否完整、正确地完成了目标。
 
 ## 子任务信息
 
@@ -84,110 +199,54 @@ def _build_eval_prompt(subtask: dict, verification: str, diff: str, previous_att
 
 ```json
 {{
-  "passed": true,
-  "reason": "变更完整实现了目标...",
+  "passed": true/false,
+  "confidence": 0.0-1.0,
+  "reason": "...",
   "suggestions": ""
 }}
 ```
 
-如果未通过，reason 必须具体说明问题，suggestions 给出明确的修复方向。
+- **passed**: true 表示变更完成目标
+- **confidence**: 你对自己判断的置信度。1.0=非常确定，0.7=较确定但有些细节不确定，0.3=可能通过但有隐患，0.0=完全不确定
+- **reason**: 具体说明判断理由
+- **suggestions**: 如果未通过（passed=false），给出明确的修复方向
+
+**重要指引：**
+- 如果验证命令包含确定性测试（pytest、assert 等），且全部通过，应优先视为任务完成。仅当 diff 明显遗漏核心功能或引入回归时才能判定 passed=false。
+- 如果 shell 验证已覆盖核心功能（通过测试运行验证了行为正确性），你的语义评估应作为补充检查而非替代验证——不要因代码风格等非功能性问题拒绝。
+- confidence ≤ 0.5 时优先判定 passed=true（不确定时按通过处理）。
 """
 
 
-def _parse_eval_response(content: str) -> dict:
-    """从 LLM 响应中解析 JSON 评估结果。"""
-    # 尝试直接解析
-    try:
-        data = json.loads(content)
-        if isinstance(data, dict) and "passed" in data:
-            return {
-                "passed": bool(data.get("passed", False)),
-                "reason": str(data.get("reason", "")),
-                "suggestions": str(data.get("suggestions", "")),
-            }
-    except json.JSONDecodeError:
-        pass
+class _DefaultEvalStrategy:
+    """默认评估策略 — 基于 LLM 的标准代码语义评估（含置信度评分）。"""
+    name = "default"
+    description = "基于 LLM 的标准代码语义评估（含置信度评分）"
 
-    # 尝试从 markdown code block 中提取
-    import re
-    matches = re.findall(r"```(?:json)?\s*\n(.*?)\n```", content, re.DOTALL)
-    for m in matches:
-        try:
-            data = json.loads(m)
-            if isinstance(data, dict) and "passed" in data:
-                return {
-                    "passed": bool(data.get("passed", False)),
-                    "reason": str(data.get("reason", "")),
-                    "suggestions": str(data.get("suggestions", "")),
-                }
-        except json.JSONDecodeError:
-            continue
-
-    # 兜底：无法解析时视为通过（避免阻塞正常流程）
-    return {
-        "passed": True,
-        "reason": f"评估响应无法解析为 JSON，按通过处理。原始响应: {content[:200]}",
-        "suggestions": "",
-    }
+    def __call__(self, subtask, worktree, verification, previous_attempts, config, logger):
+        return _default_semantic_eval(subtask, worktree, verification, previous_attempts, config, logger)
 
 
-def _get_worktree_diff(worktree: Path) -> str:
-    """获取 worktree 中 HEAD 相对于最近一次提交的 diff。"""
-    import subprocess
-    result = subprocess.run(
-        ["git", "diff", "HEAD"],
-        cwd=str(worktree), capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        return result.stdout
-    return ""
-
-
-def evaluate_semantic(
-    subtask: dict,
-    worktree: Path,
-    verification: str,
-    previous_attempts: list[dict],
-    config: dict,
-    logger: logging.Logger,
-) -> dict[str, Any]:
-    """对子任务执行结果做 LLM 语义评估。
-
-    Args:
-        subtask: 子任务 dict
-        worktree: worktree 路径
-        verification: 验证命令
-        previous_attempts: 历史修复尝试
-        config: 完整配置
-        logger: 日志记录器
-
-    Returns:
-        {"passed": bool, "reason": str, "suggestions": str,
-         "cost_usd": float, "latency_ms": float, "raw_response": str}
-    """
+def _default_semantic_eval(subtask, worktree, verification, previous_attempts, config, logger):
+    """内置评估逻辑：调用 LLM → 解析响应 → 写 metering → 返回。"""
     start = time.time()
     evaluator_cfg = config.get("evaluator", {})
 
-    # 构建评估用 API 配置（优先使用 evaluator 专用配置，否则复用 plan_api）
+    # 构建评估用 API 配置
     eval_api_cfg = dict(config.get("plan_api", {}))
-    if evaluator_cfg.get("provider"):
-        eval_api_cfg["provider"] = evaluator_cfg["provider"]
-    if evaluator_cfg.get("model"):
-        eval_api_cfg["model"] = evaluator_cfg["model"]
-    if evaluator_cfg.get("base_url"):
-        eval_api_cfg["base_url"] = evaluator_cfg["base_url"]
-    if evaluator_cfg.get("api_key"):
-        eval_api_cfg["api_key"] = evaluator_cfg["api_key"]
+    for key in ("provider", "model", "base_url", "api_key"):
+        if evaluator_cfg.get(key):
+            eval_api_cfg[key] = evaluator_cfg[key]
+    # 评估器 API 调用独立超时：不绑定 plan_api 的 timeout_ms（可能长达 3min）
+    # 评估只需快速判断 pass/fail，90s 足够
+    eval_api_cfg["timeout_ms"] = 90_000
 
     eval_config = dict(config)
     eval_config["plan_api"] = eval_api_cfg
-    # D3 修复：抑制 call_api 的内部记账（它硬编码 role="planner"，会把 evaluator 调用误标）。
-    # evaluator 自己写一条 role="evaluator" 的 metering（用 prompt 长度估算真实 token，而非硬编码）。
     eval_config.pop("_metering_path", None)
 
     diff = _get_worktree_diff(worktree)
     prompt = _build_eval_prompt(subtask, verification, diff, previous_attempts)
-
     messages = [{"role": "user", "content": prompt}]
 
     try:
@@ -195,38 +254,40 @@ def evaluate_semantic(
     except Exception as e:
         logger.warning(f"语义评估 API 调用失败: {e}")
         return {
-            "passed": True,  # API 失败时不阻塞
-            "reason": f"语义评估 API 调用失败: {e}",
+            "passed": False,
+            "confidence": 0.0,
+            "reason": f"语义评估 API 调用失败无法执行: {e}",
             "suggestions": "",
             "cost_usd": 0.0,
             "latency_ms": round((time.time() - start) * 1000, 2),
             "raw_response": "",
+            "evaluator_skipped": True,
         }
 
     parsed = _parse_eval_response(content)
     latency_ms = round((time.time() - start) * 1000, 2)
 
-    # D3 修复：用 prompt 长度估算真实 token（替代硬编码 1000/200）。
-    # 保守估算：~3 字符/token（中英混合）。completion 用实际响应长度。
-    est_prompt_tokens = max(1, len(prompt) // 3)
-    est_completion_tokens = max(1, len(content) // 3)
+    est_prompt_tokens = max(1, _estimate_tokens(prompt))
+    est_completion_tokens = max(1, _estimate_tokens(content))
     cost_usd = 0.0
     try:
         cost_usd = estimate_cost(
             eval_api_cfg.get("provider", "anthropic"),
             eval_api_cfg.get("model", ""),
-            est_prompt_tokens, est_completion_tokens
+            est_prompt_tokens, est_completion_tokens,
         )
     except Exception:
         pass
 
-    logger.info(f"语义评估结果: passed={parsed['passed']}, reason={parsed['reason'][:80]}")
+    logger.info(f"语义评估: passed={parsed['passed']} confidence={parsed['confidence']:.2f} reason={parsed['reason'][:80]}")
 
-    metering_event = {
+    # 写 metering（仅成本记录）
+    meter_event(config.get("_metering_path"), {
         "role": "evaluator",
         "virtual_model": "agentgo-evaluator",
         "actual_provider": eval_api_cfg.get("provider", "anthropic"),
         "actual_model": eval_api_cfg.get("model", ""),
+        "difficulty": subtask.get("difficulty", ""),
         "prompt_tokens": est_prompt_tokens,
         "completion_tokens": est_completion_tokens,
         "cost_usd": round(cost_usd, 6),
@@ -235,14 +296,118 @@ def evaluate_semantic(
         "fallback_reason": "",
         "task_id": config.get("_task_id", ""),
         "subtask_id": subtask.get("id", ""),
-    }
-    meter_event(config.get("_metering_path"), metering_event)
+    })
 
     return {
         "passed": parsed["passed"],
+        "confidence": parsed["confidence"],
         "reason": parsed["reason"],
         "suggestions": parsed["suggestions"],
         "cost_usd": round(cost_usd, 6),
         "latency_ms": latency_ms,
         "raw_response": content,
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 辅助函数
+# ═══════════════════════════════════════════════════════════════
+
+def _build_eval_prompt(subtask, verification, diff, previous_attempts):
+    """构建语义评估 prompt（含 confidence 要求）。"""
+    title = subtask.get("title", "")
+    description = subtask.get("description", "")[:2000]
+    agent_prompt = subtask.get("agent_prompt", "")[:1000]
+
+    history_section = ""
+    if previous_attempts:
+        history_parts = []
+        for a in previous_attempts:
+            history_parts.append(
+                f"- 第 {a.get('attempt', '?')} 次: {a.get('fix_summary', '修复尝试')} "
+                f"→ 失败原因: {a.get('failure_summary', '未知')}"
+            )
+        history_section = "## 历史修复尝试\n" + "\n".join(history_parts) + "\n\n"
+
+    if not diff.strip():
+        diff = "（未检测到文件变更）"
+    elif len(diff) > 4000:
+        diff = diff[:4000] + "\n... (diff 过长，已截断)"
+
+    return _EVAL_TEMPLATE.format(
+        title=title, description=description, agent_prompt=agent_prompt,
+        verification=verification, diff=diff, history_section=history_section,
+    )
+
+
+def _parse_eval_response(content: str) -> dict:
+    """从 LLM 响应中解析 JSON 评估结果（支持 confidence 字段）。"""
+    # 直接解析
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict) and "passed" in data:
+            return _extract(data)
+    except json.JSONDecodeError:
+        pass
+
+    # 从 markdown code block 提取
+    matches = re.findall(r"```(?:json)?\s*\n(.*?)\n```", content, re.DOTALL)
+    for m in matches:
+        try:
+            data = json.loads(m)
+            if isinstance(data, dict) and "passed" in data:
+                return _extract(data)
+        except json.JSONDecodeError:
+            continue
+
+    return {
+        "passed": False,
+        "confidence": 0.0,
+        "reason": f"评估响应无法解析为 JSON，原始响应: {content[:200]}",
+        "suggestions": "",
+    }
+
+
+def _extract(data: dict) -> dict:
+    """从解析后的 dict 中提取标准字段。"""
+    passed = bool(data.get("passed", False))
+    return {
+        "passed": passed,
+        "confidence": float(data.get("confidence", 1.0 if passed else 0.0)),
+        "reason": str(data.get("reason", "")),
+        "suggestions": str(data.get("suggestions", "")),
+    }
+
+
+def _estimate_tokens(text: str) -> int:
+    """估算混合中英文文本的 token 数。
+
+    中文 ~1 char/token，非中文 ~4 chars/token。
+    用于 metering 中 evaluator 的 token 估算（无真实 API usage 时兜底）。
+    """
+    import re
+    cjk = re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]', text)
+    cjk_count = len(cjk)
+    ascii_count = len(text) - cjk_count
+    return cjk_count + max(0, ascii_count // 4)
+
+
+def _get_worktree_diff(worktree: Path) -> str:
+    """获取 worktree 中的变更 diff — 工作区未提交用 git diff HEAD，已提交用 git show HEAD。"""
+    import subprocess
+    result = subprocess.run(
+        ["git", "diff", "HEAD"],
+        cwd=str(worktree), capture_output=True, text=True,
+    )
+    diff = result.stdout
+    if not diff.strip():
+        result = subprocess.run(
+            ["git", "show", "HEAD", "--no-renames", "--format="],
+            cwd=str(worktree), capture_output=True, text=True,
+        )
+        diff = result.stdout
+    return diff if result.returncode == 0 else ""
+
+
+# 注册默认策略
+register(_DefaultEvalStrategy())

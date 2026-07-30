@@ -1,4 +1,5 @@
 import hashlib
+import sys
 import json, re, time, logging
 from pathlib import Path
 from datetime import datetime
@@ -10,6 +11,7 @@ from .skills import list_skills
 from .role_skill_map import load_role_skill_map
 from .metrics import estimate_cost
 from .router import resolve_provider, call_with_role
+from .utils import SAFE_VERIFICATION_PREFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,7 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
                     "result": "success",
                     "fallback_reason": "",
                     "task_id": config.get("_task_id", ""),
+                    "subtask_id": "",
                 }
             )
             return content
@@ -125,6 +128,47 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
         })
         raise RuntimeError(f"连接超时或 IO 错误 ({provider}): {e}") from e
 
+
+def _detect_runtime_info(repo: Path) -> str:
+    """Detect project runtime version info (Python/Django/Node etc.) to help planner avoid incompatible code."""
+    parts = []
+    parts.append(f"Python {sys.version_info.major}.{sys.version_info.minor}")
+    req_file = repo / "requirements.txt"
+    if req_file.exists():
+        try:
+            lines = req_file.read_text().splitlines()
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith(("#", "-", "git+")):
+                    parts.append(line)
+        except Exception:
+            pass
+    pyproj = repo / "pyproject.toml"
+    if pyproj.exists():
+        try:
+            text = pyproj.read_text()
+            for line in text.splitlines():
+                line = line.strip()
+                if "requires-python" in line or "dependencies" in line or line.startswith('"'):
+                    parts.append(line.strip('", '))
+        except Exception:
+            pass
+    pkg = repo / "package.json"
+    if pkg.exists():
+        try:
+            import json
+            data = json.loads(pkg.read_text())
+            if "dependencies" in data:
+                deps = list(data["dependencies"].keys())[:10]
+                parts.append(f"Node deps: {', '.join(deps)}")
+        except Exception:
+            pass
+    if len(parts) > 15:
+        parts = parts[:15]
+        parts.append("... (truncated)")
+    return "\n".join(parts)
+
+
 def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging.Logger, supplement: str = "", reference_docs: str = "", iteration: int = 1, skill_context: str = "", no_cache: bool = False) -> dict[str, Any]:
     plan_start = time.time()
     logger.info("[PLAN] ═══ PLAN MODE ═══")
@@ -150,7 +194,7 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
     resource_map = get_resource_map(repo, git_info)
 
     # ── Prompt 预算控制 ──
-    MAX_SYSTEM_PROMPT_CHARS = 6000   # system prompt 上限字符数
+    MAX_SYSTEM_PROMPT_CHARS = 10000  # system prompt 上限字符数（含 Skill 表 + OUTPUT BUDGET + scope isolation 规则）
     MAX_USER_CONTENT_CHARS = 12000   # user content 上限字符数
     # 截断项目文件列表（保留前 100 个）
     file_lines = project_files.split("\n") if project_files else []
@@ -194,6 +238,9 @@ SCHEMA:
 }
 
 REQUIREMENTS:
+- **CRITICAL — Scope isolation**: Each step's `files` MUST include every file that step reads or modifies. If verification needs a file that belongs to another step, add a dependency.
+- **CRITICAL — Risk isolation**: Each step's `risks` must ONLY describe problems that occur DURING that step's own execution. NEVER list another step's task as a risk.
+- **Common mistake to avoid**: If step-1 adds caching and needs a fixture, the fixture belongs in step-1's `files` OR step-2 must be a dependency of step-1. Do NOT put "step-2 needs to add a fixture" in step-1's `risks`.
 - 2-5 steps, independently executable
 - Each step MUST have: agent_type, difficulty, agent_prompt
 - agent_type: developer=coding, architect=read-only design, reviewer=code review, tester=testing
@@ -213,6 +260,11 @@ EXAMPLE (3-step plan):
   "estimated_effort": "2-3 hours",
   "shared_resources": {"directories": ["src", "tests"], "git_remote": "", "git_branch": "main", "config_files": [], "env_vars": ["JWT_SECRET"]}
 }"""
+
+    # F-0: 注入项目运行时版本信息（帮助 LLM 生成兼容的代码）
+    _runtime_info = _detect_runtime_info(repo)
+    if _runtime_info:
+        system_prompt += f"\n## 项目运行时环境（避免生成不兼容的 API 调用）\n```\n{_runtime_info}\n```\n"
 
     # F-1: 注入已安装 Skill 清单（限制条目数）
     installed = list_skills(repo)
@@ -282,7 +334,7 @@ EXAMPLE (3-step plan):
         else:
             logger.warning(f"[PLAN] 跳过 Skill 上下文注入（system prompt 已达上限 {len(system_prompt)} 字符）")
 
-    system_prompt += "\n## 可用 Agent 类型\n- developer: 开发者（编写代码）\n- architect: 架构师（设计分析，只读）\n- reviewer: 审查者（代码审查）\n- tester: 测试者（编写测试）\n必须为每个步骤指定合适的 agent_type。\n\n## 示例步骤\n以下是一个正确填写 agent_type 和 skills 的示例：\n{\n  \"id\": 2,\n  \"title\": \"编写单元测试\",\n  \"description\": \"为认证模块补充测试\",\n  \"files\": [\"tests/test_auth.py\"],\n  \"verification\": \"pytest tests/test_auth.py -v\",\n  \"risks\": [],\n  \"agent_prompt\": \"请为 src/auth.py 编写单元测试，覆盖正常和异常路径\",\n  \"agent_type\": \"tester\",\n  \"difficulty\": \"medium\",\n  \"skills\": [\"tdd-workflow\"]\n}"
+    system_prompt += "\n## 可用 Agent 类型\n- developer: 开发者（编写代码）\n- architect: 架构师（设计分析，只读）\n- reviewer: 审查者（代码审查）\n- tester: 测试者（编写测试）\n必须为每个步骤指定合适的 agent_type。\n\n## 允许的验证命令\nsteps[].verification 仅限以下命令前缀（安全白名单）：\n" + "\n".join(f"- `{p}`" for p in SAFE_VERIFICATION_PREFIXES) + "\n\n## 示例步骤\n以下是一个正确填写 agent_type 和 skills 的示例：\n{\n  \"id\": 2,\n  \"title\": \"编写单元测试\",\n  \"description\": \"为认证模块补充测试\",\n  \"files\": [\"tests/test_auth.py\"],\n  \"verification\": \"pytest tests/test_auth.py -v\",\n  \"risks\": [],\n  \"agent_prompt\": \"请为 src/auth.py 编写单元测试，覆盖正常和异常路径\",\n  \"agent_type\": \"tester\",\n  \"difficulty\": \"medium\",\n  \"skills\": [\"tdd-workflow\"]\n}"
 
     # ── Prompt 预算控制：截断 user content ──
     if reference_docs and len(reference_docs) > MAX_USER_CONTENT_CHARS // 3:
