@@ -978,15 +978,34 @@ class TestRunVerificationCmd:
 
     @patch("subprocess.run")
     @patch("agent_go.executor._log_rejected_command")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._log_rejected_command")
     def test_command_chain_rejected(self, mock_log_rejected, mock_subprocess,
                                     tmp_path, fast_logger):
-        """含 && 命令链的命令应被注入扫描拒绝"""
+        """含 && 的命令拆分子命令校验，危险子命令（rm -rf）仍应被拒绝"""
         result = _run_verification_cmd("pytest -q && rm -rf x", tmp_path, 1, {},
                                        fast_logger)
 
         assert result["rejected"] is True
-        assert "命令链" in result["reject_reason"]
+        assert "子命令不通过" in result["reject_reason"], (
+            f"&& 已允许，但 rm 子命令应被拦截，实际: {result['reject_reason']}"
+        )
         mock_subprocess.assert_not_called()
+
+    @patch("subprocess.run")
+    @patch("agent_go.executor._log_rejected_command")
+    def test_command_chain_safe_allowed(self, mock_log_rejected, mock_subprocess,
+                                        tmp_path, fast_logger):
+        """安全的 && 命令链（两个安全子命令）应被允许"""
+        mock_subprocess.return_value = make_subprocess_mock(returncode=0, stdout="ok")
+
+        result = _run_verification_cmd("pytest -q && python -m pytest tests/ -v",
+                                       tmp_path, 1, {}, fast_logger)
+
+        assert "rejected" not in result, (
+            f"安全 && 链不应被拒绝，实际: {result.get('reject_reason')}"
+        )
+        assert result["exit_code"] == 0
 
     @patch("subprocess.run")
     def test_cd_prefix_stripped(self, mock_subprocess, tmp_path, fast_logger):
@@ -1034,16 +1053,16 @@ class TestRunVerificationCmd:
         assert "超时" in warning_msgs
 
     @patch("subprocess.run")
-    def test_output_tail_truncated_to_1500(self, mock_subprocess, tmp_path, fast_logger):
-        """stdout/stderr 尾部应只保留最后 1500 字符（供修复 prompt 注入）"""
+    def test_output_tail_truncated_to_3000(self, mock_subprocess, tmp_path, fast_logger):
+        """stdout/stderr 尾部应只保留最后 3000 字符（供修复 prompt 注入完整 traceback）"""
         mock_subprocess.return_value = make_subprocess_mock(
-            returncode=1, stdout="x" * 2000, stderr="y" * 1600)
+            returncode=1, stdout="x" * 4000, stderr="y" * 3600)
 
         result = _run_verification_cmd("pytest -q", tmp_path, 2, {}, fast_logger)
 
         assert result["exit_code"] == 1
-        assert result["stdout_tail"] == "x" * 1500
-        assert result["stderr_tail"] == "y" * 1500
+        assert result["stdout_tail"] == "x" * 3000
+        assert result["stderr_tail"] == "y" * 3000
         assert result["attempt"] == 2
 
 
@@ -1393,3 +1412,224 @@ class TestVerificationLoopE2E:
 
         assert result["verify_ok"] is True
         mock_eval.assert_not_called()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 修复 prompt 内容验证
+# ═══════════════════════════════════════════════════════════════
+
+class TestRepairPromptContent:
+    """验证修复 prompt 包含完整的失败上下文。
+
+    覆盖：
+      1. 失败命令、exit_code、输出内容
+      2. git diff 注入了修复 prompt
+      3. 语义评估反馈注入
+    """
+
+    @staticmethod
+    def _always_fail_git_mock():
+        """subprocess.run side_effect：git 命令成功，验证命令始终失败。"""
+        def _run(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout=" M main.py\n", stderr="")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="1 file changed, 10 insertions(+)", stderr="")
+            if any(g in cmd_str for g in ["git add", "git commit", "git tag"]):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "pytest" in cmd_str:
+                return MagicMock(returncode=1, stdout="", stderr="FAIL: 3 tests failed")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return _run
+
+    def _make_subtask(self):
+        return {
+            "id": "sub-1", "title": "基础任务", "description": "执行操作",
+            "verification": "pytest tests/",
+            "risks": [], "depends_on": [], "skills": [], "agent_type": "developer",
+            "agent_prompt": "请修改 main.py 实现登录功能",
+        }
+
+    def test_fix_prompt_contains_failed_commands(self, temp_repo, task_dir, logger):
+        """修复 prompt 应包含失败命令、exit_code、标准输出"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        captured_prompts = []
+
+        def capturing_fix(prompt, *a, **kw):
+            captured_prompts.append(prompt)
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=self._always_fail_git_mock()), \
+             patch("agent_go.executor._run_headless", side_effect=capturing_fix):
+
+            result = _verify_changes(
+                "task-1", "sub-1", self._make_subtask(), temp_repo, headless=True,
+                task_md="# Task\n请修改 main.py", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 2}},
+            )
+
+        assert result["verify_ok"] is False  # 始终失败
+        assert result["retry_count"] == 2, "应修复 2 次"
+        assert len(captured_prompts) == 2, "应产生 2 个修复 prompt"
+
+        # 验证第一个修复 prompt 的内容
+        p1 = captured_prompts[0]
+        assert "pytest" in p1, "应包含失败命令"
+        assert "exit_code=1" in p1 or "FAIL" in p1, "应包含退出码或失败输出"
+        assert "修复指令" in p1, "应包含修复指令段"
+        assert "修改 main.py" in p1, "应包含原始 TASK.md 内容"
+
+        # 验证第二次修复 prompt 包含历史记录
+        p2 = captured_prompts[1]
+        assert "历史修复尝试" in p2, "第二次修复应包含历史记录"
+        assert "第 1 次" in p2 or "attempt" in p2.lower(), "应引用前次尝试"
+
+    def test_fix_prompt_contains_git_diff(self, temp_repo, task_dir, logger):
+        """修复 prompt 应包含当前变更摘要（git diff --stat）"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        captured_prompts = []
+
+        def capturing_fix(prompt, *a, **kw):
+            captured_prompts.append(prompt)
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=self._always_fail_git_mock()), \
+             patch("agent_go.executor._run_headless", side_effect=capturing_fix):
+
+            _verify_changes(
+                "task-1", "sub-1", self._make_subtask(), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 1}},
+            )
+
+        assert len(captured_prompts) >= 1
+        p = captured_prompts[0]
+        # git diff --stat 在 _verify_changes 中以 summary 形式传递
+        assert "file changed" in p or "insertions" in p, "应包含 git diff 变更摘要"
+
+    def test_semantic_feedback_in_fix_prompt(self, temp_repo, task_dir, logger):
+        """语义评估失败 → 反馈注入修复 prompt"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        captured_prompts = []
+
+        def capturing_fix(prompt, *a, **kw):
+            captured_prompts.append(prompt)
+            return MagicMock(returncode=0)
+
+        # 注意：语义评估仅在 shell 全部通过后触发（否则不会进入 Phase 3）
+        # 因此需要 shell 通过 → 语义评估失败 → 触发修复
+        # 修复后 shell 再次通过 → 语义评估再次执行（本次通过）
+        make_git = TestVerificationLoopE2E._git_mock
+
+        with patch("subprocess.run", side_effect=make_git(verify_success_on_attempt=1)), \
+             patch("agent_go.executor._run_headless", side_effect=capturing_fix), \
+             patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
+            # 首次语义评估失败，二次通过
+            mock_eval.side_effect = [
+                {"passed": False, "reason": "代码风格不统一，缺少类型注解",
+                 "cost_usd": 0.001, "latency_ms": 50},
+                {"passed": True, "reason": "修复后符合规范",
+                 "cost_usd": 0.001, "latency_ms": 50},
+            ]
+
+            result = _verify_changes(
+                "task-1", "sub-1", self._make_subtask(), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": True}},
+            )
+
+        assert result["verify_ok"] is True, "修复后应通过"
+        # 验证修复 prompt 包含语义评估的 reason
+        if captured_prompts:
+            assert "缺少类型注解" in captured_prompts[0], \
+                "语义评估的 reason 应注入修复 prompt"
+            assert "LLM 语义评估反馈" in captured_prompts[0]
+
+
+# ═══════════════════════════════════════════════════════════════
+# L1 自动触发语义评估
+# ═══════════════════════════════════════════════════════════════
+
+class TestL1AutoTrigger:
+    """L1: heuristic/manual 验证时自动启用语义评估（即使配置为关闭）。"""
+
+    def _subtask_with_verification(self, verification: str) -> dict:
+        return {
+            "id": "sub-1", "title": "任务",
+            "description": "desc", "agent_prompt": "work",
+            "verification": verification,
+            "risks": [], "depends_on": [], "skills": [],
+            "agent_type": "developer",
+        }
+
+    def _run_verify(self, subtask, temp_repo, task_dir, logger, extra_config=None):
+        """运行 _verify_changes 并捕获是否调用了语义评估。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        config = {"evaluator": {"enabled": False}}  # 默认关闭
+        if extra_config:
+            config.update(extra_config)
+
+        with patch("subprocess.run", side_effect=self._git_mock_all_pass()), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
+            mock_fix.return_value = MagicMock(returncode=0)
+            mock_eval.return_value = {"passed": True, "confidence": 0.9,
+                                       "reason": "ok", "cost_usd": 0, "latency_ms": 0}
+
+            result = _verify_changes(
+                "task-1", "sub-1", subtask, temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir, config=config,
+            )
+        return result, mock_eval.called
+
+    @staticmethod
+    def _git_mock_all_pass():
+        """所有 git 命令成功 + 验证命令通过。"""
+        def _run(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout=" M main.py\n", stderr="")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="1 file changed")
+            if any(g in cmd_str for g in ["git add", "git commit", "git tag"]):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return _run
+
+    def test_l1_triggers_for_heuristic(self, temp_repo, task_dir, logger):
+        """heuristic 验证（npm run lint）→ L1 自动开启语义评估"""
+        subtask = self._subtask_with_verification("npm run lint")
+        result, eval_called = self._run_verify(subtask, temp_repo, task_dir, logger)
+        assert eval_called is True, "heuristic 验证应触发语义评估"
+
+    def test_l1_does_not_trigger_for_deterministic(self, temp_repo, task_dir, logger):
+        """deterministic（pytest）→ L1 不触发（已有配置控制）"""
+        subtask = self._subtask_with_verification("pytest tests/")
+        result, eval_called = self._run_verify(subtask, temp_repo, task_dir, logger)
+        assert eval_called is False, "deterministic 验证不应触发语义评估"
+
+    def test_l1_respects_existing_config(self, temp_repo, task_dir, logger):
+        """如果 evaluator.enabled=True，L1 不重复触发（但评估仍运行）"""
+        subtask = self._subtask_with_verification("pytest tests/")
+        result, eval_called = self._run_verify(subtask, temp_repo, task_dir, logger,
+                                                extra_config={"evaluator": {"enabled": True}})
+        # evaluator 在 config 中已开启，评估会运行（但不是由于 L1）
+        # 我们验证的是 L1 不干扰正常配置路径
+        assert eval_called is True  # 因为 config 开启了，所以评估运行

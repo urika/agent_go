@@ -186,6 +186,8 @@ def _build_parser():
                              help="每任务重复次数（bench 子命令，默认 3）")
     eval_parser.add_argument("--output", dest="output", default="eval_suite/results.jsonl",
                              help="结果输出文件（bench 子命令）")
+    eval_parser.add_argument("--no-skills", dest="no_skills", action="store_true",
+                             help="禁用 skill 自动发现（bench 子命令，用于 skill on/off 对比）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
                              help="读取结果文件（models 子命令）")
     # judge 子命令参数
@@ -310,7 +312,7 @@ def cmd_run(args=None):
             sys.exit(1)
         console.print("✓ git 初始化完成（本地，无 remote）")
 
-    config = load_config()
+    config = load_config(config_path=getattr(args, "config", None))
     config["_parallel"] = parallel  # M4: 时间预估用
     if max_retries is not None:
         config.setdefault("verification", {})["max_retries"] = max_retries
@@ -422,7 +424,7 @@ def cmd_run(args=None):
             console.print(f"\n⚠️ 降级到本地规则拆解...")
             subtasks = decompose_fallback(task, repo, config, logger)
             doc_paths = []
-            confirmed_plan = None  # 跳过下方 subtasks 赋值
+            confirmed_plan = None
         else:
             while confirmed_plan is None and iteration < max_iter:
                 iteration += 1
@@ -457,15 +459,19 @@ def cmd_run(args=None):
         if confirmed_plan is not None:
             # 正常 Plan 路径：拆解子任务并保存 PLAN.md
             # （降级路径已在上方得到 subtasks，confirmed_plan 为 None，跳过本块）
-            subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)
+            subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo,
+                                        default_skills=[s.name for s in skills] if skills else None)
             doc_paths = final_doc_paths
             (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
             _save_plan_snapshot(task_dir, confirmed_plan, iteration)
             logger.info(f"[PLAN] PLAN.md 已保存 (v{iteration})")
-    else:
-        # 降级拆解
-        console.print(f"\n⚠️ Plan Mode 失败: {last_error}")
-        subtasks = decompose_fallback(task, repo, config, logger)
+        elif 'subtasks' in locals() and subtasks is not None:
+            # 降级路径中已通过 decompose_fallback 生成 subtasks，无需重复调用
+            pass
+        else:
+            # 降级拆解
+            console.print(f"\n⚠️ Plan Mode 失败: {last_error}")
+            subtasks = decompose_fallback(task, repo, config, logger)
 
     # 子任务确认
     confirmed = confirm_subtasks(subtasks, config, logger)
@@ -501,11 +507,6 @@ def cmd_run(args=None):
         import threading as _th, signal as _sig
         from .tui import cmd_status_tui
         _interrupted = _th.Event()
-
-        def _tui_sigint(signum, frame):
-            _interrupted.set()
-        _prev_int = _sig.signal(_sig.SIGINT, _tui_sigint)
-        _prev_term = _sig.signal(_sig.SIGTERM, _tui_sigint)
 
         _pipeline_t = _th.Thread(
             target=_run_pipeline,
@@ -1447,23 +1448,24 @@ def cmd_pr(args=None):
             pr_file = tf.name
         title = meta.get("task", "agent_go task")[:72]
         base = meta.get("base_branch", "main")
-        if not shutil.which("gh"):
-            console.error("未安装 gh CLI。请先安装: brew install gh")
-            (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
-            console.print(f"PR 描述已备份到 {task_dir}/PR.md")
+        try:
+            if not shutil.which("gh"):
+                console.error("未安装 gh CLI。请先安装: brew install gh")
+                (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
+                console.print(f"PR 描述已备份到 {task_dir}/PR.md")
+                return
+            result = subprocess.run([
+                "gh", "pr", "create", "--title", f"{title}",
+                "--body-file", pr_file, "--base", base,
+            ], capture_output=True, text=True)
+            if result.returncode == 0:
+                console.print(result.stdout.strip())
+            else:
+                console.error(f"gh pr create 失败: {result.stderr.strip()}")
+                (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
+                console.print(f"PR 描述已备份到 {task_dir}/PR.md")
+        finally:
             os.unlink(pr_file)
-            return
-        result = subprocess.run([
-            "gh", "pr", "create", "--title", f"{title}",
-            "--body-file", pr_file, "--base", base,
-        ], capture_output=True, text=True)
-        if result.returncode == 0:
-            console.print(result.stdout.strip())
-        else:
-            console.error(f"gh pr create 失败: {result.stderr.strip()}")
-            (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
-            console.print(f"PR 描述已备份到 {task_dir}/PR.md")
-        os.unlink(pr_file)
 
 def cmd_status(args=None):
     """实时监控所有任务状态。默认 TUI 模式。--no-tui 回退文本模式。"""
@@ -1584,7 +1586,7 @@ def _cmd_status_text(args=None):
         rows = [r for r in rows if r is not None]
 
         if watch:
-            os.system("clear" if os.name == "posix" else "cls")
+            subprocess.run(["clear" if os.name == "posix" else "cls"], capture_output=True)
 
         console.print(f"{'任务ID':<24} {'状态':<6} {'进度':<8} {'耗时':<8} {'Issue':<6} {'当前子任务'}")
         console.sep("─", 110)

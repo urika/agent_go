@@ -459,9 +459,11 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 empty_count = 0
             console.force("无效输入")
 
-def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optional[Path] = None) -> list[dict[str, Any]]:
+def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optional[Path] = None,
+                     default_skills: Optional[list[str]] = None) -> list[dict[str, Any]]:
     """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。
-    同时应用角色-Skill 映射规则进行兜底匹配。"""
+    同时应用角色-Skill 映射规则进行兜底匹配。
+    default_skills: 任务级自动发现的 skill 名列表，用于回填无 skill 的 subtask。"""
     subtasks = []
     shared = plan.get("shared_resources", {})
     deps = plan.get("dependencies", {})
@@ -501,6 +503,14 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
         role_map = load_role_skill_map(repo)
         installed = list_skills(repo)
         rule_result = apply_rules(step, role_map, installed)
+        subtask_id = f"sub-{step['id']}"
+
+        # 回填任务级自动发现的 skill：subtask 无 skill 时补上 default_skills
+        _merged_skills = list(rule_result["skills"])
+        if default_skills and not _merged_skills:
+            _merged_skills = [s for s in default_skills if s in {s["name"] for s in installed}]
+            if _merged_skills:
+                logger.info(f"[skill_backfill] {subtask_id}: 无 skill，回填默认 {_merged_skills}")
 
         # 自动检测缓存相关步骤，追加测试隔离提示
         _risks = list(step.get("risks", []))
@@ -510,14 +520,12 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
             if _cache_note not in _risks:
                 _risks.append(_cache_note)
 
-        subtask_id = f"sub-{step['id']}"
-
         # S4 复杂度双通道：LLM 标注的 difficulty 透传到执行阶段（非法值归一为 medium）
         _step_difficulty = step.get("difficulty", "medium")
         if _step_difficulty not in ("easy", "medium", "hard"):
             _step_difficulty = "medium"
         # 自动提升：orm-optimizer skill + 多文件 → 复杂度至少 medium
-        if _step_difficulty == "easy" and "orm-optimizer" in rule_result["skills"] and len(files) >= 2:
+        if _step_difficulty == "easy" and "orm-optimizer" in _merged_skills and len(files) >= 2:
             _step_difficulty = "medium"
             logger.info(f"[difficulty_bump] {subtask_id}: orm-optimizer + {len(files)} files → easy→medium")
 
@@ -530,7 +538,7 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
             "verification": step.get("verification", ""),
             "risks": _risks,
             "depends_on": depends_on,
-            "skills": rule_result["skills"],
+            "skills": _merged_skills,
             "agent_type": rule_result["agent_type"],
             "difficulty": _step_difficulty,
             "_agent_type_source": "llm" if step.get("agent_type") else ("rule" if rule_result.get("matched_rules") else "default"),

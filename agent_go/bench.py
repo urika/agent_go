@@ -10,6 +10,7 @@ CLI:
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ except ImportError:
 from .console import _LazyConsole
 from .config import AGENT_GO_DIR, CONFIG_PATH
 from .eval import _read_jsonl, _read_json
+from .assessment import load_all as load_all_assessments, compute_false_positive_rate
 from .pricing import MODEL_PRICES
 
 __all__ = ["cmd_bench", "analyze_model_productivity"]
@@ -43,37 +45,57 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
     4. 仍未退出 → SIGKILL（实在不行）
     """
     import time as _time
+    import threading as _threading
     deadline = _time.time() + hard_timeout
-    poll_interval = min(5, hard_timeout // 20)  # 至少每 5s 查一次
+    poll_interval = min(5, hard_timeout // 20)
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    reader_threads: list[_threading.Thread] = []
+
+    if proc.stdout:
+        def _read_out():
+            for line in iter(proc.stdout.readline, ""):
+                stdout_lines.append(line)
+        t = _threading.Thread(target=_read_out, daemon=True)
+        t.start()
+        reader_threads.append(t)
+    if proc.stderr:
+        def _read_err():
+            for line in iter(proc.stderr.readline, ""):
+                stderr_lines.append(line)
+        t = _threading.Thread(target=_read_err, daemon=True)
+        t.start()
+        reader_threads.append(t)
+
     while True:
         remaining = deadline - _time.time()
         if proc.poll() is not None:
-            break  # 已退出
+            break
         if remaining <= 0:
-            # 超硬超时：SIGTERM
             try:
                 proc.terminate()
             except ProcessLookupError:
                 pass
             break
         if remaining <= grace_sec and not getattr(proc, "_terminated", False):
-            # 剩余 grace 秒：发 SIGTERM
             try:
                 proc.terminate()
                 proc._terminated = True
             except ProcessLookupError:
                 pass
         _time.sleep(min(poll_interval, remaining))
-    # 等 SIGTERM 后的 grace
     try:
-        stdout, stderr = proc.communicate(timeout=grace_sec)
+        proc.wait(timeout=grace_sec)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
         except ProcessLookupError:
             pass
-        stdout, stderr = proc.communicate()
-    return type("R", (), {"stdout": stdout, "stderr": stderr})()
+        proc.wait()
+    for t in reader_threads:
+        t.join(timeout=5)
+    return type("R", (), {"stdout": "".join(stdout_lines), "stderr": "".join(stderr_lines)})()
 
 # 默认 agent_go 入口：用脚本绝对路径（不依赖 pip 安装或 PYTHONPATH，
 # 避免子进程 cwd 在 fixture repo 内时找不到 agent_go 包）
@@ -123,6 +145,7 @@ def cmd_bench(args=None) -> None:
     results: list[dict] = []
     total = len(task_files) * len(models) * repeat
     current = 0
+    no_skills = bool(getattr(args, "no_skills", False))
 
     for tf in task_files:
         task = yaml.safe_load(tf.read_text(encoding="utf-8"))
@@ -135,7 +158,7 @@ def cmd_bench(args=None) -> None:
             for r in range(repeat):
                 current += 1
                 console.print(f"\n[{current}/{total}] {task_id} | {model} | repeat={r+1}")
-                result_entry = _run_one_task(task, repo, model, task_id)
+                result_entry = _run_one_task(task, repo, model, task_id, no_skills=no_skills)
                 result_entry["model"] = model
                 result_entry["repeat"] = r + 1
                 results.append(result_entry)
@@ -149,7 +172,7 @@ def cmd_bench(args=None) -> None:
 
 
 def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
-                  preserve: bool = False) -> list[dict]:
+                  preserve: bool = False, no_skills: bool = False) -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
 
     preserve=True 时传 --preserve-worktrees 给 agent_go run，保留 worktree 供交叉评判读 diff。
@@ -184,7 +207,16 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             "plan_api": plan_api,
             "worker_models": {"easy": model, "medium": model, "hard": model},
             "behavior": {"auto_confirm_plan": True, "auto_confirm_subtasks": True},
+            "evaluator": {"enabled": True},
         }
+        # 继承用户的 skills / agent_loop 配置（skill 自动发现等），否则 bench 默认关闭
+        for _k in ("skills", "agent_loop", "verification"):
+            if user_config.get(_k):
+                config[_k] = dict(user_config[_k])
+        # --no-skills 时强制关闭 skill 自动发现（用于 skill on/off 对比）
+        if no_skills:
+            config.setdefault("skills", {})["auto_discover"] = False
+            config.setdefault("skills", {})["max_auto_skills"] = 0
         json.dump(config, tf)
         tmp_config = tf.name
 
@@ -226,29 +258,44 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     elapsed = round(time.time() - start, 2)
 
     # 3. 读产物（数据契约：metering.jsonl + meta.json）
-    #    精确匹配 subprocess 创建的任务目录，避免并发竞态
-    _after_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
-    _new_dirs = _after_dirs - _before_dirs
-    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs)
+    #    精确匹配 subprocess 创建的任务目录：优先从子进程输出解析 task ID，
+    #    避免并发竞态（目录差分在并发任务下会匹配错目录）。
+    _resolved_td = None
+    if result.stdout or result.stderr:
+        _combined = (result.stdout or "") + "\n" + (result.stderr or "")
+        _m = re.search(r"agent_go\.(task-\d{8}-\d{6}-\d{3}-[0-9a-f]{4})", _combined)
+        if _m:
+            _candidate = AGENT_GO_DIR / _m.group(1)
+            if _candidate.exists():
+                _resolved_td = _candidate
+    _new_dirs = set()
+    if _resolved_td is None:
+        _after_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
+        _new_dirs = _after_dirs - _before_dirs
+    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td)
 
 
 def _collect_result(task_id: str, model: str, elapsed: float,
                     exit_code: int, stderr: str,
-                    new_dirs: "Optional[set[Path]]" = None) -> dict:
+                    new_dirs: "Optional[set[Path]]" = None,
+                    exact_td: "Optional[Path]" = None) -> dict:
     """从 agent_go 任务目录读 metering + meta，聚合为一条结果。
 
-    new_dirs: 精确的任务目录集合（通过 subprocess 前后快照差分得到，避免并发竞态）。
-    若未提供则回退到按名称排序取最新（兼容旧调用路径）。
+    exact_td: 精确任务目录（从子进程输出解析，优先）。
+    new_dirs: 目录差分结果（回退方案，仅当 exact_td 为 None 时使用）。
+    若两者都不可用则回退到按名称排序取最新（兼容旧调用路径）。
     """
-    if new_dirs and len(new_dirs) == 1:
-        td = new_dirs.pop()
-    elif new_dirs and len(new_dirs) > 1:
-        # 罕见：一次 subprocess 创建了多个目录（如 resume），取最新的
-        td = sorted(new_dirs, reverse=True)[0]
-    else:
-        # 回退：按名称排序取最新
-        task_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
-        td = task_dirs[0] if task_dirs else None
+    td = exact_td
+    if td is None:
+        if new_dirs and len(new_dirs) == 1:
+            td = new_dirs.pop()
+        elif new_dirs and len(new_dirs) > 1:
+            # 罕见：一次 subprocess 创建了多个目录（如 resume），取最新的
+            td = sorted(new_dirs, reverse=True)[0]
+        else:
+            # 回退：按名称排序取最新
+            task_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
+            td = task_dirs[0] if task_dirs else None
 
     metering = _read_jsonl(td / "metering.jsonl") if td else []
     meta = _read_json(td / "meta.json") if td else {}
@@ -320,11 +367,14 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         # 决策规则
         recommendation, roles, reason = _recommend(model, avg_pass_rate, avg_cost, n)
 
+        efficiency_score = _model_efficiency_score(avg_pass_rate, avg_cost)
+        cost_per_pass = _model_cost_per_pass(avg_cost, avg_pass_rate)
         models[model] = {
             "sample_size": n,
             "avg_pass_rate": avg_pass_rate,
             "avg_cost_usd": avg_cost,
-            "dollar_per_pass": round(avg_cost / max(avg_pass_rate, 0.01), 6),
+            "dollar_per_pass": cost_per_pass,
+            "efficiency_score": efficiency_score,
             "completed_subtasks": completed_total,
             "total_subtasks": subtask_total,
             "recommendation": recommendation,
@@ -332,8 +382,55 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
             "reason": reason,
         }
 
+        # 从 agent_go 任务目录读取评估事件计算假阳性率
+        fp_data = _compute_fp_for_model(model, AGENT_GO_DIR)
+        if fp_data:
+            models[model]["false_positive_rate"] = fp_data["fp_rate"]
+            models[model]["avg_confidence"] = fp_data["avg_confidence"]
+
     return {"models": models, "total_runs": len(results)}
 
+
+def _compute_fp_for_model(model: str, base_dir: Path) -> Optional[dict]:
+    """扫描 AGENT_GO_DIR 下该模型相关的评估事件，计算假阳性率。
+
+    注意：bench 当前设计下评估数据在 run 级别 task_dir 中，模型信息
+    可从 metering.jsonl 的 evaluator 事件中匹配 actual_model。
+    若数据不足则返回 None。
+    """
+    try:
+        events = load_all_assessments(base_dir)
+    except Exception:
+        return None
+    if not events:
+        return None
+    matched = [e for e in events if model in e.evaluator_model]
+    if not matched:
+        return None
+    fp = compute_false_positive_rate(matched)
+    if fp["total_evaluated"] == 0:
+        return None
+    return {"fp_rate": fp["false_positive_rate"], "avg_confidence": fp["avg_confidence"]}
+
+
+def _model_efficiency_score(pass_rate: float, avg_cost: float) -> float:
+    """量化模型效率：每美元获得的通过率（越高越经济）。
+
+    公式: efficiency = pass_rate / avg_cost
+    含义: 每花 1 美元能获得多少通过率（0-100% 归一化）
+    示例: pass_rate=80%, cost=$0.50 → efficiency=1.6 passes/dollar
+           pass_rate=50%, cost=$0.20 → efficiency=2.5 passes/dollar (更经济)
+    """
+    if avg_cost <= 0 or pass_rate <= 0:
+        return 0.0
+    return round(pass_rate / avg_cost, 4)
+
+
+def _model_cost_per_pass(avg_cost: float, avg_pass_rate: float) -> Optional[float]:
+    """每个通过子任务的平均成本（越低越经济）。"""
+    if avg_pass_rate <= 0 or avg_cost <= 0:
+        return None
+    return round(avg_cost / avg_pass_rate, 6)
 
 def _recommend(model: str, pass_rate: float, avg_cost: float, n: int) -> tuple[str, list[str], str]:
     """决策规则（PRD §3.7 对齐：60/70/75/80 四档阈值）"""
@@ -364,15 +461,20 @@ def cmd_models(args=None) -> None:
         return
 
     console.print(f"\n📊 模型生产力评估（{data['total_runs']} 次执行）")
-    console.print("─" * 80)
-    console.print(f"{'模型':<25} {'样本':>4} {'通过率':>7} {'$/pass':>10} {'建议':<18} {'原因'}")
-    console.print("─" * 80)
+    console.print("─" * 100)
+    console.print(f"{'模型':<22} {'样本':>4} {'通过率':>7} {'$/pass':>9} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
+    console.print("─" * 100)
 
     for model, m in data["models"].items():
         icon = {"recommended": "★", "conditional": "⚠", "discouraged": "✗", "insufficient_data": "?"}[m["recommendation"]]
-        console.print(f"{icon} {model:<23} {m['sample_size']:>4} {m['avg_pass_rate']:>6.0%} "
-                      f"${m['dollar_per_pass']:>9.4f} {m['recommendation']:<18} {m['reason']}")
-    console.print("─" * 80)
+        fp_str = f"{m.get('false_positive_rate', '?'):>3}%" if isinstance(m.get('false_positive_rate'), (int, float)) else "   ?"
+        eff = m.get("efficiency_score", 0)
+        eff_str = f"{eff:>7.1f}" if eff > 0 else "     -"
+        console.print(f"{icon} {model:<20} {m['sample_size']:>4} {m['avg_pass_rate']:>6.0%} "
+                      f"${(m['dollar_per_pass'] or 0):>8.4f} {eff_str} {fp_str:>7} "
+                      f"{m['recommendation']:<12} {m['reason']}")
+    console.print("─" * 100)
+    console.print("效率 = passes/dollar (每美元获得的通过率，越高越经济)")
 
 
 # ═══════════════════════════════════════════════════════════════

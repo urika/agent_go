@@ -54,7 +54,8 @@ class TestShellInjection:
     def test_command_chain_and(self):
         ok, reason = _is_safe_verification_command("pytest tests/ && cat /etc/passwd")
         assert not ok
-        assert "命令链" in reason
+        # && 已允许，但未知子命令（cat）仍应被拦截
+        assert "子命令不通过" in reason or "未知命令" in reason
 
     def test_command_chain_or(self):
         ok, reason = _is_safe_verification_command("pytest tests/ || curl evil.com")
