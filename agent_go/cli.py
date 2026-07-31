@@ -459,8 +459,10 @@ def cmd_run(args=None):
         if confirmed_plan is not None:
             # 正常 Plan 路径：拆解子任务并保存 PLAN.md
             # （降级路径已在上方得到 subtasks，confirmed_plan 为 None，跳过本块）
-            subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo,
-                                        default_skills=[s.name for s in skills] if skills else None)
+            subtasks = plan_to_subtasks(
+                confirmed_plan, logger, repo=repo,
+                default_skills=[s.name for s in skills] if skills else None,
+                disable_rule_skills=not config.get("skills", {}).get("auto_discover", False))
             doc_paths = final_doc_paths
             (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
             _save_plan_snapshot(task_dir, confirmed_plan, iteration)

@@ -460,10 +460,13 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
             console.force("无效输入")
 
 def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optional[Path] = None,
-                     default_skills: Optional[list[str]] = None) -> list[dict[str, Any]]:
+                     default_skills: Optional[list[str]] = None,
+                     disable_rule_skills: bool = False) -> list[dict[str, Any]]:
     """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。
     同时应用角色-Skill 映射规则进行兜底匹配。
-    default_skills: 任务级自动发现的 skill 名列表，用于回填无 skill 的 subtask。"""
+    default_skills: 任务级自动发现的 skill 名列表，用于回填无 skill 的 subtask。
+    disable_rule_skills: True 时完全禁用 role_skill_map + default_skills 的 skill 注入
+                         （仅保留 LLM 显式声明的 skills），用于获取纯净基线。"""
     subtasks = []
     shared = plan.get("shared_resources", {})
     deps = plan.get("dependencies", {})
@@ -505,12 +508,16 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
         rule_result = apply_rules(step, role_map, installed)
         subtask_id = f"sub-{step['id']}"
 
-        # 回填任务级自动发现的 skill：subtask 无 skill 时补上 default_skills
-        _merged_skills = list(rule_result["skills"])
-        if default_skills and not _merged_skills:
-            _merged_skills = [s for s in default_skills if s in {s["name"] for s in installed}]
-            if _merged_skills:
-                logger.info(f"[skill_backfill] {subtask_id}: 无 skill，回填默认 {_merged_skills}")
+        if disable_rule_skills:
+            # 纯净基线：仅保留 LLM 显式声明的 skills，禁用所有兜底注入
+            _merged_skills = list(step.get("skills", []))
+        else:
+            # 回填任务级自动发现的 skill：subtask 无 skill 时补上 default_skills
+            _merged_skills = list(rule_result["skills"])
+            if default_skills and not _merged_skills:
+                _merged_skills = [s for s in default_skills if s in {s["name"] for s in installed}]
+                if _merged_skills:
+                    logger.info(f"[skill_backfill] {subtask_id}: 无 skill，回填默认 {_merged_skills}")
 
         # 自动检测缓存相关步骤，追加测试隔离提示
         _risks = list(step.get("risks", []))
