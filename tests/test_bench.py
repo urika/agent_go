@@ -270,3 +270,101 @@ def test_analyze_model_productivity_k8_empty_denominator(tmp_path):
                             "completed": 0, "total_subtasks": 2}) + "\n")
     data = analyze_model_productivity(rp)
     assert data["models"]["m1"]["k8_zero_retry_pass_rate"] is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# S10-P2 P1 字段（per_subtask / binary_pass / semantic_pass / plan_step_count）
+
+
+def _write_meta_with_semantic(td: Path, task: str, results: list) -> None:
+    """写 meta.json（含 verification_results 的 semantic 评估 + subtasks 列表）。"""
+    td.mkdir(parents=True, exist_ok=True)
+    (td / "meta.json").write_text(json.dumps({
+        "task": task, "status": "completed",
+        "results": results,
+        "subtasks": [{"id": f"sub-{i}", "title": f"t{i}"} for i in range(1, len(results) + 1)],
+    }), encoding="utf-8")
+    (td / "metering.jsonl").write_text("", encoding="utf-8")
+
+
+def test_collect_result_semantic_pass_true(tmp_path):
+    """全部子任务语义评估通过 → semantic_pass=True。"""
+    td = tmp_path / "task-sem-ok"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True,
+         "verification_results": [{"type": "semantic", "passed": True}]},
+        {"id": "sub-2", "status": "completed", "verify_ok": True,
+         "verification_results": [{"type": "semantic", "passed": True}]},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["semantic_pass"] is True
+    assert r["binary_pass"] is True
+
+
+def test_collect_result_semantic_pass_false(tmp_path):
+    """任一子任务语义评估失败 → semantic_pass=False，binary_pass=False。"""
+    td = tmp_path / "task-sem-fail"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True,
+         "verification_results": [{"type": "semantic", "passed": True}]},
+        {"id": "sub-2", "status": "completed", "verify_ok": True,
+         "verification_results": [{"type": "semantic", "passed": False, "reason": "语义不符"}]},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["semantic_pass"] is False
+    assert r["binary_pass"] is False  # 语义失败 → 即使 verify_ok 也非 binary pass
+
+
+def test_collect_result_semantic_disabled_none(tmp_path):
+    """未启用语义评估（无 semantic 结果）→ semantic_pass=None，binary_pass 退化为 verify_ok。"""
+    td = tmp_path / "task-sem-none"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True,
+         "verification_results": [{"type": "shell", "exit_code": 0}]},
+        {"id": "sub-2", "status": "completed", "verify_ok": True,
+         "verification_results": [{"type": "shell", "exit_code": 0}]},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["semantic_pass"] is None
+    assert r["binary_pass"] is True  # 无语义时退化为 all_verify_ok
+
+
+def test_collect_result_per_subtask_structure(tmp_path):
+    """per_subtask 提取每个子任务的 sub_id/status/retries/verify_ok/semantic_ok。"""
+    td = tmp_path / "task-per-sub"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True, "retry_count": 2,
+         "verification_results": [{"type": "semantic", "passed": True}]},
+        {"id": "sub-2", "status": "failed", "verify_ok": False, "retry_count": 0,
+         "verification_results": []},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["per_subtask"][0] == {
+        "sub_id": "sub-1", "status": "completed", "retries": 2,
+        "verify_ok": True, "semantic_ok": True,
+    }
+    assert r["per_subtask"][1]["semantic_ok"] is None  # 无 semantic 结果
+
+
+def test_collect_result_plan_step_count(tmp_path):
+    """plan_step_count = subtasks 列表长度。"""
+    td = tmp_path / "task-plan-count"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True},
+        {"id": "sub-2", "status": "completed", "verify_ok": True},
+        {"id": "sub-3", "status": "completed", "verify_ok": True},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["plan_step_count"] == 3
+
+
+def test_collect_result_p1_fields_backward_compat(tmp_path):
+    """旧 meta（无 semantic/subtasks）→ 新字段不崩溃且为默认值。"""
+    td = tmp_path / "task-p1-compat"
+    _write_meta_metering(td, "Old task", [])  # 复用旧 helper，含 1 个无 verification_results 的 result
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Old task")
+    assert r["semantic_pass"] is None
+    assert r["binary_pass"] is True  # all_verify_ok 且无语义
+    assert r["per_subtask"] == [{"sub_id": "sub-1", "status": "completed",
+                                 "retries": 0, "verify_ok": True, "semantic_ok": None}]
+    assert r["plan_step_count"] == 0  # 旧 meta 无 subtasks
