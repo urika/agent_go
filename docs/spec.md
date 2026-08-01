@@ -366,7 +366,7 @@ cmd_status_tui()  → curses 多面板实时监控（agent_go status --watch）
 
 ## bench.py — 模型对照评估编排器 (585 行)
 
-> **状态**：S8 P0 已落地 + S10-P1 schema 扩展。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
+> **状态**：S8 P0 已落地 + S10-P1 schema 扩展 + S10-P2 P1 字段/代码质量/对照基线/动态 timeout。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
 
 ```
 cmd_bench(args)                            → 对照运行编排器
@@ -375,22 +375,46 @@ cmd_bench(args)                            → 对照运行编排器
   ── --repeat N                            每任务重复 N 次（默认 3）
   ── --output results.jsonl                JSONL 落盘
   ── --source-batch NAME                   批次标识（baseline / results_v2 / smoke-*）
-  ── 内部 subprocess 调 agent_go run（--yes --headless --preserve-worktrees）
+  ── 内部 subprocess 调 agent_go run（--yes --headless --preserve-worktrees --parallel 1）
+       --parallel 1：S10-P2 顺序执行，消除并发对 elapsed/cost 的干扰
+  ── 动态 timeout（S10-P2）：_dynamic_timeout = max(任务YAML配置, 子任务数×150s+120s)
+       _estimate_subtasks_from_history 从已有 results.jsonl 推断子任务数，避免多子任务被截断
   ── 读 AGENT_GO_DIR/task-*/meta.json + metering.jsonl
   ── record 字段（S10-P1 扩展）：
        timed_out     bool   任务是否因超时被强制终止（cooperative timeout SIGTERM/SIGKILL）
        judge_model   string semantic evaluator 模型（role=evaluator 的 actual_model）
        planner_model string plan 生成模型（role=planner 的 actual_model）
        source_batch  string 批次标识（跨批次追溯）
+  ── record 字段（S10-P2 P1 扩展）：
+       semantic_pass Optional[bool]  全部子任务语义评估显式通过（跳过/未启用→None）
+       binary_pass   bool    all_verify_ok AND semantic_pass is not False（二元通过，K1 口径）
+       per_subtask   json[]  每子任务 {sub_id,status,retries,verify_ok,semantic_ok}
+       plan_step_count int    Planner 分解步骤数（subtasks 长度）
+  ── record 字段（S10-P2 代码质量 §4.1）：
+       lint_errors   int    _collect_quality：各保留 worktree 的 ruff(E/F/W)+mypy 错误数之和
+       tests_broken  int    worktree pytest 失败用例数之和（基线全绿→失败=回归）
+
+cmd_baseline(args)                         → 对照基线编排器（S10-P2 §2.3）
+  ── claude -p 裸跑（不走 agent_go harness），临时副本中执行
+  ── stream-json 提取 total_cost_usd；任务 YAML verification 全绿→pass
+  ── 对临时副本跑 ruff/mypy/pytest → lint_errors / tests_broken
+  ── 默认输出 eval_suite/baseline.jsonl（--output 可覆盖）
+  ── 用于量化 harness 相对裸跑的 pass_rate / 耗时 / 成本 / 代码质量 ROI
 
 cmd_models(args)                           → 决策矩阵展示
   ── --results results.jsonl               读取 bench 产出
   ── 按模型聚合：pass_rate / dollar_per_pass / k8 / sample_size / recommendation
   ── $/pass 统一口径（§3.1）= sum(total_cost_usd) / sum(pass_rate)
   ── K8 修订（§3.4）= 通过 record 中 total_retries==0 占比
+  ── 代码质量（S10-P2）：avg_lint_errors / avg_tests_broken / code_regression_rate
+       （通过 record 中 tests_broken>0 占比，§3.5 代码回归率）
   ── 决策规则：pass_rate<60%→discouraged, >=85%→recommended, <3样本→insufficient
 
 analyze_model_productivity(path) → 与 cmd_models 同逻辑，返回 dict 供编程调用
+_collect_quality(task_dir)         → 聚合保留 worktree 的 {lint_errors, tests_broken}
+_lint_errors_for_worktree(wt)     → ruff E/F/W + mypy 对变更 .py 文件的错误数（工具缺失→0）
+_tests_broken_for_worktree(wt)    → pytest 失败用例数（工具缺失→0）
+_git_diff_files(wt)               → 变更 .py 文件列表（HEAD~1..HEAD）
 ```
 
 ## cross_judge.py — 交叉评判矩阵 (485 行)

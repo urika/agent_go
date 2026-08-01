@@ -78,6 +78,7 @@ agent_go status --watch
 # Model benchmark / cross-judgment / evaluation / gate
 agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3
 agent_go eval bench --source-batch results_v2        # 批次标识（跨批次追溯，S10-P1）
+agent_go eval baseline --candidate-models M1,M2      # 对照基线：claude -p 裸跑（不走 harness，S10-P2）
 agent_go eval models --results eval_suite/results.jsonl
 agent_go eval judge --results eval_suite/results.jsonl --judge-models M1,M2
 agent_go eval judge calibrate --llm-scores ... --human-scores ...
@@ -211,7 +212,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 ## Testing
 
 ```bash
-pytest tests/           # 1506 tests (~35s)
+pytest tests/           # 1554 tests (~62s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -268,7 +269,7 @@ for fut in as_completed(futures):
 
 ```
 	agent_go/           # 36 Python modules (~16,500 lines)
-	tests/              # 59 test files, 1506 tests
+	tests/              # 60 test files, 1554 tests
 eval_suite/         # Standard task suite for eval bench (22 tasks + 4 fixtures)
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records

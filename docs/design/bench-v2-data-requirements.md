@@ -8,7 +8,7 @@
 >
 > **日期**：2026-08-01
 >
-> **实施状态**：P0（§1.2 P0 四字段 + §三 $/pass 统一口径 + §3.4 K8 修订）✅ 已落地（2026-08-01，`bench.py` `_collect_result` + `analyze_model_productivity` + `eval bench --source-batch`）；cross_judge 自评偏差量化报告已落地（`cross_judge.py` `_print_self_bias_report`）。P1/P2 待实施。
+> **实施状态**：P0（§1.2 P0 四字段 + §三 $/pass 统一口径 + §3.4 K8 修订）✅ 已落地（2026-08-01，`bench.py` `_collect_result` + `analyze_model_productivity` + `eval bench --source-batch`）；cross_judge 自评偏差量化报告已落地（`cross_judge.py` `_print_self_bias_report`）。P1 schema（§1.2 P1 四字段 `per_subtask`/`binary_pass`/`semantic_pass`/`plan_step_count`）✅ 已落地（`751ec10`/`a72d4bf`）。代码质量维度（§4.1 `lint_errors`/`tests_broken` + 代码回归率）✅ 已落地（`_collect_quality`）。对照基线（§2.3 `eval baseline` claude -p 裸跑）✅ 已落地。全因子 198 次运行 + 对照基线运行待执行。
 
 ---
 

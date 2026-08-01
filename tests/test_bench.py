@@ -145,6 +145,76 @@ def test_collect_result_stale_aborted_not_counted_as_pass(tmp_path):
     assert result["pass_rate"] == 0.0
 
 
+def test_collect_result_stale_aborted_all_subtasks_done(tmp_path):
+    """被 SIGKILL 但全部计划子任务已完成+验证通过 → 视为完工（收尾阶段被杀）。
+
+    与 test_collect_result_stale_aborted_not_counted_as_pass 的区别：
+    此处 meta 含 subtasks 元数据，results 覆盖全部计划子任务且均 completed+verify_ok，
+    说明任务实际已跑完，仅收尾被中断 → 应计通过。
+    """
+    td = tmp_path / "task-done"
+    _write_full_meta(td, "Some integration task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "completed", "verify_ok": True},
+        {"subtask_id": "sub-2", "status": "completed", "verify_ok": True},
+    ])
+    # 补充 subtasks 元数据
+    meta_path = td / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["subtasks"] = [
+        {"id": "sub-1"}, {"id": "sub-2"},
+    ]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    result = _collect_result(
+        "integration-tests", "claude-haiku-4-5", 960.0, -9, "",
+        exact_td=td, expected_task="Some integration task",
+    )
+    assert result["subprocess_exit"] == -9
+    assert result["completed"] == 2
+    assert result["pass_rate"] == 1.0
+
+
+def test_collect_result_stale_aborted_partial_subtasks(tmp_path):
+    """被 SIGKILL 且部分子任务未完成（results 未覆盖全部计划）→ 计失败。"""
+    td = tmp_path / "task-partial"
+    _write_full_meta(td, "Some integration task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "completed", "verify_ok": True},
+    ])
+    meta_path = td / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["subtasks"] = [{"id": "sub-1"}, {"id": "sub-2"}]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    result = _collect_result(
+        "integration-tests", "claude-haiku-4-5", 960.0, -9, "",
+        exact_td=td, expected_task="Some integration task",
+    )
+    assert result["completed"] == 0
+    assert result["pass_rate"] == 0.0
+
+
+def test_collect_result_completed_status_with_nonzero_exit(tmp_path):
+    """meta.status=completed 但 exit_code 非零 → 仍计通过。
+
+    任务明确成功（meta.completed），exit_code 非零可能来自收尾命令
+    （cleanup/push）的退出码，不应把成功任务误判为失败。
+    """
+    td = tmp_path / "task-ok-exit1"
+    _write_full_meta(td, "Some integration task", "completed", [
+        {"subtask_id": "sub-1", "status": "completed", "verify_ok": True},
+        {"subtask_id": "sub-2", "status": "completed", "verify_ok": True},
+    ])
+    meta_path = td / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["subtasks"] = [{"id": "sub-1"}, {"id": "sub-2"}]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    result = _collect_result(
+        "integration-tests", "claude-haiku-4-5", 200.0, 1, "",
+        exact_td=td, expected_task="Some integration task",
+    )
+    assert result["subprocess_exit"] == 1
+    assert result["completed"] == 2
+    assert result["pass_rate"] == 1.0
+
+
 def test_collect_result_exit0_completed_counts_pass(tmp_path):
     """正常退出（exit=0, meta.status=completed）时通过率正常计算。"""
     td = tmp_path / "task-ok"
@@ -410,3 +480,213 @@ def test_collect_result_p1_fields_backward_compat(tmp_path):
     assert r["per_subtask"] == [{"sub_id": "sub-1", "status": "completed",
                                  "retries": 0, "verify_ok": True, "semantic_ok": None}]
     assert r["plan_step_count"] == 0  # 旧 meta 无 subtasks
+
+
+# ═══════════════════════════════════════════════════════════════
+# 动态 timeout
+# ═══════════════════════════════════════════════════════════════
+
+from agent_go.bench import _dynamic_timeout, _estimate_subtasks_from_history
+
+
+def _write_result(tmp_path, task_id, total_subtasks):
+    path = tmp_path / "results.jsonl"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"task_id": task_id, "total_subtasks": total_subtasks}) + "\n")
+    return path
+
+
+def test_estimate_subtasks_max(tmp_path):
+    """历史子任务数取最大值（多行时取最大，避免低估）。"""
+    p = _write_result(tmp_path, "task-x", 2)
+    _write_result(tmp_path, "task-x", 3)
+    assert _estimate_subtasks_from_history("task-x", p) == 3
+
+
+def test_estimate_subtasks_empty(tmp_path):
+    p = _write_result(tmp_path, "task-x", 3)
+    assert _estimate_subtasks_from_history("task-y", p) == 0
+
+
+def test_estimate_subtasks_missing_file(tmp_path):
+    assert _estimate_subtasks_from_history("task-x", tmp_path / "nope.jsonl") == 0
+
+
+def test_dynamic_timeout_expands_for_multi_subtask(tmp_path):
+    """多子任务任务自动扩展 timeout，不低于配置值。"""
+    p = _write_result(tmp_path, "task-x", 5)
+    # 5 子任务 → 5*150+120 = 870s > 配置 300s
+    assert _dynamic_timeout({"timeout": 300}, "task-x", p) == 870
+
+
+def test_dynamic_timeout_keeps_config_when_larger(tmp_path):
+    """配置值更大时保持配置（不缩短既有 timeout）。"""
+    p = _write_result(tmp_path, "task-x", 2)
+    # 2 子任务 → 2*150+120 = 420s < 配置 1200s
+    assert _dynamic_timeout({"timeout": 1200}, "task-x", p) == 1200
+
+
+def test_dynamic_timeout_no_history_uses_config(tmp_path):
+    """无历史数据时用配置值。"""
+    assert _dynamic_timeout({"timeout": 900}, "task-x", None) == 900
+
+
+# ═══════════════════════════════════════════════════════════════
+# S10-P2：--parallel 1 顺序执行 + 代码质量维度 + 对照基线
+# ═══════════════════════════════════════════════════════════════
+
+from agent_go.bench import (
+    _collect_quality, _git_diff_files, _lint_errors_for_worktree,
+    _tests_broken_for_worktree, _run_baseline_one,
+)
+
+
+def _write_quality_meta(td: Path, task: str) -> None:
+    """写 meta.json + 两个保留 worktree（sub-1/sub-2 的 work 目录）。"""
+    td.mkdir(parents=True, exist_ok=True)
+    (td / "meta.json").write_text(json.dumps({
+        "task": task, "status": "completed",
+        "results": [
+            {"id": "sub-1", "status": "completed", "verify_ok": True},
+            {"id": "sub-2", "status": "completed", "verify_ok": True},
+        ],
+    }), encoding="utf-8")
+    (td / "metering.jsonl").write_text("", encoding="utf-8")
+    for sub in ("sub-1", "sub-2"):
+        (td / sub / "work").mkdir(parents=True, exist_ok=True)
+
+
+def test_collect_result_quality_fields_default_zero(tmp_path):
+    """无 worktree（无质量数据）→ lint_errors/tests_broken 为 0。"""
+    td = tmp_path / "task-noquality"
+    _write_meta_metering(td, "Some task", [])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Some task")
+    assert r["lint_errors"] == 0
+    assert r["tests_broken"] == 0
+
+
+def test_collect_quality_empty_dir(tmp_path):
+    """目录不存在 / 空 → 全 0。"""
+    assert _collect_quality(tmp_path / "nope") == {"lint_errors": 0, "tests_broken": 0}
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _collect_quality(empty) == {"lint_errors": 0, "tests_broken": 0}
+
+
+def test_collect_quality_no_worktrees(tmp_path):
+    """有 task_dir 但无 worktree → 全 0（不 crash）。"""
+    td = tmp_path / "task-no-wt"
+    _write_quality_meta(td, "Task")
+    (td / "sub-1" / "work").rmdir()  # 移除 work
+    (td / "sub-2" / "work").rmdir()
+    assert _collect_quality(td) == {"lint_errors": 0, "tests_broken": 0}
+
+
+def test_git_diff_files_no_git(tmp_path):
+    """非 git 目录 → 空列表（容错）。"""
+    d = tmp_path / "plain"
+    d.mkdir()
+    (d / "x.py").write_text("x = 1\n", encoding="utf-8")
+    assert _git_diff_files(d) == []
+
+
+def test_lint_errors_tool_missing(tmp_path):
+    """ruff/mypy 不可用（FileNotFoundError）→ 0（容错）。"""
+    d = tmp_path / "repo"
+    d.mkdir()
+    (d / ".git").mkdir()
+    (d / "a.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    # 模拟 git diff 返回该文件、但 ruff 不存在 → 返回 0
+    assert _lint_errors_for_worktree(d) == 0
+
+
+def test_tests_broken_pytest_missing(tmp_path):
+    """pytest 不可用 → 0（容错）。"""
+    d = tmp_path / "repo"
+    d.mkdir()
+    assert _tests_broken_for_worktree(d) == 0
+
+
+def test_collect_quality_aggregates_mock(tmp_path, monkeypatch):
+    """聚合：两个 worktree 的 lint/tests 之和。"""
+    td = tmp_path / "task-agg"
+    _write_quality_meta(td, "Task")
+    monkeypatch.setattr("agent_go.bench._lint_errors_for_worktree", lambda wt: 3)
+    monkeypatch.setattr("agent_go.bench._tests_broken_for_worktree", lambda wt: 2)
+    assert _collect_quality(td) == {"lint_errors": 6, "tests_broken": 4}
+
+
+def test_collect_result_quality_aggregated(tmp_path, monkeypatch):
+    """_collect_result 聚合质量字段（mock 底层检查）。"""
+    td = tmp_path / "task-qagg"
+    _write_quality_meta(td, "Task")
+    monkeypatch.setattr("agent_go.bench._collect_quality", lambda td: {"lint_errors": 5, "tests_broken": 1})
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["lint_errors"] == 5
+    assert r["tests_broken"] == 1
+
+
+def test_run_baseline_one_passes(tmp_path, monkeypatch):
+    """裸跑通过：verification 全绿 → pass_rate=1.0，source_batch=baseline。"""
+    repo = tmp_path / "fixture"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "tests").mkdir()
+    task = {
+        "task": "do something",
+        "verification": ["python -c 'print(1)'"],
+        "timeout": 60,
+    }
+
+    import subprocess as _sp
+    real_run = _sp.run
+
+    def fake_run(cmd, *a, **kw):
+        if cmd and cmd[0] == "claude":
+            return type("CP", (), {"returncode": 0, "stdout": json.dumps({"type": "result", "total_cost_usd": 0.123}) + "\n"})()
+        if "verification" in str(cmd) or ("print(1)" in str(cmd)):
+            return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if cmd and cmd[0] == "python" and "-m" in cmd:
+            return type("CP", (), {"returncode": 0, "stdout": "1 passed\n", "stderr": ""})()
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    monkeypatch.setattr("agent_go.bench._lint_errors_for_worktree", lambda wt: 0)
+    monkeypatch.setattr("agent_go.bench._tests_broken_for_worktree", lambda wt: 0)
+
+    r = _run_baseline_one(task, repo, "claude-haiku-4-5", "baseline-task", source_batch="baseline")
+    assert r["pass_rate"] == 1.0
+    assert r["binary_pass"] is True
+    assert r["completed"] == 1
+    assert r["source_batch"] == "baseline"
+    assert r["baseline"] is True
+    assert r["total_subtasks"] == 1
+
+
+def test_run_baseline_one_verification_fails(tmp_path, monkeypatch):
+    """裸跑 verification 失败 → pass_rate=0.0。"""
+    repo = tmp_path / "fixture2"
+    repo.mkdir()
+    task = {
+        "task": "do something",
+        "verification": ["python -c 'import sys; sys.exit(1)'"],
+        "timeout": 60,
+    }
+
+    import subprocess as _sp
+    real_run = _sp.run
+
+    def fake_run(cmd, *a, **kw):
+        if cmd and cmd[0] == "claude":
+            return type("CP", (), {"returncode": 0, "stdout": json.dumps({"type": "result", "total_cost_usd": 0.1}) + "\n"})()
+        if "sys.exit(1)" in str(cmd):
+            return type("CP", (), {"returncode": 1, "stdout": "", "stderr": "fail"})()
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    r = _run_baseline_one(task, repo, "claude-haiku-4-5", "baseline-task", source_batch="baseline")
+    assert r["pass_rate"] == 0.0
+    assert r["binary_pass"] is False
+    assert r["failed"] == 1
+

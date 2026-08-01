@@ -210,7 +210,7 @@ Other patterns worth a second look: thread safety on shared mutable state (`resu
 ## Testing
 
 ```bash
-pytest tests/           # 1506 tests (~35s)
+pytest tests/           # 1554 tests (~62s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -220,7 +220,7 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 
 ```
 agent_go/           # 36 package modules (~16,500 lines)
-tests/              # 59 test files, 1506 tests
+tests/              # 60 test files, 1554 tests
 eval_suite/         # Standard task suite for eval bench (tasks + fixtures)
 docs/
 ├── README.md       # 文档索引
