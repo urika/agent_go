@@ -190,6 +190,8 @@ class AgentLoop:
 
         exit_code = 0
         total_cost = 0.0
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
         total_tool_calls = 0
         tool_stats: dict[str, int] = {}
         loop_start = time.time()
@@ -206,11 +208,13 @@ class AgentLoop:
 
             self.logger.info(f"[AgentLoop] turn={turn+1}/{max_turns} (elapsed={elapsed:.0f}s)")
 
-            content, tool_calls, cost = self._call_api(
+            content, tool_calls, cost, pt, ct = self._call_api(
                 provider, base_url, model, api_key, messages, tools,
                 metering_path, task_id, sub_id, timeout=api_timeout,
             )
             total_cost += cost
+            total_prompt_tokens += pt
+            total_completion_tokens += ct
 
             # 记录每个工具调用次数
             for tc in tool_calls:
@@ -254,9 +258,11 @@ class AgentLoop:
         # 写入汇总计量事件
         meter_event(metering_path, {
             "role": "worker",
-            "virtual_model": "agentgo-worker-loop-summary",
+            "virtual_model": "agentgo-worker",
             "actual_provider": provider,
             "actual_model": model,
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
             "cost_usd": round(total_cost, 6),
             "result": "success" if exit_code == 0 else "failed",
             "loop_turns": turn + 1,
@@ -304,14 +310,14 @@ class AgentLoop:
         task_id: str,
         sub_id: str,
         timeout: int = 120,
-    ) -> tuple[str, list[dict], float]:
+    ) -> tuple[str, list[dict], float, int, int]:
         """调用 LLM API 并解析响应。
 
         Args:
             timeout: 单次 API 调用超时（秒）
 
         Returns:
-            (text_content, tool_calls, cost_usd)
+            (text_content, tool_calls, cost_usd, prompt_tokens, completion_tokens)
         """
         headers = {"Content-Type": "application/json"}
         if provider == "anthropic":
@@ -414,4 +420,4 @@ class AgentLoop:
             f"{len(tool_calls)} tool_calls"
         )
 
-        return text, tool_calls, cost
+        return text, tool_calls, cost, pt, ct

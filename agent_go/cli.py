@@ -236,7 +236,11 @@ def _build_parser():
     chk_delete.add_argument("--name", "-n", required=True, help="Checkpoint name to delete")
 
     # mcp 子命令
-    subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio)")
+    mcp_parser = subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)")
+    mcp_parser.add_argument("--http", action="store_true",
+                            help="以 HTTP/SSE transport 运行（默认 stdio）。POST /mcp 处理请求，GET /mcp 为 SSE 推送")
+    mcp_parser.add_argument("--host", default="127.0.0.1", help="HTTP 绑定地址（默认 127.0.0.1，仅本地）")
+    mcp_parser.add_argument("--port", type=int, default=8090, help="HTTP 监听端口（默认 8090）")
 
     # router 子命令
     router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")
@@ -550,8 +554,8 @@ def cmd_resume(args=None):
     # logger 需在 result.json 恢复循环之前初始化，否则损坏文件触发 UnboundLocalError
     logger = setup_logger(task_id, task_dir)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
-    if meta.get("status") not in ("running", "paused", "interrupted"):
-        console.print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused/interrupted 状态可恢复")
+    if meta.get("status") not in ("running", "paused", "interrupted", "cancelled", "stale_aborted"):
+        console.print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused/interrupted/cancelled/stale_aborted 状态可恢复")
         sys.exit(1)
 
     confirmed = meta.get("subtasks", [])
@@ -768,7 +772,7 @@ def cmd_list() -> None:
             continue
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         status = meta.get("status", "unknown")
-        icon = {"completed": "🟢", "aborted": "🟡", "failed": "🔴"}.get(status, "⚪")
+        icon = {"completed": "🟢", "aborted": "🟡", "failed": "🔴", "cancelled": "⏹️"}.get(status, "⚪")
         docs = ",".join(meta.get("reference_docs", []))[:15]
         console.print(f"{t.name:<25} {icon} {status:<10} {len(meta.get('subtasks',[])):<8} {docs:<12} {meta.get('task','')[:30]}")
 
@@ -2043,7 +2047,7 @@ def main() -> None:
         elif args.command == "checkpoint":
             cmd_checkpoint(args)
         elif args.command == "mcp":
-            cmd_mcp()
+            cmd_mcp(args)
     except KeyboardInterrupt:
         console.print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)

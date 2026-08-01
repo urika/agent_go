@@ -24,10 +24,25 @@ def server(tmp_path):
 # ── Tool schemas ──────────────────────────────────────────────────
 
 class TestToolSchemas:
-    def test_four_tools(self):
-        assert len(TOOLS) == 4
+    def test_six_tools(self):
+        assert len(TOOLS) == 6
         names = [t["name"] for t in TOOLS]
-        assert names == ["run_task", "resume_task", "inspect_task", "review_task"]
+        assert names == ["run_task", "resume_task", "inspect_task", "review_task",
+                         "list_tasks", "cancel_task"]
+
+    def test_list_tasks_schema(self):
+        t = next(x for x in TOOLS if x["name"] == "list_tasks")
+        assert t["annotations"]["readOnlyHint"] is True
+        props = t["inputSchema"]["properties"]
+        assert props["status"]["enum"] == ["running", "completed", "failed", "all"]
+        assert props["limit"]["default"] == 20
+        assert props["limit"]["maximum"] == 50
+
+    def test_cancel_task_schema(self):
+        t = next(x for x in TOOLS if x["name"] == "cancel_task")
+        assert t["annotations"]["destructiveHint"] is True
+        assert t["annotations"]["idempotentHint"] is True
+        assert t["inputSchema"]["required"] == ["task_id"]
 
     def test_run_task_required_fields(self):
         t = next(x for x in TOOLS if x["name"] == "run_task")
@@ -104,6 +119,108 @@ class TestErrorModel:
         e = MCPError("AGENT_GO_TIMEOUT", "超时", retryable=True)
         assert e.retryable is True
 
+    def test_mcp_error_with_fix(self):
+        e = MCPError("AGENT_GO_TASK_NOT_FOUND", "任务不存在: task-xxx",
+                     fix={"tool": "list_tasks", "params": {"status": "all"}})
+        d = e.to_dict()
+        assert d["fix"]["tool"] == "list_tasks"
+        assert d["retryable"] is False
+
+    def test_mcp_error_with_context(self):
+        e = MCPError("AGENT_GO_TASK_FAILED", "任务失败", context={"failed_subtasks": ["sub-2"]})
+        assert e.to_dict()["context"]["failed_subtasks"] == ["sub-2"]
+
+    def test_error_template_task_not_found(self):
+        tpl = mcp_mod._error_template("AGENT_GO_TASK_NOT_FOUND", "task-abc")
+        assert tpl["fix"]["tool"] == "list_tasks"
+        assert tpl["retryable"] is False
+
+    def test_error_template_fills_task_id(self):
+        tpl = mcp_mod._error_template("AGENT_GO_TASK_RUNNING", "task-xyz")
+        assert tpl["fix"]["params"]["task_id"] == "task-xyz"
+
+    def test_error_template_unknown_code(self):
+        tpl = mcp_mod._error_template("UNKNOWN_CODE")
+        assert tpl["message"] == ""
+
+
+# ── Resources / Prompts 原语 ──────────────────────────────────────
+
+class TestResourcesPrompts:
+    def test_resources_list(self, server):
+        r = server._handle_resources_list()
+        assert len(r["resources"]) == 6
+        uris = [x["uri"] for x in r["resources"]]
+        assert "agent_go://tasks/{task_id}/summary" in uris
+        assert "agent_go://tasks/{task_id}/log/recent" in uris
+
+    def test_prompts_list(self, server):
+        r = server._handle_prompts_list()
+        names = [p["name"] for p in r["prompts"]]
+        assert names == ["diagnose_failure", "review_and_decide", "resume_or_restart"]
+
+    def test_prompts_get_diagnose(self, server):
+        r = server._handle_prompts_get("diagnose_failure", {"task_id": "task-abc"})
+        assert "task-abc" in r["messages"][0]["content"]
+
+    def test_prompts_get_unknown(self, server, capsys):
+        server._dispatch_tool("nope", {}, None, 1)  # unrelated, just warm capsys
+        try:
+            server._handle_prompts_get("nope", {})
+            assert False, "should raise"
+        except mcp_mod.MCPError as e:
+            assert e.code == "AGENT_GO_PROMPT_NOT_FOUND"
+
+    def test_resource_uri_parse(self, server):
+        assert server._parse_resource_uri("agent_go://tasks/list") == ("list", None)
+        assert server._parse_resource_uri("agent_go://tasks/task-1/summary") == ("summary", "task-1")
+        assert server._parse_resource_uri("agent_go://tasks/task-1/log/recent") == ("log/recent", "task-1")
+        assert server._parse_resource_uri("agent_go://tasks/task-1/plan") == ("plan", "task-1")
+        assert server._parse_resource_uri("http://evil/x") is None
+        assert server._parse_resource_uri("agent_go://tasks/task-1/bogus") is None
+
+    def test_resources_read_summary(self, server, tmp_path):
+        task_id = "task-res-summary"
+        td = tmp_path / task_id
+        td.mkdir()
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": task_id, "status": "completed", "task": "测试", "repo": "/tmp/repo",
+            "subtasks": [{"id": "s1"}],
+            "results": [{"subtask_id": "s1", "status": "completed", "duration_sec": 5}]
+        }), encoding="utf-8")
+        with patch.object(server, "_aggregate_cost", return_value=0.1):
+            r = server._handle_resources_read(f"agent_go://tasks/{task_id}/summary")
+        import json as _j
+        data = _j.loads(r["contents"][0]["text"])
+        assert data["status"] == "completed"
+        assert data["progress"]["completed"] == 1
+        assert data["cost_usd"] == 0.1
+
+    def test_resources_read_log(self, server, tmp_path):
+        task_id = "task-res-log"
+        td = tmp_path / task_id
+        td.mkdir()
+        (td / "meta.json").write_text(json.dumps({"status": "running"}), encoding="utf-8")
+        (td / "execution.log").write_text("\n".join(f"l{i}" for i in range(100)), encoding="utf-8")
+        r = server._handle_resources_read(f"agent_go://tasks/{task_id}/log/recent")
+        assert r["contents"][0]["mimeType"] == "text/plain"
+        assert "l99" in r["contents"][0]["text"]
+
+    def test_resources_read_missing_task(self, server, capsys):
+        try:
+            server._handle_resources_read("agent_go://tasks/task-nope/summary")
+            assert False, "should raise"
+        except mcp_mod.MCPError as e:
+            assert e.code == "AGENT_GO_TASK_NOT_FOUND"
+            assert e.fix is not None
+
+    def test_resources_read_invalid_uri(self, server):
+        try:
+            server._handle_resources_read("bad-uri")
+            assert False, "should raise"
+        except mcp_mod.MCPError as e:
+            assert e.code == "AGENT_GO_RESOURCE_INVALID"
+
 
 # ── JSON-RPC protocol ─────────────────────────────────────────────
 
@@ -168,6 +285,74 @@ class TestDispatch:
         captured = capsys.readouterr()
         resp = json.loads(captured.out)
         assert resp["error"]["data"]["error"]["code"] == "AGENT_GO_TASK_NOT_FOUND"
+
+
+# ── List / Cancel tasks ───────────────────────────────────────────
+
+class TestListCancelTasks:
+    def _mk_task(self, tmp_path, task_id, status):
+        td = tmp_path / task_id
+        td.mkdir(exist_ok=True)
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": task_id, "task": f"任务{task_id}", "repo": "/tmp/r",
+            "status": status, "subtasks": [{"id": "s1"}],
+            "results": [{"subtask_id": "s1", "status": "completed", "duration_sec": 1}]
+        }), encoding="utf-8")
+        return td
+
+    def test_list_tasks_all(self, server, tmp_path):
+        self._mk_task(tmp_path, "task-a", "completed")
+        self._mk_task(tmp_path, "task-b", "failed")
+        r = server._tool_list_tasks({"status": "all"})
+        assert r["total"] == 2
+        statuses = {t["status"] for t in r["tasks"]}
+        assert statuses == {"completed", "failed"}
+
+    def test_list_tasks_filter(self, server, tmp_path):
+        self._mk_task(tmp_path, "task-a", "completed")
+        self._mk_task(tmp_path, "task-b", "failed")
+        r = server._tool_list_tasks({"status": "failed"})
+        assert r["total"] == 1
+        assert r["tasks"][0]["task_id"] == "task-b"
+
+    def test_list_tasks_pagination(self, server, tmp_path):
+        for i in range(5):
+            self._mk_task(tmp_path, f"task-{i}", "completed")
+        r = server._tool_list_tasks({"limit": 2, "offset": 0})
+        assert len(r["tasks"]) == 2
+        assert r["has_more"] is True
+        r2 = server._tool_list_tasks({"limit": 2, "offset": 4})
+        assert len(r2["tasks"]) == 1
+        assert r2["has_more"] is False
+
+    def test_cancel_task_running(self, server, tmp_path):
+        task_id = "task-cancel"
+        td = self._mk_task(tmp_path, task_id, "running")
+        proc = MagicMock()
+        proc.poll.return_value = None
+        server._running[task_id] = proc
+        r = server._tool_cancel_task({"task_id": task_id})
+        assert r["cancelled"] is True
+        assert r["status"] == "cancelled"
+        proc.terminate.assert_called_once()
+        # meta.json 已标记
+        meta = json.loads((td / "meta.json").read_text(encoding="utf-8"))
+        assert meta["status"] == "cancelled"
+        assert "cancelled_at" in meta
+
+    def test_cancel_task_not_running(self, server, tmp_path):
+        task_id = "task-done"
+        self._mk_task(tmp_path, task_id, "completed")
+        r = server._tool_cancel_task({"task_id": task_id})
+        assert r["cancelled"] is False
+
+    def test_cancel_task_nonexistent(self, server, capsys):
+        try:
+            server._tool_cancel_task({"task_id": "task-nope"})
+            assert False, "should raise"
+        except mcp_mod.MCPError as e:
+            assert e.code == "AGENT_GO_TASK_NOT_FOUND"
+            assert e.fix["tool"] == "list_tasks"
 
 
 # ── Inspect task with synthetic data ──────────────────────────────

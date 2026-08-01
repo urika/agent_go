@@ -1,0 +1,37 @@
+id: add-metrics-system
+difficulty: hard
+repo: eval_suite/fixtures/data-pipeline
+task: |
+  为 data-pipeline 框架添加执行指标（metrics）收集和报告系统。
+
+  ## 要求
+
+  1. **核心指标收集**（src/core/ 目录下新增 metrics.py）
+     - 创建 `MetricsCollector` 类
+     - 支持收集：stage 执行耗时、输入/输出记录数、错误次数
+     - 支持 `start_stage(name)` / `end_stage(name, records_in, records_out)` 接口
+     - 支持 `get_report() -> dict` 输出汇总报告
+     - 线程安全
+
+  2. **集成到 Pipeline**（修改 src/core/pipeline.py）
+     - Pipeline 在 run/run_async 时通过 on_stage_start/on_stage_end 回调自动收集指标
+     - 运行结束后通过 context.metadata['metrics'] 获取报告
+     - 不改变现有 public API 签名
+
+  3. **CLI 报告命令**（修改 src/cli.py）
+     - 新增 `run --report` 标志：运行后在 stdout 打印 Markdown 格式的指标报告
+     - 报告内容：总耗时、各阶段耗时排行、总处理记录数、错误摘要
+
+  4. **测试**（tests/test_metrics.py）
+     - MetricsCollector 基础功能测试（至少 3 个）
+     - Pipeline 集成测试（至少 2 个）
+     - CLI --report 端到端测试（至少 1 个）
+
+  ## 约束
+  - 零外部依赖（仅 stdlib）
+  - 不改变 Stage 抽象类的接口
+  - 所有原有测试必须继续通过
+  - 新测试在 tests/test_metrics.py 中
+verification:
+  - "python -m pytest tests/ -q"
+timeout: 900

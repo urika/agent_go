@@ -229,7 +229,7 @@ class TestCallApi:
         """Anthropic 请求头与 payload"""
         mock_urlopen.return_value = MockResponse(anthropic_response(text="ok"))
         loop = AgentLoop(logger)
-        text, tool_calls, cost = loop._call_api(
+        text, tool_calls, cost, pt, ct = loop._call_api(
             "anthropic", "https://api.test/v1/messages", "test-model",
             "sk-ant-key", [{"role": "user", "content": "hi"}], [{"name": "Read"}],
             "", "t1", "s1",
@@ -252,7 +252,7 @@ class TestCallApi:
             tool_calls=[{"id": "c1", "name": "Bash", "input": {"command": "ls"}}],
         ))
         loop = AgentLoop(logger)
-        text, tool_calls, cost = loop._call_api(
+        text, tool_calls, cost, pt, ct = loop._call_api(
             "openai", "https://api.test/v1/chat/completions", "test-model",
             "sk-key", [{"role": "user", "content": "hi"}], [], "", "t1", "s1",
         )
@@ -287,7 +287,7 @@ class TestCallApi:
         """metering_path 为空时不写文件、不报错"""
         mock_urlopen.return_value = MockResponse(anthropic_response())
         loop = AgentLoop(logger)
-        text, _, _ = loop._call_api(
+        text, _, _, _, _ = loop._call_api(
             "anthropic", "https://api.test/v1/messages", "m",
             "key", [{"role": "user", "content": "hi"}], [], "", "t", "s",
         )

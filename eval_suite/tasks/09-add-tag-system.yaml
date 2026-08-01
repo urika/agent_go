@@ -1,6 +1,6 @@
 id: add-tag-system
 difficulty: hard
-repo: /Users/jinsongwang/test-target/task-mgr
+repo: eval_suite/fixtures/task-mgr
 task: |
   为 task-mgr 增加标签（tag）系统，支持给任务添加/移除标签，以及按标签过滤：
 

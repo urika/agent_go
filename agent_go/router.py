@@ -20,6 +20,7 @@
 import json
 import time
 import logging
+import threading
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
@@ -83,6 +84,8 @@ class CircuitBreaker:
     连续 failure_threshold 次失败后进入熔断状态。
     cooldown_seconds 后进入半开状态，允许 half_open_requests 个试探请求。
     试探成功 → 恢复正常；失败 → 重新熔断。
+
+    线程安全：所有公共方法使用 threading.Lock 保护。
     """
 
     def __init__(self, failure_threshold: int = 5, cooldown_seconds: int = 60, half_open_requests: int = 2):
@@ -90,6 +93,7 @@ class CircuitBreaker:
         self.cooldown_seconds = cooldown_seconds
         self.half_open_requests = half_open_requests
 
+        self._lock = threading.Lock()
         self._failure_count: int = 0
         self._last_failure_time: float = 0.0
         self._state: str = "closed"          # "closed" | "open" | "half_open"
@@ -97,51 +101,55 @@ class CircuitBreaker:
 
     def allow_request(self) -> bool:
         """当前是否允许请求通过。"""
-        now = time.time()
+        with self._lock:
+            now = time.time()
 
-        if self._state == "closed":
-            return True
+            if self._state == "closed":
+                return True
 
-        if self._state == "open":
-            if now - self._last_failure_time >= self.cooldown_seconds:
-                self._state = "half_open"
-                self._half_open_count = 0
-            else:
+            if self._state == "open":
+                if now - self._last_failure_time >= self.cooldown_seconds:
+                    self._state = "half_open"
+                    self._half_open_count = 0
+                else:
+                    return False
+
+            if self._state == "half_open":
+                if self._half_open_count < self.half_open_requests:
+                    self._half_open_count += 1
+                    return True
                 return False
 
-        if self._state == "half_open":
-            if self._half_open_count < self.half_open_requests:
-                self._half_open_count += 1
-                return True
-            return False
-
-        return True
+            return True
 
     def record_success(self) -> None:
         """记录一次成功请求。"""
-        self._failure_count = 0
-        if self._state == "half_open":
-            self._state = "closed"
-            self._half_open_count = 0
+        with self._lock:
+            self._failure_count = 0
+            if self._state == "half_open":
+                self._state = "closed"
+                self._half_open_count = 0
 
     def record_failure(self) -> None:
         """记录一次可用性失败。"""
-        self._failure_count += 1
-        self._last_failure_time = time.time()
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.time()
 
-        if self._state == "half_open":
-            # 半开状态下的失败：立即重新熔断
-            self._state = "open"
-        elif self._failure_count >= self.failure_threshold:
-            self._state = "open"
+            if self._state == "half_open":
+                self._state = "open"
+            elif self._failure_count >= self.failure_threshold:
+                self._state = "open"
 
     @property
     def state(self) -> str:
-        return self._state
+        with self._lock:
+            return self._state
 
     @property
     def failure_count(self) -> int:
-        return self._failure_count
+        with self._lock:
+            return self._failure_count
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -258,7 +266,9 @@ def _call_api_internal(
         data = json.loads(resp.read())
 
     if provider == "anthropic":
-        content = data["content"][0]["text"]
+        _blocks = data.get("content", [])
+        _text_block = next((b for b in _blocks if isinstance(b, dict) and b.get("type") == "text"), None)
+        content = _text_block["text"] if _text_block else _blocks[0].get("text", str(_blocks[0]))
     else:
         content = data["choices"][0]["message"]["content"]
 
@@ -277,6 +287,7 @@ def call_with_role(
     task_id: str = "",
     subtask_id: str = "",
     metering_path: Any = None,
+    config: Optional[dict] = None,
 ) -> tuple[str, dict]:
     """按角色路由调用 LLM API。
 
@@ -318,7 +329,7 @@ def call_with_role(
         """尝试调用一个 provider，返回内容或 None（失败时）。"""
         nonlocal result, fallback_reason, actual_provider, actual_model, prompt_tokens, completion_tokens, _quality_fail
 
-        cb = _get_circuit_breaker(_provider_key(pc), {})
+        cb = _get_circuit_breaker(_provider_key(pc), config or {})
 
         if not cb.allow_request():
             if is_fallback:
@@ -403,6 +414,17 @@ def call_with_role(
             meter_event(metering_path, metering)
             return content, metering
 
+    # 全失败：写入 metering 后 raise（保证审计可见性）
+    _final_result = "failed"
+    _final_fallback = f"primary_unavailable:fallback_{'unavailable' if route.fallback else 'not_configured'}"
+    _final_latency = round((time.time() - start) * 1000, 2)
+    _final_model = actual_model or route.primary.model or "unknown"
+    meter_event(metering_path, _build_metering(
+        route.role, actual_provider or route.primary.provider,
+        _final_model, prompt_tokens, completion_tokens,
+        0.0, _final_latency, _final_result, _final_fallback,
+        task_id, subtask_id, _policy_violation,
+    ))
     raise RuntimeError(
         f"路由调用失败：primary {_provider_key(route.primary)} 不可用，"
         f"fallback {'不可用' if route.fallback is None else '也失败'}"

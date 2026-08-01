@@ -159,6 +159,49 @@ class TestLoadConfigFaultTolerance:
         assert "回退" not in capsys.readouterr().out
 
 
+class TestLoadConfigWithPath:
+    """load_config(config_path=...) bench 场景"""
+
+    def test_config_path_overrides_default(self, tmp_path):
+        """指定 config_path 时读取该文件，忽略 ~/.agent_go/config.json"""
+        alt = tmp_path / "bench.json"
+        alt.write_text(json.dumps({
+            "plan_api": {"provider": "deepseek", "api_key": "${DS_KEY}"},
+            "worker_models": {"easy": "m1", "medium": "m2", "hard": "m3"},
+        }), encoding="utf-8")
+        config = load_config(config_path=str(alt))
+        assert config["plan_api"]["provider"] == "deepseek"
+        assert config["plan_api"]["api_key"] == "${DS_KEY}"
+        assert config["worker_models"]["easy"] == "m1"
+        assert config["worker_models"]["hard"] == "m3"
+        # 默认值保留
+        assert config["plan_api"]["max_tokens"] == 4096
+
+    def test_config_path_not_found_returns_default(self, tmp_path, capsys):
+        """config_path 文件不存在 → 告警并回退默认配置"""
+        config = load_config(config_path=str(tmp_path / "nonexistent.json"))
+        assert config["plan_api"]["provider"] == "anthropic"  # default
+        out = capsys.readouterr().out
+        assert "不存在" in out
+
+    def test_config_path_invalid_json_returns_default(self, tmp_path, capsys):
+        """config_path 文件损坏 → 告警并回退默认配置"""
+        bad = tmp_path / "bad.json"
+        bad.write_text("{broken", encoding="utf-8")
+        config = load_config(config_path=str(bad))
+        assert config["plan_api"]["provider"] == "anthropic"
+        out = capsys.readouterr().out
+        assert "读取失败" in out
+
+    def test_config_path_default_param_still_works(self, tmp_path, monkeypatch):
+        """不传 config_path 时行为不变 → 读 CONFIG_PATH"""
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"plan_api": {"provider": "openai"}}), encoding="utf-8")
+        monkeypatch.setattr("agent_go.config.CONFIG_PATH", cfg)
+        config = load_config()
+        assert config["plan_api"]["provider"] == "openai"
+
+
 class TestMeterEvent:
     """meter_event 计量写入与容错"""
 

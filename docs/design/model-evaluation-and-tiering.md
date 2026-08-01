@@ -387,12 +387,14 @@ qwen3.6-27b-local 65%        $0.08    185s    15%     90/50/20             ⚠ c
 
 ## 5. 落地范围（分阶段）
 
+> **实际落地（2026-07-25）**：P0 已完成，规模超出原规划 —— `MODEL_PRICES` 扩充至 **48 个模型**（规划 20），标准任务集 **22 个任务**（规划 8），4 个 fixture（task-mgr / data-pipeline / django-blog / fp-sandbox）。下表"交付物"列保留原规划数字作为历史记录。
+
 | 阶段 | 交付物 | 价值 |
 |------|--------|------|
-| **P0** | 扩充 `MODEL_PRICES` 表（20 个模型）+ `MODEL_TIER` 元数据 | 修复 ISSUE-26 根因，$/pass 可信 |
-| **P0** | 标准任务集种子（8 任务 + ground truth）+ `eval bench` 编排器 + `analyze_model_productivity` + `eval models` | 评估机制可用 |
-| **P1** | 交叉评判矩阵（N 模型互评）+ 人工抽检校准 | 第 2 层，假阳性检测 |
-| **P1** | `router recommend`（基于评估结果自动推荐路由）+ `config.example.json` 三套预设 | 闭环到配置 |
+| **P0** | 扩充 `MODEL_PRICES` 表（规划 20，实际 48 个模型）+ `MODEL_TIER` 元数据 | 修复 ISSUE-26 根因，$/pass 可信 |
+| **P0** | 标准任务集种子（规划 8，实际 22 任务 + ground truth）+ `eval bench` 编排器 + `analyze_model_productivity` + `eval models` | 评估机制可用 |
+| **P1** | 交叉评判矩阵（N 模型互评，**P1 简化版**：四维评分退化为单一 semantic_score，P2 升级结构化 rubric）+ 人工抽检校准 | 第 2 层，假阳性检测 |
+| **P1** | `router recommend`（基于评估结果自动推荐路由，**待实施**）+ `config.example.json` 三套预设 | 闭环到配置 |
 | **P2** | 任务集扩充（社区贡献）+ 难度自动校准 | 长期演进 |
 
 ### 改动文件清单（P0）
@@ -400,10 +402,10 @@ qwen3.6-27b-local 65%        $0.08    185s    15%     90/50/20             ⚠ c
 | 文件 | 改动 |
 |------|------|
 | `agent_go/bench.py` | **新增** `cmd_bench`（编排器）+ `analyze_model_productivity` |
-| `agent_go/eval.py` | 扩充 `MODEL_PRICES`（20 模型）+ `MODEL_TIER` |
+| `agent_go/pricing.py` | 扩充 `MODEL_PRICES`（规划 20，实际 48 模型）+ `MODEL_TIER` |
 | `agent_go/cli.py` | `bench` / `models` 子命令注册 |
-| `eval_suite/tasks/*.yaml` | **新增** 8 个标准任务 |
-| `eval_suite/fixtures/sample-py-project/` | **新增** 最小可测仓库 + ground truth 测试 |
+| `eval_suite/tasks/*.yaml` | **新增** 标准任务（规划 8，实际 22 个） |
+| `eval_suite/fixtures/` | **新增** task-mgr / data-pipeline / django-blog / fp-sandbox 4 个可测仓库 |
 | `agent_go/metrics.py` | `estimate_local_cost`（本地模型成本估算） |
 | `tests/test_bench.py` | bench 编排器测试（mock LLM，验证控制变量） |
 

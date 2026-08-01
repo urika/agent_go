@@ -17,8 +17,8 @@
 | **PRD 分析改进** | ✅ 完成 | OpenChamber 竞品对比分析、四阶段开发流程模型（含 M7 审查阶段缺口识别）、用户介入点设计；已写入 `prd.md` + 排入 `roadmap.md` S5-S7 |
 | **测试加固** | ✅ 完成（2026-07-25） | 1130 测试 5 连绿。修复 ISSUE-24（goal watchdog flaky 根治）、ISSUE-25（3 处测试漂移）；新增 72 测试覆盖 agent_loop 集成、5 个未测 CLI 命令、TUI 辅助函数、subtask 超时分支 |
 | **$/pass 门禁** | ✅ 完成（2026-07-25） | `eval gate`（绝对阈值 + `--check-regression` 回归对比 + `--update-baseline`）；CI 接入 `eval gate --baseline 0.05`；K5 `resume_success_rate` 派生；修复 ISSUE-26/27/28（计价失真 + evaluator 重复记账 + PRD 语义断裂）。详见 [ISSUES.md](ISSUES.md) |
-| **模型分级 + 评估机制设计** | ✅ 完成（2026-07-25） | 三角色 × 三档位分级矩阵 + 三层评估体系（确定性/交叉评判/决策汇总）；完整设计稿 [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md)；**P0 已落地（22 模型定价表 + bench 编排器 + eval models）** |
-| **S8 P0 模型评估机制** | ✅ 完成（2026-07-25） | `pricing.py`（22 模型定价表 + MODEL_TIER + 7 provider 默认）；`bench.py`（subprocess 隔离编排器 + `eval bench/models`）；`cross_judge.py`（交叉评判矩阵 P1 + 禁绝自评 + 人工校准）；`eval_suite/`（8 任务 + fixtures）；`config.example.json` 三套预设（国际/国内/混合） |
+| **模型分级 + 评估机制设计** | ✅ 完成（2026-07-25） | 三角色 × 三档位分级矩阵 + 三层评估体系（确定性/交叉评判/决策汇总）；完整设计稿 [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md)；**P0 已落地（48 模型定价表 + bench 编排器 + eval models）** |
+| **S8 P0 模型评估机制** | ✅ 完成（2026-07-25） | `pricing.py`（48 模型定价表 + MODEL_TIER + 7 provider 默认）；`bench.py`（subprocess 隔离编排器 + `eval bench/models`）；`cross_judge.py`（交叉评判矩阵 P1 简化版：禁绝自评 + 启发式评分 + 人工校准；P2 升级结构化 rubric）；`eval_suite/`（22 任务 + 4 fixtures）；`config.example.json` 三套预设（国际/国内/混合） |
 | **核心解耦** | ✅ 完成（2026-07-25） | evaluator/notify/goal/skills/agent_loop 全部动态 import + try/except；`estimate_task_duration` 迁 planning.py；`MODEL_PRICES` 迁 pricing.py；解耦原则固化在 [architecture.md](architecture.md) |
 | **M7 结果审查阶段** | ✅ 完成（2026-07-25 核实） | `cmd_review --task <id>`：按文件分组聚合 diff 摘要 + approve/reject/changes-requested 人工审批；`--deep` 独立模型逐子任务分析。PRD Phase 3 缺口关闭 |
 | **Plan 版本管理** | ✅ 完成（2026-07-25 核实） | `plan-history <id>` / `plan-diff <id> --v1 --v2` 命令已存在 |
@@ -44,7 +44,7 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 | **S3**（8 月下旬） | 验证循环 Phase 2：`/goal` 注入 + Stop Hook + watchdog；Phase 4：eval 新指标（首次通过率、重试成功率、阻断率） | K8 度量闭环 | 3–4 天 | K8 首次通过率有可追溯数据源 |
 | **S3** | M1 完成通知：任务结束触发 webhook / 系统通知（最小实现，配置驱动） | M1 | ~1 天 | `--yes` 无头跑完能收到通知 |
 | **S4**（9 月） | 角色感知模型路由：planner/worker/reviewer 三通道配置 + 降级留痕（`fallback_reason` 必填）+ 本地模型并发上限显式化 | 差距 3，K4 | 3–5 天 | **发布门禁：$/pass rate 不劣化**（对比 S1 基线） |
-| **S8**（9 月） | 模型分级 + 评估机制 P0：扩充 `MODEL_PRICES`（22 模型）+ `MODEL_TIER` 元数据；标准任务集种子（8 任务 + ground truth）；`eval bench` 编排器 + `analyze_model_productivity` + `eval models`；`config.example.json` 国际/国内/混合三套预设 | [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md) | ✅ 已完成（2026-07-25） |
+| **S8**（9 月） | 模型分级 + 评估机制 P0：扩充 `MODEL_PRICES`（48 模型）+ `MODEL_TIER` 元数据；标准任务集种子（22 任务 + ground truth）；`eval bench` 编排器 + `analyze_model_productivity` + `eval models`；`config.example.json` 国际/国内/混合三套预设 | [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md) | ✅ 已完成（2026-07-25） |
 
 **Q3 出关口径**：K1 ≥92%、K8 ≥80%、K4 ≤$0.05、$/pass ≤$0.05、K6 8/9。达不到则 Q4 不扩新功能，回头补质量。
 
@@ -58,7 +58,7 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 |------|--------|---------|------|
 | ~~S5~~ | ~~M7 结果审查 / M3 PR 质量仪表 / M4 时间预估 / Plan 版本管理~~ | — | ✅ 已提前落地 |
 | ~~S6~~ | ~~复杂度双通道 / 失败通知增强~~ | — | ✅ 已提前落地 |
-| **S6**（11 月） | **KPI 基线采集**：bench 真实执行（3 模型 × 8 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线，校验 Q3 出关口径可达性 | KPI 现状值目前为估计 | 待启动（最高优先级） |
+| **S6**（11 月） | **KPI 基线采集**：bench 真实执行（3 模型 × 22 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线，校验 Q3 出关口径可达性 | KPI 现状值目前为估计 | 待启动（最高优先级） |
 | **S6**（11 月） | Reviewer 角色灰度：仅高风险子任务开启审查，审查预算 ≤ 被审查工作的 20% | K4 → ≤$0.03 | 待启动 |
 | **S7**（12 月） | 叠加式审查流水线补完：`review --deep` 已具备独立模型评审能力，待补「打回自动回流」；全局决策日志治「脑裂」 | 规模化质量 | 部分 |
 | **S7**（12 月） | `router recommend`：基于 bench/judge 评估结果自动生成路由配置 | [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md) §3.5-3.7 | 待实施（交叉评判 + calibrate 已落地） |
@@ -84,14 +84,76 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 
 依赖关系：I9 是 I10 的前置（`TaskResult` 数据结构被后续所有模块依赖）；I10/I11 可并行；I12 依赖 I9（CLI `--json`）+ I10（事件进度）。
 
-## 关键风险与对策
+## 长程 Agent 演进路线（论文对照，2026 Q3–2027+）
+
+> 基于综述论文 *Towards Long-Horizon Agents: A Survey* 的统一框架（`Agent = πθ ⊕ H`），将 agent_go 的能力建设映射到 H1→H2→H3 递进路线。详见 [prd.md](prd.md)「长程 Agent 演进路线（论文对照）」完整分析。
+
+### 阶段一：补齐 H2 能力 — 让单次任务更可靠（2026 Q3–Q4）
+
+目标：从 H1（单任务可靠）跨越到 H2（跨上下文记忆 + 自适应策略）。
+
+| 迭代 | 交付物 | 论文对应 | 预估 | 验收门禁 |
+|------|--------|---------|------|---------|
+| **H2-1**（10–11 月） | **KnowledgeStore 落地**：Factual Memory（项目规则自动维护）+ Experiential Memory（验证命令成功率 / 分解策略有效性）+ Memory Maintenance（合并/去重/过期） | §4.2.2 Persistent Memory | ~3d | 同类任务第 3 次执行时 Plan prompt 自动包含历史验证命令模式 |
+| **H2-1** | **成本预算硬约束**：`--max-cost $X` 任务级上限 + 事前预估→事中监控→超限熔断 + $/pass 标度律数据积累 | §7.3.1 Cost-aware Agency | ~2d | `--max-cost 0.30` 执行中超限自动熔断并输出已花费明细 |
+| **H2-2**（11–12 月） | **分支式工作流（Branching）**：Plan 阶段对 `difficulty=hard` 步骤生成备选路径 + 验证失败时回退到分叉点尝试替代策略 + 轻量评估选最优 | §4.1.3 Branching Workflows | ~3d | 注入故障的端到端用例：验证失败→自动切换备选方案→第二路径成功 |
+| **H2-2** | **Runtime-adaptive Hooks**：Hook 根据执行状态动态调整（如「连续 3 次验证失败→自动降低 difficulty 并换模型」） | §4.5.3 Runtime-adaptive Hooks | ~2d | 配置可切换的动态 Hook 规则，日志记录触发原因 |
+
+**H2 出关口径**：K1 ≥93%、同一项目第 3 次执行 Plan 注入历史经验、超 $0.50 任务自动熔断、hard 任务至少尝试 2 条路径。
+
+### 阶段二：开启 H3 能力 — 让 Agent 随时间变强（2027 Q1–Q2）
+
+目标：从 H2（跨上下文记忆）跨越到 H3（跨任务经验积累 + Harness 自进化）。
+
+| 迭代 | 交付物 | 论文对应 | 预估 | 验收门禁 |
+|------|--------|---------|------|---------|
+| **H3-1**（1–3 月） | **Harness 参数自动调优**：基于 metering.jsonl + meta.json 历史数据，自动优化并发度、max_retries、验证策略选择 | §7.1.1 Self-evolving Harness (Level 1) | ~3d | 同项目 10 次执行后自动参数 vs 默认参数的 $/pass 降低 ≥15% |
+| **H3-1** | **分解模式库**：对「重构/新增功能/Bug 修复/迁移」四类任务的 Plan 分解策略沉淀 + Plan 阶段自动注入最佳分解模板 | §4.2.2 Experiential Memory | ~2d | 同类任务 Plan 首次通过率（用户直接确认，无需 edit）提升 ≥20% |
+| **H3-2**（3–5 月） | **编排拓扑自演化**：Agent 自主决定子任务数量、分组方式、Reviewer 范围、验证步骤剪枝 | §7.1.1 Self-evolving Harness (Level 2) + §4.4.3 Orchestration Optimization | ~4d | 自动编排 vs 人工编排的 $/pass 不劣化且耗时 ≤ 人工的 80% |
+| **H3-2** | **失败模式识别**：提前预警「此任务特征历史上成功率 < 40%」→ 建议人工介入或切换策略 | §7.4.1 Error Robustness | ~2d | 高风险任务执行前展示风险评分 + 历史相似任务成功率 |
+| **H3-3**（5–6 月） | **Skill 自主蒸馏**：从成功执行轨迹中自动提取可复用 Skill（验证命令组合 / 代码模式 / 修复策略），写入 Skill 库 | §7.1.1 Self-evolving Harness (Level 3) + §4.3.3 Skill Libraries | ~4d | 蒸馏出的 Skill 被后续任务自动匹配使用，人工审核通过率 ≥80% |
+
+**H3 出关口径**：K1 ≥95%、自进化 Harness 使 $/pass 再降 20%、跨项目经验可迁移、失败预警准确率 ≥70%。
+
+### 阶段三：基础设施化与开放性（2027 Q3+）
+
+| 迭代 | 交付物 | 论文对应 | 预估 |
+|------|--------|---------|------|
+| **F-1** | **Harness 协议标准化**：Plan/Execute/Verify 接口抽象为开放协议（类似 MCP 对 Tool 的标准化） | §7.1.2 Harness Generalization + §4.4.4 Agent Protocols | ~5d |
+| **F-1** | **多 Runtime Worker 支持**：除 Claude Code 外，兼容 OpenCode / aider / Codex CLI 作为 Worker | §7.1.2 多 Harness 训练 | ~4d |
+| **F-2** | **独立安全验证**：安全评分与成功率并列的第一类指标 + 独立 Verifier（不由执行 Agent 自审） | §7.4.2 Safety & Governance | ~4d |
+| **F-2** | **可移植 Skill 格式**：Skills 产出符合 Agent Skills 标准的跨 Runtime 可复用制品 | §7.1.2 Portable Skills | ~2d |
+
+### 演进总览
+
+```
+2026 Q3-Q4          2027 Q1-Q2           2027 Q3+
+H2 补齐              H3 开启              Frontier
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+记忆 + 分支 + 预算    自进化 + 经验积累     开放协议 + 安全 + 多Runtime
+K1≥93%              K1≥95%              生态可移植
+K4≤$0.04            K4≤$0.02            K9≥10
+```
+
+### 论文关键启示（约束设计决策）
+
+| 启示 | agent_go 的设计约束 |
+|------|-------------------|
+| Harness 是长期护城河，不是模型 | 编排层投入优先级 > 模型适配；架构保持 model-agnostic |
+| 自进化需防过拟合 | 自进化目标函数 = 真实任务成功率（非 benchmark 分）；需人工抽检验证 |
+| 安全是 Harness 层问题 | 安全机制必须独立于执行 Agent；后续所有自进化特性配独立安全验证 |
+| 持久化记忆的维护比存储更难 | KnowledgeStore 重点投入合并/去重/过期策略，而非存储容量 |
+| 分支探索成本需显式控制 | Branching 仅对 hard 子任务开启；单次分支 token 预算 ≤ 主路径 30% |
+| $/pass 是系统级指标 | 所有新功能必须以 $/pass 不劣化为前置门禁 |
 
 ## 关键风险与对策
 
-- **验证循环 token 爆炸**（PRD 已识别）：`max_retries` 硬上限 + 每迭代超时；S3 用计量日志盯 `cost_usd` 分布，超 P95 告警
+- **验证循环 token 爆炸**（PRD 已识别）：`max_retries` 硬上限 + 每迭代超时；用计量日志盯 `cost_usd` 分布，超 P95 告警
 - **模型路由拉低通过率**：Worker 走便宜模型必须配质量门 + 抽样回测；Planner 铁律不降级
-- **范围蔓延**：Field Guide 跨任务记忆、验证规则生态均列入「验证需求后再投入」，本周期不做
-- **Q3 串行风险**：若验证循环延期，优先保 S2（阻断下游）砍 S3 的 `/goal` 注入——阻断是 M6 的根，加速循环可后置
+- **范围蔓延**：H3 自进化特性必须分阶段验收，每阶段以 $/pass 不劣化为门禁；未经 bench 验证不进入下一阶段
+- **自进化过拟合风险**（论文警告）：优化目标 = 真实任务成功率，非 benchmark 分；每 50 次执行人工抽检 10%
+- **持久化记忆质量退化**（论文警告）：KnowledgeStore 必须有自动去重/合并/过期策略，防止噪声积累
+- **安全问题**：后续每个自进化特性必须配独立安全验证（不由执行 Agent 自审）
 
 ## 立即可做的三件事（本周）
 
@@ -103,4 +165,4 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 6. ~~S8 P0 模型评估机制落地~~ ✅ 已完成（2026-07-25，pricing.py + bench.py + eval_suite + cross_judge.py P1）
 7. ~~核心解耦~~ ✅ 已完成（2026-07-25，evaluator/notify/goal/skills/agent_loop 全部动态 import + try/except）
 
-**下一批**：对照 bench 真实执行（3 模型 × 8 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线；KPI 数据采集验证（K1/K8 是否因 S2/S4 提升）。
+**下一批**：对照 bench 真实执行（3 模型 × 22 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线；KPI 数据采集验证（K1/K8 是否因 S2/S4 提升）。

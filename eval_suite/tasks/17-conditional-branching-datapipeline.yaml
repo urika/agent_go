@@ -1,0 +1,19 @@
+id: conditional-branching-datapipeline
+difficulty: hard
+repo: eval_suite/fixtures/data-pipeline
+task: |
+  Add conditional branching and fan-out to the data pipeline:
+
+  1. `src/core/pipeline.py`: Add `run_branch(condition_key, branches)` — `branches` is a dict mapping context values to lists of stages; only the matching branch executes
+  2. `src/core/pipeline.py`: Add `run_fanout(stages_per_input, input_key)` — given an input list from context, run a copy of the pipeline for each item in parallel using ThreadPoolExecutor
+  3. `src/core/pipeline.py`: Add a `dry_run` mode — when enabled, stages log what they would do but don't actually process data
+  4. `src/stages/transform.py`: Add `BranchRouterStage(Stage)` — reads a `routing_key` from context, puts the value into a `branch` output, used as input to `run_branch`
+  5. `tests/test_branching.py`: Write tests covering:
+     - `run_branch` with 3 branches → only the matching branch's stages execute
+     - `run_fanout` with 5 inputs → runs 5 parallel pipelines, all results collected
+     - `dry_run` mode → stages log but don't modify context data
+     - Mixed: conditional + fanout in one pipeline definition
+verification:
+  - "python -m pytest tests/test_branching.py tests/test_pipeline.py -q"
+  - "python -c \"from src.core.pipeline import Pipeline; from src.stages.transform import BranchRouterStage; print('Branching OK')\""
+timeout: 900

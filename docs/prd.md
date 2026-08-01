@@ -426,6 +426,104 @@ $$
 | 复杂度双通道 | Planner 给子任务打 `difficulty: easy/medium/hard` 标签，hard 任务自动走强模型通道 | 7.3 |
 | **验证 Agent 生态系统** | 社区贡献的验证规则包，分三阶段演进：Phase 1 复用 Skill 体系（`type: verification`），零新增基础设施；Phase 2 打包为 Claude Code Plugin 分发；Phase 3 若生态足够大则独立为 Verifier 体系 | — |
 
+## 长程 Agent 演进路线（论文对照）
+
+> 基于 2026 年 7 月综述论文 *Towards Long-Horizon Agents: A Survey*（人大/北大/清华/港科大/新加坡国立联合发布）的系统框架，对照 agent_go 当前能力，规划下一步演进方向。
+
+### 论文核心框架
+
+论文提出长程 Agent 的**统一定义**：
+
+> **长程 Agent = 基础策略 ⊕ 外部编排层**  （`Agent = πθ ⊕ H`）
+
+长程能力不是模型的属性，而是**模型-Harness 耦合系统**的属性。两者协同进化：
+- **Pillar I（外部化 Harness）**：Loops & Workflows → Context & Memory → Tools/MCP/Skills → Orchestration → Hooks & Middleware → Verification
+- **Pillar II（内部化模型优化）**：Architecture → Data/Env Synthesis → Pre/Mid-Training → Fine-Tuning → Agentic RL → Self-Evolution
+
+能力按三个嵌套层级递进：
+
+| 层级 | 能力 | 含义 | agent_go 当前 |
+|------|------|------|--------------|
+| **H1** 上下文内交互推理 | 单窗口内的多步推理+工具使用+环境交互 | 子任务上下文隔离 + 验证循环 | ✅ 核心链路 |
+| **H2** 跨上下文状态与记忆 | 跨越多个上下文窗口/会话，维持任务状态与记忆 | git worktree 传递产物 + KnowledgeStore 设计 | ⚠️ 部分（缺持久记忆） |
+| **H3** 跨任务经验积累 | 从历史任务中学习，持续提升未来表现 | Field Guide 远期规划 | ❌ 未开始 |
+
+### agent_go 与论文框架对照
+
+| 论文 Harness 组件 | agent_go 对应 | 状态 |
+|-------------------|--------------|------|
+| Loops & Workflows (§4.1) — Plan-Execute | Plan → Decompose → Execute 四阶段 | ✅ |
+| Loops & Workflows (§4.1) — Branching | 仅线性，无多路径探索 | ❌ |
+| Context & Memory (§4.2) — Working Context | worktree 隔离 + TASK.md 窄化 | ✅ |
+| Context & Memory (§4.2) — Persistent Memory | KnowledgeStore 设计完成，待落地 | ⚠️ |
+| Tools, MCP & Skills (§4.3) | Role-Skill 规则引擎 + MCP 集成 | ✅ |
+| Orchestration (§4.4) — Decomposition & Roles | Agent Type 系统 + Role-Skill 匹配 | ✅ |
+| Orchestration (§4.4) — Coordination Topologies | 拓扑波次调度 + 并发 + 级联阻断 | ✅ |
+| Hooks & Middleware (§4.5) | Stop Hook / GoalInjector / Notify 事件通道 | ✅ |
+| Hooks & Middleware (§4.5) — Runtime-adaptive | 仅静态 Hook | ❌ |
+| Verification (§4.6) | 双层验证循环 + LLM 语义评估 + cross_judge 交叉评判 | ✅ |
+| Cost-aware Agency (§7.3.1) | 角色路由 + 复杂度双通道 + metering | ⚠️ 缺预算强制 |
+| Self-evolving Harness (§7.1.1) | 无，Harness 手工维护 | ❌ |
+| Harness Generalization (§7.1.2) | 与 Claude Code + git worktree 紧耦合 | ❌ |
+
+### 三阶段演进路线
+
+#### 阶段一：补齐 H2 能力 — 让单次任务更可靠（近期 3–6 月）
+
+**1. 分支式工作流（Branching Workflows）**
+- Plan 阶段对高不确定性步骤生成备选路径，轻量评估后选最优
+- 验证失败时回退到分叉点尝试替代策略（而非反复修复同一方案）
+- 仅对 `difficulty=hard` 子任务开启，控制成本
+
+**2. 持久化记忆落地（Persistent Memory）**
+- **Factual Memory**：项目级 CLAUDE.md / AGENTS.md 自动维护（从当前手工编写升级为 Agent 自主更新）
+- **Experiential Memory**：记录「验证命令模式 → 成功率」「分解策略 → 首次通过率」，Plan 阶段自动注入
+- **Memory Maintenance**：记忆合并、去重、过期清理（论文强调这是持久化记忆的核心工程挑战）
+
+**3. 成本预算强约束（Budget-aware Agency）**
+- `--max-cost $0.50`：任务级硬上限，达到即熔断并汇报
+- 成本从「事后分析」升级为「事前承诺 + 事中监控 + 超限熔断」
+- 建立 agent_go 自身的 $/pass 标度律数据
+
+#### 阶段二：开启 H3 能力 — 让 Agent 随时间变强（中期 6–12 月）
+
+**4. 自我进化的 Harness（Self-evolving Harness）**
+- **Phase 1 参数自动调优**：基于历史 metering.jsonl + meta.json，自动调整并发度、验证策略、max_retries
+- **Phase 2 编排拓扑自演化**：Agent 自主决定子任务分组、Reviewer 范围、验证步骤剪枝
+- **Phase 3 Skill 自主蒸馏**：从成功执行轨迹中自动提取可复用 Skill，写入 Skill 库
+
+**5. 跨任务经验积累（H3 Cross-task Experience）**
+- **验证命令知识库**：哪些验证命令在哪些类型任务上最有效？跨项目迁移
+- **分解模式库**：对「重构类」「新增功能类」「Bug 修复类」任务的最佳分解策略
+- **失败模式识别**：提前预警「此任务特征历史上成功率 < 40%」，建议人工介入
+
+#### 阶段三：基础设施化与开放性（长期 12+ 月）
+
+**6. Harness 可迁移性（Harness Generalization）**
+- Harness 协议标准化：将 Plan/Execute/Verify 接口抽象为开放协议
+- 多 Runtime 支持：不绑定 Claude Code，同时兼容 OpenCode、aider、Codex CLI 等 Worker
+- 可移植 Skill 格式：产出符合 Agent Skills 标准的可复用制品
+
+**7. 安全治理升级**
+- 外部输入作为不可信数据：sandbox 隔离 + 来源追踪
+- 安全评分作为第一类指标：与成功率并列评估
+- 独立安全验证：不由执行 Agent 自我审查
+
+### 能力-时间矩阵
+
+| 时间 | 论文层级 | 核心命题 | 关键交付 |
+|------|---------|---------|---------|
+| **现在** | H1 完善 | 单任务可靠性 85%→92% | 验证循环、级联阻断、聚合审查 |
+| **近期** | H2 补齐 | 记忆 + 分支 + 预算 | KnowledgeStore、Branching、--max-cost |
+| **中期** | H3 开启 | 自进化 + 经验积累 | Harness 自动调优、分解模式库、Skill 蒸馏 |
+| **长期** | Frontier | 可迁移 + 安全 + 开放 | 开放协议、独立安全验证、多 Runtime |
+
+### 关键设计约束（论文启示）
+
+- **Harness 而非模型，是长期护城河**：模型会换代，编排能力可跨模型复用。论文明确指出「长程能力越来越多地是 Runtime 的属性，而非模型的属性」。
+- **自进化需小心过拟合**：论文警告自进化系统的三个核心限制 — 优化目标仍是人工设定的 benchmark、泛化不超出训练分布、长期可能漂移。agent_go 的自进化应以真实任务成功率（而非 benchmark 分）为目标函数。
+- **安全是 Harness 层问题，非模型层问题**：论文强调「Harness 而非模型，是生产环境中 Agent 的主要对齐和权限控制面」。已有的 4 级命令白名单是正确的方向，需向独立安全验证演进。
+
 ## 非目标用户
 
 - 不用 Claude Code 的 — agent_go 是编排层，不是替代品

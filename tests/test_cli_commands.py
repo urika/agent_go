@@ -39,7 +39,7 @@ class TestCmdRouter:
         - CONFIG_PATH：cmd_router 函数内 `from .config import CONFIG_PATH`，
           patch agent_go.config.CONFIG_PATH（指向 tmp_path 避免污染真实配置）
         """
-        monkeypatch.setattr("agent_go.cli.load_config", lambda: config)
+        monkeypatch.setattr("agent_go.cli.load_config", lambda **kw: config)
         cfg_path = tmp_path / "config.json"
         import agent_go.config as cfg_mod
         monkeypatch.setattr(cfg_mod, "CONFIG_PATH", cfg_path)
@@ -158,7 +158,7 @@ class TestCmdCache:
     def test_list_empty(self, capsys, monkeypatch):
         from agent_go.cli import cmd_cache
         monkeypatch.setattr("agent_go.api.list_cache_entries", lambda: [])
-        monkeypatch.setattr("agent_go.config.load_config", lambda: {})
+        monkeypatch.setattr("agent_go.config.load_config", lambda **kw: {})
         cmd_cache(self._ns("list"))
         assert "暂无缓存" in capsys.readouterr().out
 
@@ -169,7 +169,7 @@ class TestCmdCache:
             {"cache_key": "xyz789", "meta": {"task": "task-B-very-long-name-here", "created_at": "2026-07-25T11", "hit_count": 0}},
         ]
         monkeypatch.setattr("agent_go.api.list_cache_entries", lambda: entries)
-        monkeypatch.setattr("agent_go.config.load_config", lambda: {})
+        monkeypatch.setattr("agent_go.config.load_config", lambda **kw: {})
         cmd_cache(self._ns("list"))
         out = capsys.readouterr().out
         assert "task-A" in out
@@ -178,7 +178,7 @@ class TestCmdCache:
     def test_clean_reports_removed(self, capsys, monkeypatch):
         from agent_go.cli import cmd_cache
         monkeypatch.setattr("agent_go.api.clean_expired_cache", lambda c: 5)
-        monkeypatch.setattr("agent_go.config.load_config", lambda: {})
+        monkeypatch.setattr("agent_go.config.load_config", lambda **kw: {})
         cmd_cache(self._ns("clean"))
         assert "清理 5 条" in capsys.readouterr().out
 
@@ -191,7 +191,7 @@ class TestCmdCache:
 
         import agent_go.api as api_mod
         monkeypatch.setattr(api_mod, "_cache_dir", lambda: cache_dir)
-        monkeypatch.setattr("agent_go.config.load_config", lambda: {})
+        monkeypatch.setattr("agent_go.config.load_config", lambda **kw: {})
 
         cmd_cache(self._ns("clear"))
         out = capsys.readouterr().out
@@ -210,7 +210,7 @@ class TestCmdCache:
         monkeypatch.setattr("agent_go.api.list_cache_entries", lambda: entries)
         import agent_go.api as api_mod
         monkeypatch.setattr(api_mod, "_cache_dir", lambda: cache_dir)
-        monkeypatch.setattr("agent_go.config.load_config", lambda: {})
+        monkeypatch.setattr("agent_go.config.load_config", lambda **kw: {})
 
         cmd_cache(self._ns("stats"))
         out = capsys.readouterr().out
@@ -221,13 +221,13 @@ class TestCmdCache:
     def test_stats_empty(self, capsys, monkeypatch):
         from agent_go.cli import cmd_cache
         monkeypatch.setattr("agent_go.api.list_cache_entries", lambda: [])
-        monkeypatch.setattr("agent_go.config.load_config", lambda: {})
+        monkeypatch.setattr("agent_go.config.load_config", lambda **kw: {})
         cmd_cache(self._ns("stats"))
         assert "缓存条目: 0" in capsys.readouterr().out
 
     def test_unknown_subcommand(self, capsys, monkeypatch):
         from agent_go.cli import cmd_cache
-        monkeypatch.setattr("agent_go.config.load_config", lambda: {})
+        monkeypatch.setattr("agent_go.config.load_config", lambda **kw: {})
         cmd_cache(self._ns("bogus"))
         assert "未知子命令" in capsys.readouterr().out
 
@@ -385,4 +385,142 @@ class TestCmdPr:
         cmd_pr(argparse.Namespace(task_id="task-pr", offline=False))
         out = capsys.readouterr().out
         assert "失败" in out
+        assert (task_dir / "PR.md").exists()
+
+
+# ═══════════════════════════════════════════════════════════════
+# cmd_pr 在线模式（--push / gh 交互）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCmdPrOnline:
+    """cmd_pr 在线模式：--push 和 gh 交互（补充测试）。"""
+
+    def _setup(self, tmp_path, meta_extras=None):
+        """创建带 repo 字段的 task 目录。"""
+        import agent_go.cli as cli_mod
+        import agent_go.config as config_mod
+
+        agent_dir = tmp_path / "agent_go_dir"
+        agent_dir.mkdir()
+        task_dir = agent_dir / "task-pr-online"
+        task_dir.mkdir()
+
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        (repo_dir / ".git").mkdir()
+
+        meta = {
+            "task": "实现登录功能",
+            "repo": str(repo_dir),
+            "base_branch": "main",
+            "results": [
+                {"subtask_id": "sub-1", "status": "completed",
+                 "summary": "auth.py", "sandbox_type": "headless",
+                 "duration_sec": 30.0},
+            ],
+        }
+        if meta_extras:
+            meta.update(meta_extras)
+        (task_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        targets = [
+            (cli_mod, "AGENT_GO_DIR", agent_dir),
+            (config_mod, "AGENT_GO_DIR", agent_dir),
+        ]
+        return task_dir, targets
+
+    def test_pr_push_calls_git_push(self, monkeypatch, tmp_path, capsys):
+        """--push → git push 被调用，且 refspec 正确。gh 不可用 → 备份 PR.md"""
+        from agent_go.cli import cmd_pr
+        task_dir, targets = self._setup(tmp_path)
+        for mod, attr, val in targets:
+            monkeypatch.setattr(mod, attr, val)
+
+        cmd_records = []
+
+        def mock_run(cmd, **kw):
+            cmd_records.append(list(cmd) if isinstance(cmd, (list, tuple)) else [cmd])
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("agent_go.cli.subprocess.run", mock_run)
+        monkeypatch.setattr("agent_go.cli.shutil.which", lambda name: None)
+
+        cmd_pr(argparse.Namespace(task_id="task-pr-online", offline=False,
+                                  push=True, remote="origin"))
+
+        push_entries = [c for c in cmd_records if c[:2] == ["git", "push"]]
+        assert len(push_entries) == 1, f"期望 1 次 git push，实际 {len(push_entries)}"
+        push_cmd = push_entries[0]
+        assert "origin" in push_cmd, f"remote 应为 origin: {push_cmd}"
+        assert "HEAD:main" in push_cmd, f"refspec 应为 HEAD:main: {push_cmd}"
+        # gh 不可用时备份 PR.md
+        assert (task_dir / "PR.md").exists()
+
+    def test_pr_push_failure_tolerated(self, monkeypatch, tmp_path, capsys):
+        """git push 失败 → 告警但不 crash，继续备份 PR.md"""
+        from agent_go.cli import cmd_pr
+        task_dir, targets = self._setup(tmp_path)
+        for mod, attr, val in targets:
+            monkeypatch.setattr(mod, attr, val)
+
+        def mock_run(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "push" in cmd_str:
+                return MagicMock(returncode=1, stderr="permission denied")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("agent_go.cli.subprocess.run", mock_run)
+        monkeypatch.setattr("agent_go.cli.shutil.which", lambda name: None)
+
+        cmd_pr(argparse.Namespace(task_id="task-pr-online", offline=False,
+                                  push=True, remote="origin"))
+
+        out = capsys.readouterr().out
+        assert "推送失败" in out
+        assert (task_dir / "PR.md").exists()
+
+    def test_pr_gh_uses_correct_args(self, monkeypatch, tmp_path, capsys):
+        """gh 可用 → gh pr create 含 --title/--body-file/--base 参数"""
+        from agent_go.cli import cmd_pr
+        task_dir, targets = self._setup(tmp_path)
+        for mod, attr, val in targets:
+            monkeypatch.setattr(mod, attr, val)
+
+        cmd_records = []
+
+        def mock_run(cmd, **kw):
+            cmd_records.append(list(cmd) if isinstance(cmd, (list, tuple)) else [cmd])
+            return MagicMock(returncode=0, stdout="https://github.com/x/y/pull/1\n")
+
+        monkeypatch.setattr("agent_go.cli.subprocess.run", mock_run)
+        monkeypatch.setattr("agent_go.cli.shutil.which", lambda name: "/usr/bin/gh")
+
+        cmd_pr(argparse.Namespace(task_id="task-pr-online", offline=False,
+                                  push=False, remote="origin"))
+
+        gh_entries = [c for c in cmd_records if c[0] == "gh"]
+        assert len(gh_entries) >= 1, "应调用 gh CLI"
+        gh_cmd = gh_entries[0]
+        assert "pr" in gh_cmd and "create" in gh_cmd, f"子命令应为 pr create: {gh_cmd}"
+        assert "--title" in gh_cmd
+        assert "--body-file" in gh_cmd
+        assert "--base" in gh_cmd
+        assert "main" in gh_cmd  # base branch
+
+    def test_pr_gh_not_installed_backups(self, monkeypatch, tmp_path, capsys):
+        """gh 未安装 → 提示安装 + 备份 PR.md（不调 subprocess.run）"""
+        from agent_go.cli import cmd_pr
+        task_dir, targets = self._setup(tmp_path)
+        for mod, attr, val in targets:
+            monkeypatch.setattr(mod, attr, val)
+
+        mock_subprocess = MagicMock()
+        monkeypatch.setattr("agent_go.cli.subprocess.run", mock_subprocess)
+        monkeypatch.setattr("agent_go.cli.shutil.which", lambda name: None)
+
+        cmd_pr(argparse.Namespace(task_id="task-pr-online", offline=False,
+                                  push=False, remote="origin"))
+
+        out = capsys.readouterr().out
+        assert "未安装 gh CLI" in out
         assert (task_dir / "PR.md").exists()

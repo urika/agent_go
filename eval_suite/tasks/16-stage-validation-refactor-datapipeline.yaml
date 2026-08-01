@@ -1,0 +1,17 @@
+id: stage-validation-refactor-datapipeline
+difficulty: hard
+repo: eval_suite/fixtures/data-pipeline
+task: |
+  Refactor data-pipeline's stage validation logic:
+
+  1. `src/core/stage.py`: Add `validate_outputs(context)` method that checks all declared `outputs` exist in context after `process()` — raises `ValueError` if any missing
+  2. `src/core/stage.py`: Add `validate(context)` method that runs both `validate_inputs` and `validate_outputs`, returning list of error strings
+  3. `src/core/pipeline.py`: Integrate `stage.validate()` into Pipeline.run() — validate before AND after each stage; collect all validation errors; if any stage has post-validation errors, raise StageError with full error list
+  4. `tests/test_stage_validation.py`: Write tests covering:
+     - Stage that declares `outputs=["result"]` but doesn't set `context["result"]` → post-validation fails
+     - Pipeline with 3 stages where stage 2 fails post-validation → stage 3 is skipped and error message includes all details
+     - Stage.validate() returns empty list when both pre and post checks pass
+verification:
+  - "python -m pytest tests/test_stage_validation.py tests/test_pipeline.py -q"
+  - "python -c \"from src.core.pipeline import Pipeline, StageError; from src.core.context import Context; print('StageValidation integrated')\""
+timeout: 600

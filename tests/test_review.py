@@ -19,7 +19,7 @@
 import argparse
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -294,3 +294,141 @@ class TestReviewErrors:
 
         out = capsys.readouterr().out
         assert "无法读取" in out or "❌" in out
+
+
+# ═══════════════════════════════════════════════════════════════
+# 场景 6：Deep Review（深层审查）
+# ═══════════════════════════════════════════════════════════════
+
+class TestDeepReview:
+    """cmd_review --deep：独立模型分析每个子任务的 diff。"""
+
+    def _setup_deep_review(self, tmp_path, task_id="task-dr", results=None):
+        """构造含 worktree 路径的 task 目录。"""
+        if results is None:
+            results = [
+                _result("sub-1", files=["auth.py"]),
+                _result("sub-2", files=["login.tsx"]),
+            ]
+        td = tmp_path / task_id
+        td.mkdir(parents=True)
+
+        # 为每个子任务创建 worktree 目录
+        for r in results:
+            wt = td / r["subtask_id"] / "work"
+            wt.mkdir(parents=True)
+            (wt / ".git").mkdir()
+            r["worktree"] = str(wt)
+
+        # 写 meta.json（含 worktree 路径）
+        meta = {
+            "task_id": task_id, "task": "实现用户认证", "status": "completed",
+            "subtasks": [
+                {"id": r["subtask_id"],
+                 "title": f"任务{r['subtask_id']}",
+                 "agent_type": "developer"}
+                for r in results
+            ],
+            "results": results,
+            "created": "20260725-100000",
+        }
+        (td / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        return td
+
+    def test_deep_review_calls_independent_model(self, tmp_path, monkeypatch, capsys):
+        """--deep → 调用独立模型审查 diff"""
+        td = self._setup_deep_review(tmp_path)
+        monkeypatch.setattr("agent_go.cli.AGENT_GO_DIR", tmp_path)
+        import agent_go.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "AGENT_GO_DIR", tmp_path)
+
+        with patch("agent_go.cli.subprocess.run") as mock_subprocess, \
+             patch("agent_go.router.resolve_provider") as mock_resolve, \
+             patch("agent_go.router.call_with_role") as mock_call, \
+             patch("agent_go.cli.config", {
+                 "router": {"enabled": True},
+                 "plan_api": {"provider": "anthropic", "api_key": "sk-test"},
+             }, create=True):
+            mock_subprocess.return_value = MagicMock(
+                returncode=0,
+                stdout="diff --git a/auth.py b/auth.py\n+def login(): pass\n",
+                stderr="",
+            )
+            # 模拟 router 返回一个有效的路由
+            from collections import namedtuple
+            _fake_route = namedtuple("_Route", ["role", "primary", "fallback"])
+            _fake_pc = namedtuple("_ProviderConfig", ["provider", "base_url", "model", "api_key"])
+            mock_resolve.return_value = _fake_route(
+                role="reviewer",
+                primary=_fake_pc(provider="anthropic", base_url="", model="claude-sonnet-4", api_key="sk-test"),
+                fallback=None,
+            )
+            mock_call.return_value = ("审查通过，代码质量良好", {"cost_usd": 0.002})
+
+            from agent_go.cli import cmd_review
+            cmd_review(argparse.Namespace(
+                task_id="task-dr", repo=None, yes=False, pr_ref="",
+                approve=False, reject=False, changes_requested=False,
+                comment_text="", deep=True,
+            ))
+
+        # 验证独立模型被调用
+        assert mock_call.called, "call_with_role 应被调用"
+        out = capsys.readouterr().out
+        assert "深层审查" in out
+        assert "审查通过" in out
+
+    def test_deep_review_worktree_missing_skips(self, tmp_path, monkeypatch, capsys):
+        """worktree 目录不存在 → 跳过该子任务（不 crash）"""
+        td = _make_task_dir(tmp_path, "task-dr2", [
+            _result("sub-1", files=["auth.py"]),
+        ])
+        monkeypatch.setattr("agent_go.cli.AGENT_GO_DIR", tmp_path)
+        import agent_go.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "AGENT_GO_DIR", tmp_path)
+
+        with patch("agent_go.cli.subprocess.run") as mock_subprocess, \
+             patch("agent_go.router.resolve_provider") as mock_resolve, \
+             patch("agent_go.cli.config", {
+                 "router": {"enabled": True},
+                 "plan_api": {"provider": "anthropic"},
+             }, create=True):
+            mock_subprocess.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            from agent_go.cli import cmd_review
+            cmd_review(argparse.Namespace(
+                task_id="task-dr2", repo=None, yes=False, pr_ref="",
+                approve=False, reject=False, changes_requested=False,
+                comment_text="", deep=True,
+            ))
+
+        # sub-1 worktree 不存在 → 不调用 resolve_provider
+        mock_resolve.assert_not_called()
+        out = capsys.readouterr().out
+        assert "深层审查" in out or "任务审查" in out
+
+    def test_deep_review_empty_diff_skips(self, tmp_path, monkeypatch, capsys):
+        """git diff 为空 → 跳过该子任务"""
+        td = self._setup_deep_review(tmp_path, task_id="task-dr3")
+        monkeypatch.setattr("agent_go.cli.AGENT_GO_DIR", tmp_path)
+        import agent_go.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "AGENT_GO_DIR", tmp_path)
+
+        with patch("agent_go.cli.subprocess.run") as mock_subprocess, \
+             patch("agent_go.router.resolve_provider") as mock_resolve, \
+             patch("agent_go.cli.config", {
+                 "router": {"enabled": True},
+                 "plan_api": {"provider": "anthropic"},
+             }, create=True):
+            # git diff 返回空
+            mock_subprocess.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            from agent_go.cli import cmd_review
+            cmd_review(argparse.Namespace(
+                task_id="task-dr3", repo=None, yes=False, pr_ref="",
+                approve=False, reject=False, changes_requested=False,
+                comment_text="", deep=True,
+            ))
+
+        # diff 为空 → 跳过，不调用独立模型
+        mock_resolve.assert_not_called()

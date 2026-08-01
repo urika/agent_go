@@ -1,7 +1,7 @@
-import os, json, logging
+import os, json, logging, threading
 from pathlib import Path
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from .console import _LazyConsole
 
@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
     },
     "evaluator": {
         "enabled": False,               # 默认关闭（向后兼容 + 成本可控）
+        "fail_closed": False,           # 评估器 API 失败时是否阻断流程（true=标记失败，false=默认通过）
         "provider": "anthropic",
         "model": "claude-haiku-4-5-20251001",
         "base_url": "https://api.anthropic.com/v1/messages",
@@ -81,6 +82,11 @@ DEFAULT_CONFIG = {
         "easy": "",                 # S4 复杂度双通道：空 = claude CLI 默认模型
         "medium": "",
         "hard": "",                 # 如 "claude-opus-4-20250514"，hard 子任务走强模型
+    },
+    "worker_models_fallback": {     # retry/timeout 时的模型升级表（空 = 不升级）
+        "easy": "",
+        "medium": "",
+        "hard": "",
     },
     "cache": {
         "enabled": True,
@@ -132,16 +138,36 @@ def safe_input(prompt: str = "") -> str:
         console.print()
         return ""
 
-def load_config() -> dict[str, Any]:
+def load_config(config_path: Optional[str] = None) -> dict[str, Any]:
+    """加载配置。config_path 非空时读取指定文件（bench 临时 config），否则读 ~/.agent_go/config.json。"""
+    if config_path:
+        target = Path(config_path)
+        if not target.exists():
+            console.warning(f"指定配置文件不存在: {target}，回退默认配置。")
+            return json.loads(json.dumps(DEFAULT_CONFIG))
+        try:
+            saved = json.loads(target.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            console.warning(f"指定配置文件读取失败 ({target}): {e}，回退默认配置。")
+            return json.loads(json.dumps(DEFAULT_CONFIG))
+        if not isinstance(saved, dict):
+            console.warning(f"指定配置文件格式无效 ({target}): 顶层应为 JSON 对象，回退默认配置。")
+            return json.loads(json.dumps(DEFAULT_CONFIG))
+        merged = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+        for key, value in saved.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key].update(value)
+            else:
+                merged[key] = value
+        return merged
+
     if CONFIG_PATH.exists():
         try:
             saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
-            # 配置文件损坏或读取失败：告警并回退默认配置，不覆写原文件
             console.warning(f"配置文件损坏或无法读取 ({CONFIG_PATH}): {e}，已回退默认配置。请检查或删除该文件。")
             return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
         if not isinstance(saved, dict):
-            # 合法 JSON 但非 dict（如 [1,2]），同样回退默认配置
             console.warning(f"配置文件格式无效 ({CONFIG_PATH}): 顶层应为 JSON 对象，已回退默认配置。请检查或删除该文件。")
             return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
         merged = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
@@ -179,6 +205,9 @@ def setup_logger(task_id: str, task_dir: Path) -> logging.Logger:
     logger.addHandler(ch)
     return logger
 
+_metering_lock = threading.Lock()
+
+
 def log_event(logger: logging.Logger, event: str, data: dict[str, Any]) -> None:
     logger.debug(json.dumps({"timestamp": datetime.now().isoformat(), "event": event, **data}, ensure_ascii=False))
 
@@ -196,7 +225,8 @@ def meter_event(metering_path: Any, event: dict[str, Any]) -> None:
     path = Path(metering_path)
     event["ts"] = datetime.now().isoformat()
     try:
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        with _metering_lock:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
     except OSError as e:
         logging.getLogger(__name__).debug(f"meter_event 写入失败: {e}")

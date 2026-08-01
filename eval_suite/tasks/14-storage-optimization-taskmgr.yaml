@@ -1,0 +1,17 @@
+id: storage-optimization-taskmgr
+difficulty: hard
+repo: eval_suite/fixtures/task-mgr
+task: |
+  Performance optimization for task-mgr storage layer:
+
+  1. `src/storage.py`: Add an in-memory LRU cache that caches `load_all()` results — invalidate on any `save()` call; use `collections.OrderedDict` with maxsize=100
+  2. `src/storage.py`: Batch `_write()` calls — if multiple `save()` calls happen within 100ms, batch them into a single disk write using a debounce timer
+  3. `src/storage.py`: Add `find_by_id(id)` method that uses the in-memory cache instead of full-file scan each time
+  4. `src/cli.py`: Add `--count` flag to `cmd_list` that shows task count without loading full task details
+  5. `tests/test_performance.py`: Write tests verifying:
+     - Cache hit ratio > 80% on repeated `load_all()` calls
+     - `find_by_id()` is at least 10x faster than `load_all()` + list comprehension
+verification:
+  - "python -m pytest tests/test_performance.py -q"
+  - "python -c \"from src.storage import TaskStorage; import tempfile, pathlib; p=pathlib.Path(tempfile.mktemp()); s=TaskStorage(p); s.save('a'); s.save('b'); assert len(s.load_all())==2; print('Batch OK')\""
+timeout: 600

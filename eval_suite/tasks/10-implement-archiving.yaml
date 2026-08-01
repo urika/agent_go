@@ -1,6 +1,6 @@
 id: implement-archiving
 difficulty: hard
-repo: /Users/jinsongwang/test-target/task-mgr
+repo: eval_suite/fixtures/task-mgr
 task: |
   为 task-mgr 增加任务归档功能：
 

@@ -1,6 +1,6 @@
 id: add-error-handling
 difficulty: easy
-repo: /Users/jinsongwang/test-target/task-mgr
+repo: eval_suite/fixtures/task-mgr
 task: |
   在 src/storage.py 的 TaskStorage.load_all 方法中，如果 JSON 文件存在但包含非法 JSON 内容，
   当前会抛出 json.JSONDecodeError 导致程序崩溃。

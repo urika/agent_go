@@ -128,8 +128,8 @@ agent_go/
 ├── tui.py               # Curses status dashboard
 ├── workflow_gen.py      # CI workflow auto-generation
 agent_go.py               # Entry-point wrapper
-tests/                    # 1130 tests across 46 test files
-eval_suite/               # Standard task suite for eval bench (8 tasks + fixtures)
+tests/                    # 1169 tests across 47 test files
+eval_suite/               # Standard task suite for eval bench (22 tasks + fixtures)
 ```
 
 ## Configuration

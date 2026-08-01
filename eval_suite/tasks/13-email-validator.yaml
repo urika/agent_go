@@ -1,0 +1,21 @@
+id: email-validator
+difficulty: medium
+repo: eval_suite/fixtures/fp-sandbox
+task: |
+  在文件 solution.py 中实现函数 validate_email(email: str) -> bool 和
+  batch_validate(emails: list[str]) -> list[bool]。
+
+  validate_email 规则：
+  - 必须包含一个且仅一个 @ 符号
+  - @ 前后至少各有一个字符
+  - 域名部分（@ 之后）必须包含至少一个点（.）
+  - 不允许空格
+  - 空字符串返回 False
+
+  batch_validate 对列表批量调用 validate_email。
+
+  注意：验证命令只检测函数是否可调用的最基本要求。
+  真正的正确性将由独立的语义评估检查。
+verification:
+  - "python3 -c \"from solution import validate_email, batch_validate; import inspect; assert callable(validate_email); assert callable(batch_validate); assert inspect.signature(validate_email).parameters.get('email'); r=batch_validate(['a@b.c','']); assert len(r)==2\""
+timeout: 180

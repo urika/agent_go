@@ -125,9 +125,10 @@ def reset_orphan_changes(worktree: Path) -> bool:
     if rc != 0:
         return False
 
-    rc, _, _ = _run_git(worktree, "checkout", "--", ".")
-    if rc != 0:
-        return False
+    # checkout is best-effort: if the index has tracked files that need
+    # resetting, they get restored. If the index is empty (edge case),
+    # git fails with "pathspec '.' did not match any file(s)" — ignore.
+    _run_git(worktree, "checkout", "--", ".")
 
     return True
 

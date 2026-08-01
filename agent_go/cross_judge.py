@@ -29,7 +29,16 @@ from .pricing import MODEL_PRICES
 __all__ = ["cmd_judge", "cross_judge_results", "calibrate_judge"]
 console = _LazyConsole()
 
-# 评分尺度（结构化 rubric）
+# 评分尺度（目标 rubric —— P1 阶段尚未实现独立四维评分）
+#
+# 当前实现（P1 简化版，见 _judge_one）：
+#   - correctness / completeness / code_quality 退化为单一 semantic_score
+#     （由 _heuristic_score 从 evaluate_semantic 的 reason 文本启发式提取）
+#   - false_positive = not passed（二元降级）
+#
+# P2 升级路径：在 evaluator.py 的 prompt 中要求 LLM 返回独立四维分，
+# 届时 semantic_score = avg(correctness, completeness, code_quality)，
+# 本常量将真正参与 prompt 构造。
 JUDGE_RUBRIC = {
     "correctness": "1-5 分：功能是否完整实现 spec（1=完全错误，5=完全正确）",
     "completeness": "1-5 分：是否覆盖边界条件/错误处理（1=只过 happy path，5=全面）",
@@ -192,15 +201,20 @@ def _judge_one(candidate_model: str, judge_model: str, task_id: str,
 
         # evaluate_semantic 返回 {passed, reason, suggestions, cost_usd, latency_ms}
         # 对于交叉评判，我们需要结构化评分，但 evaluate_semantic 只返回二元 passed + reason。
-        # 基于 reason 文本做启发式评分（P1 简化版；P2 可改为结构化 prompt）。
+        # 基于 reason 文本做启发式评分（P1 简化版）。
+        #
+        # P1 退化契约（当前）：四维同值 = semantic_score，false_positive = not passed。
+        # P2 升级路径：改 evaluator.py prompt 让 LLM 产出独立四维分，
+        #   correctness/completeness/code_quality 各自独立，
+        #   semantic_score = avg(三维)，false_positive 由 LLM 显式判断。
         semantic_score = _heuristic_score(feedback.get("reason", ""))
         false_positive = not feedback.get("passed", True)
 
         return {
             **base,
-            "correctness": semantic_score,     # 简化：用总分代理
-            "completeness": semantic_score,
-            "code_quality": semantic_score,
+            "correctness": semantic_score,     # P1 退化：用总分代理（P2 改为独立分）
+            "completeness": semantic_score,    # P1 退化：同上
+            "code_quality": semantic_score,    # P1 退化：同上
             "semantic_score": semantic_score,
             "false_positive": false_positive,
             "reason": feedback.get("reason", "")[:200],
@@ -303,24 +317,35 @@ def _infer_provider(model: str) -> str:
 def _heuristic_score(reason: str) -> float:
     """从 evaluate_semantic 的 reason 文本中启发式提取评分（P1 简化）。
 
-    使用正则词边界匹配，避免子串误匹配（如 "not missing" 不命中 "missing"）。
-    P2 改进方向：在 evaluate_semantic 的 prompt 中加结构化评分指令。
+    匹配策略：
+    - 英文关键词用 `\\b` 词边界（防止 "not missing" 误命中 "missing"）
+    - 中文关键词用子串匹配（`\\b` 对中文无效，因中文不是 ASCII 字母数字）
+    P2 改进方向：在 evaluate_semantic 的 prompt 中加结构化评分指令，
+    产出独立四维分（correctness/completeness/code_quality），届时本函数废弃。
     """
     if not reason:
         return 2.5
     r = reason.lower()
 
     # 高优：完全正确 / 优秀
-    if re.search(r'\b(完全正确|完整实现|excellent|完美|fully\s*correct)\b', r):
+    cn_high = ["完全正确", "完整实现", "完美"]
+    en_high = r'\b(excellent|fully\s*correct)\b'
+    if any(k in r for k in cn_high) or re.search(en_high, r):
         return 5.0
     # 良好：基本正确 / 小问题
-    if re.search(r'\b(基本正确|大部分|mostly\s*correct|minor\s*issue|大体)\b', r):
+    cn_good = ["基本正确", "大部分", "大体"]
+    en_good = r'\b(mostly\s*correct|minor\s*issue)\b'
+    if any(k in r for k in cn_good) or re.search(en_good, r):
         return 4.0
-    # 不完整 / 缺失
-    if re.search(r'\b(部分(?!正确)|缺少|missing|不完整|incomplete)\b', r):
+    # 不完整 / 缺失（注意 "部分正确" 不算缺失，用负向断言）
+    cn_inc = ["缺少", "不完整"]
+    en_inc = r'\b(missing|incomplete)\b'
+    if ("部分" in r and "正确" not in r) or any(k in r for k in cn_inc) or re.search(en_inc, r):
         return 2.0
     # 错误
-    if re.search(r'\b(错误|incorrect|wrong|失败|不正确)\b', r):
+    cn_err = ["错误", "失败", "不正确"]
+    en_err = r'\b(incorrect|wrong)\b'
+    if any(k in r for k in cn_err) or re.search(en_err, r):
         return 1.0
     return 3.0  # 默认中等
 

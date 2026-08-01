@@ -1,0 +1,51 @@
+id: db-end-to-end-optimization
+difficulty: hard
+repo: eval_suite/fixtures/django-blog
+task: |
+  End-to-end database performance optimization for the Django blog API.
+
+  The API serves 180k+ rows (10k posts, 50k comments, 100k page views)
+  and has measured P95 latency >3s on the post listing endpoint.
+
+  **Phase 1 — Indexing (estimated 2-3 subtasks)**
+  Identify and add missing database indexes:
+  - post.created_at DESC (archive queries filter by month/year)
+  - post.author_id (author posts page)
+  - comment(post_id, created_at) composite (paginated comment listing)
+  - performance regression test must show <2s archive query
+
+  **Phase 2 — Query optimization (estimated 2-3 subtasks)**
+  Fix N+1 queries in post list view:
+  - Add select_related('author__profile', 'category') to Post.objects.all()
+  - Add prefetch_related('tags') for tag names
+  - Replace per-post Comment.count() with annotate(comment_count=Count('comments'))
+  - Performance test: post list must use ≤5 SQL queries regardless of post count
+
+  **Phase 3 — Aggregation optimization (estimated 1-2 subtasks)**
+  Fix category_stats view:
+  - Replace per-category loop with single annotated query
+  - Use .annotate(post_count=Count('posts'), avg_views=Avg('view_count'))
+  - Performance test: must use ≤2 queries
+
+  **Phase 4 — Caching (estimated 2-3 subtasks)**
+  Add caching layer:
+  - Cache category list (1 hour TTL, invalidate on category save)
+  - Cache trending posts (5 minute TTL, invalidate on new published post)
+  - Cache category_stats (10 minute TTL)
+  - Use Django's cache framework (locmem backend for test, configurable)
+  - Performance test: cached response must come back in <200ms
+
+  **Phase 5 — Search optimization (estimated 1-2 subtasks)**
+  Upgrade search from LIKE %keyword% to PostgreSQL full-text search:
+  - Add SearchVector on title || ' ' || body
+  - Add GIN index via migration
+  - Use SearchQuery + SearchRank for relevance ordering
+  - post_search must handle 100+ concurrent queries under 1s P99
+
+  Each phase may create a but must not break existing tests in test_blog_api.py.
+  Run tests/test_performance.py after each phase to measure progress.
+verification:
+  - "python -m pytest tests/test_blog_api.py -q"
+  - "python -m pytest tests/test_performance.py -q -v"
+  - "python -m scripts.check_perf"
+timeout: 1800

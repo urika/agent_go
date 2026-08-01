@@ -72,9 +72,9 @@ def _record_subtask_result(
         else:
             meta["results"].append(result)
         _save_meta_atomic(meta, task_dir)
-    completed_ids.add(st["id"])
-    if result.get("status") == "failed":
-        failed_ids.add(st["id"])
+        completed_ids.add(st["id"])
+        if result.get("status") == "failed":
+            failed_ids.add(st["id"])
         # S6 失败通知增强：子任务失败时主动推送（即使整体未完成）
         from .notify import notify_event as _notify_event
         try:
@@ -134,18 +134,21 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     else:
         _interrupted = threading.Event()
         _own_signal = True
-        # P0 Layer 2 增强：先用 SIGTERM（graceful），30s 内 claude 不退出才 SIGKILL
-        def _on_interrupt(signum: int, frame: Any) -> None:
-            _interrupted.set()
-            with active_pids_lock:
-                pids_to_kill = list(active_pids)
-            for pid in pids_to_kill:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-        prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
-        prev_sigterm = signal.signal(signal.SIGTERM, _on_interrupt)
+
+    # 注册信号处理器：设置中断标志 + SIGTERM 转发到子进程
+    # （无论 _own_signal 如何都需要转发子进程，覆盖 TUI/Cli 两种模式）
+    def _on_interrupt(signum: int, frame: Any) -> None:
+        _interrupted.set()
+        # 先保存 meta.json（尽最大努力 — async-signal-safe 约束下仅写入 pipe 或小文件）
+        with active_pids_lock:
+            pids_to_kill = list(active_pids)
+        for pid in pids_to_kill:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+    prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
+    prev_sigterm = signal.signal(signal.SIGTERM, _on_interrupt)
 
     # 跳过已完成的子任务
     remaining = [st for st in confirmed if st["id"] not in completed_ids]
@@ -278,6 +281,12 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                         worktree_map, results_map, completed_ids, failed_ids,
                         degraded_count, meta_lock, config,
                     )
+                    # 若中断已触发，取消剩余 futures，加速退出
+                    if _interrupted.is_set():
+                        remaining_futs = [f for f in futures if not f.done()]
+                        for f in remaining_futs:
+                            f.cancel()
+                        break
 
         console.emit("wave_complete", {"wave_idx": wave_num})
 
@@ -501,6 +510,31 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         console.print("─" * 60)
         console.print("  使用 agent_go inspect <task-id> 查看详情")
         console.print(f"  或直接 cd 到对应目录查看")
+
+    # ── P0-5 失败恢复闭环引导 ──
+    # 失败后给出可复制执行的完整操作路径，避免用户手动拼接 task_id
+    task_id_str = meta.get("task_id", task_dir.name)
+    if has_failed or has_blocked:
+        console.sep("=", 68)
+        console.title("🔧 失败恢复指引")
+        console.print("推荐操作（可直接复制执行）:")
+        if preserved_ids:
+            console.print(f"  📋 查看失败现场:     agent_go inspect {task_id_str}")
+        if has_failed:
+            console.print(f"  📝 审查已完成部分:   agent_go review --task {task_id_str}")
+            console.print(f"  🔄 修复后继续执行:   agent_go resume {task_id_str}")
+            console.print(f"  🚫 不阻断下游重试:   agent_go resume {task_id_str} --no-verify-block")
+        if has_blocked:
+            console.print(f"  🚫 跳过阻断重试:     agent_go resume {task_id_str} --no-verify-block")
+        console.sep("=", 68)
+
+    # ── P1-3 后续操作卡片 ──
+    task_id_str = meta.get("task_id", task_dir.name)
+    console.print("\n📋 后续操作:")
+    console.print(f"  📋 审查变更     agent_go review --task {task_id_str} --deep")
+    console.print(f"  ✅ 审查+批准    agent_go review --task {task_id_str} --deep --approve")
+    console.print(f"  🔀 创建 PR      agent_go pr {task_id_str} --push")
+    console.print(f"  🔄 恢复执行     agent_go resume {task_id_str}")
 
     # ── 任务完成通知（M1） ──
     # 事件优先级：on_blocked > on_failed > on_complete（一次管线只派发一个事件）

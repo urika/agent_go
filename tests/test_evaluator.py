@@ -44,9 +44,9 @@ class TestParseEvalResponse:
         assert result["passed"] is False
         assert "style inconsistent" in result["reason"]
 
-    def test_unparseable_defaults_to_passed(self):
+    def test_unparseable_defaults_to_failed(self):
         result = _parse_eval_response("random text without json")
-        assert result["passed"] is True
+        assert result["passed"] is False
         assert "无法解析" in result["reason"]
 
 
@@ -145,27 +145,27 @@ class TestEvaluateSemantic:
         assert result["reason"] == "缺少文档更新"
         assert result["suggestions"] == "补充 README 说明"
 
-    def test_api_failure_fallback_passed(self, tmp_path, logger):
-        """API 调用抛异常时不阻塞流程：按通过处理，cost 为 0。"""
+    def test_api_failure_fallback_not_passed(self, tmp_path, logger):
+        """API 调用抛异常时不假通过：返回 failed，cost 为 0，reason 含错误信息。"""
         config = _make_eval_config()
         with patch("agent_go.evaluator._get_worktree_diff", return_value=""), \
              patch("agent_go.evaluator.call_api", side_effect=RuntimeError("connection refused")):
             result = evaluate_semantic(_EVAL_SUBTASK, tmp_path, "pytest tests/", [], config, logger)
 
-        assert result["passed"] is True
+        assert result["passed"] is False
         assert "API 调用失败" in result["reason"]
         assert "connection refused" in result["reason"]
         assert result["cost_usd"] == 0.0
         assert result["raw_response"] == ""
 
-    def test_unparseable_response_defaults_passed(self, tmp_path, logger):
-        """LLM 返回非 JSON 内容时按通过处理（避免阻塞正常流程）。"""
+    def test_unparseable_response_defaults_failed(self, tmp_path, logger):
+        """LLM 返回非 JSON 内容时不过（避免隐藏评估失败）。"""
         config = _make_eval_config()
         with patch("agent_go.evaluator._get_worktree_diff", return_value=""), \
              patch("agent_go.evaluator.call_api", return_value="我无法评估这个变更"):
             result = evaluate_semantic(_EVAL_SUBTASK, tmp_path, "pytest tests/", [], config, logger)
 
-        assert result["passed"] is True
+        assert result["passed"] is False
         assert "无法解析" in result["reason"]
 
     def test_evaluator_config_overrides_plan_api(self, tmp_path, logger):
@@ -487,3 +487,93 @@ class TestExecutorSemanticEval:
         mock_eval.assert_not_called()
         assert result["verify_ok"] is True
         assert result["status"] == "completed"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 策略注册表
+# ═══════════════════════════════════════════════════════════════
+
+class TestStrategyRegistry:
+    """evaluator 策略注册、路由、列出。"""
+
+    def test_register_and_list_strategies(self):
+        """注册自定义策略后可通过 list_strategies 列出"""
+        from agent_go.evaluator import register, list_strategies
+        # 清理测试前注册的策略
+        class _TestStrategy:
+            name = "test_strategy"
+            description = "test"
+            def __call__(self, *a, **kw):
+                return {"passed": True, "confidence": 1.0, "reason": "test"}
+        register(_TestStrategy())
+        strategies = list_strategies()
+        names = [s["name"] for s in strategies]
+        assert "test_strategy" in names
+
+    def test_evaluate_routes_to_custom_strategy(self, logger):
+        """config.evaluator.strategy 指定自定义策略时，路由到该策略"""
+        from agent_go.evaluator import evaluate, register
+
+        called = [False]
+        class _RouteStrategy:
+            name = "route_test"
+            description = ""
+            def __call__(self, *a, **kw):
+                called[0] = True
+                return {"passed": False, "confidence": 0.1, "reason": "routed"}
+
+        register(_RouteStrategy())
+        config = {"evaluator": {"strategy": "route_test"}}
+        result = evaluate({}, None, "test", [], config, logger)
+        assert called[0] is True
+        assert result["passed"] is False
+        assert result["confidence"] == 0.1
+
+
+# ═══════════════════════════════════════════════════════════════
+# 评估事件持久化
+# ═══════════════════════════════════════════════════════════════
+
+class TestAssessmentPersistence:
+    """evaluate() 自动写 assessment.jsonl"""
+
+    def test_evaluate_writes_assessment_jsonl(self, tmp_path, logger, monkeypatch):
+        """调用 evaluate() 时在指定路径写入 assessment.jsonl"""
+        from agent_go.evaluator import evaluate
+
+        # mock LLM 调用（避免真正调 API）
+        mock_content = '{"passed": true, "confidence": 0.85, "reason": "ok"}'
+        with patch("agent_go.evaluator.call_api", return_value=mock_content), \
+             patch("agent_go.evaluator._get_worktree_diff", return_value=""):
+            config = {"_task_id": "t1", "plan_api": {"provider": "anthropic"}}
+            result = evaluate(
+                {"id": "s1"}, tmp_path, "npm run lint", [],
+                config, logger,
+                assessment_path=str(tmp_path),
+                verification_confidence={"level": "heuristic"},
+            )
+
+        # assessment.jsonl 已写入
+        af = tmp_path / "assessment.jsonl"
+        assert af.exists()
+        events = af.read_text(encoding="utf-8").strip().split("\n")
+        assert len(events) == 1
+        import json
+        data = json.loads(events[0])
+        assert data["task_id"] == "t1"
+        assert data["subtask_id"] == "s1"
+        assert data["trigger_source"] == "auto"  # verification_confidence 传入 → auto
+        assert data["verification_confidence"] == "heuristic"
+        assert data["passed"] is True
+        assert data["confidence"] == 0.85
+
+    def test_evaluate_manual_trigger_source(self, tmp_path, logger):
+        """不传 verification_confidence → trigger_source=manual"""
+        from agent_go.evaluator import evaluate
+        with patch("agent_go.evaluator.call_api", return_value='{"passed": true, "confidence": 1.0, "reason": "ok"}'), \
+             patch("agent_go.evaluator._get_worktree_diff", return_value=""):
+            config = {"_task_id": "t1", "plan_api": {"provider": "anthropic"}}
+            evaluate({"id": "s1"}, tmp_path, "pytest", [],
+                     config, logger, assessment_path=str(tmp_path))
+        data = json.loads((tmp_path / "assessment.jsonl").read_text())
+        assert data["trigger_source"] == "manual"

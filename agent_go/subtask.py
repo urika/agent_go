@@ -80,7 +80,7 @@ def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger
             subprocess.run(["git", "merge", "--abort"],
                            cwd=str(dst_worktree), capture_output=True)
 
-def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None, allowed_tools: Optional[list] = None, hard_timeout: int = 0, shared_activity: Optional[list] = None) -> subprocess.CompletedProcess:
+def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None, allowed_tools: Optional[list] = None, hard_timeout: int = 0, shared_activity: Optional[list] = None, config: Optional[dict] = None) -> subprocess.CompletedProcess:
     """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。
 
     allowed_tools: Agent 类型声明的工具白名单（如 architect 的 Read/Grep/Glob）。
@@ -90,20 +90,23 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                      {tool, target, since}，供调用方（如进度行）无锁读取最新活动。
                     共享规则：写线程（daemon reader）替换列表元素 [0]；
                     读线程（调用方主线程）读取 [0]。CPython GIL 下 dict 引用赋值是原子的。
+    config: 运行时配置字典（非 None 时优先于磁盘加载，避免 disk ↔ runtime 不一致）
     """
-    # Phase 2: GoalInjector 看门狗配置。优先级：env（运行时 config 注入，CLI 覆盖生效）> 磁盘 config > 默认
+    # Phase 2: GoalInjector 看门狗配置。优先级：运行时 config（参数注入）> env > 磁盘 config > 默认
     GOAL_WATCHDOG_ENABLED = True
     MAX_GOAL_TURNS = 20
     GOAL_TIMEOUT = 600
-    try:
-        from .config import load_config
-        _cfg = load_config()
-        _goal_cfg = _cfg.get("goal", {})
-        GOAL_WATCHDOG_ENABLED = _goal_cfg.get("enabled", True)
-        MAX_GOAL_TURNS = _goal_cfg.get("max_turns", 20)
-        GOAL_TIMEOUT = _goal_cfg.get("timeout_seconds", 600)
-    except Exception:
-        pass
+    _cfg = config
+    if _cfg is None:
+        try:
+            from .config import load_config
+            _cfg = load_config()
+        except Exception:
+            _cfg = {}
+    _goal_cfg = _cfg.get("goal", {})
+    GOAL_WATCHDOG_ENABLED = _goal_cfg.get("enabled", True)
+    MAX_GOAL_TURNS = _goal_cfg.get("max_turns", 20)
+    GOAL_TIMEOUT = _goal_cfg.get("timeout_seconds", 600)
     if "AGENT_GO_GOAL_ENABLED" in env:
         GOAL_WATCHDOG_ENABLED = env["AGENT_GO_GOAL_ENABLED"] == "1"
     if "AGENT_GO_GOAL_MAX_TURNS" in env:
@@ -409,16 +412,21 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     metering_path = env.get("AGENT_GO_METERING_PATH", "")
     if metering_path and (claude_usage_total["prompt_tokens"] or claude_usage_total["completion_tokens"] or claude_usage_total["cost_usd"]):
         from .config import meter_event
+        _model = env.get("AGENT_GO_CLAUDE_MODEL", "") or "claude-code-executor"
+        # 如果模型在 local_models 列表中，成本完全由本地承担，记账为 0
+        _local_models_raw = env.get("AGENT_GO_LOCAL_MODELS", "")
+        _is_local = _model in [m.strip() for m in _local_models_raw.split(",")] if _local_models_raw else False
+        _cost = 0.0 if _is_local else round(claude_usage_total["cost_usd"], 6)
         meter_event(metering_path, {
             "role": "worker",
             "virtual_model": "agentgo-worker",
             "actual_provider": "claude-code",
             # S4：路由到具体模型时记录真实模型，否则为 CLI 默认
-            "actual_model": env.get("AGENT_GO_CLAUDE_MODEL", "") or "claude-code-executor",
+            "actual_model": _model,
             "difficulty": env.get("AGENT_GO_DIFFICULTY", ""),
             "prompt_tokens": claude_usage_total["prompt_tokens"],
             "completion_tokens": claude_usage_total["completion_tokens"],
-            "cost_usd": round(claude_usage_total["cost_usd"], 6),
+            "cost_usd": _cost,
             "latency_ms": claude_usage_total["duration_ms"],
             "result": "success" if final_rc == 0 else "failed",
             "fallback_reason": "",
@@ -426,7 +434,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             "subtask_id": sub_id,
             "num_turns": claude_usage_total["num_turns"],
         })
-        logger.info(f"{PFX} Claude 执行计量: {claude_usage_total['prompt_tokens']}+{claude_usage_total['completion_tokens']} tokens, ${claude_usage_total['cost_usd']:.4f}")
+        logger.info(f"{PFX} Claude 执行计量: {claude_usage_total['prompt_tokens']}+{claude_usage_total['completion_tokens']} tokens, ${_cost:.4f}{' (本地模型, 成本 0)' if _is_local else ''}")
 
     return subprocess.CompletedProcess(
         [], final_rc,

@@ -1,0 +1,45 @@
+id: add-caching-layer
+difficulty: hard
+repo: eval_suite/fixtures/data-pipeline
+task: |
+  为 data-pipeline 框架添加 stage 输出缓存层，避免重复计算。
+
+  ## 要求
+
+  1. **缓存核心**（src/core/cache.py 新文件）
+     - 创建 `StageCache` 类
+     - 缓存 key = stage_name + 输入数据的哈希摘要
+     - 缓存值 = stage 输出的序列化数据
+     - 支持 `get(key)`, `set(key, value)`, `invalidate(stage_name)`, `clear()` 
+     - 缓存持久化到磁盘文件 `.pipeline_cache/` 目录（JSON 格式）
+     - 可配置最大缓存条目数（默认 100）
+
+  2. **Pipeline 集成**（修改 src/core/pipeline.py）
+     - Pipeline.run() 在 stage 执行前检查缓存
+     - 命中缓存时跳过 stage 执行，直接从缓存恢复输出
+     - `run(use_cache=True)` 可选，默认为 True
+     - `run_async` 也支持缓存
+
+  3. **Stage 适配**（修改 src/stages/ 下的各 stage 类）
+     - 每个 stage 的 process() 方法输入/输出需要支持序列化
+     - CsvExtractStage: records 需可 JSON 序列化
+     - Transform stages: 确保输出可 JSON 序列化
+
+  4. **CLI 缓存管理**（修改 src/cli.py）
+     - 新增 `cache clear` 命令：清空缓存
+     - 新增 `cache stats` 命令：显示缓存命中/未命中统计
+     - `run --no-cache` 标志：跳过缓存
+
+  5. **测试**（tests/test_cache.py）
+     - StageCache 基础功能测试（至少 4 个）
+     - Pipeline 缓存集成测试（至少 2 个）
+     - CLI 缓存命令测试（至少 1 个）
+
+  ## 约束
+  - 零外部依赖
+  - 缓存目录不提交到 git（更新 .gitignore）
+  - 所有原有测试继续通过
+  - 缓存序列化失败时优雅降级（跳过缓存，不中断运行）
+verification:
+  - "python -m pytest tests/ -q"
+timeout: 900

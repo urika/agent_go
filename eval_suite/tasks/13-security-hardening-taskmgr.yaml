@@ -1,0 +1,16 @@
+id: security-hardening-taskmgr
+difficulty: hard
+repo: eval_suite/fixtures/task-mgr
+task: |
+  Security audit hardening for task-mgr CLI:
+
+  1. `src/cli.py`: Add input validation to `cmd_add` and `cmd_list` — reject descriptions longer than 200 chars, reject descriptions containing shell metacharacters (`; & | $ ` ``)
+  2. `src/cli.py`: Add `argparse` type validation instead of manual string parsing — all task IDs must match `[0-9a-f]{8}` regex
+  3. `src/storage.py`: Add path traversal protection to the data file path — reject paths containing `..`
+  4. `src/models.py`: Add `sanitize()` classmethod that strips HTML tags from description text (keep only plain text, max 200 chars)
+  5. `tests/test_security.py`: Write tests covering all 4 attack vectors
+verification:
+  - "python -m pytest tests/test_security.py -q"
+  - "python -c \"from src.cli import cmd_add; import sys; sys.argv=['cli','add','valid']; cmd_add(); print('add OK')\""
+  - "python -c \"from src.models import Task; t=Task.sanitize('<script>alert(1)</script>normal'); assert 'script' not in t.description and t.description=='normal'; print('sanitize OK')\""
+timeout: 600

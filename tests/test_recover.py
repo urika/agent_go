@@ -247,6 +247,45 @@ class TestResetOrphanChanges:
         assert (tmp_path / "tracked.txt").read_text(encoding="utf-8") == "original"
         assert not (tmp_path / "untracked.txt").exists()
 
+    def test_only_untracked_no_tracked_files(self, tmp_path):
+        """边缘 case：.git 存在但没有 tracked 文件，只有 untracked 文件。
+        这是旧代码 checkout -- . 失败的唯一场景（index 为空）。
+        """
+        (tmp_path / ".gitkeep").write_text("", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        # 现在 repo 有 1 个 tracked 文件；删除它，让 index 为空，类似 init 后无 commit 的状态
+        subprocess.run(["git", "rm", "-rf", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "empty"], cwd=str(tmp_path), capture_output=True)
+        # 确认无 tracked 文件
+        r = subprocess.run(["git", "ls-files"], cwd=str(tmp_path), capture_output=True, text=True)
+        assert r.stdout.strip() == ""
+
+        # 只加 untracked 文件
+        (tmp_path / "orphan.py").write_text("# orphan\n", encoding="utf-8")
+        (tmp_path / "scratch.json").write_text("{}\n", encoding="utf-8")
+
+        assert reset_orphan_changes(tmp_path) is True
+        assert not (tmp_path / "orphan.py").exists()
+        assert not (tmp_path / "scratch.json").exists()
+
+    def test_only_untracked_nested_dirs(self, tmp_path):
+        """untracked 文件在嵌套子目录中 — clean -fd 需要递归清理。"""
+        _init_repo(tmp_path, {"base.py": "# base\n"})
+        nested = tmp_path / "src" / "utils"
+        nested.mkdir(parents=True)
+        (nested / "helper.py").write_text("# helper\n", encoding="utf-8")
+        (tmp_path / "config.json").write_text("{}\n", encoding="utf-8")
+
+        assert reset_orphan_changes(tmp_path) is True
+        assert not (nested / "helper.py").exists()
+        assert not (tmp_path / "config.json").exists()
+        assert not (tmp_path / "src").exists()  # 整个 untracked 目录树被 clean -fd 删除
+        assert (tmp_path / "base.py").exists()  # tracked 文件不受影响
+
     def test_errors_when_git_fails(self, tmp_path):
         with patch("agent_go.recover._run_git",
                    side_effect=[(0, " M f\n", ""), (-1, "", "error")]):

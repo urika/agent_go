@@ -294,9 +294,9 @@ cmd_models(args)                           → 决策矩阵展示
 analyze_model_productivity(path) → 与 cmd_models 同逻辑，返回 dict 供编程调用
 ```
 
-## cross_judge.py — 交叉评判矩阵 (350 行)
+## cross_judge.py — 交叉评判矩阵 (413 行)
 
-> **状态**：S8 P1 已落地。N 模型互评（禁绝自评）+ 人工校准。
+> **状态**：S8 P1 简化版已落地。N 模型互评（禁绝自评）+ 人工校准。
 
 ```
 cmd_judge(args)                            → 交叉评判 + 校准 CLI
@@ -306,8 +306,11 @@ cmd_judge(args)                            → 交叉评判 + 校准 CLI
   ── --judge-subcommand calibrate           人工校准模式
 
 cross_judge_results(bench_results, judges) → 逐条调用 evaluate_semantic（读 worktree git diff）
-  ── 硬约束：judge_model != candidate_model（禁绝自评，LLM-as-Judge 自偏防护）
-  ── 评分尺度：correctness/completeness/code_quality（1-5）+ false_positive(bool)
+  ── 硬约束：judge 与 candidate 不同 provider（禁绝自评，LLM-as-Judge 自偏防护）
+  ── 评分尺度（目标 rubric）：correctness/completeness/code_quality（1-5）+ false_positive(bool)
+  ── 当前实现（P1 简化）：四维退化为单一 semantic_score（由 reason 文本启发式提取），
+     false_positive = not passed。P2 计划升级 evaluator.py prompt 为结构化 rubric，
+     产出独立四维分，届时 semantic_score = avg(correctness, completeness, code_quality)。
 
 calibrate_judge(llm_path, human_csv)       → 人工校准
   ── human CSV: task_id,candidate_model,correctness,... 
@@ -315,9 +318,9 @@ calibrate_judge(llm_path, human_csv)       → 人工校准
   ── 分歧 ≤1.0→✓reliable, 1.0-1.5→⚠marginal, >1.5→✗unreliable
 ```
 
-## pricing.py — 大模型定价表 (130 行)
+## pricing.py — 大模型定价表 (152 行)
 
-> **状态**：从 eval.py 迁出。S8 P0 落地。38 个模型（2026-07 最新）+ 档位元数据。
+> **状态**：从 eval.py 迁出。S8 P0 落地。48 个模型（2026-07 最新）+ 档位元数据。
 
 ```
 MODEL_PRICES        → {model: {prompt, completion}} 定价表（USD/百万tokens）

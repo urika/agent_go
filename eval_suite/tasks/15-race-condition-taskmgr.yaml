@@ -1,0 +1,17 @@
+id: race-condition-taskmgr
+difficulty: hard
+repo: eval_suite/fixtures/task-mgr
+task: |
+  Fix race condition in task-mgr's file-based storage under concurrent access:
+
+  1. `src/storage.py`: Add `threading.Lock` to `save()` and `load_all()` — prevent two concurrent writes from overwriting each other's data
+  2. `src/storage.py`: Implement atomic file write pattern — write to a `.tmp` file, then `os.replace()` to the real path (crash-safe)
+  3. `src/storage.py`: Add retry logic for `load_all()` — if JSON decode fails, retry up to 3 times with 10ms backoff (handles partial writes from concurrent processes)
+  4. `tests/test_concurrent.py`: Write tests verifying:
+     - 10 concurrent `save()` calls on separate threads all succeed and all tasks are persisted
+     - Atomic write: simulate mid-write crash, verify no data corruption
+     - Cross-process safety: simulate two TaskStorage instances writing alternately
+verification:
+  - "python -m pytest tests/test_concurrent.py -q"
+  - "python -c \"from src.storage import TaskStorage; import tempfile, pathlib; p=pathlib.Path(tempfile.mktemp()); s=TaskStorage(p); s.save('x'); data=s.load_all(); assert len(data)==1 and data[0].description=='x'; print('Atomic OK')\""
+timeout: 600

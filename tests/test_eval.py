@@ -201,6 +201,36 @@ class TestAnalyzeQuality:
         result = analyze_quality(meta)
         assert result["Q2_subtask_success_rate"] == 100
 
+    def test_q11_not_present_without_task_dir(self):
+        """不传 task_dir → Q11 字段不存在"""
+        meta = _make_meta()
+        result = analyze_quality(meta)
+        assert result is not None
+        assert "Q11_false_positive_rate" not in result
+
+    def test_q11_computed_from_assessment(self, tmp_path):
+        """有 assessment.jsonl → Q11 字段出现"""
+        # 写 assessment.jsonl
+        from agent_go.assessment import AssessmentEvent, write
+        td = tmp_path / "task-001"
+        td.mkdir()
+        path = td / "assessment.jsonl"
+        for p in [True, False, True]:
+            write(path, AssessmentEvent(
+                task_id="task-001", subtask_id="s1",
+                trigger_source="auto", passed=p, confidence=0.8 if p else 0.2,
+                evaluator_model="haiku",
+            ))
+        # 写 meta.json
+        meta = _make_meta()
+        (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        result = analyze_quality(meta, task_dir=td)
+        assert result is not None
+        assert result.get("Q11_evaluated_count") == 3
+        assert result.get("Q11_flagged_count") == 1
+        assert result.get("Q11_false_positive_rate") == pytest.approx(33.3, rel=1)
+        assert result.get("Q11_avg_confidence") == 0.8
+
 
 class TestAnalyzePerformance:
     """性能分析"""

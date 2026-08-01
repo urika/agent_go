@@ -1,0 +1,148 @@
+[
+  {
+    "model": "DS Flash",
+    "task": "fix-default",
+    "success": true,
+    "step_count": 2,
+    "issues": [],
+    "duration_ms": 12395,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "DS Flash",
+    "task": "add-tags",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 25894,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "DS Flash",
+    "task": "add-metrics",
+    "success": true,
+    "step_count": 3,
+    "issues": [],
+    "duration_ms": 21345,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "DS Flash",
+    "task": "add-pipeline-retry",
+    "success": true,
+    "step_count": 3,
+    "issues": [],
+    "duration_ms": 24223,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "DS Pro",
+    "task": "fix-default",
+    "success": true,
+    "step_count": 2,
+    "issues": [],
+    "duration_ms": 25854,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "DS Pro",
+    "task": "add-tags",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 32822,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "DS Pro",
+    "task": "add-metrics",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 41492,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "DS Pro",
+    "task": "add-pipeline-retry",
+    "success": true,
+    "step_count": 3,
+    "issues": [],
+    "duration_ms": 40214,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "Kimi K3",
+    "task": "fix-default",
+    "success": true,
+    "step_count": 2,
+    "issues": [],
+    "duration_ms": 32317,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "Kimi K3",
+    "task": "add-tags",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 46189,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "Kimi K3",
+    "task": "add-metrics",
+    "success": false,
+    "step_count": 0,
+    "issues": [
+      "连接超时或 IO 错误 (anthropic): The read operation timed out"
+    ],
+    "duration_ms": 61284,
+    "field_completeness": 0
+  },
+  {
+    "model": "Kimi K3",
+    "task": "add-pipeline-retry",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 55095,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "Kimi 2.7",
+    "task": "fix-default",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 8468,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "Kimi 2.7",
+    "task": "add-tags",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 11553,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "Kimi 2.7",
+    "task": "add-metrics",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 15869,
+    "field_completeness": 1.0
+  },
+  {
+    "model": "Kimi 2.7",
+    "task": "add-pipeline-retry",
+    "success": true,
+    "step_count": 4,
+    "issues": [],
+    "duration_ms": 15904,
+    "field_completeness": 1.0
+  }
+]

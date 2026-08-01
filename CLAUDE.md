@@ -109,7 +109,7 @@ cmd_run()
 | `metrics.py` | Data collection: timing, change stats, estimate_cost, aggregate_metering |
 | `eval.py` | Quality/perf/cost (per-role)/reliability/ux evaluation, eval gate ($/pass baseline + regression) |
 | `planning.py` | Planning helpers: estimate_task_duration (M4) |
-| `pricing.py` | Model price table (22 models), MODEL_TIER, provider defaults |
+| `pricing.py` | Model price table (48 models), MODEL_TIER, provider defaults |
 | `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks |
 | `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
 | `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
@@ -145,8 +145,8 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 
 ```
 agent_go/           # 28 package modules (~10,300 lines)
-tests/              # 46 test files, 1130 tests
-eval_suite/         # Standard task suite for eval bench (8 tasks + fixtures)
+tests/              # 47 test files, 1169 tests
+eval_suite/         # Standard task suite for eval bench (22 tasks + fixtures)
 docs/
 ├── README.md       # 文档索引
 ├── architecture.md # 核心架构、关键设计决策、数据流

@@ -56,7 +56,7 @@ MODEL_PRICES = {
     "deepseek-chat":           {"prompt": 0.14, "completion": 0.28},   # V3.2 性价比旗舰（$0.28/$0.28）
     "deepseek-v3.2":           {"prompt": 0.14, "completion": 0.28},   # 同款别名
     "deepseek-v4-flash":       {"prompt": 0.14, "completion": 0.28},   # V4 Flash
-    "deepseek-v4-pro":         {"prompt": 0.55, "completion": 1.1},    # V4 Pro
+    "deepseek-v4-pro":         {"prompt": 0.435, "completion": 0.87},  # V4 Pro（2026-07 官网价）
     "deepseek-reasoner":       {"prompt": 0.42, "completion": 0.83},   # R1 推理（¥3/6）
 
     # ── 阿里云百炼 Qwen（2026-07，help.aliyun.com） ──

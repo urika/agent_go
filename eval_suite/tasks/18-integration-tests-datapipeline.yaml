@@ -1,0 +1,25 @@
+id: integration-tests-datapipeline
+difficulty: hard
+repo: eval_suite/fixtures/data-pipeline
+task: |
+  Build a comprehensive integration test suite for the data pipeline from CLI:
+
+  1. Create `tests/fixtures/` directory with:
+     - `sample.csv`: valid CSV with 10 rows and 3 columns
+     - `pipeline_valid.json`: valid pipeline config (CSV extract → filter → map → file load)
+     - `pipeline_invalid.json`: pipeline with unknown stage type
+  2. Create `tests/test_cli_integration.py` testing:
+     - Full end-to-end pipeline via `cli.cmd_run()` — verify output file is created with correct content
+     - Pipeline with missing input file exits with non-zero and error message
+     - Pipeline with invalid config exits with non-zero and validation error details
+     - `list-stages` subcommand prints all 7 registered stage types
+     - `validate` subcommand validates the valid config (exit 0) and invalid config (exit 1)
+  3. Create `conftest.py` with reusable fixtures:
+     - `temp_dir`: temporary directory with lifecycle cleanup
+     - `sample_csv`: generates `fixtures/sample.csv` path
+     - `valid_config`: returns parsed pipeline_valid.json path
+  4. Ensure all integration tests are idempotent (running twice produces same result) and clean up after themselves
+verification:
+  - "python -m pytest tests/test_cli_integration.py tests/test_cli.py -q"
+  - "python -c \"from pathlib import Path; assert Path('tests/fixtures/sample.csv').exists(); print('fixtures OK')\""
+timeout: 600

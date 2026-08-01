@@ -129,7 +129,7 @@ cmd_run()
 | `utils.py` | Commit formatting, slugify, shell safety, version detection |
 | `eval.py` | Quality/perf/cost (per-role)/reliability/UX analysis + eval gate ($/pass baseline + regression) |
 | `planning.py` | Planning helpers: estimate_task_duration |
-| `pricing.py` | Model price table (22 models), MODEL_TIER, provider defaults |
+| `pricing.py` | Model price table (48 models), MODEL_TIER, provider defaults |
 | `replay.py` | Execution replay timeline: load meta/metering/results, ASCII/JSON visualization |
 | `checkpoint.py` | Worktree file snapshot manager: take/restore/delete |
 | `mcp_server.py` | MCP JSON-RPC 2.0 server over stdio (4 tools + lifecycle event stream) |
@@ -221,8 +221,8 @@ for fut in as_completed(futures):
 
 ```
 	agent_go/           # 29 Python modules (~10,400 lines)
-	tests/              # 47 test files, 1264 tests
-eval_suite/         # Standard task suite for eval bench (12 tasks + fixtures)
+	tests/              # 47 test files, 1169 tests
+eval_suite/         # Standard task suite for eval bench (22 tasks + fixtures)
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records
 ```
