@@ -625,6 +625,32 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
     has_changes = bool(status_result.stdout.strip())
+    # 稳健性：worker 可能自行 commit（如 deepseek 模型），此时工作区干净但已有变更。
+    # 判定：HEAD commit 为本次 subtask 新产生（author 时间在最近 10 分钟内且非 fixture 初始提交）。
+    if not has_changes:
+        try:
+            _head_hash = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=str(worktree),
+                capture_output=True, text=True, timeout=10).stdout.strip()
+            _head_date = subprocess.run(
+                ["git", "log", "-1", "--format=%at", "HEAD"], cwd=str(worktree),
+                capture_output=True, text=True, timeout=10).stdout.strip()
+            _head_msg = subprocess.run(
+                ["git", "log", "-1", "--format=%s", "HEAD"], cwd=str(worktree),
+                capture_output=True, text=True, timeout=10).stdout.strip()
+            _now = time.time()
+            _recent = False
+            if _head_date and _head_date.isdigit():
+                _recent = (_now - int(_head_date) < 600)
+            if _recent:
+                _self_commit_stat = subprocess.run(
+                    ["git", "show", "--stat", "--format=", "HEAD"], cwd=str(worktree),
+                    capture_output=True, text=True, timeout=10).stdout.strip()
+                has_changes = True
+                summary = f"worker 自行提交: {_head_msg}\n{_self_commit_stat}" if _self_commit_stat else f"worker 自行提交: {_head_msg}"
+                logger.info(f"[self_commit] {subtask['id']}: HEAD 变更于 {_now - int(_head_date):.0f}s 前 → 识别为有变更 ({_head_hash[:8]})")
+        except Exception as _sc_err:
+            logger.debug(f"[self_commit] 检查失败（忽略）: {_sc_err}")
     if has_changes:
         diff_result = subprocess.run(["git", "diff", "--stat", "HEAD"], cwd=str(worktree), capture_output=True, text=True)
         tracked = diff_result.stdout.strip()
