@@ -271,7 +271,7 @@ PM 把「要做什么」说清楚，agent_go 负责「怎么执行」。
 | **已有** | `--docs` | 将参考文档全文注入 Plan prompt。当前等价于 `--spec` 的「参考资料」注入，但无结构化解析 | ✅ 已落地（`cmd_run` → `read_reference_docs` → `generate_plan(reference_docs=...)`） |
 | **已有** | Plan 确认 [S] 补充 / [D] 文档 | 交互式手动补充上下文后重新生成 Plan | ✅ 已落地（`confirm_plan` 交互菜单） |
 | **P1** | `agent_go scope` | 轻量 Scoping：读代码库 + 追问澄清 → 输出 Task Spec 草稿 | 待设计（依赖 S10 bench） |
-| **P1** | L1.5 AST 冲突检测 | 多子任务同符号冲突的静态检测（零 LLM 成本，[arXiv:2603.24284](sdd-references-and-frameworks.md) 97% 精度） | 待实施 |
+| **P1** | L1.5 AST 冲突检测 | 多子任务同符号冲突的静态检测（零 LLM 成本，[arXiv:2603.24284](sdd-references-and-frameworks.md) 97% 精度）。`detect_step_conflicts()` 用 ast 提取顶层符号，符号级冲突在 Plan 确认后拦截 | ✅ **已落地（S11 L1.5）** |
 | **P2** | `--context` 参数 | 从 PRD/Roadmap 等长文档中按需提取相关段落注入 | 远期 |
 | **P2** | Task Spec 库 | 历史 Spec 搜索复用 | 依赖 KnowledgeStore |
 
