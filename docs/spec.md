@@ -364,9 +364,9 @@ execute_tool(name, args, worktree, ...) → 工具分发执行（返回 ToolResu
 cmd_status_tui()  → curses 多面板实时监控（agent_go status --watch）
 ```
 
-## bench.py — 模型对照评估编排器 (551 行)
+## bench.py — 模型对照评估编排器 (585 行)
 
-> **状态**：S8 P0 已落地。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
+> **状态**：S8 P0 已落地 + S10-P1 schema 扩展。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
 
 ```
 cmd_bench(args)                            → 对照运行编排器
@@ -374,20 +374,28 @@ cmd_bench(args)                            → 对照运行编排器
   ── --models M1,M2,M3                     被评模型（每模型跑全部任务）
   ── --repeat N                            每任务重复 N 次（默认 3）
   ── --output results.jsonl                JSONL 落盘
+  ── --source-batch NAME                   批次标识（baseline / results_v2 / smoke-*）
   ── 内部 subprocess 调 agent_go run（--yes --headless --preserve-worktrees）
   ── 读 AGENT_GO_DIR/task-*/meta.json + metering.jsonl
+  ── record 字段（S10-P1 扩展）：
+       timed_out     bool   任务是否因超时被强制终止（cooperative timeout SIGTERM/SIGKILL）
+       judge_model   string semantic evaluator 模型（role=evaluator 的 actual_model）
+       planner_model string plan 生成模型（role=planner 的 actual_model）
+       source_batch  string 批次标识（跨批次追溯）
 
 cmd_models(args)                           → 决策矩阵展示
   ── --results results.jsonl               读取 bench 产出
-  ── 按模型聚合：pass_rate / dollar_per_pass / sample_size / recommendation
+  ── 按模型聚合：pass_rate / dollar_per_pass / k8 / sample_size / recommendation
+  ── $/pass 统一口径（§3.1）= sum(total_cost_usd) / sum(pass_rate)
+  ── K8 修订（§3.4）= 通过 record 中 total_retries==0 占比
   ── 决策规则：pass_rate<60%→discouraged, >=85%→recommended, <3样本→insufficient
 
 analyze_model_productivity(path) → 与 cmd_models 同逻辑，返回 dict 供编程调用
 ```
 
-## cross_judge.py — 交叉评判矩阵 (438 行)
+## cross_judge.py — 交叉评判矩阵 (485 行)
 
-> **状态**：S8 P1 简化版已落地。N 模型互评（禁绝自评）+ 人工校准。
+> **状态**：S8 P1 简化版已落地 + S10-P1 自评偏差量化。N 模型互评（禁绝自评）+ 人工校准。
 
 ```
 cmd_judge(args)                            → 交叉评判 + 校准 CLI
@@ -402,6 +410,12 @@ cross_judge_results(bench_results, judges) → 逐条调用 evaluate_semantic（
   ── 当前实现（P1 简化）：四维退化为单一 semantic_score（由 reason 文本启发式提取），
      false_positive = not passed。P2 计划升级 evaluator.py prompt 为结构化 rubric，
      产出独立四维分，届时 semantic_score = avg(correctness, completeness, code_quality)。
+  ── S10-P1：每条结果携带 self_judge_model（bench record 的 judge_model，即自评模型身份）
+
+_print_self_bias_report(bench_results, scores) → 自评偏差量化报告（S10-P1）
+  ── 口径：自评通过（pass_rate>0）的 record 中，
+       被 cross-judge 判 false_positive 的占比 + cross-judge 评分 <3/5 的占比
+  ── 解读：false_positive 率越高 → semantic evaluator 自评越乐观（漏检越多）
 
 calibrate_judge(llm_path, human_csv)       → 人工校准
   ── human CSV: task_id,candidate_model,correctness,... 

@@ -181,6 +181,65 @@ class TestCrossJudgeResults:
             assert s["error"] == "无可用 worktree"
             assert s["semantic_score"] == -1
 
+    def test_self_judge_model_carried_through(self, tmp_path):
+        """S10-P1：bench record 的 judge_model（自评模型）透传到每条 cross-judge 结果。"""
+        br = self._make_bench_result(tmp_path, candidate_model="claude-sonnet-4")
+        br["judge_model"] = "gpt-5"  # 自评模型身份
+        fake_feedback = {
+            "passed": True, "reason": "完全正确实现",
+            "suggestions": "", "cost_usd": 0.01, "latency_ms": 200,
+        }
+        with patch("agent_go.evaluator.evaluate_semantic",
+                   return_value=fake_feedback):
+            scores = cross_judge_results([br], ["deepseek-chat"])
+        assert len(scores) == 1
+        assert scores[0]["self_judge_model"] == "gpt-5"
+
+    def test_no_worktree_carries_self_judge(self, tmp_path):
+        """无 worktree 降级路径同样携带 self_judge_model。"""
+        br = self._make_bench_result(tmp_path, with_worktree=False)
+        br["judge_model"] = "claude-haiku-4-5"
+        scores = cross_judge_results([br], ["gpt-5"])
+        assert scores[0]["self_judge_model"] == "claude-haiku-4-5"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 自评偏差量化报告（S10-P1）
+# ═══════════════════════════════════════════════════════════════
+
+class TestSelfBiasReport:
+    """_print_self_bias_report：自评通过 vs cross-judge 判定的偏差统计（仅验证不抛异常 + 计数逻辑）。"""
+
+    def test_self_pass_records_counted(self, tmp_path, capsys):
+        from agent_go.cross_judge import _print_self_bias_report
+        bench_results = [
+            {"task_id": "t1", "pass_rate": 1.0},   # 自评通过
+            {"task_id": "t2", "pass_rate": 0.0},   # 自评未通过
+        ]
+        scores = [
+            {"task_id": "t1", "semantic_score": 5, "false_positive": False},
+            {"task_id": "t1", "semantic_score": 2, "false_positive": True},
+            {"task_id": "t2", "semantic_score": 4, "false_positive": False},
+        ]
+        _print_self_bias_report(bench_results, scores)
+        out = capsys.readouterr().out
+        assert "自评偏差量化" in out
+        assert "1" in out  # 自评通过的 record 数（t1）
+
+    def test_no_judged_scores_returns_quietly(self, capsys):
+        from agent_go.cross_judge import _print_self_bias_report
+        _print_self_bias_report([], [])
+        out = capsys.readouterr().out
+        assert "自评偏差量化" not in out  # 无 scores → 直接返回
+
+    def test_no_self_pass_returns_quietly(self, capsys):
+        from agent_go.cross_judge import _print_self_bias_report
+        bench_results = [{"task_id": "t1", "pass_rate": 0.0}]
+        scores = [{"task_id": "t1", "semantic_score": 4, "false_positive": False}]
+        _print_self_bias_report(bench_results, scores)
+        out = capsys.readouterr().out
+        assert "无自评通过" in out
+
 
 # ═══════════════════════════════════════════════════════════════
 # _judge_one
