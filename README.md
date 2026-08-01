@@ -1,7 +1,7 @@
 # agent_go
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-1442%20passed-green)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1464%20passed-green)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stdlib Only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)]()
 
@@ -22,6 +22,7 @@ Give Claude Code a complex task — refactoring auth, upgrading dependencies, ad
 - **Interrupt & crash recovery** — SIGINT pauses with `resume`; SIGKILL/abnormal exits rebuild `meta.json` via `recover`
 - **Result review** — `review --task <id>` aggregates per-file diffs with approve/reject decisions; `--deep` adds independent-model analysis
 - **MCP server & client** — expose agent_go as an MCP server (stdio or HTTP/SSE, 6 tools); subtasks can consume tools from external MCP servers (`mcp__{server}__{tool}`)
+- **Artifact export** — subtasks write deliverables to `__artifacts__/` in their worktree; with `--artifact-dir`, files are exported to your directory before worktree cleanup
 - **Evaluation** — `eval quality/perf/cost/reliability/ux` built-in analytics
 - **Release gate** — `eval gate --baseline 0.05` enforces $/pass rate budget (北极星指标); CI step fails on regression
 - **Model benchmark** — `eval bench --models M1,M2` compares N models on standard task suite; `eval models` outputs decision matrix
@@ -41,6 +42,9 @@ agent_go run ~/my-project "重构认证模块，从 JWT 迁移到 OAuth2"
 
 # Headless with concurrency and remote push
 agent_go run ~/my-project "升级所有依赖" --yes --parallel 3 --remote origin
+
+# Export subtask artifacts (worktree/__artifacts__/) to a directory before cleanup
+agent_go run ~/my-project "生成 Q3 季度汇报 PPT" --yes --artifact-dir ~/Desktop/reports
 
 # With explicit skills
 agent_go run ~/my-project "安全审查" --skill security-review --docs "README.md,docs/spec.md"
@@ -100,6 +104,7 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 | `--interactive` | Start TUI dashboard monitoring subtask execution |
 | `--step-confirm` | Pause to confirm before each wave |
 | `--auto-init` | Auto `git init` + first commit for non-git target dirs |
+| `--artifact-dir <dir>` | Export artifacts (subtask `__artifacts__/` files) to this directory |
 | `--docs <paths>` | Mount reference documents (comma-separated) |
 | `--issue <N>` | Link GitHub issue (injected into commits) |
 | `--skill <names>` | Load Skills by name (comma-separated) |
@@ -146,9 +151,10 @@ agent_go/
 ├── bench.py             # Model benchmark orchestrator (eval bench)
 ├── cross_judge.py       # Cross-model judgment matrix + human calibration
 ├── assessment.py        # False-positive evaluation data layer
+├── artifacts.py         # Artifact export (S9-B: __artifacts__/ -> --artifact-dir)
 └── lint.py              # AST-based static checks
 agent_go.py               # Entry-point wrapper
-tests/                    # 1442 tests across 59 test files
+tests/                    # 1464 tests across 60 test files
 eval_suite/               # Standard task suite for eval bench (22 tasks + 4 fixtures)
 ```
 
@@ -185,7 +191,7 @@ Config at `~/.agent_go/config.json` (auto-created). See [`config.example.json`](
 ```bash
 pip3 install pytest pytest-mock
 
-pytest tests/              # 1442 tests (~35s)
+pytest tests/              # 1464 tests (~35s)
 pytest tests/ -q           # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 ```

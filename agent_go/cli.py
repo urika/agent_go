@@ -86,6 +86,8 @@ def _build_parser():
                             help="每波执行前暂停确认（适用于交互式非 TUI 场景）")
     run_parser.add_argument("--auto-init", action="store_true",
                             help="目标目录非 git 仓库时自动 git init + 首次 commit（默认关闭）")
+    run_parser.add_argument("--artifact-dir", default=None,
+                            help="产物导出目录：子任务写入 worktree/__artifacts__/ 的文件在此收集导出（默认不导出）")
     run_parser.add_argument("--config", default=argparse.SUPPRESS, help="Path to config JSON file (default: ~/.agent_go/config.json)")
 
     # resume 子命令
@@ -104,6 +106,8 @@ def _build_parser():
                                help="强制清理所有 worktree")
     resume_parser.add_argument("--no-verify-block", action="store_true", dest="no_verify_block",
                                help="验证失败不阻断下游依赖（默认阻断）")
+    resume_parser.add_argument("--artifact-dir", default=None,
+                               help="产物导出目录：收集各 worktree/__artifacts__/ 的文件（覆盖 meta 中的记录）")
 
     # list 子命令
     subparsers.add_parser("list", help="List all historical tasks")
@@ -344,6 +348,8 @@ def cmd_run(args=None):
         config.setdefault("goal", {})["enable_goal_hook"] = True
     if getattr(args, "agent_loop", False):
         config.setdefault("agent_loop", {})["enabled"] = True
+    if getattr(args, "artifact_dir", None):
+        config["artifact_dir"] = args.artifact_dir
 
     if auto_yes:
         config["behavior"]["auto_confirm_plan"] = True
@@ -607,11 +613,13 @@ def cmd_resume(args=None):
     config["_metering_path"] = str(task_dir / "metering.jsonl")
     config["_task_id"] = task_id
 
-    # CLI 覆盖：--max-retries / --no-verify-block（args 模式）
+    # CLI 覆盖：--max-retries / --no-verify-block / --artifact-dir（args 模式）
     if args and getattr(args, 'max_retries', None) is not None:
         config.setdefault("verification", {})["max_retries"] = args.max_retries
     if args and getattr(args, 'no_verify_block', False):
         config.setdefault("verification", {})["block_on_failure"] = False
+    if args and getattr(args, 'artifact_dir', None):
+        config["artifact_dir"] = args.artifact_dir
 
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv

@@ -47,6 +47,8 @@
     "timeout_seconds": 600,
     "enable_goal_hook": false
   },
+  "artifact_dir": null,
+  "_artifact_note": "S9-B 产物导出目录（如 \"/Users/me/reports\"）。子任务写入 worktree/__artifacts__/ 的文件在任务完成后导出到该目录；null = 不导出（向后兼容）",
   "worker_models": {
     "easy":   "",
     "medium": "",

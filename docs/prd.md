@@ -439,7 +439,7 @@ CLI 正在成为 AI Agent 的事实标准接口（2026 年 Q1 的 Agent-Native C
 
 ## 办公能力扩展：MCP 消费 + 产物导出（S9）
 
-> **状态**：能力 A（MCP 消费层）✅ 已落地（2026-08-01，`mcp_client.py` + `mcp_servers` config）；能力 B（产物导出）设计中，设计稿见 [design/office-capability-extension.md](design/office-capability-extension.md)，排入 roadmap S9-B
+> **状态**：能力 A（MCP 消费层）✅ 已落地（2026-08-01，`mcp_client.py` + `mcp_servers` config）；能力 B（产物导出）✅ 已落地（2026-08-01，`artifacts.py` + `--artifact-dir`），设计稿见 [design/office-capability-extension.md](design/office-capability-extension.md)
 > **决策结论**：不自建 Office 编辑器，补齐"搬运"（MCP 消费）与"交付"（产物导出）两个架构能力
 
 ### 背景
@@ -453,7 +453,7 @@ agent_go 的护城河是 Plan → Decompose → Execute 编排层，不是文档
 | 缺口 | 现状 | 后果 |
 |------|------|------|
 | **A. 无外部工具消费** | ✅ **已关闭（2026-08-01）**：MCP 消费层已落地，子任务可调用外部 server 工具；另暴露 MCP server 6 tools | 历史：无法接入 Office MCP 生态，子任务只能改代码 |
-| **B. 无产物导出** | 子任务在临时 worktree 执行，pipeline 完成后清理 worktree | 生成的文档随清理丢失，无法交付用户 |
+| **B. 无产物导出** | ✅ **已关闭（2026-08-01）**：`artifacts.py` + `__artifacts__/` 声明制 + `--artifact-dir` 已落地，pipeline 清理前收集导出 | 历史：生成的文档随清理丢失，无法交付用户 |
 
 ### 能力 A：MCP 消费层（✅ 已落地）
 
@@ -475,13 +475,14 @@ agent_go 的护城河是 Plan → Decompose → Execute 编排层，不是文档
 - 故障隔离：server 启动失败降级 warning，不阻断 pipeline（与 notify/skills 同级）
 - 实现：`agent_go/mcp_client.py`（MCPClientPool + MCPServerConnection），pipeline 启动/收尾管理连接池
 
-### 能力 B：产物导出路径（设计中）
+### 能力 B：产物导出路径（✅ 已落地）
 
 区分 code-diff（worktree→commit）与 artifact（文件→用户目录）。
 
 - **声明制**：子任务写入 `worktree/__artifacts__/` 的文件视为产物
 - **收尾收集**：pipeline 清理 worktree 前扫描 `__artifacts__/`，复制到 `--artifact-dir`
 - **CLI**：`--artifact-dir ~/reports` 显式指定；不指定则向后兼容（产物留 worktree）
+- **实现**：`agent_go/artifacts.py`（collect_from_worktree + export + render_export_summary）；TASK.md 注入产物目录约定引导子任务
 
 ```bash
 agent_go run ./repo "读取 sales.xlsx 生成季度汇报 PPT" \

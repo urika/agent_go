@@ -985,3 +985,104 @@ class TestPipelineConcurrencyStress:
         assert meta["status"] == "failed"
         assert len(meta["results"]) == n
         assert all(r["status"] == "failed" for r in meta["results"])
+
+
+class TestPipelineArtifactExport:
+    """S9-B 产物导出集成：--artifact-dir 配置时清理前收集 __artifacts__/。
+
+    覆盖验收 B1（导出到目标目录）/ B2（不指定则不导出，向后兼容）。
+    """
+
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_artifact_dir_exports_files(self, mock_run, mock_gc, mock_wt_remove, mock_wt_prune,
+                                        mock_subproc, temp_dir, logger):
+        """B1: config 含 artifact_dir → 子任务 __artifacts__/ 文件被导出。"""
+        sub1 = _make_subtask("sub-1")
+        confirmed = [sub1]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-art")
+
+        # 构造 worktree/__artifacts__/report.md
+        work = task_dir / "sub-1" / "work"
+        art_dir = work / "__artifacts__"
+        art_dir.mkdir(parents=True)
+        (art_dir / "report.md").write_text("# Q3 report", encoding="utf-8")
+
+        artifact_dir = temp_dir / "reports"
+        mock_run.side_effect = [_success_result("sub-1")]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={"artifact_dir": str(artifact_dir)}, headless=True, parallel=1,
+            issue_ref="", meta=_default_meta("t-art"),
+        )
+
+        exported = artifact_dir / "t-art" / "sub-1" / "report.md"
+        assert exported.exists()
+        assert exported.read_text(encoding="utf-8") == "# Q3 report"
+
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_no_artifact_dir_no_export(self, mock_run, mock_gc, mock_wt_remove, mock_wt_prune,
+                                       mock_subproc, temp_dir, logger):
+        """B2: 不指定 artifact_dir → 无导出目录创建，产物留在 worktree。"""
+        sub1 = _make_subtask("sub-1")
+        confirmed = [sub1]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-art2")
+
+        work = task_dir / "sub-1" / "work"
+        art_dir = work / "__artifacts__"
+        art_dir.mkdir(parents=True)
+        (art_dir / "report.md").write_text("# report", encoding="utf-8")
+
+        mock_run.side_effect = [_success_result("sub-1")]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=True, parallel=1,
+            issue_ref="", meta=_default_meta("t-art2"),
+        )
+
+        # 无 artifact_dir → 不创建导出目录
+        assert not (temp_dir / "reports").exists()
+        # 产物仍在 worktree 中（未被删除）
+        assert (art_dir / "report.md").exists()
+
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_export_failure_does_not_break_pipeline(self, mock_run, mock_gc, mock_wt_remove, mock_wt_prune,
+                                                    mock_subproc, temp_dir, logger, monkeypatch):
+        """导出异常被吞掉，pipeline 正常完成（解耦原则）。"""
+        sub1 = _make_subtask("sub-1")
+        confirmed = [sub1]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-art3")
+
+        work = task_dir / "sub-1" / "work"
+        work.mkdir(parents=True)
+
+        mock_run.side_effect = [_success_result("sub-1")]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        def _boom(*a, **k):
+            raise RuntimeError("export failure")
+
+        monkeypatch.setattr("agent_go.artifacts.export", _boom)
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={"artifact_dir": str(temp_dir / "reports")}, headless=True, parallel=1,
+            issue_ref="", meta=_default_meta("t-art3"),
+        )
+        # pipeline 正常走到 meta.json 落盘，导出失败不中断
+        assert (task_dir / "meta.json").exists()

@@ -1,6 +1,6 @@
 # 设计稿：办公能力扩展（MCP 消费 + 产物导出）
 
-> **状态**：能力 A（MCP 消费层）✅ 已实现（2026-08-01，`agent_go/mcp_client.py` + `mcp_servers` config）；能力 B（产物导出）设计稿（2026-08-01）
+> **状态**：能力 A（MCP 消费层）✅ 已实现（2026-08-01，`agent_go/mcp_client.py` + `mcp_servers` config）；能力 B（产物导出）✅ 已实现（2026-08-01，`agent_go/artifacts.py` + `--artifact-dir`，验收 B1/B2/B3 通过）
 > **关联**：[prd.md](../prd.md) 「办公能力扩展」章节、[roadmap.md](../roadmap.md) S9 迭代
 > **背景调研**：见同目录调研附件《Office AI 助手生态调研》——业界已通过 MCP 协议标准化 Office 文档自动化，社区生态成熟（excel-mcp-server 4084★、office-powerpoint-mcp-server 1847★）
 
@@ -152,7 +152,7 @@ finally:
 
 ---
 
-## 三、能力 B：产物导出路径（Artifact Export）
+## 三、能力 B：产物导出路径（Artifact Export）——✅ 已实现（2026-08-01）
 
 ### 3.1 目标
 

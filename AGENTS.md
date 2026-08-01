@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (35 modules, ~16,300 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (36 modules, ~16,500 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -30,6 +30,9 @@ agent_go run <repo-path> '<task>' --max-retries 5 --preserve-worktrees
 
 # Auto git init for non-git target dir (local-only, no remote)
 agent_go run <repo-path> '<task>' --auto-init
+
+# Export subtask artifacts (worktree/__artifacts__/) to a directory before cleanup
+agent_go run <repo-path> '<task>' --artifact-dir ~/Desktop/reports
 
 # With custom config file
 agent_go --config /path/to/config.json run <repo-path> '<task>'
@@ -140,7 +143,7 @@ resume <task-id>    → reruns uncompleted subtasks from meta.json state
 
 If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuilds `meta.json` from worktree state: commit+verify-pass → completed, commit+verify-fail → failed, no commit+orphan changes → reset (resume reruns it), no commit+no changes → no_changes. It never commits orphan changes itself — commit stays the sole completion boundary for resume correctness.
 
-## Key Modules (35 modules, ~16,300 lines)
+## Key Modules (36 modules, ~16,500 lines)
 
 | Module | Purpose |
 |--------|---------|
@@ -173,6 +176,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks |
 | `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
 | `assessment.py` | False-positive evaluation data layer: AssessmentEvent model, persistence, aggregation |
+| `artifacts.py` | Artifact export (S9-B): collect worktree/__artifacts__/ into --artifact-dir before cleanup |
 | `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
 | `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |
 | `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
@@ -206,7 +210,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 ## Testing
 
 ```bash
-pytest tests/           # 1442 tests (~35s)
+pytest tests/           # 1464 tests (~35s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -262,8 +266,8 @@ for fut in as_completed(futures):
 ## File Organization
 
 ```
-	agent_go/           # 35 Python modules (~16,300 lines)
-	tests/              # 59 test files, 1442 tests
+	agent_go/           # 36 Python modules (~16,500 lines)
+	tests/              # 60 test files, 1464 tests
 eval_suite/         # Standard task suite for eval bench (22 tasks + 4 fixtures)
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records
