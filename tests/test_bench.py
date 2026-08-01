@@ -358,6 +358,48 @@ def test_collect_result_plan_step_count(tmp_path):
     assert r["plan_step_count"] == 3
 
 
+def test_collect_result_semantic_api_failure_skipped(tmp_path):
+    """语义评估 API 调用失败（403）→ 视为未执行（None），binary_pass 退化为 verify_ok。
+
+    复现 S10-P2 smoke test 发现的真实场景：evaluator 因 API 故障返回
+    passed=False + reason 含「API 调用失败」——不应误判为语义失败。
+    """
+    td = tmp_path / "task-sem-403"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True,
+         "verification_results": [
+             {"type": "shell", "exit_code": 0},
+             {"type": "semantic", "passed": False,
+              "reason": "语义评估 API 调用失败无法执行: API 请求失败 (anthropic, HTTP 403)"},
+         ]},
+        {"id": "sub-2", "status": "completed", "verify_ok": True,
+         "verification_results": [
+             {"type": "semantic", "passed": False,
+              "reason": "语义评估 API 调用失败无法执行: API 请求失败 (anthropic, HTTP 403)"},
+         ]},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["semantic_pass"] is None  # API 故障跳过 → 不参与判定
+    assert r["binary_pass"] is True    # 退化为 all_verify_ok
+    assert r["per_subtask"][0]["semantic_ok"] is None
+
+
+def test_collect_result_semantic_real_failure_not_skipped(tmp_path):
+    """真实语义失败（非 API 故障）→ 不被误判为跳过，semantic_pass=False。"""
+    td = tmp_path / "task-sem-real"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True,
+         "verification_results": [
+             {"type": "semantic", "passed": False,
+              "reason": "代码未实现要求的业务逻辑，缺少校验分支"},
+         ]},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["semantic_pass"] is False  # 真实语义失败保留
+    assert r["binary_pass"] is False
+    assert r["per_subtask"][0]["semantic_ok"] is False
+
+
 def test_collect_result_p1_fields_backward_compat(tmp_path):
     """旧 meta（无 semantic/subtasks）→ 新字段不崩溃且为默认值。"""
     td = tmp_path / "task-p1-compat"

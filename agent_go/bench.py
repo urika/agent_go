@@ -330,11 +330,24 @@ def _dir_matches_task(td: Path, expected_task: str) -> bool:
 def _subtask_semantic_ok(subtask_result: dict) -> Optional[bool]:
     """判断单个子任务是否通过语义评估（verification_results 中 type=='semantic'）。
 
+    语义评估执行失败被跳过时视为 None（未执行），而不是 False —— 否则会错误地
+    「因 API 故障而判失败」，污染 binary_pass。识别跳过的两种信号：
+      1. evaluator_skipped=True 字段（新版本 evaluator 返回）
+      2. reason 含「API 调用失败 / 已跳过 / 失败（已跳过）」特征（旧版本 executor
+         写入 verification_results 时丢弃了 evaluator_skipped，只留 reason 特征）
+
     Returns:
-        True/False 若有语义评估结果；None 若未启用语义评估或无结果。
+        True/False 若有有效语义评估结果；None 若未启用、无结果或评估被跳过。
     """
     for vr in (subtask_result.get("verification_results") or []):
         if isinstance(vr, dict) and vr.get("type") == "semantic":
+            # 跳过信号 1：evaluator_skipped 字段
+            if vr.get("evaluator_skipped"):
+                return None
+            # 跳过信号 2：reason 特征（API 故障 / 显式跳过）
+            reason = (vr.get("reason") or "").lower()
+            if any(k in reason for k in ("api 调用失败", "api 请求失败", "调用失败", "已跳过", "failed (skipped)", "评估失败（已跳过）")):
+                return None
             return bool(vr.get("passed"))
     return None
 
@@ -400,16 +413,19 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     all_passed = all(r.get("verify_ok", False) for r in results if r.get("status") == "completed")
 
     # ── S10-P2：P1 字段采集 ──
-    # semantic_pass：子任务 verification_results 中 type=="semantic" 的 passed 汇总。
-    #   （semantic evaluator 未启用/失败时该字段缺失，视为 None —— 与 binary_pass 判定的
-    #   "显式语义通过" 区分；仅当全部子任务的语义评估都显式通过才为 True）
+    # semantic_pass：各子任务的语义评估通过汇总（用 _subtask_semantic_ok，
+    #   evaluator_skipped/未启用 → None 不算入，避免「API 故障」误判为失败）。
+    #   仅当至少一个子任务有有效语义结果、且全部有效结果为通过 → True；
+    #   有任一有效结果为不通过 → False；无任何有效结果 → None。
     _semantic_passed_flags = []
+    _semantic_checked = 0
     for _r in results:
-        for _vr in (_r.get("verification_results") or []):
-            if isinstance(_vr, dict) and _vr.get("type") == "semantic":
-                _semantic_passed_flags.append(bool(_vr.get("passed")))
+        _so = _subtask_semantic_ok(_r)
+        if _so is not None:
+            _semantic_checked += 1
+            _semantic_passed_flags.append(_so)
     semantic_pass: Optional[bool] = None
-    if _semantic_passed_flags:
+    if _semantic_checked:
         semantic_pass = all(_semantic_passed_flags)
 
     # binary_pass：全部子任务 verify_ok，且（语义评估启用时）语义全部通过。
