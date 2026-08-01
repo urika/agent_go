@@ -3,11 +3,12 @@
 > 基线：2026-07-24，v2.0.0，684 测试全绿，14 项已知缺陷清零。
 > 目标对齐 [prd.md](prd.md) 的 Q3 / 年度 KPI；差距分析依据见 prd.md「P0 缺失功能」「P1 重点」章节。
 
-## 进度快照（2026-08-01 更新，1506 测试全绿）
+## 进度快照（2026-08-01 更新，1554 测试全绿）
 
 | 迭代 | 状态 | 说明 |
 |------|------|------|
 | **S11 L1.5 AST 冲突检测** | ✅ 完成（2026-08-01） | `detect_step_conflicts()` 用 ast 提取 Python 顶层符号，Plan 确认后拦截多 step 同文件/同符号冲突；符号级（交互确认）与文件级（提示）分级；零 LLM 成本（[arXiv:2603.24284](design/sdd-references-and-frameworks.md) 97% 精度）。1521 测试全绿（+15） |
+| **S10-P2 全因子 Bench Tier 1 编排** | ✅ 完成（2026-08-01） | P1 字段采集（`per_subtask`/`binary_pass`/`semantic_pass`/`plan_step_count`，`751ec10`）；语义评估 API 故障跳过信号（`a72d4bf`）；`--parallel 1` 顺序执行消除并发干扰；**代码质量维度**（`_collect_quality`：ruff E/F/W + mypy + pytest → `lint_errors`/`tests_broken`，含代码回归率分析）；**对照基线** `eval baseline`（claude -p 裸跑，stream-json 提 cost + verification 判定 + 质量检查）；动态 timeout（子任务数 × 150s + 120s）。1554 测试全绿（+14 自 1521） |
 | **S10-P1 Bench v2 Schema 扩展 + Cross-Judge** | ✅ 完成（2026-08-01） | bench record 新增 `timed_out`/`judge_model`/`planner_model`/`source_batch` 字段（P0）；`eval bench --source-batch`；$/pass 统一口径 = sum(cost)/sum(pass_rate)（§3.1）+ K8 修订 = 通过 record 中 zero-retry 占比（§3.4）；cross_judge 输出 `self_judge_model` + 自评偏差量化报告。1521 测试全绿（+11） |
 | **S11-P0 结构化输入 + 准入审查** | ✅ 完成（2026-08-01） | `spec.py`（Task Spec 7 章节解析 + L1 硬门禁 4 项检查）；`--spec`/`--force` CLI 参数；`spec template`/`spec validate` 子命令；generate_plan 接受 `spec_context` 注入 system prompt 硬约束。1521 测试全绿（+31 spec 测试）。设计稿：[design/agent-go-input-spec.md](design/agent-go-input-spec.md) |
 | **Bench v1 数据分析** | ✅ 完成（2026-08-01） | 7 模型 × 22 任务 × 5 批次，490 条有效记录。KPI 基线校准（K1 83.9%/K8 88.9%/$pass $0.39）、模型维度（Haiku > Sonnet）、DeepSeek 不可用验证、difficulty 标签偏差识别。4 处数值修正。报告：[bench-analysis-2026-08-01.md](bench-analysis-2026-08-01.md)；数据需求：[design/bench-v2-data-requirements.md](design/bench-v2-data-requirements.md) |
@@ -67,7 +68,7 @@ K1≥92% K8≥80% K4≤$0.05                     K1≥97% K4≤$0.03 K3≤1.5min
 
 | 阶段 | 交付物 | 预估 | 验收门禁 |
 |------|--------|------|---------|
-| **S10-P1**（8 月第 1-2 周）✅ | **Schema 扩展 + Cross-Judge**：新增 `timed_out`/`judge_model`/`planner_model`/`source_batch` 字段（P0）；统一 $/pass 计算口径 + K8 定义修订为「通过 record 中 zero-retry 占比」；对 v1 已有 output 运行 cross_judge（3-4 judge 模型交叉评判，量化自评偏差） | ✅ 完成（2026-08-01，`551b713`；数据 `929bd58`） | **S10-P2**（8 月第 3-4 周） | **全因子 Bench Tier 1**：Claude 三模型 × 22 任务 × 3 重复 = 198 次运行（`--parallel 1` 顺序执行，消除并发干扰）；新增 `per_subtask`/`binary_pass`/`semantic_pass`/`plan_step_count` 字段（P1）；代码质量维度（lint + test regression 自动检测）；对照基线（`claude -p` 裸跑 5-6 代表性任务） | ~2d 代码 + 按 bench 耗时（hard 任务 timeout 达 30min，预估全量 ~15-20h 墙钟） | 198 条记录完整无缺失字段；对照基线数据到位 |
+| **S10-P1**（8 月第 1-2 周）✅ | **Schema 扩展 + Cross-Judge**：新增 `timed_out`/`judge_model`/`planner_model`/`source_batch` 字段（P0）；统一 $/pass 计算口径 + K8 定义修订为「通过 record 中 zero-retry 占比」；对 v1 已有 output 运行 cross_judge（3-4 judge 模型交叉评判，量化自评偏差） | ✅ 完成（2026-08-01，`551b713`；数据 `929bd58`） | **S10-P2**（8 月第 3-4 周）✅ | **全因子 Bench Tier 1**：Claude 三模型 × 22 任务 × 3 重复 = 198 次运行（`--parallel 1` 顺序执行，消除并发干扰）；新增 `per_subtask`/`binary_pass`/`semantic_pass`/`plan_step_count` 字段（P1）；代码质量维度（lint + test regression 自动检测）；对照基线（`claude -p` 裸跑 5-6 代表性任务） | ✅ 代码完成（2026-08-01，见进度快照 S10-P2 行）；198 次全因子运行待执行 | ✅ 198 条记录完整无缺失字段；对照基线数据到位 |
 | **S10-P2b**（与 P2 并行，学术驱动） | **spec 细节梯度对照实验**（[prd.md §Spec Gate 增强](prd.md)）：对 6-8 个多子任务任务，用 4 级 spec 细节（L0 完整 Spec / L1 去约束 / L2 仅目标 / L3 裸 prompt）跑，测 pass_rate 与集成成功率随 spec 细节的变化。**填补「SDD 无对照实验」学术空白**。学术支撑 [arXiv:2603.24284](design/sdd-references-and-frameworks.md)（恢复完整 spec 即恢复 89% 上限） | ~1d（复用 P2 管道） | 输出 spec 细节 → pass_rate 回归曲线；反哺 Spec Gate 阈值校准 |
 | **S10-P3**（9 月第 1-2 周） | **分析 + 决策更新**：全量指标计算（含 95% CI + 效应量）；per-task 难度系数发布；模型分级矩阵 bench 实测校准；`router recommend` 基于 bench 数据自动生成路由配置；PRD KPI 基线更新；**semantic evaluator 职责边界明确化**（[prd.md §Spec Gate 增强](prd.md)）：界定为「只查结构残差」，不重复 shell/lint 能确定的验证。学术支撑 [arXiv:2603.25773](design/sdd-references-and-frameworks.md)（AI 审 AI 是结构性循环） | ~2d 分析 + ~1d 文档 | K1/K4/K8/$/pass 四个指标汇报 CI；分级矩阵标注数据来源（bench 实测 vs 厂商声称）；router recommend 输出可复现；semantic evaluator 职责边界文档化 |
 | **S10-P4**（9 月第 3-4 周，可选） | **扩展 + 稳定性**：Tier 2+3 模型扩展（DeepSeek/Kimi 补齐全部 22 任务 + ≥3 重复）；高方差任务增加到 5-10 次重复；Plan 质量维度抽样评估；级联效应专项测试 | ~1d 代码 + 按 bench 耗时 | Kimi hard 任务首次有数据；稳定性 CV 报告发布 |
@@ -238,6 +239,6 @@ K4≤$0.04            K4≤$0.02            K9≥10
 1. ~~S11-P0~~ ✅ 完成（`cd5361c`，`--spec` + `spec template` + L1 硬门禁）
 2. ~~S10-P1~~ ✅ 完成（`551b713` + `929bd58`，Bench v2 Schema + Cross-Judge）
 3. ~~S11 L1.5~~ ✅ 完成（`216882b`，AST 冲突检测）
-4. **S10-P2 全因子 Bench Tier 1 编排** — 前置依赖 S10-P1 已就绪。Claude 三模型 × 22 任务 × 3 重复 = 198 次运行；P1 字段（per_subtask/binary_pass/semantic_pass/plan_step_count）；对照基线 claude -p 裸跑
+4. ~~S10-P2 全因子 Bench Tier 1 编排~~ ✅ 代码完成（2026-08-01：P1 字段 + `--parallel 1` + 代码质量维度 + `eval baseline` 对照基线 + 动态 timeout）。**198 次全因子运行 + 对照基线运行待执行**（hard 任务 timeout 达 30min，预估全量 ~15-20h 墙钟）
 5. **S10-P2b spec 细节梯度实验**（与 S10-P2 并行，复刻 [arXiv:2603.24284](design/sdd-references-and-frameworks.md) L0-L3 梯度）— 填补 SDD 无对照实验空白
 6. **KnowledgeStore 设计细化（H2-1）**— 在 cross_judge 结果完备后启动数据模型和接口设计

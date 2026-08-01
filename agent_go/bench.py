@@ -11,6 +11,7 @@ CLI:
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -29,7 +30,7 @@ from .eval import _read_jsonl, _read_json
 from .assessment import load_all as load_all_assessments, compute_false_positive_rate
 from .pricing import MODEL_PRICES
 
-__all__ = ["cmd_bench", "analyze_model_productivity"]
+__all__ = ["cmd_bench", "cmd_baseline", "analyze_model_productivity"]
 console = _LazyConsole()
 
 
@@ -178,7 +179,7 @@ def cmd_bench(args=None) -> None:
             for r in range(repeat):
                 current += 1
                 console.print(f"\n[{current}/{total}] {task_id} | {model} | repeat={r+1}")
-                result_entry = _run_one_task(task, repo, model, task_id, no_skills=no_skills, source_batch=source_batch)
+                result_entry = _run_one_task(task, repo, model, task_id, no_skills=no_skills, source_batch=source_batch, results_path=output_path)
                 result_entry["model"] = model
                 result_entry["repeat"] = r + 1
                 results.append(result_entry)
@@ -191,13 +192,182 @@ def cmd_bench(args=None) -> None:
     console.print(f"   下一步: agent_go eval models --results {output_path}")
 
 
+# ═══════════════════════════════════════════════════════════════
+# S10-P2：对照基线（bench-v2-data-requirements.md §2.3）
+# ═══════════════════════════════════════════════════════════════
+
+def _run_baseline_one(task: dict, repo: Path, model: str, task_id: str,
+                      source_batch: str = "baseline") -> dict:
+    """claude -p 裸跑一个任务（不走 agent_go harness），作为对照基线。
+
+    流程：
+      1. 在临时副本中运行 `claude -p <task>`（stream-json 模式，提取 cost + elapsed）
+      2. 对该临时目录运行任务 YAML 的 verification 命令 → pass 判定
+      3. 对临时目录运行 ruff/mypy/pytest → 代码质量指标
+    返回与 _collect_result 同构的 record（task_dir=""，source_batch=baseline）。
+    """
+    import shutil
+    import tempfile as _tempfile
+
+    start = time.time()
+    tmp_dir = Path(_tempfile.mkdtemp(prefix="bench_baseline_"))
+    work = tmp_dir / "repo"
+    try:
+        # 复制 fixture 到临时目录（不复制 .git，避免污染原 repo / 依赖 git 状态）
+        shutil.copytree(repo, work, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache"))
+
+        # 1. claude -p 裸跑（stream-json 提取 total_cost_usd / elapsed）
+        claude_cmd = [
+            "claude", "-p", task["task"],
+            "--permission-mode", "bypassPermissions",
+            "--no-session-persistence",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+        ]
+        _routed_model = model
+        if _routed_model:
+            claude_cmd.extend(["--model", _routed_model])
+        timeout = int(task.get("timeout", 1800)) + 60
+        cost_usd = 0.0
+        exit_code = -1
+        try:
+            cp = subprocess.run(
+                claude_cmd, cwd=str(work), capture_output=True, text=True, timeout=timeout,
+            )
+            exit_code = cp.returncode
+            for line in (cp.stdout or "").splitlines():
+                try:
+                    ev = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(ev, dict) and ev.get("type") == "result":
+                    cost_usd = ev.get("total_cost_usd") or cost_usd
+        except subprocess.TimeoutExpired:
+            exit_code = -1
+
+        # 2. verification 命令 → pass 判定（全部退出码 0 才算通过）
+        verification_ok = True
+        for vcmd in (task.get("verification") or []):
+            try:
+                vr = subprocess.run(
+                    shlex.split(vcmd), cwd=str(work), capture_output=True, text=True, timeout=120,
+                )
+            except (subprocess.SubprocessError, OSError):
+                verification_ok = False
+                break
+            if vr.returncode != 0:
+                verification_ok = False
+                break
+
+        # 3. 代码质量（对完整临时副本运行，等价于裸跑产出）
+        quality = {
+            "lint_errors": _lint_errors_for_worktree(work),
+            "tests_broken": _tests_broken_for_worktree(work),
+        }
+        elapsed = round(time.time() - start, 2)
+
+        return {
+            "task_id": task_id,
+            "model": model,
+            "task_dir": "",
+            "elapsed_sec": elapsed,
+            "subprocess_exit": exit_code,
+            "completed": 1 if verification_ok else 0,
+            "failed": 0 if verification_ok else 1,
+            "total_subtasks": 1,
+            "pass_rate": 1.0 if verification_ok else 0.0,
+            "all_verify_ok": verification_ok,
+            "total_retries": 0,
+            "total_cost_usd": round(cost_usd or 0.0, 6),
+            "total_latency_ms": 0,
+            "dollar_per_pass": round(cost_usd or 0.0, 6) if verification_ok and cost_usd else None,
+            "stderr_tail": "",
+            "timed_out": exit_code == -1,
+            "judge_model": "",
+            "planner_model": "",
+            "source_batch": source_batch,
+            "semantic_pass": None,
+            "binary_pass": verification_ok,
+            "per_subtask": [],
+            "plan_step_count": 0,
+            "lint_errors": quality["lint_errors"],
+            "tests_broken": quality["tests_broken"],
+            "baseline": True,
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def cmd_baseline(args=None) -> None:
+    """对照基线编排器：claude -p 裸跑代表性任务（不走 agent_go harness）。
+
+    用于量化 harness 相对裸跑的 pass_rate / 耗时 / 成本 / 代码质量 ROI。
+    复用 bench 的任务集/模型/重复参数，结果写入单独文件（默认 baseline.jsonl）。
+    """
+    if yaml is None:
+        console.warning("需要 PyYAML 以解析任务文件：pip install pyyaml")
+        sys.exit(1)
+
+    _workspace = Path(__file__).resolve().parent.parent
+
+    tasks_arg = args.tasks if args and hasattr(args, "tasks") else "eval_suite"
+    tasks_dir = Path(tasks_arg)
+    if not tasks_dir.is_absolute():
+        tasks_dir = _workspace / tasks_dir
+
+    output_arg = getattr(args, "output", None) or "eval_suite/baseline.jsonl"
+    output_path = Path(output_arg)
+    if not output_path.is_absolute():
+        output_path = _workspace / output_path
+
+    models = [m.strip() for m in (getattr(args, "candidate_models", None) or "").split(",") if m.strip()]
+    repeat = int(getattr(args, "repeat", 3) or 3)
+    source_batch = getattr(args, "source_batch", None) or "baseline"
+
+    if not models:
+        console.error("至少指定一个 --candidate-models（逗号分隔）")
+        sys.exit(1)
+
+    task_files = sorted(tasks_dir.glob("tasks/*.yaml"))
+    if not task_files:
+        console.error(f"未找到任务文件: {tasks_dir}/tasks/*.yaml")
+        sys.exit(1)
+
+    console.print(f"🧪 baseline 开始（claude -p 裸跑）: {len(task_files)} 任务 × {len(models)} 模型 × {repeat} 重复 = {len(task_files)*len(models)*repeat} 次执行")
+    console.print(f"   模型: {', '.join(models)}")
+    console.print(f"   输出: {output_path}")
+
+    total = len(task_files) * len(models) * repeat
+    current = 0
+    for tf in task_files:
+        task = yaml.safe_load(tf.read_text(encoding="utf-8"))
+        task_id = task["id"]
+        repo = Path(task["repo"])
+        if not repo.is_absolute():
+            repo = Path.cwd() / repo
+        for model in models:
+            for r in range(repeat):
+                current += 1
+                console.print(f"\n[{current}/{total}] {task_id} | {model} | repeat={r+1}")
+                entry = _run_baseline_one(task, repo, model, task_id, source_batch=source_batch)
+                entry["model"] = model
+                entry["repeat"] = r + 1
+                with open(output_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    console.print(f"\n✅ baseline 完成: {len(task_files) * len(models) * repeat} 条结果 → {output_path}")
+    console.print(f"   下一步: agent_go eval models --results {output_path}")
+
+
 def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
                   preserve: bool = False, no_skills: bool = False,
-                  source_batch: str = "") -> list[dict]:
+                  source_batch: str = "", results_path: Optional[Path] = None) -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
 
     preserve=True 时传 --preserve-worktrees 给 agent_go run，保留 worktree 供交叉评判读 diff。
     source_batch: 批次标识（如 baseline / results_v2 / smoke-*），写入每条 record。
+    results_path: 结果文件路径，用于从历史记录推断子任务数做动态 timeout。
     """
     start = time.time()
 
@@ -261,13 +431,17 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     try:
         # P1 Layer 1：cooperative timeout —— 用 Popen + 监控代替硬 timeout
         # 剩余 grace_sec 秒时发 SIGTERM，让 agent_go 完成当前步骤 + save meta
-        # grace_sec 后才 SIGKILL（实在不行才硬杀）
-        hard_timeout = task.get("timeout", 1800)
+        # grace_sec 后才 SIGKILL（实在不行才硬杀）。
+        # 动态 timeout：多子任务任务按「子任务数 × 基准耗时」自动扩展，
+        # 避免任务被 timeout 截断（K1 提升）。不低于任务 YAML 配置值。
+        hard_timeout = _dynamic_timeout(task, task_id, results_path)
         grace_sec = 60
+        console.debug(f"[timeout] {task_id} → {hard_timeout}s ({_estimate_subtasks_from_history(task_id, results_path)} subtasks)")
         proc = subprocess.Popen(
             agent_go_cmd + ["run",
              str(repo), task["task"],
              "--yes", "--headless", "--preserve-worktrees",
+             "--parallel", "1",   # S10-P2：顺序执行，消除并发对 elapsed/cost 的干扰
              "--config", tmp_config],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=str(workspace_dir),
@@ -335,6 +509,64 @@ def _dir_matches_task(td: Path, expected_task: str) -> bool:
     return meta_task[:n] == expected[:n]
 
 
+# 动态 timeout 基准参数（基于 v2 bench 实测：每子任务平均耗时 ~70-150s）
+# 基准取 150s/subtask，另加 120s 缓冲覆盖收尾（保存 meta/清理/push）与波动。
+# 公式：timeout = max(任务YAML配置值, 子任务数 × 基准 + 缓冲)
+_DYNAMIC_TIMEOUT_BASE_SEC = 150      # 每子任务基准耗时（秒）
+_DYNAMIC_TIMEOUT_BUFFER_SEC = 120    # 收尾/波动缓冲（秒）
+
+
+def _estimate_subtasks_from_history(task_id: str, results_path: Optional[Path]) -> int:
+    """从已有 bench 结果文件推断该任务的历史子任务数。
+
+    Args:
+        task_id: 任务 ID
+        results_path: bench 结果文件（results.jsonl）。读取其中该 task_id 的
+            total_subtasks。
+
+    Returns:
+        历史最大子任务数（取最大值比均值更稳妥——Plan 可能产生不同的分解，
+        用最大值避免低估导致任务仍被 timeout 截断）；无法推断时返回 0。
+    """
+    if not results_path or not results_path.exists():
+        return 0
+    try:
+        max_n = 0
+        for line in results_path.read_text(encoding="utf-8").strip().split("\n"):
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("task_id") == task_id:
+                n = rec.get("total_subtasks")
+                if isinstance(n, int) and n > 0:
+                    max_n = max(max_n, n)
+        return max_n
+    except OSError:
+        return 0
+
+
+def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = None) -> int:
+    """按子任务数动态计算任务 timeout，解决多子任务任务被 timeout 截断的问题。
+
+    优先级：
+      1. 任务 YAML 显式声明 `timeout` → 作为下限（不缩短既有配置）
+      2. 历史推断子任务数 × 基准耗时 + 缓冲 → 动态上限
+
+    公式：timeout = max(配置值, 子任务数 × 150s + 120s)
+    例：add-caching-layer 5 子任务 → max(900, 5×150+120=870) = 900s
+        （历史推断为 5 时仍用配置 900；若子任务更多则自动扩展）
+    """
+    cfg_timeout = int(task.get("timeout", 1800))
+    n = _estimate_subtasks_from_history(task_id, results_path)
+    if n <= 0:
+        return cfg_timeout
+    dynamic = n * _DYNAMIC_TIMEOUT_BASE_SEC + _DYNAMIC_TIMEOUT_BUFFER_SEC
+    return max(cfg_timeout, dynamic)
+
+
 def _subtask_semantic_ok(subtask_result: dict) -> Optional[bool]:
     """判断单个子任务是否通过语义评估（verification_results 中 type=='semantic'）。
 
@@ -358,6 +590,95 @@ def _subtask_semantic_ok(subtask_result: dict) -> Optional[bool]:
                 return None
             return bool(vr.get("passed"))
     return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# S10-P2：代码质量维度（bench-v2-data-requirements.md §4.1）
+# ═══════════════════════════════════════════════════════════════
+
+def _git_diff_files(worktree: Path, base_ref: str = "HEAD~1") -> list[str]:
+    """获取 worktree 中相对 base 变更的 Python 文件（供 ruff/mypy 检查）。
+
+    base_ref 默认取父提交（HEAD~1）——worktree 分支上每个 subtask 一个 commit。
+    返回失败时为空列表（容错，不阻断 bench）。
+    """
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--name-only", base_ref, "HEAD"],
+            cwd=str(worktree), capture_output=True, text=True, timeout=15,
+        )
+        return [f for f in r.stdout.splitlines() if f.endswith(".py")]
+    except (subprocess.SubprocessError, OSError):
+        return []
+
+
+def _lint_errors_for_worktree(worktree: Path) -> int:
+    """对 worktree 中变更的 Python 文件运行 ruff + mypy，返回新增错误数。
+
+    仅统计存在（未删除）的 .py 变更文件；工具缺失/不可用时返回 0（容错）。
+    ruff 只查 E/F/W（与 CI lint 一致）；mypy --ignore-missing-imports 忽略缺失 stub。
+    """
+    files = _git_diff_files(worktree)
+    if not files:
+        return 0
+    errors = 0
+    for cmd in (
+        ["ruff", "check", "--select=E,F,W", "--output-format=concise"],
+        ["mypy", "--ignore-missing-imports", "--no-error-summary"],
+    ):
+        try:
+            r = subprocess.run(
+                cmd + files, cwd=str(worktree), capture_output=True, text=True, timeout=120,
+            )
+        except (subprocess.SubprocessError, OSError):
+            continue  # 工具缺失 / 超时 → 该维度不计数
+        if r.stdout:
+            errors += sum(1 for line in r.stdout.splitlines() if line.strip())
+    return errors
+
+
+def _tests_broken_for_worktree(worktree: Path) -> int:
+    """运行 repo 原有测试套件（pytest），返回新增测试失败数。
+
+    以「worktree 上 pytest 失败用例数」作为「新增失败」的代理 —— fixture repo
+    基线测试应为全绿，失败即代表 subtask 变更引入的回归。pytest 不可用时返回 0。
+    """
+    try:
+        r = subprocess.run(
+            ["python", "-m", "pytest", "-q", "--tb=no"],
+            cwd=str(worktree), capture_output=True, text=True, timeout=300,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return 0
+    if r.returncode == 0:
+        return 0
+    # 解析 "N failed" 或 "N failed, M passed" 中的失败数
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        m = re.match(r"(\d+) failed", line)
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def _collect_quality(task_dir: Path) -> dict[str, int]:
+    """聚合 task_dir 下全部保留 worktree 的代码质量指标。
+
+    Returns:
+        {"lint_errors": int, "tests_broken": int} —— 各 subtask worktree 之和。
+        worktree 不保留（已清理）或无 worktree 时返回全 0。
+    """
+    lint = 0
+    broken = 0
+    if not task_dir or not task_dir.exists():
+        return {"lint_errors": 0, "tests_broken": 0}
+    # worktree 布局：task_dir/{sub_id}/work
+    for sub_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+        worktree = sub_dir / "work"
+        if worktree.exists():
+            lint += _lint_errors_for_worktree(worktree)
+            broken += _tests_broken_for_worktree(worktree)
+    return {"lint_errors": lint, "tests_broken": broken}
 
 
 def _collect_result(task_id: str, model: str, elapsed: float,
@@ -420,6 +741,9 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     retry_total = sum(r.get("retry_count", 0) for r in results)
     all_passed = all(r.get("verify_ok", False) for r in results if r.get("status") == "completed")
 
+    # S10-P2：代码质量维度（§4.1）—— 从保留 worktree 聚合 lint_errors / tests_broken
+    quality = _collect_quality(td) if td else {"lint_errors": 0, "tests_broken": 0}
+
     # ── S10-P2：P1 字段采集 ──
     # semantic_pass：各子任务的语义评估通过汇总（用 _subtask_semantic_ok，
     #   evaluator_skipped/未启用 → None 不算入，避免「API 故障」误判为失败）。
@@ -457,19 +781,39 @@ def _collect_result(task_id: str, model: str, elapsed: float,
 
     # ── 进程未自然完成判定 ──
     # bench 用 cooperative timeout：超时先 SIGTERM，grace 后 SIGKILL（-9）。
-    # 被 SIGKILL 或非零退出的任务即使子任务标记 completed/verify_ok，也说明
-    # 执行被打断，不应按"完整通过"计。stale_aborted 是 pipeline 在 SIGTERM
-    # 时写 meta 后留下的状态，同样视为未完成。
+    # 被 SIGKILL 或非零退出的任务可能有两种情况：
+    #   1. 执行中途被杀 → 任务未完成，不应计通过
+    #   2. 所有子任务已完成且验证通过，仅收尾阶段（保存 meta/清理 worktree）
+    #      被杀 → 实际已完工，应计通过（K1 提升的关键）
+    # 判定优先级：
+    #   - meta.status == completed → 任务明确成功，绝不判失败（exit_code 非零
+    #     可能是收尾命令（如 cleanup/push）的退出码，不代表任务失败）
+    #   - 否则若 aborted：区分「收尾被杀（已完工）」与「中途被杀（未完工）」
     meta_status = meta.get("status", "")
-    _aborted = exit_code != 0 or meta_status in ("stale_aborted", "aborted", "interrupted", "cancelled")
+    if meta_status == "completed":
+        _aborted = False
+    else:
+        _aborted = exit_code != 0 or meta_status in ("stale_aborted", "aborted", "interrupted", "cancelled")
     if _aborted:
-        # 被中断（SIGKILL / stale_aborted）：任务未自然完成，所有子任务
-        # 一律不计通过（即使 meta 中标记 completed+verify_ok，也是中断前
-        # 的瞬时快照），只统计明确失败/阻塞。
-        completed = 0
-        failed = sum(1 for r in results
-                     if r.get("status") in ("failed", "blocked"))
-        all_passed = False
+        # 区分「收尾被杀（已完工）」与「中途被杀（未完工）」
+        _planned_ids = {st.get("id") for st in (meta.get("subtasks") or [])}
+        _result_ids = {r.get("subtask_id") or r.get("id") for r in results if r.get("subtask_id") or r.get("id")}
+        _all_resulted = bool(_planned_ids) and _planned_ids.issubset(_result_ids)
+        _all_done = bool(results) and all(
+            r.get("status") == "completed" and r.get("verify_ok") is True
+            for r in results
+        )
+        if _all_done and _all_resulted:
+            # 已完工（收尾阶段被杀）：保持原 completed/all_passed 判定。
+            # 仅当 results 覆盖了全部计划子任务时才视为完工——避免无 subtasks
+            # 元数据或子任务确实未跑完时误判通过。
+            console.debug(f"[collect] {task_id} aborted但全部子任务完成，视为完工 (exit={exit_code}, status={meta_status})")
+        else:
+            # 中途被杀（未完工）：所有子任务不计通过
+            completed = 0
+            failed = sum(1 for r in results
+                         if r.get("status") in ("failed", "blocked"))
+            all_passed = False
 
     return {
         "task_id": task_id,
@@ -496,6 +840,9 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         "binary_pass": binary_pass,
         "per_subtask": per_subtask,
         "plan_step_count": plan_step_count,
+        # S10-P2：代码质量维度（§4.1，从保留 worktree 聚合）
+        "lint_errors": quality["lint_errors"],
+        "tests_broken": quality["tests_broken"],
     }
 
 
@@ -550,6 +897,18 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         )
         k8 = round(_zero_retry_passed / _passed_count, 4) if _passed_count else None
 
+        # S10-P2 代码质量维度（§3.5 / §4.1）：
+        #   - 平均 lint 错误 / 平均测试回归（跨所有 record，含未通过的）
+        #   - 代码回归率 = 通过 record（pass_rate>0）中 tests_broken>0 占比
+        _lint_all = [it.get("lint_errors") or 0 for it in items]
+        _broken_all = [it.get("tests_broken") or 0 for it in items]
+        avg_lint = round(sum(_lint_all) / n, 3) if n else 0
+        avg_tests_broken = round(sum(_broken_all) / n, 3) if n else 0
+        _regression_passed = sum(
+            1 for it in _passed_records if (it.get("tests_broken") or 0) > 0
+        )
+        code_regression_rate = round(_regression_passed / _passed_count, 4) if _passed_count else None
+
         # 决策规则
         recommendation, roles, reason = _recommend(model, avg_pass_rate, avg_cost, n)
 
@@ -563,6 +922,9 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
             "dollar_per_pass_legacy": cost_per_pass,
             "k8_zero_retry_pass_rate": k8,
             "efficiency_score": efficiency_score,
+            "avg_lint_errors": avg_lint,
+            "avg_tests_broken": avg_tests_broken,
+            "code_regression_rate": code_regression_rate,
             "completed_subtasks": completed_total,
             "total_subtasks": subtask_total,
             "recommendation": recommendation,
