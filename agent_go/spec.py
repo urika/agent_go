@@ -21,6 +21,7 @@ L1 硬门禁（确定性检查，0 误判，阻断执行）：
 L1 通过后返回结构化 TaskSpec，由 generate_plan 注入 prompt。
 """
 
+import ast
 import re
 import logging
 import subprocess
@@ -33,10 +34,12 @@ from .utils import SAFE_VERIFICATION_PREFIXES
 __all__ = [
     "TaskSpec",
     "SpecViolation",
+    "StepConflict",
     "parse_spec",
     "validate_spec_l1",
     "render_spec_template",
     "extract_file_paths",
+    "detect_step_conflicts",
 ]
 
 logger = logging.getLogger(__name__)
@@ -491,3 +494,145 @@ def render_spec_template(repo: Optional[Path] = None) -> str:
     # 修正模板中的笔误（醇收 -> 验收）
     template = _SPEC_TEMPLATE.replace("醇收标准", "验收标准")
     return template.format(timestamp=timestamp, repo=repo_str, scope_change_hint=scope_hint)
+
+
+# ─── L1.5 AST 冲突检测（S11 L1.5，学术驱动） ─────────────────────────
+
+# 需要符号级冲突检测的文件扩展名
+_PY_EXT = {".py", ".pyi"}
+
+
+@dataclass
+class StepConflict:
+    """L1.5 检测到的多 step 冲突。"""
+
+    file: str              # 冲突文件
+    steps: list            # 涉及冲突的 step id 列表
+    symbols: list          # 同名符号列表（符号级冲突时非空；文件级为空）
+    severity: str          # "symbol"（高置信）/ "file"（低置信，需注意）
+    message: str           # 人可读说明
+
+
+def _extract_top_level_symbols(file_path: Path) -> set[str]:
+    """用 ast 提取一个 Python 文件的顶层符号（函数/类/模块级赋值名）。
+
+    纯静态，零 LLM。解析失败返回空集（非 Python 或不解析）。
+    """
+    if file_path.suffix not in _PY_EXT or not file_path.exists():
+        return set()
+    try:
+        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+    symbols: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    symbols.add(t.id)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            if isinstance(node.target, ast.Name):
+                symbols.add(node.target.id)
+    return symbols
+
+
+def _step_text(step: dict) -> str:
+    """step 的检索文本（title + description + agent_prompt）。"""
+    parts = []
+    for k in ("title", "description", "agent_prompt"):
+        v = step.get(k)
+        if isinstance(v, str):
+            parts.append(v)
+    return " ".join(parts)
+
+
+def detect_step_conflicts(steps: list, repo: Path) -> list[StepConflict]:
+    """检测 Plan steps 之间的文件/符号冲突（L1.5）。
+
+    论文 arXiv:2603.24284（The Specification Gap）证明：多 Agent 协调失败
+    的主要来源是「同一文件/同一符号被独立修改」。本函数用 AST 纯静态检测
+    （零 LLM 成本），在 Plan 确认后、执行前拦截。
+
+    检测逻辑：
+      1. 按 step 的 files 分组，找出被 ≥2 个 step 修改的文件
+      2. 对冲突文件，用 ast 提取其顶层符号，检查各 step 文本是否引用同名符号
+         - 引用同一符号 → severity="symbol"（高置信冲突，几乎必然集成失败）
+         - 仅同文件不同符号 → severity="file"（低置信，可能可并行）
+
+    Args:
+        steps: Plan 的 steps 列表（每个含 id/files/title/description/agent_prompt）
+        repo: 仓库路径（解析文件路径用）
+
+    Returns:
+        StepConflict 列表。空列表 = 无冲突。
+    """
+    conflicts: list[StepConflict] = []
+
+    # 1. 文件 → step 映射
+    file_steps: dict[str, list] = {}
+    for step in steps:
+        files = step.get("files") or []
+        if isinstance(files, str):
+            files = [files]
+        for f in files:
+            if not isinstance(f, str) or not f:
+                continue
+            # 规范化：去掉前导 ./（仅当确以 ./ 开头，避免误伤绝对路径的 /）
+            norm = f[2:] if f.startswith("./") else f
+            if Path(norm).is_absolute():
+                norm = "/".join(Path(norm).parts[-3:])  # 取尾部 3 段，尽力匹配
+            file_steps.setdefault(norm, []).append(step)
+
+    # 2. 找被 ≥2 个 step 修改的文件
+    repo_path = Path(repo) if repo else None
+    for file, steps_on_file in file_steps.items():
+        if len(steps_on_file) < 2:
+            continue
+        # 文件级冲突（低置信，先用文件级兜底）
+        file_abs = repo_path / file if repo_path else None
+        symbols = _extract_top_level_symbols(file_abs) if file_abs else set()
+
+        # 3. 符号级：检查各 step 文本是否引用同一符号
+        matched_symbols: list = []
+        if symbols:
+            symbol_mentions: dict[str, list] = {}
+            for step in steps_on_file:
+                text = _step_text(step)
+                for sym in symbols:
+                    # 用单词边界匹配，避免 "verify" 匹配到 "verified" 的误报
+                    if re.search(rf"\b{re.escape(sym)}\b", text):
+                        symbol_mentions.setdefault(sym, []).append(step.get("id"))
+            for sym, step_ids in symbol_mentions.items():
+                if len(step_ids) >= 2:
+                    matched_symbols.append(sym)
+
+        if matched_symbols:
+            # 符号级冲突：只列出真正引用冲突符号的 step
+            conflict_steps = sorted({
+                sid
+                for sym in matched_symbols
+                for sid in symbol_mentions.get(sym, [])
+            })
+            conflicts.append(StepConflict(
+                file=file,
+                steps=conflict_steps,
+                symbols=matched_symbols,
+                severity="symbol",
+                message=(f"符号级冲突：多个 step 修改 {file} 的同一符号 "
+                         f"{', '.join(matched_symbols)}。这些修改必然相互覆盖，"
+                         f"建议合并为同一 step 或通过依赖顺序执行。"),
+            ))
+        else:
+            conflicts.append(StepConflict(
+                file=file,
+                steps=[s.get("id") for s in steps_on_file],
+                symbols=[],
+                severity="file",
+                message=(f"文件级冲突：多个 step（{'/'.join(str(s.get('id')) for s in steps_on_file)}）"
+                         f"修改同一文件 {file}。若改动区域不重叠可并行，"
+                         f"否则建议合并或调整依赖。"),
+            ))
+
+    return conflicts

@@ -11,7 +11,7 @@ from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
 from .pipeline import _run_pipeline
 from .skills import load_skills, discover_skills, render_skill_for_plan, list_skills
-from .spec import parse_spec, validate_spec_l1, render_spec_template
+from .spec import parse_spec, validate_spec_l1, render_spec_template, detect_step_conflicts
 from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .replay import cmd_replay
@@ -559,6 +559,27 @@ def cmd_run(args=None):
         if confirmed_plan is not None:
             # 正常 Plan 路径：拆解子任务并保存 PLAN.md
             # （降级路径已在上方得到 subtasks，confirmed_plan 为 None，跳过本块）
+            # L1.5 AST 冲突检测（S11，学术驱动）：Plan 确认后、执行前拦截多 step 同文件/同符号冲突
+            try:
+                step_conflicts = detect_step_conflicts(confirmed_plan.get("steps") or [], repo)
+                symbol_conflicts = [c for c in step_conflicts if c.severity == "symbol"]
+                file_conflicts = [c for c in step_conflicts if c.severity == "file"]
+                if step_conflicts:
+                    console.print(f"\n⚡ L1.5 AST 冲突检测：{len(step_conflicts)} 处")
+                    for c in step_conflicts:
+                        icon = "🔴" if c.severity == "symbol" else "🟡"
+                        console.print(f"  {icon} [{c.severity}] {c.file} (steps {'/'.join(map(str, c.steps))})")
+                        if c.symbols:
+                            console.print(f"      同名符号: {', '.join(c.symbols)}")
+                    # 符号级冲突（高置信）在交互模式询问是否继续，--yes/--force 跳过询问
+                    if symbol_conflicts and not auto_yes and not force_spec:
+                        resp = safe_input("\n⚠️ 存在符号级冲突，可能集成失败。继续执行? [y/N] ").strip().lower()
+                        if resp not in ("y", "yes"):
+                            console.error("已取消执行。建议调整 Plan：合并冲突 step 或添加依赖。")
+                            sys.exit(1)
+            except Exception as _e:
+                # 冲突检测是辅助功能，失败不阻断主流程
+                logger.warning(f"L1.5 冲突检测失败（跳过）: {_e}")
             subtasks = plan_to_subtasks(
                 confirmed_plan, logger, repo=repo,
                 default_skills=[s.name for s in skills] if skills else None,

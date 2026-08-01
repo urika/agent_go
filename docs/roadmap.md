@@ -7,6 +7,7 @@
 
 | 迭代 | 状态 | 说明 |
 |------|------|------|
+| **S11 L1.5 AST 冲突检测** | ✅ 完成（2026-08-01） | `detect_step_conflicts()` 用 ast 提取 Python 顶层符号，Plan 确认后拦截多 step 同文件/同符号冲突；符号级（交互确认）与文件级（提示）分级；零 LLM 成本（[arXiv:2603.24284](design/sdd-references-and-frameworks.md) 97% 精度）。1521 测试全绿（+15） |
 | **S10-P1 Bench v2 Schema 扩展 + Cross-Judge** | ✅ 完成（2026-08-01） | bench record 新增 `timed_out`/`judge_model`/`planner_model`/`source_batch` 字段（P0）；`eval bench --source-batch`；$/pass 统一口径 = sum(cost)/sum(pass_rate)（§3.1）+ K8 修订 = 通过 record 中 zero-retry 占比（§3.4）；cross_judge 输出 `self_judge_model` + 自评偏差量化报告。1506 测试全绿（+11） |
 | **S11-P0 结构化输入 + 准入审查** | ✅ 完成（2026-08-01） | `spec.py`（Task Spec 7 章节解析 + L1 硬门禁 4 项检查）；`--spec`/`--force` CLI 参数；`spec template`/`spec validate` 子命令；generate_plan 接受 `spec_context` 注入 system prompt 硬约束。1506 测试全绿（+31 spec 测试；1 个 bench flaky 与环境相关）。设计稿：[design/agent-go-input-spec.md](design/agent-go-input-spec.md) |
 | **Bench v1 数据分析** | ✅ 完成（2026-08-01） | 7 模型 × 22 任务 × 5 批次，490 条有效记录。KPI 基线校准（K1 83.9%/K8 88.9%/$pass $0.39）、模型维度（Haiku > Sonnet）、DeepSeek 不可用验证、difficulty 标签偏差识别。4 处数值修正。报告：[bench-analysis-2026-08-01.md](bench-analysis-2026-08-01.md)；数据需求：[design/bench-v2-data-requirements.md](design/bench-v2-data-requirements.md) |
@@ -57,7 +58,7 @@ K1≥92% K8≥80% K4≤$0.05                     K1≥97% K4≤$0.03 K3≤1.5min
 | **S3** | M1 完成通知：任务结束触发 webhook / 系统通知（最小实现，配置驱动） | M1 | ~1 天 | `--yes` 无头跑完能收到通知 |
 | **S4**（9 月） | 角色感知模型路由：planner/worker/reviewer 三通道配置 + 降级留痕（`fallback_reason` 必填）+ 本地模型并发上限显式化 | 差距 3，K4 | 3–5 天 | **发布门禁：$/pass rate 不劣化**（对比 S1 基线） |
 | **S11-P0**（8 月第 1-2 周）✅ | **结构化输入 + 准入审查**：`--spec` 参数（Task Spec 解析注入 Plan prompt）；`agent_go spec template`（模板生成）；`spec validate`（L1 审查）；Spec Gate L1 硬门禁（必填章节/文件路径/白名单/长度下限，确定性检查）；`--force`/`--yes` 行为定义 | 输入质量 → Plan 质量 → 成本控制 | ✅ 完成（1495 测试，+31 spec 测试） |
-| **S11**（8 月第 3-4 周） | **Spec Gate L1.5 AST 冲突检测**（学术驱动新增）：在 L1 与 L2 之间加基于 AST 的多子任务文件冲突检测，纯静态分析零 LLM 成本。学术支撑 [arXiv:2603.24284](design/sdd-references-and-frameworks.md#26-多-agent-协调与规范鸿沟serper-补充关键) 实测 97% 精度 | 多子任务集成冲突前置拦截 | P1 ~1.5d | 构造跨子任务同符号冲突用例，AST 检测命中 |
+| **S11 L1.5**（8 月第 3-4 周）✅ | **Spec Gate L1.5 AST 冲突检测**（学术驱动新增）：`detect_step_conflicts()` 用 ast 提取 Python 顶层符号，Plan 确认后、执行前检测多 step 同文件/同符号冲突。符号级（高置信，交互确认）与文件级（提示）分级。零 LLM 成本。学术支撑 [arXiv:2603.24284](design/sdd-references-and-frameworks.md#26-多-agent-协调与规范鸿沟serper-补充关键) 实测 97% 精度 | 多子任务集成冲突前置拦截 | ✅ 完成（1521 测试，+15 L1.5 测试） |
 | **S11**（9 月，依赖 S10-P1） | Spec Gate L2 软警告（LLM 辅助：范围完整性/约束一致性/验收可自动化度/历史风险匹配） | 输入质量 → 降低方向偏离和无效重试 | P1 ~1d | L2 警告准确率 >80%（人工抽检 20 条 Spec） |
 | **S11**（9 月，依赖 S10-P1） | `agent_go scope`（轻量 Scoping：读代码库 + 追问澄清 → 输出 Task Spec 草稿） | 上游工具链完整性 | P1 ~2d | 端到端：`agent_go scope "需求" → Task Spec → agent_go run --spec → PR` |
 | **S10**（8-9 月） | **Bench v2：可信 KPI 基线 + 模型选型决策依据**（详见 [prd.md §Bench v2 计划](prd.md) 和 [design/bench-v2-data-requirements.md](design/bench-v2-data-requirements.md)） | — | — | — |
