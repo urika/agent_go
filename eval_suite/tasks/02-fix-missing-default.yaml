@@ -1,6 +1,6 @@
 id: fix-missing-default
 difficulty: easy
-repo: eval_suite/fixtures/task-mgr
+repo: /Users/jinsongwang/test-target/task-mgr
 task: |
   在 src/cli.py 的 cmd_list 函数中，status 参数默认值为空字符串 ""。
   当用户不传 status 参数时，函数行为正确（load_all 返回全部任务）。

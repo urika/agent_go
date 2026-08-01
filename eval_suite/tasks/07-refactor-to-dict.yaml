@@ -1,6 +1,6 @@
 id: refactor-to-dict
 difficulty: medium
-repo: eval_suite/fixtures/task-mgr
+repo: /Users/jinsongwang/test-target/task-mgr
 task: |
   将 src/storage.py 中的 TaskStorage 从 `list[Task]` 内部存储改为 `dict[str, Task]`（以 task.id 为键）。
   

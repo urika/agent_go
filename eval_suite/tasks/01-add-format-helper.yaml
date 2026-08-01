@@ -1,7 +1,7 @@
 # Easy: single-function addition with clear spec
 id: add-format-helper
 difficulty: easy
-repo: eval_suite/fixtures/task-mgr
+repo: /Users/jinsongwang/test-target/task-mgr
 task: |
   在 src/utils.py 中新增函数 `truncate_text(text: str, max_len: int = 50) -> str`：
   - 如果 text 长度 ≤ max_len，原样返回

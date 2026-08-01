@@ -1,6 +1,6 @@
 id: add-task-priority
 difficulty: easy
-repo: eval_suite/fixtures/task-mgr
+repo: /Users/jinsongwang/test-target/task-mgr
 task: |
   在 src/models.py 的 Task 类中，新增 priority 字段：
   - __init__ 增加 priority: str = "medium" 参数（可选值 "low"/"medium"/"high"）
