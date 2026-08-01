@@ -327,6 +327,18 @@ def _dir_matches_task(td: Path, expected_task: str) -> bool:
     return meta_task[:n] == expected[:n]
 
 
+def _subtask_semantic_ok(subtask_result: dict) -> Optional[bool]:
+    """判断单个子任务是否通过语义评估（verification_results 中 type=='semantic'）。
+
+    Returns:
+        True/False 若有语义评估结果；None 若未启用语义评估或无结果。
+    """
+    for vr in (subtask_result.get("verification_results") or []):
+        if isinstance(vr, dict) and vr.get("type") == "semantic":
+            return bool(vr.get("passed"))
+    return None
+
+
 def _collect_result(task_id: str, model: str, elapsed: float,
                     exit_code: int, stderr: str,
                     new_dirs: "Optional[set[Path]]" = None,
@@ -387,6 +399,38 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     retry_total = sum(r.get("retry_count", 0) for r in results)
     all_passed = all(r.get("verify_ok", False) for r in results if r.get("status") == "completed")
 
+    # ── S10-P2：P1 字段采集 ──
+    # semantic_pass：子任务 verification_results 中 type=="semantic" 的 passed 汇总。
+    #   （semantic evaluator 未启用/失败时该字段缺失，视为 None —— 与 binary_pass 判定的
+    #   "显式语义通过" 区分；仅当全部子任务的语义评估都显式通过才为 True）
+    _semantic_passed_flags = []
+    for _r in results:
+        for _vr in (_r.get("verification_results") or []):
+            if isinstance(_vr, dict) and _vr.get("type") == "semantic":
+                _semantic_passed_flags.append(bool(_vr.get("passed")))
+    semantic_pass: Optional[bool] = None
+    if _semantic_passed_flags:
+        semantic_pass = all(_semantic_passed_flags)
+
+    # binary_pass：全部子任务 verify_ok，且（语义评估启用时）语义全部通过。
+    #   语义评估未启用（semantic_pass is None）时退化为 all_verify_ok 判定。
+    binary_pass = all_passed and (semantic_pass is not False)
+
+    # per_subtask：每个子任务的简明细（供按子任务失败模式分析）
+    per_subtask = [
+        {
+            "sub_id": _r.get("subtask_id") or _r.get("id") or "",
+            "status": _r.get("status", ""),
+            "retries": _r.get("retry_count", 0),
+            "verify_ok": bool(_r.get("verify_ok", False)),
+            "semantic_ok": _subtask_semantic_ok(_r),
+        }
+        for _r in results
+    ]
+
+    # plan_step_count：执行计划步骤数（subtasks 列表长度；无则 0）
+    plan_step_count = len(meta.get("subtasks") or [])
+
     # ── 进程未自然完成判定 ──
     # bench 用 cooperative timeout：超时先 SIGTERM，grace 后 SIGKILL（-9）。
     # 被 SIGKILL 或非零退出的任务即使子任务标记 completed/verify_ok，也说明
@@ -423,6 +467,11 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         "judge_model": judge_model,
         "planner_model": planner_model,
         "source_batch": source_batch,
+        # S10-P2：P1 字段
+        "semantic_pass": semantic_pass,
+        "binary_pass": binary_pass,
+        "per_subtask": per_subtask,
+        "plan_step_count": plan_step_count,
     }
 
 
