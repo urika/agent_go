@@ -36,7 +36,7 @@ console = _LazyConsole()
 def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 60):
     """P1 Layer 1：cooperative timeout —— 不直接 SIGKILL，先 SIGTERM 给 agent_go 写 meta 的机会。
 
-    Returns: (stdout, stderr) bytes
+    Returns: (stdout, stderr) bytes 与是否因超时被终止的标志
 
     流程：
     1. 监控子进程，最多 hard_timeout 秒
@@ -52,6 +52,7 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
     reader_threads: list[_threading.Thread] = []
+    _timed_out = False
 
     if proc.stdout:
         def _read_out():
@@ -73,12 +74,14 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
         if proc.poll() is not None:
             break
         if remaining <= 0:
+            _timed_out = True
             try:
                 proc.terminate()
             except ProcessLookupError:
                 pass
             break
         if remaining <= grace_sec and not getattr(proc, "_terminated", False):
+            _timed_out = True
             try:
                 proc.terminate()
                 proc._terminated = True
@@ -109,7 +112,9 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
             except OSError:
                 pass
         t.join(timeout=2)
-    return type("R", (), {"stdout": "".join(stdout_lines), "stderr": "".join(stderr_lines)})()
+    _r = type("R", (), {"stdout": "".join(stdout_lines), "stderr": "".join(stderr_lines)})
+    _r.timed_out = _timed_out
+    return _r
 
 # 默认 agent_go 入口：用脚本绝对路径（不依赖 pip 安装或 PYTHONPATH，
 # 避免子进程 cwd 在 fixture repo 内时找不到 agent_go 包）
@@ -142,6 +147,7 @@ def cmd_bench(args=None) -> None:
 
     models = [m.strip() for m in (getattr(args, "candidate_models", None) or "").split(",") if m.strip()]
     repeat = int(getattr(args, "repeat", 3) or 3)
+    source_batch = getattr(args, "source_batch", None) or ""
 
     if not models:
         console.error("至少指定一个 --candidate-models（逗号分隔）")
@@ -172,7 +178,7 @@ def cmd_bench(args=None) -> None:
             for r in range(repeat):
                 current += 1
                 console.print(f"\n[{current}/{total}] {task_id} | {model} | repeat={r+1}")
-                result_entry = _run_one_task(task, repo, model, task_id, no_skills=no_skills)
+                result_entry = _run_one_task(task, repo, model, task_id, no_skills=no_skills, source_batch=source_batch)
                 result_entry["model"] = model
                 result_entry["repeat"] = r + 1
                 results.append(result_entry)
@@ -186,10 +192,12 @@ def cmd_bench(args=None) -> None:
 
 
 def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
-                  preserve: bool = False, no_skills: bool = False) -> list[dict]:
+                  preserve: bool = False, no_skills: bool = False,
+                  source_batch: str = "") -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
 
     preserve=True 时传 --preserve-worktrees 给 agent_go run，保留 worktree 供交叉评判读 diff。
+    source_batch: 批次标识（如 baseline / results_v2 / smoke-*），写入每条 record。
     """
     start = time.time()
 
@@ -257,6 +265,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             cwd=str(workspace_dir),
         )
         result = _run_with_grace(proc, hard_timeout=hard_timeout, grace_sec=grace_sec)
+        _timed_out = bool(getattr(result, "timed_out", False))
         result = subprocess.CompletedProcess(
             args=proc.args, returncode=proc.returncode,
             stdout=result.stdout, stderr=result.stderr,
@@ -266,6 +275,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     except subprocess.TimeoutExpired:
         exit_code = -1
         stderr_tail = "bench: subprocess timeout"
+        _timed_out = True
     finally:
         Path(tmp_config).unlink(missing_ok=True)
 
@@ -287,7 +297,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     if _resolved_td is None:
         _after_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
         _new_dirs = _after_dirs - _before_dirs
-    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected)
+    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch)
 
 
 def _dir_matches_task(td: Path, expected_task: str) -> bool:
@@ -321,12 +331,16 @@ def _collect_result(task_id: str, model: str, elapsed: float,
                     exit_code: int, stderr: str,
                     new_dirs: "Optional[set[Path]]" = None,
                     exact_td: "Optional[Path]" = None,
-                    expected_task: str = "") -> dict:
+                    expected_task: str = "",
+                    timed_out: bool = False,
+                    source_batch: str = "") -> dict:
     """从 agent_go 任务目录读 metering + meta，聚合为一条结果。
 
     exact_td: 精确任务目录（从子进程输出解析，优先）。
     new_dirs: 目录差分结果（回退方案，仅当 exact_td 为 None 时使用）。
     expected_task: 期望任务描述，用于校验目录内容匹配（防止并发/残留错配）。
+    timed_out: 任务是否因超时被强制终止（cooperative timeout 触发 SIGTERM/SIGKILL）。
+    source_batch: 批次标识（如 baseline / smoke-*），用于跨批次追溯与全量对比。
     若都无法定位匹配目录则返回空数据记录（task_dir=""）。
     """
     td = exact_td if (exact_td and _dir_matches_task(exact_td, expected_task)) else None
@@ -354,6 +368,17 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     # cost 聚合
     total_cost = sum(ev.get("cost_usd", 0) or 0 for ev in metering)
     total_latency = sum(ev.get("latency_ms", 0) or 0 for ev in metering)
+
+    # S10-P1：从 metering 提取 Planner / Judge 模型（跨层归因基础）
+    planner_model = ""
+    judge_model = ""
+    for ev in metering:
+        _role = ev.get("role", "")
+        _am = ev.get("actual_model", "") or ""
+        if _role == "planner" and _am:
+            planner_model = _am
+        elif _role == "evaluator" and _am:
+            judge_model = _am
 
     # 子任务结果
     results = meta.get("results", [])
@@ -394,6 +419,10 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         "total_latency_ms": round(total_latency, 2),
         "dollar_per_pass": round(total_cost / completed, 6) if completed else None,
         "stderr_tail": stderr[-200:],
+        "timed_out": timed_out,
+        "judge_model": judge_model,
+        "planner_model": planner_model,
+        "source_batch": source_batch,
     }
 
 
@@ -431,6 +460,23 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         pass_rates = [it["pass_rate"] for it in items]
         avg_pass_rate = round(sum(pass_rates) / n, 4) if n else 0
 
+        # S10-P1 统一口径（bench-v2-data-requirements.md §3.1）：
+        #   $/pass = sum(total_cost_usd) / sum(pass_rate)
+        # 以 raw cost 和 raw pass_rate 为准，不依赖 record 级 dollar_per_pass 字段（跨批次可比）。
+        _sum_cost = sum(it.get("total_cost_usd", 0) or 0 for it in items)
+        _sum_pass = sum(pass_rates)
+        dollar_per_pass = round(_sum_cost / _sum_pass, 6) if _sum_pass > 0 else None
+
+        # S10-P1 K8 修订（§3.4）：K8 = 通过 record 中 zero-retry 占比。
+        # 分母只含通过 record（pass_rate > 0），分子是其 total_retries == 0 的子集。
+        # binary_pass（P1）落地前以 pass_rate > 0 近似"通过"。
+        _passed_records = [it for it in items if (it.get("pass_rate") or 0) > 0]
+        _passed_count = len(_passed_records)
+        _zero_retry_passed = sum(
+            1 for it in _passed_records if (it.get("total_retries") or 0) == 0
+        )
+        k8 = round(_zero_retry_passed / _passed_count, 4) if _passed_count else None
+
         # 决策规则
         recommendation, roles, reason = _recommend(model, avg_pass_rate, avg_cost, n)
 
@@ -440,7 +486,9 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
             "sample_size": n,
             "avg_pass_rate": avg_pass_rate,
             "avg_cost_usd": avg_cost,
-            "dollar_per_pass": cost_per_pass,
+            "dollar_per_pass": dollar_per_pass,
+            "dollar_per_pass_legacy": cost_per_pass,
+            "k8_zero_retry_pass_rate": k8,
             "efficiency_score": efficiency_score,
             "completed_subtasks": completed_total,
             "total_subtasks": subtask_total,
@@ -528,20 +576,24 @@ def cmd_models(args=None) -> None:
         return
 
     console.print(f"\n📊 模型生产力评估（{data['total_runs']} 次执行）")
-    console.print("─" * 100)
-    console.print(f"{'模型':<22} {'样本':>4} {'通过率':>7} {'$/pass':>9} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
-    console.print("─" * 100)
+    console.print("─" * 118)
+    console.print(f"{'模型':<22} {'样本':>4} {'通过率':>7} {'$/pass':>9} {'K8':>6} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
+    console.print("─" * 118)
 
     for model, m in data["models"].items():
         icon = {"recommended": "★", "conditional": "⚠", "discouraged": "✗", "insufficient_data": "?"}[m["recommendation"]]
         fp_str = f"{m.get('false_positive_rate', '?'):>3}%" if isinstance(m.get('false_positive_rate'), (int, float)) else "   ?"
         eff = m.get("efficiency_score", 0)
         eff_str = f"{eff:>7.1f}" if eff > 0 else "     -"
+        k8 = m.get("k8_zero_retry_pass_rate")
+        k8_str = f"{k8:>5.0%}" if k8 is not None else "    -"
         console.print(f"{icon} {model:<20} {m['sample_size']:>4} {m['avg_pass_rate']:>6.0%} "
-                      f"${(m['dollar_per_pass'] or 0):>8.4f} {eff_str} {fp_str:>7} "
+                      f"${(m['dollar_per_pass'] or 0):>8.4f} {k8_str} {eff_str} {fp_str:>7} "
                       f"{m['recommendation']:<12} {m['reason']}")
-    console.print("─" * 100)
+    console.print("─" * 118)
     console.print("效率 = passes/dollar (每美元获得的通过率，越高越经济)")
+    console.print("K8   = 通过 record 中 zero-retry 占比（首次验证通过率，§3.4 修订口径）")
+    console.print("$/pass = sum(cost) / sum(pass_rate)，raw 口径，跨批次可比（§3.1）")
 
 
 # ═══════════════════════════════════════════════════════════════

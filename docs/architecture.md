@@ -94,7 +94,7 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
 ## 测试
 
 ```bash
-pytest tests/ -q           # 1464 tests, ~35s
+pytest tests/ -q           # 1506 tests, ~35s
 ```
 
 测试策略：mock 所有外部依赖 (git, claude, API)，验证逻辑正确性。NFR 专项测试在 `test_nfr_*.py`。

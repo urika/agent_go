@@ -1,7 +1,7 @@
 # agent_go
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-1464%20passed-green)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1506%20passed-green)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stdlib Only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)]()
 
@@ -25,7 +25,7 @@ Give Claude Code a complex task — refactoring auth, upgrading dependencies, ad
 - **Artifact export** — subtasks write deliverables to `__artifacts__/` in their worktree; with `--artifact-dir`, files are exported to your directory before worktree cleanup
 - **Evaluation** — `eval quality/perf/cost/reliability/ux` built-in analytics
 - **Release gate** — `eval gate --baseline 0.05` enforces $/pass rate budget (北极星指标); CI step fails on regression
-- **Model benchmark** — `eval bench --models M1,M2` compares N models on standard task suite; `eval models` outputs decision matrix
+- **Model benchmark** — `eval bench --models M1,M2` compares N models on standard task suite; `eval models` outputs decision matrix; records `timed_out`/`judge_model`/`planner_model`/`source_batch` per run (S10-P1); `eval judge` runs cross-model judgment with self-bias quantification
 - **Cross-judgment** — `eval judge --judge-models M1,M2` runs N-model mutual review with self-bias prevention; `eval judge calibrate` for human calibration
 
 ## Quick Start
@@ -82,9 +82,9 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 | `eval gate` | **Release gate** — fail CI if $/pass rate exceeds baseline (北极星指标) |
 | `eval gate --check-regression` | **Regression gate** — fail if $/pass rate regressed >10% vs stored baseline (PRD "不劣化") |
 | `eval gate --update-baseline` | Reset stored baseline to current rate (use after model upgrades) |
-| `eval bench` | **Model benchmark** — compare N models on standard task suite, output decision matrix |
-| `eval models` | **Productivity report** — per-model pass_rate / $/pass / recommendation |
-| `eval judge` | **Cross-judgment** — N-model mutual review with self-bias prevention |
+| `eval bench` | **Model benchmark** — compare N models on standard task suite, output decision matrix; `--source-batch` records batch identity |
+| `eval models` | **Productivity report** — per-model pass_rate / $/pass / K8 / recommendation |
+| `eval judge` | **Cross-judgment** — N-model mutual review with self-bias prevention + self-bias quantification |
 | `eval judge calibrate` | **Human calibration** — compare LLM vs human scores, detect unreliable judges |
 
 ### Options
@@ -154,7 +154,7 @@ agent_go/
 ├── artifacts.py         # Artifact export (S9-B: __artifacts__/ -> --artifact-dir)
 └── lint.py              # AST-based static checks
 agent_go.py               # Entry-point wrapper
-tests/                    # 1464 tests across 60 test files
+tests/                    # 1506 tests across 59 test files
 eval_suite/               # Standard task suite for eval bench (22 tasks + 4 fixtures)
 ```
 
@@ -191,7 +191,7 @@ Config at `~/.agent_go/config.json` (auto-created). See [`config.example.json`](
 ```bash
 pip3 install pytest pytest-mock
 
-pytest tests/              # 1464 tests (~35s)
+pytest tests/              # 1506 tests (~35s)
 pytest tests/ -q           # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 ```

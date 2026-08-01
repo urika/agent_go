@@ -84,6 +84,7 @@ def cmd_judge(args=None) -> None:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
 
     _print_cross_judge_summary(scores, judge_models)
+    _print_self_bias_report(results, scores)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -112,6 +113,8 @@ def cross_judge_results(bench_results: list[dict], judge_models: list[str]) -> l
 
         candidate_model = br.get("model", "unknown")
         task_id = br.get("task_id", "")
+        # S10-P1：自评模型身份（semantic evaluator 用的模型），用于自评偏差量化
+        self_judge = br.get("judge_model", "") or ""
 
         # 找第一个 completed 的 subtask 的 worktree
         worktree_path = None
@@ -129,7 +132,8 @@ def cross_judge_results(bench_results: list[dict], judge_models: list[str]) -> l
             for jm in judge_models:
                 scores.append({
                     "task_id": task_id, "candidate_model": candidate_model,
-                    "judge_model": jm, "error": "无可用 worktree",
+                    "judge_model": jm, "self_judge_model": self_judge,
+                    "error": "无可用 worktree",
                     "semantic_score": -1, "false_positive": None,
                 })
             current += len(judge_models)
@@ -146,13 +150,15 @@ def cross_judge_results(bench_results: list[dict], judge_models: list[str]) -> l
             if _same_provider(jm, candidate_model):
                 scores.append({
                     "task_id": task_id, "candidate_model": candidate_model,
-                    "judge_model": jm, "error": "自评禁止（LLM-as-Judge 自偏）",
+                    "judge_model": jm, "self_judge_model": self_judge,
+                    "error": "自评禁止（LLM-as-Judge 自偏）",
                     "semantic_score": -1, "false_positive": None,
                 })
                 continue
 
             score_entry = _judge_one(candidate_model, jm, task_id, task_dir,
                                      worktree_path, git_diff, verification_cmd)
+            score_entry["self_judge_model"] = self_judge
             scores.append(score_entry)
 
     return scores
@@ -386,6 +392,47 @@ def _read_human_csv(path: Path) -> list[dict]:
 # ═══════════════════════════════════════════════════════════════
 # 输出
 # ═══════════════════════════════════════════════════════════════
+
+def _print_self_bias_report(bench_results: list[dict], scores: list[dict]) -> None:
+    """自评偏差量化报告（S10-P1）。
+
+    自评（semantic evaluator）是二元 passed 判定；cross-judge 是 1-5 分。
+    偏差量化口径：
+      - 自评通过但 cross-judge 判为 false_positive → 自评乐观（假阴性漏检）
+      - 自评通过记录中 cross-judge semantic_score 均值 < 3 → 自评与客观评分存在分歧
+    该报告回答：semantic evaluator 的自评是否可信（跨模型交叉验证后的偏差幅度）。
+    """
+    if not scores:
+        return
+
+    # 自评通过（pass_rate > 0）的 record 对应的 cross-judge 判定
+    passed_self = {br.get("task_id"): br for br in bench_results
+                   if (br.get("pass_rate") or 0) > 0}
+
+    judged = [s for s in scores if s.get("semantic_score", -1) >= 0]
+    fp_flags = [s for s in judged
+                if s.get("task_id") in passed_self and s.get("false_positive")]
+    low_scores = [s for s in judged
+                  if s.get("task_id") in passed_self and (s.get("semantic_score") or 5) < 3]
+
+    console.print("\n📉 自评偏差量化（S10-P1）")
+    console.print("─" * 70)
+    if not judged:
+        console.print("  无有效 cross-judge 判定（全部无 worktree / 自评禁止）")
+        return
+    judged_self_pass = [s for s in judged if s.get("task_id") in passed_self]
+    n_self_pass = len(judged_self_pass)
+    if n_self_pass == 0:
+        console.print("  无自评通过的 record 进入交叉评判，无法量化偏差")
+        return
+    fp_rate = round(len(fp_flags) / n_self_pass * 100)
+    low_rate = round(len(low_scores) / n_self_pass * 100)
+    console.print(f"  自评通过的 record 被 cross-judge 交叉评判: {n_self_pass}")
+    console.print(f"  其中被 cross-judge 判为 false_positive: {len(fp_flags)} ({fp_rate}%)")
+    console.print(f"  其中 cross-judge 评分 < 3/5（与自评乐观相悖）: {len(low_scores)} ({low_rate}%)")
+    console.print("─" * 70)
+    console.print("  解读：false_positive 率越高 → 自评越乐观（semantic evaluator 漏检越多）")
+
 
 def _print_cross_judge_summary(scores: list[dict], judge_models: list[str]) -> None:
     """打印交叉评判摘要 — 按 candidate_model × judge_model 聚合。"""

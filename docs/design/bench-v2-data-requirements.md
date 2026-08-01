@@ -7,6 +7,8 @@
 > **目标**：定义下一轮 Bench 测试的数据采集标准、实验设计规范和指标体系，支撑 Q3 KPI 的准确度量和产品决策
 >
 > **日期**：2026-08-01
+>
+> **实施状态**：P0（§1.2 P0 四字段 + §三 $/pass 统一口径 + §3.4 K8 修订）✅ 已落地（2026-08-01，`bench.py` `_collect_result` + `analyze_model_productivity` + `eval bench --source-batch`）；cross_judge 自评偏差量化报告已落地（`cross_judge.py` `_print_self_bias_report`）。P1/P2 待实施。
 
 ---
 

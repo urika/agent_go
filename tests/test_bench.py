@@ -176,3 +176,97 @@ def test_collect_result_stale_aborted_verify_unknown(tmp_path):
     assert result["completed"] == 0
     assert result["failed"] == 1
     assert result["pass_rate"] == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════
+# S10-P1 schema 扩展
+# ═══════════════════════════════════════════════════════════════
+
+def _write_meta_metering(td: Path, task: str, metering_events: list) -> None:
+    td.mkdir(parents=True, exist_ok=True)
+    (td / "meta.json").write_text(json.dumps({
+        "task": task, "status": "completed",
+        "results": [{"id": "sub-1", "status": "completed", "verify_ok": True}],
+    }), encoding="utf-8")
+    with open(td / "metering.jsonl", "w", encoding="utf-8") as f:
+        for ev in metering_events:
+            f.write(json.dumps(ev) + "\n")
+
+
+def test_collect_result_has_s10_p1_schema_fields(tmp_path):
+    """S10-P1：新字段 timed_out/source_batch 从参数透传，judge/planner 从 metering 提取。"""
+    td = tmp_path / "task-s10"
+    _write_meta_metering(td, "Some task", [
+        {"role": "planner", "actual_model": "deepseek-v4-flash"},
+        {"role": "worker", "actual_model": "claude-haiku-4-5"},
+        {"role": "evaluator", "actual_model": "gpt-5"},
+    ])
+    result = _collect_result(
+        "s10-task", "claude-haiku-4-5", 100.0, 0, "",
+        exact_td=td, expected_task="Some task",
+        timed_out=True, source_batch="smoke-20260801",
+    )
+    assert result["timed_out"] is True
+    assert result["source_batch"] == "smoke-20260801"
+    assert result["planner_model"] == "deepseek-v4-flash"
+    assert result["judge_model"] == "gpt-5"
+    # 不传参时默认值（向后兼容）
+    result2 = _collect_result("s10-task", "claude-haiku-4-5", 1.0, 0, "",
+                              exact_td=td, expected_task="Some task")
+    assert result2["timed_out"] is False
+    assert result2["source_batch"] == ""
+    assert result2["planner_model"] == "deepseek-v4-flash"
+    assert result2["judge_model"] == "gpt-5"
+
+
+def test_collect_result_no_metering_models_empty(tmp_path):
+    """无 metering 或无对应 role 事件 → judge/planner_model 为空串。"""
+    td = tmp_path / "task-nometer"
+    _write_meta_metering(td, "Some task", [
+        {"role": "worker", "actual_model": "claude-haiku-4-5"},
+    ])
+    result = _collect_result("s10-task", "claude-haiku-4-5", 1.0, 0, "",
+                             exact_td=td, expected_task="Some task")
+    assert result["planner_model"] == ""
+    assert result["judge_model"] == ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# S10-P1 $/pass 统一口径 + K8 修订
+# ═══════════════════════════════════════════════════════════════
+
+def test_analyze_model_productivity_s10_metrics(tmp_path):
+    """$/pass = sum(cost)/sum(pass_rate)；K8 = 通过 record 中 zero-retry 占比。"""
+    from agent_go.bench import analyze_model_productivity
+    results = [
+        {"model": "m1", "total_cost_usd": 1.0, "pass_rate": 0.5, "total_retries": 0,
+         "completed": 1, "total_subtasks": 2},
+        {"model": "m1", "total_cost_usd": 2.0, "pass_rate": 1.0, "total_retries": 2,
+         "completed": 2, "total_subtasks": 2},
+        {"model": "m1", "total_cost_usd": 3.0, "pass_rate": 0.0, "total_retries": 0,
+         "completed": 0, "total_subtasks": 2},
+    ]
+    rp = tmp_path / "r.jsonl"
+    with open(rp, "w", encoding="utf-8") as f:
+        for r in results:
+            f.write(json.dumps(r) + "\n")
+    data = analyze_model_productivity(rp)
+    m1 = data["models"]["m1"]
+    # $/pass = (1+2+3) / (0.5+1.0+0.0) = 6/1.5 = 4.0
+    assert m1["dollar_per_pass"] == 4.0
+    # K8：通过 record（pass_rate>0）2 个，其中 zero-retry 1 个 → 0.5
+    assert m1["k8_zero_retry_pass_rate"] == 0.5
+    # legacy 口径保留
+    assert "dollar_per_pass_legacy" in m1
+
+
+def test_analyze_model_productivity_k8_empty_denominator(tmp_path):
+    """无通过 record → K8 = None（分母为 0）。"""
+    from agent_go.bench import analyze_model_productivity
+    rp = tmp_path / "r.jsonl"
+    with open(rp, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"model": "m1", "total_cost_usd": 1.0,
+                            "pass_rate": 0.0, "total_retries": 0,
+                            "completed": 0, "total_subtasks": 2}) + "\n")
+    data = analyze_model_productivity(rp)
+    assert data["models"]["m1"]["k8_zero_retry_pass_rate"] is None
