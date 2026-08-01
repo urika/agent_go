@@ -78,6 +78,7 @@ DEFAULT_CONFIG = {
     "agents": {
         "default": "developer"      # 默认 Agent 类型
     },
+    "artifact_dir": None,           # S9-B 产物导出目录；null = 不导出（产物留在 worktree，向后兼容）
     "worker_models": {
         "easy": "",                 # S4 复杂度双通道：空 = claude CLI 默认模型
         "medium": "",

@@ -3,14 +3,15 @@
 > 基线：2026-07-24，v2.0.0，684 测试全绿，14 项已知缺陷清零。
 > 目标对齐 [prd.md](prd.md) 的 Q3 / 年度 KPI；差距分析依据见 prd.md「P0 缺失功能」「P1 重点」章节。
 
-## 进度快照（2026-08-01 更新，1442 测试全绿）
+## 进度快照（2026-08-01 更新，1464 测试全绿）
 
 | 迭代 | 状态 | 说明 |
 |------|------|------|
 | **CLI/MCP 交互层** | ✅ 完成（2026-08-01） | MCP 6 tools（新增 `list_tasks` / `cancel_task`）+ Resources 原语（6 个）+ Prompts 原语（3 个 SOP 模板）+ **HTTP/SSE Transport**（`agent_go mcp --http`，Bearer token 鉴权）；错误响应 `fix` 字段（ERROR_TEMPLATES 7 种类型）；ActivityTracker 并行活动追踪（异步任务后台监控）；CLI 失败恢复闭环引导 + 后续操作卡片；任务生命周期 `cancelled` 状态可恢复。设计稿：[design/cli-mcp-design-analysis.md](design/cli-mcp-design-analysis.md) + [design/cli-mcp-interaction-analysis.md](design/cli-mcp-interaction-analysis.md) |
 | **CLI/MCP 保留项落地** | ✅ 完成（2026-08-01） | 波次进度卡片（`_estimate_wave_count` + wave N/M 卡片）；`skills show <name>` SKILL.md 自描述；多 profile（`--profile` / `AGENT_GO_PROFILE` → `~/.agent_go/profiles/`）；增量 Plan 迭代 + 实时 Diff（`show_plan_diff` + 菜单 [V] 版本历史）；Sampling 原语（`request_sampling` stdio 双向 + cancel_task `confirm`）。改进清单全部闭环 |
 | **S9-A MCP 消费层** | ✅ 完成（2026-08-01） | `mcp_client.py`（MCPClientPool + MCPServerConnection）；`mcp_servers` config 节（command/args/env/enabled/tool_filter/scope）；pipeline 启动/收尾连接池管理；外部工具命名空间 `mcp__{server}__{tool}`（agent_loop tools 合并 + claude `--mcp-config` 透传）；故障隔离降级 warning。设计稿：[design/office-capability-extension.md](design/office-capability-extension.md) |
-| **测试加固** | ✅ 完成（2026-08-01） | 1442 测试全绿（+54 自 1387 基线） |
+| **S9-B 产物导出** | ✅ 完成（2026-08-01） | `artifacts.py`（collect_from_worktree + export + render_export_summary）；`__artifacts__/` 约定目录（声明制）；`--artifact-dir` CLI + `artifact_dir` config；pipeline 清理 worktree 前收集；TASK.md 注入产物约定；final report 列出导出清单。B1/B2/B3 验收通过 |
+| **测试加固** | ✅ 完成（2026-08-01） | 1464 测试全绿（+22 自 1442 基线） |
 | S1 计量日志 | ✅ 完成 | planner/worker 双角色 metering.jsonl 全链路（run + resume）；eval cost per-role 拆分；修复 executor 计量路径死代码、api.py router 路径 NameError || S1 M2 失败摘要 | ✅ 完成 | `failure_reason`（验证命令 + exit code + stderr 尾部）写入结果，`show` 展示 |
 | S2 验证循环 | ✅ 完成（2026-07-25） | 全链路验收修复 8 项缺口（含 wave 调度排除 blocked 的关键 bug、CLI 配置贯通）+ 剩余项落地：Stop Hook GoalInjector（`--goal-hook`）、retry_timeout 硬超时、goal.enabled 默认对齐 false、`--goal` 开关 |
 | M1 完成通知 | ✅ 完成 | `notify.py` 多通道（desktop/webhook/command）+ 事件订阅 + IM 适配器，设计稿：[design/notification-webhook-spec.md](design/notification-webhook-spec.md) |
@@ -70,14 +71,14 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 
 ## Q4 2026 扩展：办公能力（S9）
 
-> **状态**：S9-A（MCP 消费层）✅ 已实现（2026-08-01，见 [design/office-capability-extension.md](design/office-capability-extension.md)）；S9-B（产物导出）设计中，排入 S9
+> **状态**：S9-A（MCP 消费层）✅ 已实现（2026-08-01）；S9-B（产物导出）✅ 已实现（2026-08-01）；S9-C（端到端验证+文档）待启动
 > **决策**：不自建 Office 编辑器，补齐 MCP 消费 + 产物导出两个架构能力，复用已成标准的 Office MCP 生态
 > **前提**：依赖 S4 路由机制稳定（外部 MCP server 也是模型路由的对象）+ $/pass 门禁不劣化
 
 | 迭代 | 交付物 | 对应缺口 | 预估 | 验收门禁 |
 |------|--------|---------|------|---------|
 | **S9-A** | **MCP 消费层**：`mcp_client.py`（MCPClientPool + MCPServerConnection，stdlib 实现 JSON-RPC over stdio）；`config.json` 新增 `mcp_servers` 节（command/args/env/enabled/tool_filter/scope）；`pipeline.py` 启动时拉起连接池、结束时 finally 回收；外部工具命名空间 `mcp__{server}__{tool}` 合并进 AgentLoop `tools` 字段 + claude CLI `--mcp-config` 透传；故障隔离（启动失败降级 warning 不阻断 pipeline，与 notify/skills 同级） | 缺口 A：无外部工具消费 | ✅ 已实现（2026-08-01） | ✅ 已通过：配置 excel/ppt MCP server 后子任务可调用 `mcp__excel__read_sheet`；server 启动失败任务正常完成 |
-| **S9-B**（12 月） | **产物导出路径**：新增 `artifacts.py`（collect_from_worktree + export + render_export_summary）；`__artifacts__/` 约定目录（声明制）；`--artifact-dir` CLI 参数 + `artifact_dir` config；`pipeline.py` 清理 worktree 前扫描收集；TASK.md prompt 注入产物目录约定；final report 列出导出清单 | 缺口 B：无产物导出 | ~4 天 | 子任务写 `__artifacts__/report.pptx` + `--artifact-dir ~/reports` → 文件出现在目标目录；不指定时向后兼容（K13 = 100%） |
+| **S9-B** | **产物导出路径**：新增 `artifacts.py`（collect_from_worktree + export + render_export_summary）；`__artifacts__/` 约定目录（声明制）；`--artifact-dir` CLI 参数 + `artifact_dir` config；`pipeline.py` 清理 worktree 前扫描收集；TASK.md prompt 注入产物目录约定；final report 列出导出清单 | 缺口 B：无产物导出 | ✅ 已实现（2026-08-01） | ✅ 已通过：B1 子任务写 `__artifacts__/report.md` + `--artifact-dir` → 文件出现在目标目录；B2 不指定时向后兼容无导出；B3 失败保留 worktree 产物可收集 |
 | **S9-C**（次年 1 月） | **端到端场景验证 + 文档**：Office MCP 集成指南（excel/ppt/ms365 三套配置示例 + openpyxl 公式陷阱说明）；eval_suite 新增"文档生成"类任务（验证产物完整率）；`tool_filter`/`scope` 调优指南 | 闭环验证 | ~3 天 | 端到端：`agent_go run ... --artifact-dir` 生成完整 PPT 报告并导出成功 |
 
 **S9 出关口径**：K12（MCP 工具调用成功率）≥95%、K13（产物导出完整率）=100%、$/pass 不劣化（外部工具调用的 token 计入 metering，受门禁约束）。
@@ -187,5 +188,6 @@ K4≤$0.04            K4≤$0.02            K9≥10
 9. ~~PRD/Roadmap 文档同步~~ ✅ 已完成（2026-08-01，prd.md 新增「CLI 与 MCP 交互层」章节，roadmap 快照更新）
 10. ~~办公能力扩展设计稿~~ ✅ 已完成（2026-08-01，[design/office-capability-extension.md](design/office-capability-extension.md)；prd.md 新增「办公能力扩展」章节 + K12/K13；roadmap 排入 S9）
 11. ~~CLI/MCP 保留项落地~~ ✅ 已完成（2026-08-01，波次进度卡片 / skills show / 多 profile / 增量 Plan Diff / Sampling 原语，1387 测试全绿，改进清单全部闭环）
+12. ~~S9-B 产物导出~~ ✅ 已完成（2026-08-01，`artifacts.py` + `__artifacts__/` 声明制 + `--artifact-dir`，B1/B2/B3 验收通过，1464 测试全绿）
 
-**下一批**：对照 bench 真实执行（3 模型 × 22 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线；KPI 数据采集验证（K1/K8 是否因 S2/S4 提升）；**S9-B 产物导出**（`artifacts.py` + `--artifact-dir` config）待启动。
+**下一批**：对照 bench 真实执行（3 模型 × 22 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线；KPI 数据采集验证（K1/K8 是否因 S2/S4 提升）。

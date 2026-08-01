@@ -94,7 +94,7 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
 ## 测试
 
 ```bash
-pytest tests/ -q           # 1442 tests, ~35s
+pytest tests/ -q           # 1464 tests, ~35s
 ```
 
 测试策略：mock 所有外部依赖 (git, claude, API)，验证逻辑正确性。NFR 专项测试在 `test_nfr_*.py`。
@@ -178,7 +178,7 @@ agent_go/bench.py（编排器，不 import pipeline/executor）
     agent_go eval judge calibrate --llm-scores ... --human-scores ...
 ```
 
-### S9 办公能力扩展架构（能力 A ✅ 已实现，能力 B ⏳ 设计中）
+### S9 办公能力扩展架构（能力 A ✅ 已实现，能力 B ✅ 已实现）
 
 > 设计稿见 [design/office-capability-extension.md](design/office-capability-extension.md)。补齐两个结构性缺口，使 agent_go 从"代码 diff 导向"扩展为"可交付任意产物"的编排器。**不自建 Office 编辑器**，复用已成标准的 Office MCP 生态。
 
@@ -195,8 +195,8 @@ agent_go/bench.py（编排器，不 import pipeline/executor）
   配置：config.json 新增 mcp_servers 节（command/args/env/enabled/tool_filter/scope）
   容错：server 启动失败降级 warning 不阻断 pipeline（与 notify/skills 同级）
 
-能力 B：产物导出路径（让生成的文件交付到用户目录，不被 worktree 清理吃掉）——⏳ 设计中
-  agent_go/artifacts.py（规划新增）
+能力 B：产物导出路径（让生成的文件交付到用户目录，不被 worktree 清理吃掉）——✅ 已实现（2026-08-01）
+  agent_go/artifacts.py
     collect_from_worktree — 扫描 worktree/__artifacts__/** 收集产物
     export — 复制到 --artifact-dir/{task_id}/{sub_id}/
     render_export_summary — 生成导出清单（供 final report）

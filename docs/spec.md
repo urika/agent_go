@@ -34,7 +34,7 @@ mcp(args)                → MCP server (stdio / --http HTTP+SSE)
 `run` 另支持 `--max-retries` / `--no-verify-block` / `--goal` / `--goal-hook` / `--semantic-eval` /
 `--agent-loop` / `--interactive` / `--step-confirm` / `--auto-init` / `--parallel N` / `--remote`。
 
-## api.py — LLM Plan 生成 + 缓存 (423 行)
+## api.py — LLM Plan 生成 + 缓存 (583 行)
 
 ```
 generate_plan(task, repo, config, logger, ...)  → 调用 LLM → 返回 plan dict
@@ -45,7 +45,7 @@ load_cached_plan(key, task, config, logger)     → 读缓存
 save_cached_plan(key, plan, task, repo, config) → 写缓存
 ```
 
-## pipeline.py — 拓扑波次调度器 (390 行)
+## pipeline.py — 拓扑波次调度器 (636 行)
 
 ```
 _run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核心调度 (内部，cli.py 调用)
@@ -54,6 +54,7 @@ _run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核�
   ── 远程推送、worktree/tag 清理、gc.auto 恢复
   ── preserve_worktrees: None=保留 failed/blocked，True=全保留，False=全清理
   ── mcp_client: MCPClientPool start_all() 启动 / finally stop_all() 回收（外部 MCP 工具）
+  ── S9-B 产物导出：config.artifact_dir 时清理 worktree 前调用 artifacts.export，final report 渲染清单
 notify_event(event, context, config) → 任务完成/失败通知 (M1)
 ```
 
@@ -63,7 +64,7 @@ notify_event(event, context, config) → 任务完成/失败通知 (M1)
 estimate_task_duration(subtasks, parallel, tasks_dir) → 历史子任务耗时中位数 × 拓扑波次
 ```
 
-## executor.py — 子任务执行器 (1300 行)
+## executor.py — 子任务执行器 (1459 行)
 
 ```
 run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None) → 单子任务端到端
@@ -79,12 +80,13 @@ run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None
         + files_hint ** 通配符 ≤1 + 上游依赖 ≤2）
   ── MCP 消费：claude --mcp-config 透传外部 MCP 工具（mcp_client 配置）
   ── 语义评估：evaluator.enabled → shell 验证过后触发；fail_closed 可阻断
+  ── S9-B: config.artifact_dir 时 TASK.md 注入 __artifacts__/ 产物目录约定
 _build_sandbox_env()        → 净化环境变量 (敏感词剔除 + AGENT_GO_API_KEY 强制删)
 _apply_resource_limits()    → setrlimit (失败不阻塞)
 _verify_changes()           → 验证循环 + 修复重试（retry_count 注入 context.md + metering）
 ```
 
-## subtask.py — Claude 调用原语 (430 行)
+## subtask.py — Claude 调用原语 (479 行)
 
 ```
 _run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) → claude -p 无头模式
@@ -96,7 +98,7 @@ _run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) 
 _git_merge_upstream(src, dst, tag, logger, ...)   → 上游产物 merge
 ```
 
-## ui.py — 终端交互 (418 行)
+## ui.py — 终端交互 (779 行)
 
 ```
 confirm_plan(plan, config, ...)    → Y/S/D/E/R/N 确认
@@ -104,7 +106,7 @@ confirm_subtasks(subtasks, ...)    → Y/N/E/A/D 确认
 plan_to_subtasks(plan, logger)     → Plan.steps → subtasks (注入 agent_prompt + 资源清单)
 ```
 
-## config.py — 配置与日志 (116 行)
+## config.py — 配置与日志 (258 行)
 
 ```
 load_config()                → ~/.agent_go/config.json，浅合并 DEFAULT_CONFIG
@@ -115,7 +117,7 @@ meter_event(path, event)     → 结构化计量事件写 metering.jsonl (role/c
 safe_input(prompt)           → input() 包装，EOF → ""
 ```
 
-## console.py — 输出抽象 (156 行)
+## console.py — 输出抽象 (216 行)
 
 ```
 Console(quiet, verbose)      → print/force/info/success/warning/error/debug
@@ -125,7 +127,7 @@ set_default_console(c)       → 替换全局实例 (cli.py cmd_run 调用)
 get_default_console()        → 获取当前实例
 ```
 
-## git_utils.py — Git 操作 (114 行)
+## git_utils.py — Git 操作 (203 行)
 
 ```
 analyze_project(repo)        → git ls-files 或 find
@@ -135,7 +137,7 @@ _worktree_create/remove/prune(repo, ...) → worktree 生命周期
 _set_gc_auto(repo, "0"|"1") → gc.auto 读写 (并发安全)
 ```
 
-## utils.py — 共享工具 (383 行)
+## utils.py — 共享工具 (464 行)
 
 ```
 read_reference_docs(paths, repo, logger)     → 参考文档读取 (路径穿越防御)
@@ -147,7 +149,7 @@ _detect_commit_prefix(title)                 → feat/fix/refactor/docs/test/cho
 _slugify(text)                               → 分支名适用短标识
 ```
 
-## agents.py — Agent 类型系统 (188 行)
+## agents.py — Agent 类型系统 (191 行)
 
 ```
 load_agent_type(name, project_root)  → 用户定义 > 内置 (developer/architect/reviewer/tester)
@@ -156,7 +158,7 @@ get_claude_command(agent, worktree)  → 构建 claude CLI 参数 (headless/交�
 get_agent_env(agent)                 → AGENT_GO_AGENT_TYPE 环境变量
 ```
 
-## skills.py — Skill 加载 (213 行)
+## skills.py — Skill 加载 (238 行)
 
 ```
 load_skill(name, project_root)      → YAML frontmatter + Markdown body
@@ -166,7 +168,7 @@ render_skill_for_execution(skill)    → TASK.md 注入格式 (完整)
 discover_skills(task)                → 关键词自动匹配 (实验性)
 ```
 
-## role_skill_map.py — 角色-Skill 匹配 (139 行)
+## role_skill_map.py — 角色-Skill 匹配 (161 行)
 
 ```
 load_role_skill_map(project_root)    → 加载匹配规则
@@ -223,7 +225,7 @@ notify_event(event, context, config)   → 唯一入口：on_complete/on_failed/
   ── ${VAR} 环境变量插值、https 校验、超时重试、故障隔离
 ```
 
-## eval.py — 离线评估 (1038 行)
+## eval.py — 离线评估 (1106 行)
 
 ```
 analyze_quality(meta)           → Q1-Q10 质量指标 + 综合评分
@@ -323,6 +325,16 @@ load_all(task_dir)             → 读取全部事件
 compute_false_positive_rate(task_dir) → 语义评估假阳性率（eval/bench 消费）
 ```
 
+## artifacts.py — 产物导出（S9-B）
+
+```
+ARTIFACT_DIR_NAME = "__artifacts__"     → worktree 内约定产物目录（声明制）
+collect_from_worktree(worktree, sub_id) → 扫描 worktree/__artifacts__/** 返回产物列表
+export(task_id, results, artifact_dir, task_dir) → 复制到 artifact_dir/{task_id}/{sub_id}/（含保留 worktree）
+render_export_summary(export_result)    → 生成导出清单（final report 展示）
+  ── pipeline 清理 worktree 前调用；导出失败降级 warning 不中断任务
+```
+
 ## lint.py — AST 静态检查
 
 ```
@@ -352,7 +364,7 @@ execute_tool(name, args, worktree, ...) → 工具分发执行（返回 ToolResu
 cmd_status_tui()  → curses 多面板实时监控（agent_go status --watch）
 ```
 
-## bench.py — 模型对照评估编排器 (300 行)
+## bench.py — 模型对照评估编排器 (551 行)
 
 > **状态**：S8 P0 已落地。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
 
@@ -373,7 +385,7 @@ cmd_models(args)                           → 决策矩阵展示
 analyze_model_productivity(path) → 与 cmd_models 同逻辑，返回 dict 供编程调用
 ```
 
-## cross_judge.py — 交叉评判矩阵 (413 行)
+## cross_judge.py — 交叉评判矩阵 (438 行)
 
 > **状态**：S8 P1 简化版已落地。N 模型互评（禁绝自评）+ 人工校准。
 

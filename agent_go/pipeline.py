@@ -399,6 +399,17 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         else:
             logger.warning(f"[remote] {push_errors} 个分支推送失败")
 
+    # ── S9-B 产物导出：清理 worktree 前扫描 __artifacts__/ 收集到 artifact_dir ──
+    # 声明制：只有写入 __artifacts__/ 的文件视为交付物；不指定 --artifact-dir 时跳过（向后兼容）
+    export_result: Optional[dict[str, Any]] = None
+    _artifact_dir = config.get("artifact_dir") if config else None
+    if _artifact_dir:
+        try:
+            from .artifacts import export as _export_artifacts
+            export_result = _export_artifacts(task_id, results_map, _artifact_dir, task_dir)
+        except Exception as _art_err:
+            logger.warning(f"[artifacts] 产物导出失败（不中断任务）: {_art_err}")
+
     # ── Worktree 清理（跳过保留的 worktree） ──
     preserved_ids: list[str] = []
     if (repo / ".git").exists():
@@ -578,6 +589,16 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         console.print("─" * 60)
         console.print("  使用 agent_go inspect <task-id> 查看详情")
         console.print(f"  或直接 cd 到对应目录查看")
+
+    # ── S9-B 产物导出清单（与保留 worktree 清单并列） ──
+    if export_result:
+        try:
+            from .artifacts import render_export_summary as _render_export_summary
+            _summary = _render_export_summary(export_result)
+            if _summary:
+                console.print(_summary)
+        except Exception as _render_err:
+            logger.debug(f"[artifacts] 导出清单渲染失败（忽略）: {_render_err}")
 
     # ── P0-5 失败恢复闭环引导 ──
     # 失败后给出可复制执行的完整操作路径，避免用户手动拼接 task_id

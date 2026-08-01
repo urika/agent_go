@@ -9,6 +9,7 @@ from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
+from .artifacts import ARTIFACT_DIR_NAME
 # 解耦原则：evaluator 是可选增强，不静态 import（避免核心模块强绑增强模块的传递依赖）。
 # 改为调用点（_verify_changes 内 evaluator_enabled 守卫后）动态 import。
 from .config import get_api_key
@@ -246,6 +247,16 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     if not headless:
         exec_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
     task_md_parts.extend(exec_requirements)
+
+    # S9-B 产物导出约定：--artifact-dir 开启时注入 __artifacts__/ 目录约定
+    # 声明制——只有写入 __artifacts__/ 的文件才视为交付物，随 worktree 清理不丢失
+    if _effective_config(config).get("artifact_dir"):
+        task_md_parts.extend([
+            "",
+            "## 产物输出",
+            f"如需生成文档/表格/演示文稿等非代码交付物，写入 `{ARTIFACT_DIR_NAME}/` 目录。",
+            "该目录下的文件将在任务完成后导出到指定位置（--artifact-dir），不会随 worktree 清理丢失。",
+        ])
 
     # Phase 2: GoalInjector — 注入目标导向指令（默认关闭，--goal 开启）
     goal_enabled = _effective_config(config).get("goal", {}).get("enabled", False)
