@@ -25,6 +25,12 @@ agent_go run <repo-path> '<task>' --yes --parallel 3 --remote origin
 # With explicit skills and agent type
 agent_go run <repo-path> '<task>' --skill security-review --agent-type reviewer
 
+# With structured Task Spec (SDD input contract) — recommended for non-trivial tasks
+agent_go spec template <repo-path> --output docs/tasks/task-xxx.md   # generate spec template
+agent_go spec validate docs/tasks/task-xxx.md <repo-path>            # L1 admission gate
+agent_go run <repo-path> --spec docs/tasks/task-xxx.md --yes         # run with spec
+agent_go run <repo-path> --spec docs/tasks/task-xxx.md --force       # skip admission gate
+
 # With custom config file
 agent_go --config /path/to/config.json run <repo-path> '<task>'
 
@@ -115,7 +121,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 
 | Module | Purpose |
 |--------|---------|
-| `cli.py` | CLI commands: run, resume, list, show, status, pr, config, clean, cache, inspect, review, router, eval, ci, recover, replay, checkpoint, mcp, plan-history, plan-diff |
+| `cli.py` | CLI commands: run, resume, list, show, status, pr, config, spec, clean, cache, inspect, review, router, eval, ci, recover, replay, checkpoint, mcp, plan-history, plan-diff |
 | `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
 | `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
 | `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify |
@@ -150,6 +156,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `recover.py` | Rebuilds meta.json from worktree state after SIGKILL/abnormal interruption |
 | `assessment.py` | False-positive evaluation data layer: AssessmentEvent model, persistence, aggregation (pure data module, no core-module imports) |
 | `artifacts.py` | Artifact export (S9-B): collect worktree/__artifacts__/ into --artifact-dir before cleanup |
+| `spec.py` | Task Spec parsing + L1 admission gate (S11-P0): 7-section Markdown spec → structured constraints injected into Plan prompt; deterministic pre-flight checks (required sections / file path validity / verification whitelist / length floor) |
 | `lint.py` | AST-based static checks: detects suspicious for-loop body truncation (see review pattern below) |
 
 ## Key Design Decisions
@@ -203,7 +210,7 @@ Other patterns worth a second look: thread safety on shared mutable state (`resu
 ## Testing
 
 ```bash
-pytest tests/           # 1464 tests (~35s)
+pytest tests/           # 1506 tests (~35s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -213,7 +220,7 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 
 ```
 agent_go/           # 36 package modules (~16,500 lines)
-tests/              # 60 test files, 1464 tests
+tests/              # 59 test files, 1506 tests
 eval_suite/         # Standard task suite for eval bench (tasks + fixtures)
 docs/
 ├── README.md       # 文档索引
