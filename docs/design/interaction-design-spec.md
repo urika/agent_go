@@ -3,7 +3,7 @@
 | 字段 | 值 |
 |---|---|
 | 文档版本 | v1.0 |
-| 状态 | Draft |
+| 状态 | ✅ 已实现（主要项落地；遗留：`$EDITOR` PLAN.md 编辑、`--no-emoji` 标志未实现，见 §4.2.3/§7.2） |
 | 负责人 | 交互设计 |
 | 关联文档 | `prd.md`、`architecture.md`、`docs/design/*` |
 | 配套文档 | [`interaction-roadmap.md`](./interaction-roadmap.md)（执行路线图）、[`design-decisions.md`](./design-decisions.md)（决策记录） |
@@ -883,11 +883,11 @@ subtask claude 完成
 
 | 指标 | 当前 | 目标 |
 |---|---|---|
-| 裸 `print()` 调用 | 184 | 0 |
-| 未使用的 Console 方法 | 4 | 0 |
-| 散落的 emoji 字面量 | ~50 种 | ≤ `ICONS` 字典 |
-| TUI 默认启用 | 否 | 否（--interactive 可启用） |
-| JSON 输出模式 | 无 | 全命令支持 |
+| 裸 `print()` 调用 | 0（全部经 Console 抽象层） | 0 |
+| 未使用的 Console 方法 | 0 | 0 |
+| 散落的 emoji 字面量 | 仍有 ~105 种分散在各模块（非集中式字典） | 收敛至单一 ICONS 常量 |
+| TUI 默认启用 | 否（--interactive 可启用） | 否（--interactive 可启用） |
+| JSON 输出模式 | 全局 `--json` 支持 | 全命令支持 |
 
 ---
 

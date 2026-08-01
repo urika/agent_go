@@ -2,8 +2,11 @@
 
 ## Overview
 
-6 realistic multi-file tasks across 2 fixture projects (task-mgr, data-pipeline),
+本文件描述**种子任务子集**（#13–18）：6 realistic multi-file tasks across 2 fixture projects (task-mgr, data-pipeline),
 covering 6 production engineering patterns. Each is designed to require 3-6 subtasks.
+
+> **注意**：当前 `eval_suite/` 已扩至 **22 个任务 + 4 个 fixture**（task-mgr / data-pipeline / django-blog / fp-sandbox），
+> 本文件仅覆盖其中 2 个 fixture 上的种子任务子集。完整任务清单以 `eval_suite/tasks/` 为准。
 
 ## Tasks
 

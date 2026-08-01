@@ -42,7 +42,8 @@ agent_go replay <task-id>
 
 # Checkpoint management (worktree file snapshots)
 agent_go checkpoint list <task-id>
-agent_go checkpoint restore <task-id> --sub <sub-id> --id <checkpoint-id>
+agent_go checkpoint restore <task-id> --name <sub-id> [--target <dir>]
+agent_go checkpoint delete <task-id> --name <sub-id>
 
 # Inspect preserved worktrees of failed/blocked subtasks
 agent_go inspect <task-id>

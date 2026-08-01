@@ -1,31 +1,38 @@
 # agent_go 接口规格速查
 
 > 浓缩自 19 份独立 SPEC。每个模块列出公共接口签名和一行说明。
-> **快照日期：2026-07-25** — 接口签名已对齐源码。行号仅供参考（会漂移）。
+> **快照日期：2026-08-01** — 接口签名已对齐源码。行号仅供参考（会漂移）。
 
-## cli.py — CLI 入口 (1607 行)
+## cli.py — CLI 入口 (2100 行)
 
 ```
 cmd_run(args)            → Plan → Execute 主流程
 cmd_resume(args)         → 中断恢复
+cmd_recover(args)        → SIGKILL 后从 worktree 重建 meta.json (--dry-run 只扫描)
 cmd_list()               → 列出历史任务
 cmd_show(args)           → 查看任务详情
-cmd_status(args)         → 实时监控 (--watch)
-cmd_pr(args)             → 生成 PR 描述
+cmd_status(args)         → 实时监控 (--watch / --no-tui)
+cmd_pr(args)             → 生成 PR 描述 (--push 经 gh CLI 创建)
 cmd_review(args)         → 审查任务结果(--task/--approve/--reject/--changes-requested) 或代码
 cmd_config()             → 查看/编辑配置
 cmd_clean()              → 清理任务目录和 tags
-cmd_skills()             → 列出已安装 Skill
+cmd_skills()             → 列出已安装 Skill (list / show <name>)
 cmd_agents()             → 列出 Agent 类型
-cmd_cache(args)          → Plan 缓存管理
+cmd_cache(args)          → Plan 缓存管理 (list/clean/clear/stats)
 cmd_inspect(args)        → 查看保留的 worktree 现场 (failed/blocked)
-cmd_router(args)         → 角色感知模型路由配置
-cmd_eval(args)           → 离线评估 (quality/perf/cost/reliability/ux/gate/all)
+cmd_router(args)         → 角色感知模型路由配置 (show/enable/disable/set-role)
+cmd_checkpoint(args)     → 检查点快照管理 (list/restore/delete)
+cmd_eval(args)           → 离线评估 (quality/perf/cost/reliability/ux/gate/bench/models/judge/all)
 plan-history(args)       → Plan 版本历史
 plan-diff(args)          → Plan 版本对比 (--v1/--v2)
+replay(args)             → 执行回放时间线 (--json)
+ci(args)                 → GitHub Actions workflow 生成 (--dry-run)
+mcp(args)                → MCP server (stdio / --http HTTP+SSE)
 ```
 `run`/`resume` 支持 `--preserve-worktrees`（保留全部）/ `--no-preserve`（强制清理），
 默认仅保留 failed/blocked 子任务的 worktree 供人工审查。
+`run` 另支持 `--max-retries` / `--no-verify-block` / `--goal` / `--goal-hook` / `--semantic-eval` /
+`--agent-loop` / `--interactive` / `--step-confirm` / `--auto-init` / `--parallel N` / `--remote`。
 
 ## api.py — LLM Plan 生成 + 缓存 (423 行)
 
@@ -38,22 +45,30 @@ load_cached_plan(key, task, config, logger)     → 读缓存
 save_cached_plan(key, plan, task, repo, config) → 写缓存
 ```
 
-## pipeline.py — 拓扑波次调度器 (386 行)
+## pipeline.py — 拓扑波次调度器 (390 行)
 
 ```
 _run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核心调度 (内部，cli.py 调用)
   ── Wave 拓扑排序 + ThreadPoolExecutor
-  ── SIGINT → _interrupted → meta["status"]="paused" → sys.exit(0)
+  ── SIGINT → _interrupted → 杀子进程 → meta["status"]="paused" → sys.exit(0)
   ── 远程推送、worktree/tag 清理、gc.auto 恢复
   ── preserve_worktrees: None=保留 failed/blocked，True=全保留，False=全清理
-_notify_complete(task_id, total, completed_ids, has_failed) → 任务完成通知 (M1)
+  ── mcp_client: MCPClientPool start_all() 启动 / finally stop_all() 回收（外部 MCP 工具）
+notify_event(event, context, config) → 任务完成/失败通知 (M1)
 ```
 
-## executor.py — 子任务执行器 (989 行)
+## planning.py — 规划辅助 (M4)
+
+```
+estimate_task_duration(subtasks, parallel, tasks_dir) → 历史子任务耗时中位数 × 拓扑波次
+```
+
+## executor.py — 子任务执行器 (1300 行)
 
 ```
 run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None) → 单子任务端到端
   ── _create_worktree() → _git_merge_upstream() → _build_task_md()
+  ── checkpoint 快照（提交前，回滚用）
   ── _run_claude() → _verify_changes() → commit + tag
   ── metering_path → AGENT_GO_METERING_PATH env → worker 计量写入
   ── config → 运行时配置贯通（max_retries/goal/evaluator/worker_models）
@@ -62,16 +77,20 @@ run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None
   ── S5: agent_loop 混合策略（_is_simple_task 判定：agent_type 不为 architect/reviewer
         + 关键词不含 探索/调研/重构/迁移/refactor/migrate/explore
         + files_hint ** 通配符 ≤1 + 上游依赖 ≤2）
+  ── MCP 消费：claude --mcp-config 透传外部 MCP 工具（mcp_client 配置）
+  ── 语义评估：evaluator.enabled → shell 验证过后触发；fail_closed 可阻断
 _build_sandbox_env()        → 净化环境变量 (敏感词剔除 + AGENT_GO_API_KEY 强制删)
 _apply_resource_limits()    → setrlimit (失败不阻塞)
+_verify_changes()           → 验证循环 + 修复重试（retry_count 注入 context.md + metering）
 ```
 
-## subtask.py — Claude 调用原语 (387 行)
+## subtask.py — Claude 调用原语 (430 行)
 
 ```
-_run_headless(task_md, worktree, env, logger, ..., hard_timeout=0) → claude -p 无头模式
+_run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) → claude -p 无头模式
   ── 交互检测 (正则 + 退出码 130) → 最多 2 次重试
   ── hard_timeout：硬超时 kill（retry_timeout 接线）
+  ── goal 配置优先级：运行时 config > env > 磁盘 (goal.enabled/max_turns/timeout_seconds)
   ── S4: AGENT_GO_CLAUDE_MODEL env → claude --model；计量记录 difficulty/真实模型
   ── stream-json result 事件提取 usage/cost → 写 metering.jsonl (worker 角色)
 _git_merge_upstream(src, dst, tag, logger, ...)   → 上游产物 merge
@@ -177,7 +196,11 @@ call_with_role(route, messages, api_key, logger, ...) → primary → fallback �
 ## evaluator.py — 验证评估
 
 ```
-LLM 语义评估 + 失败原因摘要 (failure_summary)，供修复循环与 eval 指标使用
+evaluate_semantic(subtask, worktree, config, logger) → 语义评估 (evaluator.enabled)
+  ── API 失败 → passed=False + confidence=0.0（fail_open 时代默认不阻断；fail_closed 阻断）
+  ── 响应解析失败 → passed=False（default-deny）
+  ── 写 assessment.jsonl（评估假阳性数据，assessment.py 消费）
+  ── 计量含 difficulty / 估算 tokens（CJK 感知：CJK 1 token，ASCII 1/4 token）
 ```
 
 ## goal_injector.py — /goal Stop Hook 注入
@@ -227,50 +250,106 @@ aggregate_quality/perf(dir)     → 跨任务聚合
 estimate_task_duration(subtasks, parallel, tasks_dir) → M4 时间预估（历史中位数 × 拓扑波次）
 cmd_eval(args)                  → eval CLI，子命令：
                                   quality|perf|cost|reliability|ux|gate|all
+                                  + bench|models|judge（见 bench.py / cross_judge.py）
                                   gate 支持 --baseline X（绝对阈值，默认 0.05）
                                             --check-regression（对比历史基线）
                                             --update-baseline（重置基线）
 
 # 模型分级元数据（见 design/model-evaluation-and-tiering.md §1）
 MODEL_PRICES                    → {model: {prompt, completion}} 定价表（USD/百万tokens）
-MODEL_TIER                      → {frontier/value/lite: [models]} 模型档位（待落地）
+MODEL_TIER                      → {frontier/value/lite: [models]} 模型档位（见 pricing.py）
 PROVIDER_DEFAULT_MODEL          → provider → 默认模型（旧日志缺 model 字段时回退）
 ```
 
-## bench.py — 模型生产力评估（待落地，见 design/model-evaluation-and-tiering.md §3）
-
-> **状态**：设计完成，待实施。三层评估体系（确定性 + 交叉评判 + 决策汇总）。
+## recover.py — 崩溃恢复 (SIGKILL)
 
 ```
-cmd_bench(args)                            → 对照运行编排器
-  ── --tasks eval_suite/                   标准任务集（YAML，带 ground-truth 验证）
-  ── --models M1,M2,M3                     被评模型（每模型跑全部任务）
-  ── --repeat N                            每任务重复 N 次（稳定性，默认 3）
-  ── --judge-model Mj                      跨模型评判（第 2 层，禁绝自评）
-  ── --output results.jsonl                原始结果落盘
-  ── 复用 _worktree_create / run_subtask / evaluate_semantic
-  ── 硬约束：judge_model != candidate_model（规避 LLM-as-Judge 自偏）
-
-analyze_model_productivity(results_path)   → 第 3 层决策汇总
-  ── 按 actual_model 聚合：pass_rate / first_pass_rate / avg_retries
-                            avg_latency_ms / dollar_per_pass / semantic_score
-                            false_positive_rate / pass_rate_std
-  ── difficulty_breakdown: {easy/medium/hard: {pass_rate, dollar_per_pass}}
-  ── recommendation: recommended | conditional | discouraged
-  ── recommended_roles: [worker_easy, worker_medium, reviewer, ...]
-  ── 决策规则：pass_rate<60% 或 假阳性>20% → discouraged；
-              sample_size<5 → low_confidence 不参与自动决策
+recover_meta(task_dir, dry_run=False) → 从 worktree 状态重建 meta.json
+  ── commit + verify-pass → completed；commit + verify-fail → failed
+  ── no commit + orphan changes → reset（resume 重跑）；no commit + no changes → no_changes
+  ── 永不代提交 orphan 变更（commit 是唯一完成边界）
 ```
 
-**标准任务集（`eval_suite/`，待落地）：**
-- `eval_suite/tasks/*.yaml` — 任务定义（id / difficulty / repo / task / verification / timeout）
-- `eval_suite/fixtures/sample-py-project/` — 固定最小可测仓库 + ground truth 测试
-- 规模：easy 10-15 + medium 10 + hard 5-10（每档 ≥10 才能算稳通过率）
-
-## tui.py — 状态面板 (199 行)
+## replay.py — 执行回放时间线
 
 ```
-cmd_status_tui()  → curses 多面板实时监控
+cmd_replay(args) → 读 meta/metering/results，ASCII 时间线 / --json 结构化输出
+```
+
+## checkpoint.py — 检查点快照
+
+```
+take_snapshot(worktree, task_dir, sub_id)   → 快照文件 (提交前)
+restore_snapshot(worktree, checkpoint, ...) → 回滚恢复
+list_checkpoints(task_dir)                  → 列出快照
+delete_checkpoint(task_dir, sub_id)         → 删除快照
+```
+
+## mcp_server.py — MCP server (stdio, JSON-RPC 2.0)
+
+> **状态**：6 工具 + 6 Resources + 3 Prompts 已落地。
+
+```
+TOOLS = [run_task, resume_task, inspect_task, review_task, list_tasks, cancel_task]
+RESOURCES = [Task List, Task Summary, Latest Plan, Metering Data, Review Status]
+PROMPTS = [diagnose_failure, review_and_decide, resume_or_restart]
+  ── spawn agent_go 子进程，解析 stdout JSONL → notifications/progress
+  ── repo allowlist (AGENT_GO_MCP_ALLOWED_REPOS) fail-closed
+  ── wait=true 流式；wait=false 异步返回 task_id 轮询
+```
+
+## mcp_http.py — MCP server HTTP/SSE transport
+
+```
+agent_go mcp --http --host 127.0.0.1 --port 8090
+  ── POST /mcp (JSON-RPC) + GET /mcp (SSE 推送) + GET /health
+  ── AGENT_GO_MCP_HTTP_TOKEN → Bearer token 鉴权
+```
+
+## mcp_client.py — MCP 消费层
+
+```
+MCPClientPool(config)          → 多 server 连接池 (start_all/stop_all/get_server)
+MCPServerConnection(command)   → 单 server 生命周期 (subprocess + JSON-RPC initialize 握手)
+_tool_prefix = "mcp__{server}__{tool}"  → 外部工具命名空间（agent_loop tools 合并 + claude --mcp-config 透传）
+  ── server 启动失败降级 warning，不阻断 pipeline
+```
+
+## assessment.py — 评估假阳性数据层
+
+```
+write(task_dir, event)         → 追加 AssessmentEvent 到 assessment.jsonl
+load_all(task_dir)             → 读取全部事件
+compute_false_positive_rate(task_dir) → 语义评估假阳性率（eval/bench 消费）
+```
+
+## lint.py — AST 静态检查
+
+```
+lint_for_loop_truncation(path) → 检测 for 循环体被截断（循环变量在循环外使用）
+```
+
+## agent_loop.py — 自主 Agent 循环 (--agent-loop)
+
+```
+run_agent_loop(task_md, worktree, env, logger, config) → 工具调用 ReAct 循环
+  ── _is_simple_task() 判定：简单任务走直接 API，复杂任务保留 claude -p
+  ── tools 合并 ToolRegistry.definitions() + mcp_client 外部工具（mcp__ 命名空间）
+  ── 每轮写 metering（virtual_model=agentgo-worker，含 token 统计）
+  ── 上限：max_turns（默认 20）/ max_duration（默认 600s）/ api_timeout（120s）
+```
+
+## tool_executor.py — Agent 循环工具注册表
+
+```
+ToolRegistry() → Read/Write/Edit/Bash 等工具定义 + bash 安全规则 + 文件操作
+execute_tool(name, args, worktree, ...) → 工具分发执行（返回 ToolResult 结构化结果）
+```
+
+## tui.py — 状态面板
+
+```
+cmd_status_tui()  → curses 多面板实时监控（agent_go status --watch）
 ```
 
 ## bench.py — 模型对照评估编排器 (300 行)

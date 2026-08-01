@@ -3,10 +3,28 @@
 | 字段 | 值 |
 |---|---|
 | 文档版本 | v1.0 |
-| 状态 | Active |
+| 状态 | Active（各 ADR 落地状态见下表） |
 | 关联文档 | `interaction-design-spec.md`（规范）、`interaction-roadmap.md`（路线图） |
 
 > 本文档记录 UI/UX 优化过程中的关键设计决策及其依据。每条决策均标注：**背景 → 决策 → 理由 → 代码验证**。决策变更时追加修订记录，不删除历史。
+
+### ADR 落地状态速查（2026-08-01 核验）
+
+| ADR | 决策 | 落地状态 |
+|-----|------|---------|
+| ADR-001 | 验证上下文卡片 | ✅ 已实现（验证卡片复用 executor 数据） |
+| ADR-002 | `--json` 提前到 Phase 0.5 | ✅ 已实现（全局 `--json`） |
+| ADR-003 | TUI 降级为 `--interactive` 可选 | ✅ 已实现（`--interactive`） |
+| ADR-004 | stream-json 事件为进度主数据源 | ✅ 已实现（`current_activity` + shared_activity） |
+| ADR-005 | 删除 emoji 标准化 | ✅ 已落地（不实现） |
+| ADR-006 | 多方案对比降级 backlog | ✅ 已落地（不实现） |
+| ADR-007 | 验证分层 + 失败分类 | ❌ 未实现（无 fast/full 字段） |
+| ADR-008 | shell 链分解 | 🔶 部分（仅 `&&` 拆链，未按 `\|\|`/`;`/`\|` 拆分） |
+| ADR-009 | 可验证引用进入报告 | ✅ 已实现 |
+| ADR-010 | STEERING.md 运行中引导 | ❌ 未实现 |
+| ADR-011 | 两轴安全（allowedTools 分级） | ✅ 已实现（agents.py reviewer/architect 只读集 + `--allowedTools`） |
+| ADR-012 | role_skill_map 四态激活矩阵 | ❌ 未实现（无 activation 字段） |
+| ADR-013 | worker env 密钥剥离 + evaluator fail-closed | 🔶 部分（`evaluator.fail_closed` 已实现；`sensitive_env_prefixes` 密钥剥离未实现） |
 
 ---
 

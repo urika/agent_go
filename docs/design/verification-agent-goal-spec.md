@@ -1,7 +1,7 @@
 # Verification Agent + /Goal 混合模式设计 Spec
 
 > 版本: v1.0  
-> 状态: Draft  
+> 状态: ✅ 已实现（实施偏差记录见 §11.4：循环位于 `executor.py:_verify_changes`；`goal_injector.py` 已实现 Stop Hook；`verification.llm_eval.*` 收敛为顶层 `evaluator.*` 配置）  
 > 关联 Issue: N/A  
 > 设计目标: 在 agent_go pipeline 中引入"验证 Agent"循环机制，结合 Claude Code `/goal` 原生能力，实现可配置的自动修复循环（verify → fix → verify → ... until pass or max_retries），并将验证结果反写为下游依赖阻断信号。
 

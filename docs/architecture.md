@@ -55,7 +55,8 @@ cmd_run(repo, task)
 并发 worktree 操作共享对象库，执行前 `git config gc.auto 0`，结束时恢复原值。
 
 ### 三层降级
-外部 LLM API (60s timeout) → 本地模型 (localhost:8000, 10s) → DECOMPOSE_RULES 关键词匹配 → 单任务兜底。
+外部 LLM API (180s timeout) → 本地模型 (localhost:8000, 10s) → DECOMPOSE_RULES 关键词匹配 → 单任务兜底。
+另有 plan 缓存（TTL 24h）前置跳过、generate_plan 3 次重试、confirm_plan S/D 重生成、5 轮重生成循环等兜底层，详见 CLAUDE.md「Plan 生成降级链」。
 
 ### 安全白名单
 LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell 注入扫描 → 命令白名单查找 (28 种工具) → 逐 token 正则匹配。防御深度，default-deny。
@@ -80,6 +81,9 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
     ├── meta.json            ← 任务元数据 + results 数组 (含 failure_reason)
     ├── execution.log        ← 双格式: INFO人类可读 + DEBUG结构化JSON
     ├── metering.jsonl       ← 结构化计量: 每 API 调用一条 (role/tokens/cost/latency/result)
+    ├── assessment.jsonl     ← 语义评估事件 (evaluator 写入，eval 假阳性率数据源)
+    ├── plans/v{version}.json ← Plan 版本快照 (plan-history/plan-diff 数据源)
+    ├── review.json          ← review --task 聚合评审结论 (仅生成时)
     └── sub-<n>/
         ├── work/            ← git worktree (执行后清理; failed/blocked 保留)
         ├── .preserved       ← 保留标记 (subtask_id/status/failure_reason/branch)
@@ -90,7 +94,7 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
 ## 测试
 
 ```bash
-pytest tests/ -q           # 1130 tests, ~17s
+pytest tests/ -q           # 1442 tests, ~35s
 ```
 
 测试策略：mock 所有外部依赖 (git, claude, API)，验证逻辑正确性。NFR 专项测试在 `test_nfr_*.py`。
@@ -145,12 +149,13 @@ pytest tests/ -q           # 1130 tests, ~17s
 
 | 增强 | import 方式 | 开关 | 容错 | 状态 |
 |------|-----------|------|------|------|
-| Evaluator | 动态 + except | `evaluator.enabled` (False) | ✅ 评估失败不中断 | ✅ 解耦完成 |
-| Notify | 动态 + except | `notify.enabled` (True) | ✅ 三层 try/except | ✅ 解耦完成 |
+| Evaluator | 动态 + except | `evaluator.enabled` (False) | ✅ 评估失败不中断（fail_closed 可阻断） | ✅ 解耦完成 |
+| Notify | 动态 + except | `behavior.notify_on_complete` (True) 或 `notify` 块 | ✅ 三层 try/except | ✅ 解耦完成 |
 | GoalInjector (/goal) | 动态 + except | `goal.enabled` (False) | ✅ (02) | ✅ 解耦完成 |
 | GoalInjector (Stop Hook) | 动态 + except | `goal.enable_goal_hook` (False) | ✅ (02) | ✅ 解耦完成 |
 | AgentLoop | 动态 + except | `agent_loop.enabled` (False) | ✅ 失败回退 claude -p | ✅ 解耦完成 |
 | Skills | 动态 + except | `skills` 字段非空 | ✅ (02) | ✅ 解耦完成 |
+| MCP 消费层 (mcp_client) | 动态 + except | `mcp_servers` 非空 | ✅ server 失败降级 warning 不阻断 | ✅ 解耦完成（2026-08-01） |
 | M4 时间预估 | planning 模块归位 | 无开关（always-on） | N/A | ✅ 已从 eval 解耦 |
 | Metering | 动态 | `_metering_path` 非空 | ✅ OSError 兜底 | 核心可观测性 |
 | S4 difficulty | N/A | `worker_models` 非空 | N/A | 核心可观测性 |
@@ -173,16 +178,16 @@ agent_go/bench.py（编排器，不 import pipeline/executor）
     agent_go eval judge calibrate --llm-scores ... --human-scores ...
 ```
 
-### S9 办公能力扩展架构（⏳ 设计中，2026-08-01）
+### S9 办公能力扩展架构（能力 A ✅ 已实现，能力 B ⏳ 设计中）
 
 > 设计稿见 [design/office-capability-extension.md](design/office-capability-extension.md)。补齐两个结构性缺口，使 agent_go 从"代码 diff 导向"扩展为"可交付任意产物"的编排器。**不自建 Office 编辑器**，复用已成标准的 Office MCP 生态。
 
 ```
-能力 A：MCP 消费层（让子任务调用外部 MCP server 工具）
-  agent_go/mcp_client.py（新增）
+能力 A：MCP 消费层（让子任务调用外部 MCP server 工具）——✅ 已实现（2026-08-01）
+  agent_go/mcp_client.py
     MCPClientPool — 多 server 连接池，pipeline 启动时 start_all()，finally stop_all()
     MCPServerConnection — 单 server 生命周期（subprocess + JSON-RPC initialize 握手）
-    命名空间约定：外部工具暴露为 {server}__{tool}（如 excel__read_sheet）
+    命名空间约定：外部工具暴露为 mcp__{server}__{tool}（如 mcp__excel__read_sheet）
   集成点：
     pipeline.py — 启动拉起连接池 / 结束回收
     agent_loop.py — tools 字段合并原生 + MCP 工具，dispatch 按命名空间路由
@@ -190,13 +195,13 @@ agent_go/bench.py（编排器，不 import pipeline/executor）
   配置：config.json 新增 mcp_servers 节（command/args/env/enabled/tool_filter/scope）
   容错：server 启动失败降级 warning 不阻断 pipeline（与 notify/skills 同级）
 
-能力 B：产物导出路径（让生成的文件交付到用户目录，不被 worktree 清理吃掉）
-  agent_go/artifacts.py（新增）
+能力 B：产物导出路径（让生成的文件交付到用户目录，不被 worktree 清理吃掉）——⏳ 设计中
+  agent_go/artifacts.py（规划新增）
     collect_from_worktree — 扫描 worktree/__artifacts__/** 收集产物
     export — 复制到 --artifact-dir/{task_id}/{sub_id}/
     render_export_summary — 生成导出清单（供 final report）
   集成点：
-    pipeline.py — 清理 worktree 前（pipeline.py:378）调用 export
+    pipeline.py — 清理 worktree 前调用 export
     executor.py — TASK.md 注入 __artifacts__/ 产物目录约定
   配置：--artifact-dir CLI + artifact_dir config（null = 向后兼容不导出）
   交付物分类：

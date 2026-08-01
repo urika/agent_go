@@ -3,7 +3,7 @@
 > 作者：agent_go 架构分析  
 > 日期：2026-08-01  
 > 版本：v1.0  
-> 状态：草稿  
+> 状态：✅ 完成（§7 落地记录对应代码已全部核验）  
 > 前置阅读：[cli-mcp-design-analysis.md](./cli-mcp-design-analysis.md) — 范式总结与最佳实践
 
 ---
@@ -575,9 +575,10 @@ Step 4: MCP Server 处理
 #### 问题 5：Context Bloat — 工具定义全量加载
 
 ```
-当前:  4 个 tool definitions (run_task, resume_task, inspect_task, review_task)
-       每个都有 description + annotations + 完整 inputSchema
-       无论 Agent 当前是否需要，全部加载到 LLM context
+基线（改进前）: 4 个 tool definitions (run_task, resume_task, inspect_task, review_task)
+      现状: 6 个 tool definitions（+ list_tasks, cancel_task）+ Resources/Prompts 原语
+      每个都有 description + annotations + 完整 inputSchema
+      无论 Agent 当前是否需要，全部加载到 LLM context
 
 量化:  run_task description: ~200 chars
        run_task inputSchema: ~600 chars

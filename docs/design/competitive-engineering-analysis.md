@@ -134,19 +134,19 @@ agent_go 的本质是**编排器（orchestrator）**——把任务拆解后，�
 
 ## 5. 借鉴优先级总表（→ ADR / Roadmap）
 
-| 优先级 | 借鉴点 | 来源 | 落地模块 | 成本 | ADR |
-|---|---|---|---|---|---|
-| **P1** | 验证分层 + 失败分类 | Aider | `executor.py` | 低 | ADR-007 |
-| **P1** | shell 链分解加固白名单 | Codex | `utils.py` | 低 | ADR-008 |
-| **P1** | 可验证引用进报告/卡片 | Codex | `pipeline.py`/`ui.py` | 低 | ADR-009 |
-| **P2** | Steering 通道 | Cursor/Windsurf | `subtask.py` | 中 | ADR-010 |
-| **P2** | 两轴安全模型 | Codex | `agents.py`/`subtask.py` | 中 | ADR-011 |
-| **P2** | 四态激活矩阵 | Cursor/Windsurf | `role_skill_map.py`/`skills.py` | 低 | ADR-012 |
-| **P2** | 密钥剥离 + fail-closed | Codex | `executor.py`/`evaluator.py` | 低 | ADR-013 |
-| P3 | rewind 检查点 + plan 联动 | Cursor/Claude | `cli.py`/`git_utils.py` | 中 | 待立 |
-| P3 | goal 超限 Continue 语义 | Windsurf | `goal_injector.py` | 低 | 待立 |
-| P3 | Repo Map 符号上下文 | Aider | `git_utils.py`/`api.py` | 中 | 待立 |
-| P4 | 状态栏脚本契约 | Claude | `tui.py`/`console.py` | 中 | 待立 |
+| 优先级 | 借鉴点 | 来源 | 落地模块 | 成本 | ADR | 落地状态（2026-08-01） |
+|---|---|---|---|---|---|---|
+| **P1** | 验证分层 + 失败分类 | Aider | `executor.py` | 低 | ADR-007 | ❌ 未实现 |
+| **P1** | shell 链分解加固白名单 | Codex | `utils.py` | 低 | ADR-008 | 🔶 部分（仅 `&&`） |
+| **P1** | 可验证引用进报告/卡片 | Codex | `pipeline.py`/`ui.py` | 低 | ADR-009 | ✅ 已实现 |
+| **P2** | Steering 通道 | Cursor/Windsurf | `subtask.py` | 中 | ADR-010 | ❌ 未实现 |
+| **P2** | 两轴安全模型 | Codex | `agents.py`/`subtask.py` | 中 | ADR-011 | ✅ 已实现（allowedTools 分级） |
+| **P2** | 四态激活矩阵 | Cursor/Windsurf | `role_skill_map.py`/`skills.py` | 低 | ADR-012 | ❌ 未实现 |
+| **P2** | 密钥剥离 + fail-closed | Codex | `executor.py`/`evaluator.py` | 低 | ADR-013 | 🔶 部分（`evaluator.fail_closed` ✅；密钥剥离 ❌） |
+| P3 | rewind 检查点 + plan 联动 | Cursor/Claude | `cli.py`/`git_utils.py` | 中 | 待立 | ✅ 已实现（`checkpoint.py`） |
+| P3 | goal 超限 Continue 语义 | Windsurf | `goal_injector.py` | 低 | 待立 | ❌ 未实现 |
+| P3 | Repo Map 符号上下文 | Aider | `git_utils.py`/`api.py` | 中 | 待立 | ❌ 未实现 |
+| P4 | 状态栏脚本契约 | Claude | `tui.py`/`console.py` | 中 | 待立 | ❌ 未实现 |
 
 ---
 

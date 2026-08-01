@@ -23,11 +23,6 @@
     "local_model_name": "qwen",
     "enable_rules": true
   },
-  "headless": {
-    "idle_timeout": 300,
-    "max_retries": 2,
-    "heartbeat_interval": 30
-  },
   "notify": {
     "enabled": true,
     "timeout_sec": 5,

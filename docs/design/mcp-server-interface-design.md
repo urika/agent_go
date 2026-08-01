@@ -16,13 +16,13 @@
 ## 1. 目标与非目标
 
 **目标**
-- 4 个工具覆盖任务全生命周期：`run_task` / `resume_task` / `inspect_task` / `review_task`
+- 6 个工具覆盖任务全生命周期：`run_task` / `resume_task` / `inspect_task` / `review_task` / `list_tasks` / `cancel_task`
 - 长任务（分钟~小时级）的双模语义：异步立即返回 + 同步等待（progress notification 流式推进）
 - 事件流复用 IDS §4.6 的 JSON 事件 taxonomy，单一 schema 三处消费（终端 / MCP / CI）
 - stdio transport，Python stdlib 实现，不引入第三方依赖
 
 **非目标**
-- 不做 HTTP/SSE transport（stdio 覆盖本地宿主场景；远程场景由宿主侧 gateway 承担）
+- ~~不做 HTTP/SSE transport~~ → 已实现（`mcp_http.py`，POST /mcp + GET /mcp SSE + GET /health，`AGENT_GO_MCP_HTTP_TOKEN` Bearer 鉴权）；stdio 覆盖本地宿主场景，HTTP 覆盖远程/集成场景
 - 不做任务队列/多租户（MCP server 是单用户本地进程）
 - 不暴露 agent_go 全部 CLI（`eval`/`bench`/`router` 等管理命令不进 MCP，面越小越好）
 
@@ -502,15 +502,15 @@ OpenClaw 路径同理（其 plugin SDK / MCP 工具接入等价），渠道渲�
 
 | 期 | 内容 | 依赖 | 估时 |
 |---|---|---|---|
-| **M1** | `mcp_server.py`（stdio JSON-RPC + tools/list + tools/call + 4 工具 + degraded 事件轮询） | 无 | 3d |
-| **M2** | 对接 `--json` 完整事件流（替换轮询） | P0.5（ADR-002） | 1d |
+| **M1** | `mcp_server.py`（stdio JSON-RPC + tools/list + tools/call + 4 工具 + degraded 事件轮询） | 无 | ✅ M1 已完成 |
+| **M2** | 对接 `--json` 完整事件流（替换轮询） | P0.5（ADR-002） | ✅ M2 已完成 |
 | **M3** | `current_activity` 进度字段（含子任务中间阶段活动 + inspect 查询） | P1-5（ADR-004） | ✅ M3 已完成 |
 | **M4** | Hermes/OpenClaw 集成指南 + 示例 skill | M1 | ✅ M4 已完成 |
+| **M5** | 增量工具：`list_tasks`（任务发现 + 状态过滤）+ `cancel_task`（SIGINT 优雅暂停）；Resources（Task List/Task Summary/Latest Plan/Metering Data/Recent Log/Review Status）+ Prompts（diagnose_failure/review_and_decide/resume_or_restart） | M1 | ✅ 已实现 |
+| **M6** | HTTP/SSE transport（`mcp_http.py`：POST /mcp + GET /mcp SSE + GET /health，`AGENT_GO_MCP_HTTP_TOKEN` Bearer 鉴权） | M1 | ✅ 已实现 |
 
-M1 先行不阻塞——degraded 模式保证四工具端到端可用，M2 仅提升事件粒度。
-
-**验收标准**：
-- Hermes `hermes tools` 可见 4 个 agent_go 工具；
+**验收标准**（当前状态）：
+- 宿主 tools/list 可见 **6 个** agent_go 工具（`run_task` / `resume_task` / `inspect_task` / `review_task` / `list_tasks` / `cancel_task`）；
 - 从 Hermes 对话发起 run_task → 轮询 inspect_task → review_task analyze 全链路返回结构化结果；
 - allowlist 外 repo 调用被 fail-closed 拒绝；
 - server 崩溃不杀死已 detachment 的 agent_go 任务（可用 resume_task 续上）。
@@ -522,7 +522,7 @@ M1 先行不阻塞——degraded 模式保证四工具端到端可用，M2 仅�
 | # | 问题 | 当前倾向 | 需决策方 |
 |---|---|---|---|
 | Q1 | `wait=true` 的最长阻塞是否设宿主可配上限？ | server 侧硬上限 6h | 工程 |
-| Q2 | 是否需要第 5 个工具 `cancel_task`（SIGINT 优雅暂停）？ | 需要但可后置——resume 已支持，cancel 就是向 detached 进程发 SIGINT | 产品 |
+| Q2 | ~~是否需要第 5 个工具 `cancel_task`~~ → **已解决（✅ 已实现）** | `cancel_task` 已落地：向 detached 进程发 SIGINT 优雅暂停 + meta.json 标记 `cancelled` | 已关闭 |
 | Q3 | review 决策是否回写 GitHub PR（经 `gh`）？ | 后置到 M4，先落本地 decision.json | 产品 |
 | Q4 | 多 server 实例并发（同一 repo 被两个宿主同时 run）？ | worktree 隔离天然安全；meta 层面不做锁，文档声明 best-effort | 工程 |
 

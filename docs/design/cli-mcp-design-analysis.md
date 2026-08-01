@@ -3,7 +3,7 @@
 > 作者：agent_go 架构分析  
 > 日期：2026-08-01  
 > 版本：v1.0  
-> 状态：草稿
+> 状态：分析完成（差距项落地状态见 §4.1/§4.2 表格，落地记录见 [cli-mcp-interaction-analysis.md](cli-mcp-interaction-analysis.md) §7）
 
 ---
 
@@ -454,10 +454,10 @@ progressive → 流式事件 (JSON Lines) 实时推送进度
 
 | 原语 | 是否必需 | agent_go 状态 |
 |------|---------|---------------|
-| **Tools** | ✅ 必需 | ✅ 已实现 (4 tools) |
-| **Resources** | 推荐 | ❌ 未实现 — 可将 task log、metering、plan history 暴露 |
-| **Prompts** | 推荐 | ❌ 未实现 — 可暴露 review/plan 模板 |
-| **Sampling** | 进阶 | ❌ 未实现 — 可在关键决策点反向询问 |
+| **Tools** | ✅ 必需 | ✅ 已实现 (6 tools: run/resume/inspect/review/list/cancel) |
+| **Resources** | 推荐 | ✅ 已实现 — Task List / Task Summary / Latest Plan / Metering Data / Recent Log / Review Status 暴露 task log、metering、plan history |
+| **Prompts** | 推荐 | ✅ 已实现 — 暴露 diagnose_failure / review_and_decide / resume_or_restart 模板 |
+| **Sampling** | 进阶 | ✅ 已实现 — `request_sampling` stdio 双向 + cancel_task `confirm` 反向询问 |
 
 #### 3.3.5 生产就绪
 
@@ -493,19 +493,19 @@ progressive → 流式事件 (JSON Lines) 实时推送进度
 | **并发安全** | `git gc.auto` 禁用、ThreadPoolExecutor、meta_lock | 鲁棒性 |
 | **Quality Dashboard** | 通过率/验证率/合并就绪三色指示器 | 决策辅助 |
 
-#### ❌ 有差距
+#### ❌ 有差距（部分已落地）
 
-| 差距 | 严重度 | 对标来源 |
-|------|--------|---------|
-| **缺少 `--version` 标志** | 低 | CLI 基础规范 |
-| **帮助文本无 Usage 示例** | 中 | CLI 规范 — argparse 默认无示例 |
-| **错误消息缺少 `FIX:` 风格的可执行修复指令** | 高 | Agent-Native CLI — 飞书 CLI 的核心差异 |
-| **缺少三层命令架构的显式设计** | 中 | Agent-Native CLI — 当前隐式存在但未系统化 |
-| **缺少 `--dry-run` 全局支持** | 中 | CLI 安全规范 — 飞书 CLI 所有写操作支持 |
-| **缺少输出格式切换（`--format json\|table\|csv`）** | 低 | Agent-Native CLI — 当前仅 `--json` 二态 |
-| **Skills 命令帮助信息不够 Agent 友好** | 中 | Agent-Native CLI — 可增加 SKILL.md 自描述 |
-| **缺少多账户/多 profile 支持** | 低 | Agent-Native CLI — 飞书 `--account` / `--profile` |
-| **凭证存储未使用 OS keychain** | 低 | 安全规范 — 飞书 CLI 使用系统密钥链 |
+| 差距 | 严重度 | 对标来源 | 落地状态 |
+|------|--------|---------|---------|
+| **缺少 `--version` 标志** | 低 | CLI 基础规范 | 待实施（`__init__.__version__` 已存在） |
+| **帮助文本无 Usage 示例** | 中 | CLI 规范 — argparse 默认无示例 | 待实施 |
+| **错误消息缺少 `FIX:` 风格的可执行修复指令** | 高 | Agent-Native CLI — 飞书 CLI 的核心差异 | ✅ 已实现（CLI 失败恢复闭环引导 + 后续操作卡片） |
+| **缺少三层命令架构的显式设计** | 中 | Agent-Native CLI — 当前隐式存在但未系统化 | 待实施 |
+| **缺少 `--dry-run` 全局支持** | 中 | CLI 安全规范 — 飞书 CLI 所有写操作支持 | 部分（ci / recover 已支持） |
+| **缺少输出格式切换（`--format json\|table\|csv`）** | 低 | Agent-Native CLI — 当前仅 `--json` 二态 | 待实施 |
+| **Skills 命令帮助信息不够 Agent 友好** | 中 | Agent-Native CLI — 可增加 SKILL.md 自描述 | ✅ 已实现（`skills show <name>`） |
+| **缺少多账户/多 profile 支持** | 低 | Agent-Native CLI — 飞书 `--account` / `--profile` | ✅ 已实现（`--profile` / `AGENT_GO_PROFILE` → `~/.agent_go/profiles/`） |
+| **凭证存储未使用 OS keychain** | 低 | 安全规范 — 飞书 CLI 使用系统密钥链 | 待实施 |
 
 ---
 
@@ -529,18 +529,18 @@ progressive → 流式事件 (JSON Lines) 实时推送进度
 | **审查审计** | `review_decision.json` + `review_history.jsonl` | MCP 生产 |
 | **取消支持** | 响应 `notifications/cancelled`，stdin EOF 时 terminate 所有子进程 | MCP 规范 |
 
-#### ❌ 有差距
+#### ❌ 有差距（以下条目多数已在后续迭代落地，见 §7 落地记录）
 
-| 差距 | 严重度 | 对标来源 |
-|------|--------|---------|
-| **Resources 原语未使用** | 高 | MCP 规范 — 可将 task log、metering、plan history 暴露为只读 Resource |
-| **Prompts 原语未使用** | 中 | MCP 规范 — 可暴露 review template / plan template |
-| **Sampling 原语未使用** | 低 | MCP 规范 — Server→LLM 反向查询 |
-| **仅 stdio transport** | 中 | MCP 规范 — 缺少 SSE/HTTP，限制远程部署场景 |
-| **工具数偏少（4 个）** | 低 | 可考虑增加 `list_tasks`、`cancel_task` 等 |
-| **缺少 lazy context 策略** | 中 | AWS MCP 实践 — Resource 可按需加载，避免全量注入 context |
-| **错误消息缺少 `fix` 字段** | 中 | Agent-Native 理念 — 当前 error 有 code/message/retryable 但无可执行修复指令 |
-| **Tool descriptions 可更精简** | 低 | Token 效率 — 当前描述偏长 |
+| 差距 | 严重度 | 对标来源 | 落地状态 |
+|------|--------|---------|---------|
+| **Resources 原语未使用** | 高 | MCP 规范 — 可将 task log、metering、plan history 暴露为只读 Resource | ✅ 已实现（Task List / Task Summary / Latest Plan / Metering Data / Recent Log / Review Status） |
+| **Prompts 原语未使用** | 中 | MCP 规范 — 可暴露 review template / plan template | ✅ 已实现（diagnose_failure / review_and_decide / resume_or_restart） |
+| **Sampling 原语未使用** | 低 | MCP 规范 — Server→LLM 反向查询 | ✅ 已实现（`request_sampling` + cancel_task `confirm`） |
+| **仅 stdio transport** | 中 | MCP 规范 — 缺少 SSE/HTTP，限制远程部署场景 | ✅ 已实现（`mcp_http.py`，POST /mcp + GET /mcp SSE + /health，Bearer 鉴权） |
+| **工具数偏少（4 个）** | 低 | 可考虑增加 `list_tasks`、`cancel_task` 等 | ✅ 已实现（6 个 tools） |
+| **错误消息缺少 `fix` 字段** | 中 | Agent-Native 理念 — 当前 error 有 code/message/retryable 但无可执行修复指令 | ✅ 已实现（ERROR_TEMPLATES 7 类 fix 字段） |
+| **缺少 lazy context 策略** | 中 | AWS MCP 实践 — Resource 可按需加载，避免全量注入 context | 待评估 |
+| **Tool descriptions 可更精简** | 低 | Token 效率 — 当前描述偏长 | 待评估 |
 
 ---
 

@@ -3,7 +3,7 @@
 | 字段 | 值 |
 |---|---|
 | 文档版本 | v1.0 |
-| 状态 | Active |
+| 状态 | ✅ 已完成（Sprint 1–5 计划项全部落地，落地记录见 [cli-mcp-interaction-analysis.md](./cli-mcp-interaction-analysis.md) §7） |
 | 关联文档 | `interaction-design-spec.md`（规范）、`design-decisions.md`（决策记录） |
 | 上游输入 | PM 优化计划、交互设计方案、深入分析（代码验证） |
 

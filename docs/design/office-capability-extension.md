@@ -1,6 +1,6 @@
 # 设计稿：办公能力扩展（MCP 消费 + 产物导出）
 
-> **状态**：设计稿（2026-08-01）
+> **状态**：能力 A（MCP 消费层）✅ 已实现（2026-08-01，`agent_go/mcp_client.py` + `mcp_servers` config）；能力 B（产物导出）设计稿（2026-08-01）
 > **关联**：[prd.md](../prd.md) 「办公能力扩展」章节、[roadmap.md](../roadmap.md) S9 迭代
 > **背景调研**：见同目录调研附件《Office AI 助手生态调研》——业界已通过 MCP 协议标准化 Office 文档自动化，社区生态成熟（excel-mcp-server 4084★、office-powerpoint-mcp-server 1847★）
 
@@ -111,7 +111,7 @@ mcp_client.py
 └── _namespace_tool(server_key, tool_name)  # 命名空间映射：避免跨 server 工具重名
 ```
 
-**命名空间约定**：外部工具对外暴露为 `{server_key}__{tool_name}`（如 `excel__read_sheet`），dispatch 时按 `__` 拆分路由。这避免 `read` 这类通用名冲突，也让 LLM 和用户都能识别工具来源。
+**命名空间约定**：外部工具对外暴露为 `mcp__{server_key}__{tool_name}`（如 `mcp__excel__read_sheet`），dispatch 时按 `__` 拆分路由。这避免 `read` 这类通用名冲突，也让 LLM 和用户都能识别工具来源。（落地为 `mcp_client.py` 的 `_TOOL_PREFIX = "mcp__"` + server key + `__` + tool name）
 
 ### 2.4 与执行链路集成
 
@@ -260,7 +260,7 @@ pipeline 收尾扫描 __artifacts__/ → 导出到 ~/Desktop/reports/
 
 | # | 验收项 | 门禁 |
 |---|--------|------|
-| A1 | 配置 `mcp_servers` 后，子任务 LLM 能看到并调用外部工具 | `tools` 列表含 `excel__*` 命名空间工具 |
+| A1 | 配置 `mcp_servers` 后，子任务 LLM 能看到并调用外部工具 | `tools` 列表含 `mcp__excel__*` 命名空间工具 |
 | A2 | 外部 server 启动失败时不阻断 pipeline | 降级 warning，任务正常完成 |
 | A3 | 工具调用超时/异常返回结构化错误，LLM 可重试 | 错误格式与原生 ToolResult 一致 |
 | A4 | 连接池在 pipeline 结束后无僵尸进程 | `ps` 无残留 uvx/npx 进程 |

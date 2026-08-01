@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (31 modules, ~12,000 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, config-driven role-skill mapping, verification loop with auto-retry, worktree preservation for failed tasks, and remote branch push.
+agent_go is a modular Python CLI tool (35 modules, ~16,300 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -37,6 +37,10 @@ agent_go --config /path/to/config.json run <repo-path> '<task>'
 # Resume an interrupted task
 agent_go resume <task-id>
 
+# Rebuild meta.json after a SIGKILL / abnormal interruption
+agent_go recover <task-id>
+agent_go recover <task-id> --dry-run    # scan only, don't update meta.json
+
 # Inspect preserved worktrees after failed task
 agent_go inspect <task-id>
 agent_go inspect <task-id> --all    # show all subtasks
@@ -57,7 +61,8 @@ agent_go replay <task-id> --json
 
 # Checkpoint management (worktree file snapshots)
 agent_go checkpoint list <task-id>
-agent_go checkpoint restore <task-id> --sub <sub-id> --id <checkpoint-id>
+agent_go checkpoint restore <task-id> --name <sub-id> [--target <dir>]
+agent_go checkpoint delete <task-id> --name <sub-id>
 
 # MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)
 agent_go mcp
@@ -66,6 +71,24 @@ AGENT_GO_MCP_HTTP_TOKEN=xxx agent_go mcp --http   # 启用 Bearer token 鉴权
 
 # Monitor running tasks
 agent_go status --watch
+
+# Model benchmark / cross-judgment / evaluation / gate
+agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3
+agent_go eval models --results eval_suite/results.jsonl
+agent_go eval judge --results eval_suite/results.jsonl --judge-models M1,M2
+agent_go eval judge calibrate --llm-scores ... --human-scores ...
+agent_go eval gate --baseline 0.05
+agent_go eval gate --check-regression --update-baseline
+
+# PR / CI workflow generation / cache / router / skills / agents / config
+agent_go pr <task-id> --push
+agent_go ci --dry-run
+agent_go cache stats
+agent_go router show
+agent_go skills list
+agent_go skills show <name>
+agent_go agents
+agent_go config
 
 # List / show / clean
 agent_go list
@@ -86,18 +109,22 @@ cmd_run()
   │     ├── router.py          → optional role-aware routing (planner/worker/reviewer)
   │     └── metering.jsonl     → per-call role/tokens/cost/latency (planner + worker)
   ├── confirm_plan()           → Y/S/D/E/R/N interactive (--yes skips)
-  ├── plan_to_subtasks()       → injects agent_prompt + applies role-skill rules
+  ├── plan_to_subtasks()       → injects agent_prompt + applies role-skill rules + difficulty
   ├── confirm_subtasks()       → Y/N/E/A/D interactive
+  ├── estimate_task_duration() → M4 time estimate (historical median × topo waves)
   └── _run_pipeline()
         ├── disable gc.auto    → concurrency safety
         ├── topological waves  → ThreadPoolExecutor with --parallel N
+        │   └── upstream failed/blocked → downstream marked blocked & skipped
         ├── run_subtask()
         │     ├── git worktree add -b agent_go/{task_id}/{sub_id}
         │     ├── git merge upstream tag → artifact passing
-        │     ├── writes TASK.md (path-rewritten for isolation)
+        │     ├── writes TASK.md (path-rewritten; optional /goal via --goal)
+        │     ├── optional Stop Hook injection (--goal-hook)
+        │     ├── difficulty → worker_models → claude --model
+        │     ├── checkpoint snapshot taken for rollback (checkpoint.py)
         │     ├── spawns claude -p (or greywall wrapper)
         │     ├── loads skills + agent type per subtask
-        │     ├── difficulty-based model routing (worker_models → claude --model)
         │     ├── git commit + tag ({task_id}/{sub_id} namespaced)
         │     └── verification + auto-retry loop (configurable max_retries)
         ├── push branches to remote (if --remote)
@@ -106,17 +133,22 @@ cmd_run()
         ├── final report
         │   └── lists preserved worktree paths + failure reasons
         └── inspect command → list preserved worktrees, paths, git branches
+
+recover <task-id>   → rebuild meta.json from worktree state after SIGKILL
+resume <task-id>    → reruns uncompleted subtasks from meta.json state
 ```
 
-## Key Modules (28 modules, ~10,300 lines)
+If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuilds `meta.json` from worktree state: commit+verify-pass → completed, commit+verify-fail → failed, no commit+orphan changes → reset (resume reruns it), no commit+no changes → no_changes. It never commits orphan changes itself — commit stays the sole completion boundary for resume correctness.
+
+## Key Modules (35 modules, ~16,300 lines)
 
 | Module | Purpose |
 |--------|---------|
-| `cli.py` | CLI commands: run, resume, list, show, status, pr, config, clean, inspect, review, router, cache, eval, ci, skills, agents, plan-history, plan-diff |
+| `cli.py` | CLI commands: run, resume, recover, list, show, status, pr, config, clean, inspect, review, router, cache, eval, ci, skills, agents, plan-history, plan-diff, replay, checkpoint, mcp |
 | `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
 | `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
 | `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify loop |
-| `pipeline.py` | Wave scheduler, concurrency, worktree preservation/cleanup, remote push |
+| `pipeline.py` | Wave scheduler, concurrency, worktree preservation/cleanup, remote push, SIGINT |
 | `subtask.py` | claude -p headless runner, git merge upstream, worker metering, difficulty env |
 | `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
 | `goal_injector.py` | /goal Stop Hook injection: .claude/settings.json + verify-goal.sh |
@@ -134,12 +166,16 @@ cmd_run()
 | `pricing.py` | Model price table (48 models), MODEL_TIER, provider defaults |
 | `replay.py` | Execution replay timeline: load meta/metering/results, ASCII/JSON visualization |
 | `checkpoint.py` | Worktree file snapshot manager: take/restore/delete |
-| `mcp_server.py` | MCP JSON-RPC 2.0 server over stdio (4 tools + lifecycle event stream) |
+| `recover.py` | Rebuild meta.json from worktree state after SIGKILL/abnormal interruption |
+| `mcp_server.py` | MCP server over stdio: 6 tools (run/resume/inspect/review/list/cancel) + resources + prompts |
+| `mcp_http.py` | MCP server HTTP/SSE transport: POST /mcp + GET /mcp (SSE) + GET /health, Bearer auth |
+| `mcp_client.py` | MCP consumption layer: subtasks call external MCP tools, namespaced `mcp__{server}__{tool}` |
 | `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks |
 | `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
+| `assessment.py` | False-positive evaluation data layer: AssessmentEvent model, persistence, aggregation |
 | `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
 | `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |
-| `console.py` | Console output abstraction: quiet mode, lazy default binding, tables |
+| `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
 | `tui.py` | Curses status dashboard |
 | `workflow_gen.py` | GitHub Actions workflow generation (ci command) |
 | `lint.py` | AST-based static checks: suspicious for-loop body truncation |
@@ -157,16 +193,20 @@ cmd_run()
 - **Result review (M7)**: `agent_go review --task <task-id>` aggregates per-file diff summaries across subtasks with approve/reject/changes-requested decisions; `--deep` runs independent-model per-subtask analysis.
 - **Difficulty routing**: Planner tags subtasks with `difficulty`; `worker_models` config maps difficulty to a model name passed via `claude --model`; `worker_backends` maps model names to API base URLs (per-subtask `ANTHROPIC_BASE_URL` injection, overrides `worker_base_url`); difficulty and actual model recorded in metering.
 - **Planner API isolation**: `planner_api` config block overrides `plan_api` for plan generation only — supports independent model/provider for planning vs execution.
+- **Crash recovery**: commit is the sole completion boundary. `agent_go recover` never commits orphan changes on your behalf — it only classifies worktree state so `resume` knows what to rerun.
+- **MCP dual role**: agent_go is both an MCP server (`mcp_server.py` / `mcp_http.py`, exposing run/resume/inspect/review/list/cancel tools + resources + prompts) and an MCP consumer (`mcp_client.py`, letting subtasks call tools from external MCP servers, namespaced `mcp__{server}__{tool}`). Consumer failures are isolated per-server and degrade to a warning rather than blocking the pipeline.
 - **Config**: `~/.agent_go/config.json` (auto-created). Shallow-merged with `DEFAULT_CONFIG`.
 - **API key**: `AGENT_GO_API_KEY` env var > `config.json` `api_key`. Template vars (`${VAR_NAME}`) resolved from environment.
 - **Local model cost tracking**: `local_models` list marks model names routed to local backends — metering cost is zeroed for matched models.
 - **Logging**: Dual-format — INFO human-readable + DEBUG JSON events.
+- **Output abstraction**: `Console` class (quiet/verbose modes) is injected at CLI entry and shared via module-level default. All user-facing output goes through it — no bare `print()` calls.
 - **Sandbox**: Prefers `greywall`, falls back to native `claude`.
+- **CI**: `.github/workflows/test.yml` runs pytest + ruff (E,F,W) + mypy on push/PR to main. Config in `pyproject.toml`.
 
 ## Testing
 
 ```bash
-pytest tests/           # 1264 tests (~24s)
+pytest tests/           # 1442 tests (~35s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -222,9 +262,9 @@ for fut in as_completed(futures):
 ## File Organization
 
 ```
-	agent_go/           # 29 Python modules (~10,400 lines)
-	tests/              # 47 test files, 1169 tests
-eval_suite/         # Standard task suite for eval bench (22 tasks + fixtures)
+	agent_go/           # 35 Python modules (~16,300 lines)
+	tests/              # 59 test files, 1442 tests
+eval_suite/         # Standard task suite for eval bench (22 tasks + 4 fixtures)
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records
 ```

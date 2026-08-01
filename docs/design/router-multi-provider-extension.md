@@ -344,36 +344,38 @@ def evaluate_semantic(...):
 
 ## 实现路线图
 
+> **落地状态（2026-08-01）**：Phase 0 ✅（per-provider key + `${ENV_VAR}`，`config.py:plan_api/planner_api`）；Phase 1 ✅（`worker_backends` → `ANTHROPIC_BASE_URL` 注入，见 executor.py:1237-1245）；Phase 4 ✅（`evaluator.py` 经 `router.py` reviewer 角色）；Phase 2/3 以不同模块落地——未建 `agent_interface.py`/`open_source_adapter.py`，实际以 `agent_loop.py` + `tool_executor.py`（`--agent-loop` 混合策略）实现等价能力。
+
 ```
 Phase 0: per-provider API Key
   ├── ProviderConfig.api_key
   ├── ${ENV_VAR} 语法支持
   └── call_with_role() 优先使用 per-provider key
-  ⏱ 1天 | 🔴 无风险
+  ⏱ 1天 | 🔴 无风险 | ✅ 已实现
 
 Phase 1: 环境变量注入
   ├── executor.py 查询 router
-  ├── 注入 ANTHROPIC_API_KEY / BASE_URL
-  └── logger 记录路由信息
-  ⏱ 0.5天 | 🔴 无风险
+   ├── 注入 ANTHROPIC_API_KEY / BASE_URL
+   └── logger 记录路由信息
+   ⏱ 0.5天 | 🔴 无风险 | ✅ 已实现
 
 Phase 2: Agent 接口抽象
   ├── AgentInterface / AgentResult
   ├── ClaudeHeadlessAgent 适配
   └── executor.py 策略分发
-  ⏱ 1天 | 🟡 中风险（重构需测试覆盖）
+  ⏱ 1天 | 🟡 中风险（重构需测试覆盖）| 🔶 以 agent_loop.py + tool_executor.py 落地（--agent-loop）
 
 Phase 3: 开源 Agent 适配器
   ├── 选定具体框架
   ├── OpenSourceAgent 实现
   ├── 工具实现（Read/Write/Edit/Bash）
   └── 多轮对话 + 修复循环
-  ⏱ 3-5天 | 🟠 中高风险（依赖稳定性）
+  ⏱ 3-5天 | 🟠 中高风险（依赖稳定性）| ⏳ 待实施
 
 Phase 4: Evaluator 接入
   ├── evaluator.py 调用 resolve_provider
   └── 使用 reviewer 路由
-  ⏱ 0.5天 | 🔴 无风险
+  ⏱ 0.5天 | 🔴 无风险 | ✅ 已实现
 ```
 
 ---

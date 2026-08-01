@@ -23,16 +23,20 @@
 # 宿主对话中输入：
 可用哪些工具？
 
-# 宿主应返回 4 个工具：
+# 宿主应返回 6 个工具：
 - run_task（Run structured engineering task）
 - resume_task（Resume paused task）
 - inspect_task（Inspect task status）
 - review_task（Review task results）
+- list_tasks（List tasks with status filter）
+- cancel_task（Cancel a running task）
 
 # 验证 allowlist 安全边界：
 对 ~/unauthorized/path 执行 "重构登录模块"
 → 宿主应返回错误：AGENT_GO_REPO_INVALID
 ```
+
+> **传输方式**：默认 stdio（`agent_go mcp`）。远程/集成场景可用 HTTP/SSE 模式：`agent_go mcp --http --host 127.0.0.1 --port 8090`（POST /mcp + GET /mcp SSE 事件推送 + GET /health 健康检查；`AGENT_GO_MCP_HTTP_TOKEN=xxx` 启用 Bearer token 鉴权）。各宿主的 `command`/`url` 配置见 §2/§4 对应条目。
 
 ### 1.2 典型调用流
 
@@ -521,7 +525,7 @@ result["timeout_hint"]  # "任务仍在后台运行，可稍后 inspect_task 轮
 | `AGENT_GO_TASK_RUNNING` | 对 running 任务调 resume | 用 inspect_task 先查状态 |
 | `AGENT_GO_CAPACITY` | 并发已达上限 | 等现有任务完成或增大 `AGENT_GO_MCP_MAX_CONCURRENT` |
 | `AGENT_GO_TIMEOUT` | wait=true 超时 | 非错误，任务仍在后台跑 |
-| server 启动后无响应 | stdin 未正确连接 | 确认宿主用 stdio transport 而不是 HTTP |
+| server 启动后无响应 | stdin 未正确连接 | 确认宿主用 stdio transport（`agent_go mcp`）而不是 HTTP；若走 HTTP 则确认 `agent_go mcp --http` 已启动且端口正确 |
 | `AGENT_GO_PLAN_FAILED` | LLM 无法生成 Plan | 检查 API key 是否有效、模型是否可用 |
 | server 启动报错 | Python 环境问题 | 确认 `python3 -m agent_go.mcp_server` 能否独立运行 |
 
@@ -534,6 +538,10 @@ $ echo '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
   | head -1
 
 # 预期返回: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05",...}}
+
+# HTTP/SSE 模式的健康检查
+$ curl -s http://127.0.0.1:8090/health
+# 预期返回: {"status":"ok",...}（需配 AGENT_GO_MCP_HTTP_TOKEN 时带 Authorization: Bearer <token>）
 ```
 
 ### 8.2 日志查看

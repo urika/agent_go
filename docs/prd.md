@@ -437,9 +437,9 @@ CLI 正在成为 AI Agent 的事实标准接口（2026 年 Q1 的 Agent-Native C
 | SKILL.md 自描述 | `agent_go skills show <name>` 输出完整 SKILL.md | ✅ 已落地 |
 | Activity store 持久化 | 服务重启不丢失活动追踪 | 远期候选 |
 
-## 办公能力扩展：MCP 消费 + 产物导出（S9，设计中）
+## 办公能力扩展：MCP 消费 + 产物导出（S9）
 
-> **状态**：设计稿完成（2026-08-01，见 [design/office-capability-extension.md](design/office-capability-extension.md)），排入 roadmap S9
+> **状态**：能力 A（MCP 消费层）✅ 已落地（2026-08-01，`mcp_client.py` + `mcp_servers` config）；能力 B（产物导出）设计中，设计稿见 [design/office-capability-extension.md](design/office-capability-extension.md)，排入 roadmap S9-B
 > **决策结论**：不自建 Office 编辑器，补齐"搬运"（MCP 消费）与"交付"（产物导出）两个架构能力
 
 ### 背景
@@ -452,10 +452,10 @@ agent_go 的护城河是 Plan → Decompose → Execute 编排层，不是文档
 
 | 缺口 | 现状 | 后果 |
 |------|------|------|
-| **A. 无外部工具消费** | 仅作 MCP server 暴露，不消费外部 server；工具硬编码 4 个（Read/Write/Edit/Bash），沙箱禁网络 | 无法接入 Office MCP 生态，子任务只能改代码 |
+| **A. 无外部工具消费** | ✅ **已关闭（2026-08-01）**：MCP 消费层已落地，子任务可调用外部 server 工具；另暴露 MCP server 6 tools | 历史：无法接入 Office MCP 生态，子任务只能改代码 |
 | **B. 无产物导出** | 子任务在临时 worktree 执行，pipeline 完成后清理 worktree | 生成的文档随清理丢失，无法交付用户 |
 
-### 能力 A：MCP 消费层
+### 能力 A：MCP 消费层（✅ 已落地）
 
 让子任务调用用户配置的外部 MCP server 工具，如同原生工具。
 
@@ -464,17 +464,18 @@ agent_go 的护城河是 Plan → Decompose → Execute 编排层，不是文档
 ```jsonc
 {
   "mcp_servers": {
-    "excel": {"command": "uvx", "args": ["excel-mcp-server", "stdio"]},
+    "excel": {"command": "uvx", "args": ["excel-mcp-server", "stdio"], "scope": "worker"},
     "ppt": {"command": "uvx", "args": ["--from", "office-powerpoint-mcp-server", "ppt_mcp_server"]}
   }
 }
 ```
 
-- 命名空间约定：外部工具暴露为 `{server}__{tool}`（如 `excel__read_sheet`），避免重名
+- 命名空间约定：外部工具暴露为 `mcp__{server}__{tool}`（如 `mcp__excel__read_sheet`），避免重名
 - `tool_filter` 白名单收窄能力（省 token），`scope` 控制可见性（worker/planner_only）
 - 故障隔离：server 启动失败降级 warning，不阻断 pipeline（与 notify/skills 同级）
+- 实现：`agent_go/mcp_client.py`（MCPClientPool + MCPServerConnection），pipeline 启动/收尾管理连接池
 
-### 能力 B：产物导出路径
+### 能力 B：产物导出路径（设计中）
 
 区分 code-diff（worktree→commit）与 artifact（文件→用户目录）。
 

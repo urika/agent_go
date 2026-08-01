@@ -1,7 +1,7 @@
 # agent_go
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-1130%20passed-green)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1442%20passed-green)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stdlib Only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)]()
 
@@ -19,7 +19,9 @@ Give Claude Code a complex task — refactoring auth, upgrading dependencies, ad
 - **Remote push** — push worktree branches to a remote for CI/CD integration
 - **Zero dependencies** — pure Python stdlib
 - **Plan cache** — SHA256 cache key + 24h TTL reduces API costs
+- **Interrupt & crash recovery** — SIGINT pauses with `resume`; SIGKILL/abnormal exits rebuild `meta.json` via `recover`
 - **Result review** — `review --task <id>` aggregates per-file diffs with approve/reject decisions; `--deep` adds independent-model analysis
+- **MCP server & client** — expose agent_go as an MCP server (stdio or HTTP/SSE, 6 tools); subtasks can consume tools from external MCP servers (`mcp__{server}__{tool}`)
 - **Evaluation** — `eval quality/perf/cost/reliability/ux` built-in analytics
 - **Release gate** — `eval gate --baseline 0.05` enforces $/pass rate budget (北极星指标); CI step fails on regression
 - **Model benchmark** — `eval bench --models M1,M2` compares N models on standard task suite; `eval models` outputs decision matrix
@@ -53,21 +55,25 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 |---------|-------------|
 | `run <repo> '<task>'` | Plan, decompose, execute |
 | `resume <task-id>` | Resume a paused/interrupted task |
+| `recover <task-id>` | Rebuild `meta.json` from worktree state after SIGKILL/abnormal interruption |
 | `list` | List all historical tasks |
 | `show <task-id>` | Show task details with agent roles and skill hits |
-| `status` | Live status monitoring (`--watch` for auto-refresh) |
+| `status` | Live status monitoring (`--watch` for auto-refresh, `--no-tui` text mode) |
 | `pr <task-id>` | Generate and create PR (requires `gh` CLI; `--push` to auto-create) |
 | `review --task <id>` | **Result review (M7)** — aggregate per-file diff summary + approve/reject/changes-requested; `--deep` for independent-model analysis |
 | `review <repo>` | Code review with Claude on a repo or PR |
 | `inspect <task-id>` | Inspect preserved worktrees of failed/blocked subtasks (`--json` available) |
+| `replay <task-id>` | Execution timeline replay (`--json` for machine-readable) |
+| `checkpoint list/restore/delete` | Worktree file snapshot manager for subtask rollback |
 | `plan-history <id>` / `plan-diff <id>` | Plan version history and diff between versions |
+| `mcp` | Start MCP server (stdio, or `--http` for HTTP/SSE with Bearer token auth) |
 | `router <show/enable/disable/set-role>` | Role-aware model routing configuration |
 | `config` | View current configuration |
 | `clean` | Remove all task data |
-| `skills` | List available Skills |
+| `skills list/show` | List Skills / show a Skill's full SKILL.md |
 | `agents` | List available Agent types |
 | `ci` | Generate GitHub Actions workflow |
-| `cache` | Plan cache management |
+| `cache` | Plan cache management (`list`/`clean`/`clear`/`stats`) |
 | `eval` | Quality/performance/cost evaluation |
 | `eval gate` | **Release gate** — fail CI if $/pass rate exceeds baseline (北极星指标) |
 | `eval gate --check-regression` | **Regression gate** — fail if $/pass rate regressed >10% vs stored baseline (PRD "不劣化") |
@@ -83,11 +89,17 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 |------|-------------|
 | `--yes, -y` | Skip all confirmations, run headless |
 | `--headless` | Subtasks use `claude -p` (non-interactive) |
+| `--quiet, -q` / `--verbose` | Suppress non-error output / show debug output |
 | `--parallel N` | Max concurrent subtasks (default 1) |
 | `--max-retries N` | Max verification-fix retries per subtask (default 3) |
 | `--preserve-worktrees` / `--no-preserve` | Keep failed/blocked worktrees for manual inspection |
+| `--no-verify-block` | Verification failure does NOT block downstream subtasks (default: block) |
 | `--goal` / `--goal-hook` | Inject /goal + Stop Hook into subtask worktrees |
 | `--semantic-eval` / `--no-semantic-eval` | Toggle LLM semantic evaluation in verification |
+| `--agent-loop` | Hybrid strategy: simple tasks via direct API, complex tasks via `claude -p` |
+| `--interactive` | Start TUI dashboard monitoring subtask execution |
+| `--step-confirm` | Pause to confirm before each wave |
+| `--auto-init` | Auto `git init` + first commit for non-git target dirs |
 | `--docs <paths>` | Mount reference documents (comma-separated) |
 | `--issue <N>` | Link GitHub issue (injected into commits) |
 | `--skill <names>` | Load Skills by name (comma-separated) |
@@ -99,8 +111,8 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 
 ```
 agent_go/
-├── __init__.py          # Package exports (v2.0.0)
-├── cli.py               # cmd_run, cmd_resume, cmd_review — CLI entry points
+├── __init__.py          # Package exports
+├── cli.py               # CLI entry points + all subcommands
 ├── config.py            # Config loading, API key resolution, logging
 ├── api.py               # call_api, generate_plan, decompose_fallback
 ├── ui.py                # confirm_plan, confirm_subtasks, plan_to_subtasks
@@ -108,7 +120,7 @@ agent_go/
 ├── git_utils.py         # analyze_project, worktree create/remove/prune
 ├── subtask.py           # _git_merge_upstream, _run_headless, worker metering
 ├── executor.py          # run_subtask — core subtask runner + verification loop
-├── pipeline.py          # _run_pipeline — wave scheduler + cleanup
+├── pipeline.py          # _run_pipeline — wave scheduler + cleanup + SIGINT
 ├── utils.py             # _format_commit, _slugify, shell safety
 ├── skills.py            # Skill loading, discovery, rendering
 ├── agents.py            # Agent type definitions
@@ -116,9 +128,6 @@ agent_go/
 ├── router.py            # Role-aware model routing (planner/worker/reviewer)
 ├── pricing.py           # Model price table + MODEL_TIER
 ├── metrics.py           # Data collection (timing/change_stats/token/metering)
-├── eval.py              # Quality/perf/cost/reliability/ux analysis + gate
-├── bench.py             # Model benchmark orchestrator (eval bench)
-├── cross_judge.py       # Cross-model judgment matrix + human calibration
 ├── evaluator.py         # Verification evaluation + failure summary
 ├── agent_loop.py        # Autonomous agent loop (--agent-loop)
 ├── tool_executor.py     # Tool registry for agent loop
@@ -127,9 +136,20 @@ agent_go/
 ├── console.py           # Console output abstraction
 ├── tui.py               # Curses status dashboard
 ├── workflow_gen.py      # CI workflow auto-generation
+├── replay.py            # Execution timeline replay
+├── checkpoint.py        # Worktree file snapshot manager
+├── recover.py           # Rebuild meta.json from worktree state
+├── mcp_server.py        # MCP server (stdio): tools + resources + prompts
+├── mcp_http.py          # MCP server HTTP/SSE transport
+├── mcp_client.py        # MCP consumption layer (external MCP tools in subtasks)
+├── eval.py              # Quality/perf/cost/reliability/ux analysis + gate
+├── bench.py             # Model benchmark orchestrator (eval bench)
+├── cross_judge.py       # Cross-model judgment matrix + human calibration
+├── assessment.py        # False-positive evaluation data layer
+└── lint.py              # AST-based static checks
 agent_go.py               # Entry-point wrapper
-tests/                    # 1169 tests across 47 test files
-eval_suite/               # Standard task suite for eval bench (22 tasks + fixtures)
+tests/                    # 1442 tests across 59 test files
+eval_suite/               # Standard task suite for eval bench (22 tasks + 4 fixtures)
 ```
 
 ## Configuration
@@ -165,7 +185,7 @@ Config at `~/.agent_go/config.json` (auto-created). See [`config.example.json`](
 ```bash
 pip3 install pytest pytest-mock
 
-pytest tests/              # 1130 tests (~17s)
+pytest tests/              # 1442 tests (~35s)
 pytest tests/ -q           # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 ```
