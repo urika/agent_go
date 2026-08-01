@@ -231,6 +231,14 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             "behavior": {"auto_confirm_plan": True, "auto_confirm_subtasks": True},
             "evaluator": {"enabled": True},
         }
+        # 继承用户的 evaluator 配置（provider/base_url/model/api_key），
+        # 否则 evaluator 回落到 DEFAULT_CONFIG 的 anthropic 默认值 → 403
+        # （DEFAULT_CONFIG.evaluator.provider=anthropic + base_url=api.anthropic.com，
+        #  用户环境没有可用 Anthropic key 时语义评估必失败）
+        if user_config.get("evaluator"):
+            evaluator_cfg = dict(user_config["evaluator"])
+            evaluator_cfg["enabled"] = True  # bench 强制启用语义评估
+            config["evaluator"] = evaluator_cfg
         # 继承用户的 skills / agent_loop 配置（skill 自动发现等），否则 bench 默认关闭
         for _k in ("skills", "agent_loop", "verification"):
             if user_config.get(_k):
