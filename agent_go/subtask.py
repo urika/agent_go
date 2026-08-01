@@ -160,6 +160,21 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         _max_tokens = env.get("AGENT_GO_MAX_TOKENS", "")
         if _max_tokens:
             env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = _max_tokens
+        # S9-A: 透传外部 MCP server 配置给 claude CLI（claude 原生支持 MCP 消费）
+        _mcp_servers_cfg = _cfg.get("mcp_servers") if _cfg else None
+        if _mcp_servers_cfg:
+            try:
+                from .mcp_client import MCPClientPool
+                _claude_mcp = MCPClientPool(_mcp_servers_cfg).mcp_config_for_claude()
+                if _claude_mcp.get("mcpServers"):
+                    import tempfile as _tempfile
+                    _tf = _tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".json", delete=False, prefix="agent_go_mcp_")
+                    json.dump(_claude_mcp, _tf)
+                    _tf.close()
+                    cmd.extend(["--mcp-config", _tf.name])
+            except Exception as _mcp_err:
+                logger.debug(f"[{sub_id}] MCP config 透传失败（已跳过）: {_mcp_err}")
         proc = subprocess.Popen(cmd, env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         if active_pids_lock:

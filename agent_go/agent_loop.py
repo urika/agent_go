@@ -185,6 +185,15 @@ class AgentLoop:
         metering_path = config.get("_metering_path", "")
 
         tools = ToolRegistry.definitions()
+        # S9-A: 合并外部 MCP 工具（如有连接池透传）
+        _mcp_pool = config.get("_mcp_pool") if config else None
+        if _mcp_pool is not None:
+            try:
+                _mcp_tools = _mcp_pool.tool_definitions()
+                if _mcp_tools:
+                    tools = tools + _mcp_tools
+            except Exception:
+                pass  # MCP 工具获取失败，只用原生工具
 
         messages = [{"role": "user", "content": prompt}]
 
@@ -231,7 +240,13 @@ class AgentLoop:
 
             for tc in tool_calls:
                 self.logger.info(f"[AgentLoop] 执行 {tc['name']}(...)")
-                result = ToolRegistry.execute(tc["name"], tc["input"], worktree)
+                # S9-A: MCP 工具按 mcp__ 前缀路由到连接池，原生工具走 ToolRegistry
+                if tc["name"].startswith("mcp__"):
+                    _mcp_pool = config.get("_mcp_pool") if config else None
+                    result = _mcp_pool.dispatch(tc["name"], tc["input"]) if _mcp_pool is not None \
+                        else {"success": False, "error": "MCP 池不可用"}
+                else:
+                    result = ToolRegistry.execute(tc["name"], tc["input"], worktree)
                 result_str = result.get("output", "") or result.get("error", "")
                 self.logger.debug(f"[AgentLoop] {tc['name']} 结果: {result_str[:200]}")
                 messages.append({

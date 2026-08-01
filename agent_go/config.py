@@ -108,6 +108,13 @@ DEFAULT_CONFIG = {
             "half_open_requests": 2,         # 半开时允许通过的请求数
         },
     },
+    "mcp_servers": {
+        # 外部 MCP server 配置（S9-A 消费层）。
+        # 格式: "server_key": {"command": "uvx", "args": [...], "env": {}, "enabled": True, "tool_filter": [...], "scope": "worker"}
+        # scope: "worker"(默认，仅执行子任务可见) | "planner_only" | "always"
+        # 工具暴露为 mcp__{server_key}__{tool_name}，避免与原生工具重名
+        # 详见 docs/design/office-capability-extension.md §2
+    },
 }
 
 DECOMPOSE_RULES = [

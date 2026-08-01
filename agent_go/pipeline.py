@@ -183,6 +183,31 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             _, _, _ = _set_gc_auto(repo, original_gc_value)
         return
 
+    # ── MCP 消费层（S9-A）：启动外部 MCP server 连接池 ──
+    # 解耦：可选增强，启动失败降级 warning 不阻断 pipeline（与 notify/skills 同级）
+    mcp_pool = None
+    _mcp_cfg = config.get("mcp_servers") if config else None
+    if _mcp_cfg:
+        try:
+            from .mcp_client import MCPClientPool
+            mcp_pool = MCPClientPool(_mcp_cfg)
+            mcp_pool.start_all()
+            config["_mcp_pool"] = mcp_pool  # 透传给子任务（agent_loop / subtask）
+            _tool_count = len(mcp_pool.tool_definitions())
+            if _tool_count:
+                logger.info(f"[mcp] 已连接 {len(mcp_pool._servers)} 个 MCP server，{_tool_count} 个工具可用")
+        except Exception as _mcp_err:
+            logger.warning(f"MCP 消费层启动失败，跳过（不中断核心）: {_mcp_err}")
+            mcp_pool = None
+
+    def _stop_mcp_pool() -> None:
+        """pipeline 退出时回收 MCP server 进程（3 个退出点共用）。"""
+        if mcp_pool is not None:
+            try:
+                mcp_pool.stop_all()
+            except Exception:
+                logger.debug("MCP 池停止异常（已忽略）", exc_info=True)
+
     console.emit("pipeline_start", {
         "task_id": task_id,
         "total_subtasks": total,
@@ -340,6 +365,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             # 恢复 gc.auto
             if gc_disabled and original_gc_value is not None:
                 _, _, _ = _set_gc_auto(repo, original_gc_value)
+            _stop_mcp_pool()
             sys.exit(0)
 
         remaining = [st for st in remaining if st["id"] not in completed_ids]
@@ -439,6 +465,9 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
 
         if gc_disabled and original_gc_value is not None:
             _, _, _ = _set_gc_auto(repo, original_gc_value)
+
+    # 正常结束：回收 MCP 池（中断退出已在上面 sys.exit 前处理）
+    _stop_mcp_pool()
 
     # 收集所有结果并写回 meta.json（完整版本，含 results 数组）
     meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
