@@ -1,0 +1,9 @@
+[project]
+name = "data-pipeline"
+version = "0.1.0"
+description = "A modular data pipeline framework"
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,7 @@
+[project]
+name = "fp-sandbox"
+version = "0.1.0"
+description = "Empty sandbox fixture for tasks that create files from scratch (email-validator, safe-file-reader, etc.)"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

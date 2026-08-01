@@ -1,0 +1,14 @@
+[project]
+name = "django-blog"
+version = "0.1.0"
+description = "Django blog fixture with intentional DB performance anti-patterns"
+requires-python = ">=3.9"
+dependencies = [
+    "django>=4.2,<5.0",
+    "djangorestframework>=3.14",
+    "psycopg2-binary>=2.9",
+    "pytest>=7.0",
+    "pytest-django>=4.5",
+    "pytest-benchmark>=4.0",
+    "django-debug-toolbar>=4.0",
+]
