@@ -34,6 +34,47 @@ def _resolve_env_value(value: str) -> str:
         return os.environ.get(var_name, match.group(0))  # 未设置时保留原样
     return pattern.sub(_replace, value)
 
+
+# 本地后端真实模型名探测缓存：{(base_url, host, port): model_name}
+_local_model_probe_cache: dict = {}
+
+
+def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
+    """探测本地代理后端的真实模型名。
+
+    本地代理（如 llama.cpp anthropic_proxy）通过 SIGHUP 切换模型时，
+    /v1/models 只暴露固定 claude 别名，但 /status 页面暴露当前 MODEL_NAME
+    （如 mlx-community/Qwen3.6-27B-4bit）。本函数解析 /status 的第一个
+    "Model" 字段来获取真实后端模型名。
+
+    Args:
+        base_url: 本地后端 base URL（如 http://127.0.0.1:4000）
+        timeout: HTTP 超时秒数
+
+    Returns:
+        真实模型名；探测失败时返回空字符串。
+    """
+    if not base_url:
+        return ""
+    key = base_url.rstrip("/")
+    if key in _local_model_probe_cache:
+        return _local_model_probe_cache[key]
+    model = ""
+    try:
+        import urllib.request as _urlreq
+        status_url = key + "/status"
+        req = _urlreq.Request(status_url, headers={"User-Agent": "agent_go-probe/1.0"})
+        with _urlreq.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        # 解析第一个 "Model" 字段（本地后端真实模型名）
+        m = re.search(r'<span class="label">Model</span><span class="value">([^<]+)</span>', body)
+        if m:
+            model = m.group(1).strip()
+    except Exception:
+        model = ""
+    _local_model_probe_cache[key] = model
+    return model
+
 # 模块级常量：路径替换时的边界字符集（在 _build_task_md 和 run_subtask 中共享）
 _BOUNDARY_CHARS = r'\s"\'\(\):/：，。、'
 _BOUNDARY_BEFORE = rf'(?<![^{_BOUNDARY_CHARS}])'
@@ -1195,11 +1236,36 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         log_event(logger, "model_routing", {"sub_id": sub_id, "difficulty": difficulty, "model": routed_model})
     # worker_backends：按模型名映射 ANTHROPIC_BASE_URL（覆盖 worker_base_url 的统一值）
     _worker_backends = _effective_config(config).get("worker_backends", {})
+    _backend_url = ""
     if routed_model and _worker_backends and routed_model in _worker_backends:
         _backend_url = _resolve_env_value(_worker_backends[routed_model])
         if _backend_url:
             env["ANTHROPIC_BASE_URL"] = _backend_url
             logger.info(f"[worker_backend] {routed_model} → {_backend_url}")
+    # 本地后端检测：worker_backends / worker_base_url 指向本机（127.0.0.1/localhost）
+    # 时，标记为本地模型（成本清零），并把真实后端模型名透传给 subtask
+    # （claude 会把 claude-haiku-4-5 等路由名硬编码映射成 deepseek-v4-flash
+    # 之类的内部名，无法反映真实本地后端）。
+    # 真实模型名解析优先级：
+    #   1. 探测本地代理 /status（支持模型热切换，如 SIGHUP 后从
+    #      Qwen3.6-27B-4bit 切到别的模型也能自动识别）
+    #   2. local_model_names 静态映射（routed_model → 真实名）
+    #   3. 回退 routed_model 本身
+    _plan_api_cfg = config.get("plan_api", {}) if config else {}
+    _worker_url_src = _backend_url or _resolve_env_value(_plan_api_cfg.get("worker_base_url", ""))
+    _is_local_url = bool(_worker_url_src) and re.search(r"(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])", _worker_url_src)
+    if _is_local_url:
+        env["AGENT_GO_IS_LOCAL"] = "1"
+        _local_model_name = _probe_local_model(_worker_url_src)
+        if not _local_model_name:
+            _local_names_cfg = _effective_config(config).get("local_model_names", {})
+            if isinstance(_local_names_cfg, dict) and routed_model in _local_names_cfg:
+                _local_model_name = str(_local_names_cfg[routed_model])
+        if not _local_model_name:
+            _local_model_name = routed_model
+        if _local_model_name:
+            env["AGENT_GO_LOCAL_MODEL"] = _local_model_name
+        logger.info(f"[worker_local] {routed_model} → 本地后端 {_worker_url_src} (model={_local_model_name})")
 
     # 5. Run Claude（含混合策略分支：简单任务 → 直接 API）
     _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)

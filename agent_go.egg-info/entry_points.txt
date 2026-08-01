@@ -1,0 +1,2 @@
+[console_scripts]
+agent_go = agent_go.cli:main

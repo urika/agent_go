@@ -136,7 +136,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     HEARTBEAT = 60       # 60s 无事件发心跳
 
     # Phase 1 配套：累计所有 attempt 的 Claude usage（result 事件提取）
-    claude_usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "duration_ms": 0, "num_turns": 0}
+    claude_usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "duration_ms": 0, "num_turns": 0, "model": ""}
 
     def _run_one(prompt: str, attempt: int) -> tuple[subprocess.Popen, list[str], bool]:
         """启动 claude -p (stream-json) 并实时解析事件。"""
@@ -267,6 +267,11 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             # assistant: 消息批次
             elif ev_type == "assistant":
                 content = event.get("message", {}).get("content", [])
+                # 记录实际请求的模型名（claude 会把 claude-haiku-4-5 等路由名
+                # 解析为后端真实模型，如 deepseek-v4-flash）
+                _msg_model = event.get("message", {}).get("model", "")
+                if _msg_model and not claude_usage_total["model"]:
+                    claude_usage_total["model"] = _msg_model
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "text":
@@ -428,16 +433,32 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     if metering_path and (claude_usage_total["prompt_tokens"] or claude_usage_total["completion_tokens"] or claude_usage_total["cost_usd"]):
         from .config import meter_event
         _model = env.get("AGENT_GO_CLAUDE_MODEL", "") or "claude-code-executor"
-        # 如果模型在 local_models 列表中，成本完全由本地承担，记账为 0
-        _local_models_raw = env.get("AGENT_GO_LOCAL_MODELS", "")
-        _is_local = _model in [m.strip() for m in _local_models_raw.split(",")] if _local_models_raw else False
+        # 实际请求模型：优先用 claude 响应中解析出的真实模型名
+        # （如 --model claude-haiku-4-5 实际请求 deepseek-v4-flash），
+        # 解析失败时回退路由名
+        _resolved_model = claude_usage_total.get("model") or _model
+        # 本地后端判定：executor 检测到 ANTHROPIC_BASE_URL 指向本机
+        # （127.0.0.1/localhost，如本地 llama-server 代理 4000→8081）时注入
+        # AGENT_GO_IS_LOCAL=1。此时 claude 响应中的 model（如 deepseek-v4-flash）
+        # 是 claude 内置映射，不代表真实本地后端，用 AGENT_GO_LOCAL_MODEL
+        # （executor 从 worker_backends/local_model_names 解析）覆盖。
+        _is_local = env.get("AGENT_GO_IS_LOCAL", "") == "1"
+        if _is_local:
+            _local_model_name = env.get("AGENT_GO_LOCAL_MODEL", "") or _model
+            _resolved_model = _local_model_name
+        else:
+            # 兼容旧配置：模型在 local_models 列表中视为本地，成本清零
+            _local_models_raw = env.get("AGENT_GO_LOCAL_MODELS", "")
+            _is_local = _resolved_model in [m.strip() for m in _local_models_raw.split(",")] if _local_models_raw else False
         _cost = 0.0 if _is_local else round(claude_usage_total["cost_usd"], 6)
         meter_event(metering_path, {
             "role": "worker",
             "virtual_model": "agentgo-worker",
             "actual_provider": "claude-code",
-            # S4：路由到具体模型时记录真实模型，否则为 CLI 默认
-            "actual_model": _model,
+            # S4：路由到具体模型时记录真实模型（claude 响应解析），否则为 CLI 默认
+            "actual_model": _resolved_model,
+            "routed_model": _model,
+            "is_local": _is_local,
             "difficulty": env.get("AGENT_GO_DIFFICULTY", ""),
             "prompt_tokens": claude_usage_total["prompt_tokens"],
             "completion_tokens": claude_usage_total["completion_tokens"],

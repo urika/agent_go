@@ -949,3 +949,137 @@ class TestUsageAggregation:
         ev = self._read_metering(metering)
         assert ev["actual_model"] == "claude-opus-4"
         assert ev["difficulty"] == "hard"
+
+    @patch("subprocess.Popen")
+    def test_metering_resolves_real_model_from_assistant(self, mock_popen, logger, tmp_path):
+        """assistant 事件的 message.model 覆盖路由名：记录实际请求的模型
+
+        --model claude-haiku-4-5 被 claude 解析为 deepseek-v4-flash 后，
+        metering 应记录实际模型 deepseek-v4-flash，同时保留 routed_model。
+        """
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"model": "deepseek-v4-flash", "content": [
+                    {"type": "text", "text": "ok"},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success",
+                "total_cost_usd": 0.03,
+                "usage": {"input_tokens": 800, "output_tokens": 120},
+            }) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-haiku-4-5",
+             "AGENT_GO_DIFFICULTY": "easy"},
+            logger, "sub-u6"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "deepseek-v4-flash"
+        assert ev["routed_model"] == "claude-haiku-4-5"
+        assert ev["difficulty"] == "easy"
+
+    @patch("subprocess.Popen")
+    def test_metering_no_assistant_model_falls_back_to_routed(self, mock_popen, logger, tmp_path):
+        """无 assistant 事件（或 message.model 缺失）时回退路由名"""
+        metering = tmp_path / "metering.jsonl"
+        events = [json.dumps({
+            "type": "result", "subtype": "success",
+            "total_cost_usd": 0.03,
+            "usage": {"input_tokens": 800, "output_tokens": 120},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-sonnet-4-6"},
+            logger, "sub-u7"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "claude-sonnet-4-6"
+        assert ev["routed_model"] == "claude-sonnet-4-6"
+
+    @patch("subprocess.Popen")
+    def test_metering_local_backend_zero_cost(self, mock_popen, logger, tmp_path):
+        """AGENT_GO_IS_LOCAL=1 时：成本清零，actual_model 用 AGENT_GO_LOCAL_MODEL
+
+        本地后端（如 4000 代理 → Qwen3.6-27B-4bit）时，claude 响应的 model
+        （deepseek-v4-flash）是内置映射不代表真实后端，应被本地模型名覆盖。
+        """
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"model": "deepseek-v4-flash", "content": [
+                    {"type": "text", "text": "ok"},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success",
+                "total_cost_usd": 0.03,
+                "usage": {"input_tokens": 800, "output_tokens": 120},
+            }) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-haiku-4-5",
+             "AGENT_GO_IS_LOCAL": "1",
+             "AGENT_GO_LOCAL_MODEL": "Qwen3.6-27B-4bit"},
+            logger, "sub-u8"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "Qwen3.6-27B-4bit"
+        assert ev["routed_model"] == "claude-haiku-4-5"
+        assert ev["cost_usd"] == 0.0
+        assert ev["is_local"] is True
+
+    @patch("subprocess.Popen")
+    def test_metering_local_backend_fallback_to_routed(self, mock_popen, logger, tmp_path):
+        """本地后端但未配置 AGENT_GO_LOCAL_MODEL 时，actual_model 回退路由名"""
+        metering = tmp_path / "metering.jsonl"
+        events = [json.dumps({
+            "type": "result", "subtype": "success",
+            "total_cost_usd": 0.05,
+            "usage": {"input_tokens": 800, "output_tokens": 120},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-haiku-4-5",
+             "AGENT_GO_IS_LOCAL": "1"},
+            logger, "sub-u9"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "claude-haiku-4-5"
+        assert ev["cost_usd"] == 0.0
+        assert ev["is_local"] is True
+
+    @patch("subprocess.Popen")
+    def test_metering_legacy_local_models_config(self, mock_popen, logger, tmp_path):
+        """兼容旧配置：AGENT_GO_LOCAL_MODELS 列出的模型成本清零"""
+        metering = tmp_path / "metering.jsonl"
+        events = [json.dumps({
+            "type": "result", "subtype": "success",
+            "total_cost_usd": 0.05,
+            "usage": {"input_tokens": 800, "output_tokens": 120},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-haiku-4-5",
+             "AGENT_GO_LOCAL_MODELS": "claude-haiku-4-5,qwen-local"},
+            logger, "sub-u10"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "claude-haiku-4-5"
+        assert ev["cost_usd"] == 0.0
+        assert ev["is_local"] is True

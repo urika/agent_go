@@ -29,6 +29,7 @@ from agent_go.executor import (
     _load_verify_state,
     _assess_verification_confidence,
     _is_simple_task,
+    _probe_local_model,
 )
 
 
@@ -1633,3 +1634,66 @@ class TestL1AutoTrigger:
         # evaluator 在 config 中已开启，评估会运行（但不是由于 L1）
         # 我们验证的是 L1 不干扰正常配置路径
         assert eval_called is True  # 因为 config 开启了，所以评估运行
+
+
+# ═══════════════════════════════════════════════════════════════
+# 本地后端模型探测
+# ═══════════════════════════════════════════════════════════════
+
+class TestProbeLocalModel:
+    """_probe_local_model：从本地代理 /status 探测真实后端模型名"""
+
+    _STATUS_HTML = """<html><body>
+    <div class="row"><span class="label">Model</span><span class="value">mlx-community/Qwen3.6-27B-4bit</span></div>
+    <div class="row"><span class="label">Cloud Model</span><span class="value">deepseek-v4-flash</span></div>
+    <div class="row"><span class="label">Model</span><span class="value">claude-haiku-4-5</span></div>
+    </body></html>"""
+
+    def test_probe_parses_first_model_field(self, monkeypatch):
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = self._STATUS_HTML.encode("utf-8")
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_resp
+        monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=mock_ctx))
+        model = _probe_local_model("http://127.0.0.1:4000")
+        assert model == "mlx-community/Qwen3.6-27B-4bit"
+
+    def test_probe_uses_cache(self, monkeypatch):
+        from agent_go import executor
+        calls = []
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        orig = executor._probe_local_model
+
+        def _cached(self, url, timeout=2.0):
+            calls.append(url)
+            return "cached-model"
+
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {"http://127.0.0.1:4000": "cached-model"})
+        assert _probe_local_model("http://127.0.0.1:4000") == "cached-model"
+        assert len(calls) == 0
+
+    def test_probe_empty_url(self, monkeypatch):
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        assert _probe_local_model("") == ""
+
+    def test_probe_unreachable_returns_empty(self, monkeypatch):
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        import urllib.error
+        def _boom(*a, **k):
+            raise urllib.error.URLError("refused")
+        monkeypatch.setattr("urllib.request.urlopen", _boom)
+        assert _probe_local_model("http://127.0.0.1:9999") == ""
+
+    def test_probe_malformed_html_returns_empty(self, monkeypatch):
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"<html>no model info</html>"
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_resp
+        monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=mock_ctx))
+        assert _probe_local_model("http://127.0.0.1:4000") == ""

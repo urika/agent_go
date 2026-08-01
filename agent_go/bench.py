@@ -93,8 +93,22 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
         except ProcessLookupError:
             pass
         proc.wait()
+    # 等待 reader 线程读完管道剩余数据（SIGKILL 时管道 EOF，线程会自行结束）
     for t in reader_threads:
-        t.join(timeout=5)
+        t.join(timeout=grace_sec)
+    # 兜底：若 reader 线程仍残留（异常场景），耗尽管道剩余数据
+    for t in reader_threads:
+        if t.is_alive() and proc.stderr and not proc.stderr.closed:
+            try:
+                proc.stderr.read()
+            except OSError:
+                pass
+        if t.is_alive() and proc.stdout and not proc.stdout.closed:
+            try:
+                proc.stdout.read()
+            except OSError:
+                pass
+        t.join(timeout=2)
     return type("R", (), {"stdout": "".join(stdout_lines), "stderr": "".join(stderr_lines)})()
 
 # 默认 agent_go 入口：用脚本绝对路径（不依赖 pip 安装或 PYTHONPATH，
@@ -259,43 +273,80 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
 
     # 3. 读产物（数据契约：metering.jsonl + meta.json）
     #    精确匹配 subprocess 创建的任务目录：优先从子进程输出解析 task ID，
-    #    避免并发竞态（目录差分在并发任务下会匹配错目录）。
+    #    并校验目录 meta 内容与当前任务一致（防止并发进程/残留目录错配）。
+    _expected = task.get("task", "")
     _resolved_td = None
     if result.stdout or result.stderr:
         _combined = (result.stdout or "") + "\n" + (result.stderr or "")
         _m = re.search(r"agent_go\.(task-\d{8}-\d{6}-\d{3}-[0-9a-f]{4})", _combined)
         if _m:
             _candidate = AGENT_GO_DIR / _m.group(1)
-            if _candidate.exists():
+            if _candidate.exists() and _dir_matches_task(_candidate, _expected):
                 _resolved_td = _candidate
     _new_dirs = set()
     if _resolved_td is None:
         _after_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
         _new_dirs = _after_dirs - _before_dirs
-    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td)
+    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected)
+
+
+def _dir_matches_task(td: Path, expected_task: str) -> bool:
+    """校验任务目录的 meta.json 描述是否与期望任务匹配（防止并发进程/残留目录错配）。
+
+    - 期望描述为空 → 无法校验，返回 True（兼容旧调用路径）。
+    - 目录不存在或无 meta.json → 返回 False（无法证明匹配）。
+    - 描述匹配判定：meta.task 与期望 task 前 30 字符一致，或 meta.task 是
+      期望 task 的前缀 / 期望 task 是 meta.task 的前缀（同一任务可能描述略有裁剪）。
+    """
+    if not expected_task or not td or not td.exists():
+        return not expected_task
+    meta_path = td / "meta.json"
+    if not meta_path.exists():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    meta_task = (meta.get("task") or "").strip()
+    expected = expected_task.strip()
+    if not meta_task:
+        return False
+    n = min(len(meta_task), len(expected), 30)
+    if n == 0:
+        return False
+    return meta_task[:n] == expected[:n]
 
 
 def _collect_result(task_id: str, model: str, elapsed: float,
                     exit_code: int, stderr: str,
                     new_dirs: "Optional[set[Path]]" = None,
-                    exact_td: "Optional[Path]" = None) -> dict:
+                    exact_td: "Optional[Path]" = None,
+                    expected_task: str = "") -> dict:
     """从 agent_go 任务目录读 metering + meta，聚合为一条结果。
 
     exact_td: 精确任务目录（从子进程输出解析，优先）。
     new_dirs: 目录差分结果（回退方案，仅当 exact_td 为 None 时使用）。
-    若两者都不可用则回退到按名称排序取最新（兼容旧调用路径）。
+    expected_task: 期望任务描述，用于校验目录内容匹配（防止并发/残留错配）。
+    若都无法定位匹配目录则返回空数据记录（task_dir=""）。
     """
-    td = exact_td
-    if td is None:
-        if new_dirs and len(new_dirs) == 1:
-            td = new_dirs.pop()
-        elif new_dirs and len(new_dirs) > 1:
-            # 罕见：一次 subprocess 创建了多个目录（如 resume），取最新的
-            td = sorted(new_dirs, reverse=True)[0]
+    td = exact_td if (exact_td and _dir_matches_task(exact_td, expected_task)) else None
+    if td is None and new_dirs:
+        # 从差集目录中筛选 meta 内容匹配的任务目录，取最新；全部不匹配则降级
+        candidates = [d for d in new_dirs if _dir_matches_task(d, expected_task)]
+        if candidates:
+            td = sorted(candidates, reverse=True)[0]
+        elif expected_task:
+            td = None
         else:
-            # 回退：按名称排序取最新
-            task_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
-            td = task_dirs[0] if task_dirs else None
+            td = sorted(new_dirs, reverse=True)[0]
+    if td is None and expected_task:
+        # 回退：全盘扫描 meta.task 匹配的最近目录（并发进程污染差集时的兜底）
+        task_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
+        td = next((d for d in task_dirs if _dir_matches_task(d, expected_task)), None)
+    elif td is None:
+        # 兼容旧调用路径：按名称排序取最新
+        task_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
+        td = task_dirs[0] if task_dirs else None
 
     metering = _read_jsonl(td / "metering.jsonl") if td else []
     meta = _read_json(td / "meta.json") if td else {}
@@ -310,6 +361,22 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     failed = sum(1 for r in results if r.get("status") == "failed")
     retry_total = sum(r.get("retry_count", 0) for r in results)
     all_passed = all(r.get("verify_ok", False) for r in results if r.get("status") == "completed")
+
+    # ── 进程未自然完成判定 ──
+    # bench 用 cooperative timeout：超时先 SIGTERM，grace 后 SIGKILL（-9）。
+    # 被 SIGKILL 或非零退出的任务即使子任务标记 completed/verify_ok，也说明
+    # 执行被打断，不应按"完整通过"计。stale_aborted 是 pipeline 在 SIGTERM
+    # 时写 meta 后留下的状态，同样视为未完成。
+    meta_status = meta.get("status", "")
+    _aborted = exit_code != 0 or meta_status in ("stale_aborted", "aborted", "interrupted", "cancelled")
+    if _aborted:
+        # 被中断（SIGKILL / stale_aborted）：任务未自然完成，所有子任务
+        # 一律不计通过（即使 meta 中标记 completed+verify_ok，也是中断前
+        # 的瞬时快照），只统计明确失败/阻塞。
+        completed = 0
+        failed = sum(1 for r in results
+                     if r.get("status") in ("failed", "blocked"))
+        all_passed = False
 
     return {
         "task_id": task_id,
