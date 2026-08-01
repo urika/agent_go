@@ -1251,10 +1251,35 @@ def _on_destructive_action(action: str, detail: str) -> dict:
 
 ### 未落地（📋 保留设计待迭代）
 
+> **2026-08-01（第二批）**：全部保留项已落地，详见下方「保留项落地记录」。至此改进清单全部闭环。
+
 | 编号 | 改进项 | 说明 |
 |------|--------|------|
-| P1-4 | 结构化波次进度卡片（wave_progress 事件） | 需 executor/pipeline 协作改造 |
-| P2-2 | Sampling 原语（Plan 置信度确认 / 高风险操作确认） | 依赖客户端 sampling 能力协商 |
-| P2-3 | 增量 Plan 迭代 + 实时 Diff | ui.py 交互流程改造 |
-| P2-4 | Activity store 持久化（服务重启不丢失） | 需磁盘存储 + 恢复策略 |
-| P3 | SSE/HTTP Transport / 多 profile / SKILL.md 自描述 | 产品化阶段
+| — | （无） | 全部落地 |
+
+### 保留项落地记录（2026-08-01 第二批，R-1~R-5）
+
+| 编号 | 改进项 | 变更文件 | 验证 |
+|------|--------|---------|------|
+| R-1 | **波次进度卡片**：`_estimate_wave_count` 预估算总波次；wave_start/wave_complete 事件带 total_waves/done/failed；CLI 波次卡片（`═══ Wave N/M (并行数) ═══` + 完成汇总） | `pipeline.py` | ✅ 6 测试 |
+| R-2 | **SKILL.md 自描述**：`agent_go skills show <name>`（输出完整 SKILL.md，Agent 可读）；`--json` 结构化（frontmatter + body + allowed_tools）；`get_skill_full()` | `skills.py` + `cli.py` | ✅ 2 测试 |
+| R-3 | **多 profile**：顶层 `--profile <name>` / `AGENT_GO_PROFILE` 环境变量 → `~/.agent_go/profiles/<name>.json` 或 `config.<name>.json`；`--config` 优先于 profile；所有 load_config 调用点自动生效 | `config.py` + `cli.py` | ✅ 4 测试 |
+| R-4 | **增量 Plan 迭代 + 实时 Diff**：`compute_plan_diff` / `show_plan_diff`（新增/删除/修改步骤 + 字段级差异）；confirm_plan 菜单 [V] 内联版本历史；S/D 重新生成与 cmd_run R 循环均展示 diff | `ui.py` + `cli.py` | ✅ 5 测试 |
+| R-5 | **Sampling 原语**：`request_sampling()`（stdio 双向 request/response + 超时 + fail-open）；`sampling_confirm()` 确认包装；cancel_task 可选 `confirm` 参数（Host 拒绝时任务保持运行）；HTTP transport 无双向通道自动跳过 | `mcp_server.py` | ✅ 8 测试 |
+
+**测试基线**：`pytest tests/` → **1387 passed**（新增 25 个测试）。
+
+### 已补充落地：SSE/HTTP Transport（2026-08-01）
+
+| 编号 | 改进项 | 变更文件 | 验证 |
+|------|--------|---------|------|
+| P3-1 | `mcp_server.py` 重构：抽取 `handle_message()`（stdio/HTTP 共用）、`_result_payload`/`_error_payload` 纯构造、`notification_sink` 注入 | `mcp_server.py` | ✅ 63 MCP 测试通过 |
+| P3-2 | 新建 `mcp_http.py`：Streamable HTTP 模式（POST /mcp 处理 JSON-RPC；GET /mcp 为 SSE 推送通道；GET /health 健康检查）；Bearer token 鉴权（`AGENT_GO_MCP_HTTP_TOKEN`）；SSE 心跳/EOF 探测/空闲超时；CORS 预检 | `mcp_http.py`（新增） | ✅ 21 测试通过 |
+| P3-3 | CLI `agent_go mcp --http --host --port`；`python3 -m agent_go.mcp_server --http` 同样支持 | `cli.py` | ✅ 端到端验证 |
+
+**SSE 关键实现细节**：
+- `wait=true` 的 tools/call 在 HTTP 下同步阻塞执行（长请求），progress notification 通过 SSE 连接推送（`notification_sink` 广播到所有 `sse_clients`）
+- 客户端断开探测：`select` 探测 socket EOF + 30s 心跳保活 + 900s 空闲超时兜底
+- 默认绑定 `127.0.0.1`（仅本地）；设置 `AGENT_GO_MCP_HTTP_TOKEN` 后所有端点（含 SSE）需 Bearer 鉴权
+
+**测试基线**：`pytest tests/` → **1362 passed**（新增 21 个 HTTP transport 测试）。

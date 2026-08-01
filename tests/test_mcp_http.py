@@ -244,7 +244,8 @@ class TestSSE:
         resp = conn.getresponse()
         time.sleep(0.2)
         assert len(srv.sse_clients) == 1
-        conn.close()  # 主动断开
+        # 注意：getresponse() 后 socket 所有权移交 resp，必须 resp.close() 才真正断开
+        resp.close()
         time.sleep(2.0)  # 等 SSE 循环探测到 EOF（1s 轮询周期）
         assert len(srv.sse_clients) == 0
 

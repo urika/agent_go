@@ -139,7 +139,25 @@ def safe_input(prompt: str = "") -> str:
         return ""
 
 def load_config(config_path: Optional[str] = None) -> dict[str, Any]:
-    """加载配置。config_path 非空时读取指定文件（bench 临时 config），否则读 ~/.agent_go/config.json。"""
+    """加载配置。config_path 非空时读取指定文件（bench 临时 config），否则读 ~/.agent_go/config.json。
+
+    Profile 支持（R-3）：--profile <name> / AGENT_GO_PROFILE 环境变量 →
+    优先读 ~/.agent_go/profiles/<name>.json，其次 ~/.agent_go/config.<name>.json；
+    不存在时回退默认配置并警告。--config（config_path）优先级高于 profile。
+    """
+    if not config_path:
+        profile = os.environ.get("AGENT_GO_PROFILE", "")
+        if profile:
+            candidates = [
+                AGENT_GO_DIR / "profiles" / f"{profile}.json",
+                AGENT_GO_DIR / f"config.{profile}.json",
+            ]
+            found = next((c for c in candidates if c.exists()), None)
+            if found:
+                config_path = str(found)
+            else:
+                console.warning(f"Profile '{profile}' 不存在（查找 {', '.join(str(c) for c in candidates)}），回退默认配置。")
+
     if config_path:
         target = Path(config_path)
         if not target.exists():

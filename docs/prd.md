@@ -365,9 +365,153 @@ $$
 | **LLM-as-Judge 自偏** | 用 Sonnet 评 Sonnet 产出会系统性偏高 10-30%，评估结果不可信 | 交叉评判矩阵禁绝自评（`judge != candidate`）+ 人工抽检 10% 校准 |
 | 开放：跨任务记忆沉淀 | Agent 间经验随会话结束丢失，每次从零开始 | 远期探索 Field Guide 机制（Agent 自主维护的项目级记忆） |
 
+## CLI 与 MCP 交互层（已落地 2026-08-01）
+
+> **一句话：agent_go 同时是「人类可用的 CLI」和「Agent 可用的 MCP Server」——错误带修复指令、上下文按需加载、支持远程接入。**
+>
+> 设计分析见 [design/cli-mcp-design-analysis.md](design/cli-mcp-design-analysis.md)（范式总结 + 最佳实践）与 [design/cli-mcp-interaction-analysis.md](design/cli-mcp-interaction-analysis.md)（7 个交互场景分析 + 改进方案 + 落地记录）。
+
+### 背景
+
+CLI 正在成为 AI Agent 的事实标准接口（2026 年 Q1 的 Agent-Native CLI 浪潮：larksuite/cli、Google Workspace CLI、CLI-Anything 等 90 天 130k stars）。agent_go 需要同时服务**人类**（终端操作）和 **AI Agent**（自主调用）两类调用者，二者对交互协议的需求不同：
+
+| 维度 | 人类用户 | AI Agent |
+|------|---------|----------|
+| 交互方式 | 交互确认 + 终端输出 | 工具调用 + 结构化响应 |
+| 错误处理 | 可读的错误信息 | 可执行的修复指令（`fix` 字段） |
+| 上下文获取 | 看终端 | 按需读取（Resources 原语） |
+| 进度感知 | 终端进度条 / TUI | 轮询 + 推送通知 |
+
+### 已落地能力清单（2026-08-01）
+
+#### MCP 协议完备性（6 tools + 三大原语 + 双 Transport）
+
+| 能力 | 说明 | 状态 |
+|------|------|------|
+| **6 个工具** | `run_task` / `resume_task` / `inspect_task` / `review_task` / `list_tasks` / `cancel_task` | ✅ 已落地 |
+| **Resources 原语** | 6 个只读资源（summary / plan / metering / log/recent / review / list），按需加载，轮询 token 消耗降低约 80% | ✅ 已落地 |
+| **Prompts 原语** | 3 个标准操作规程模板（diagnose_failure / review_and_decide / resume_or_restart），Agent 无需自己编写诊断流程 | ✅ 已落地 |
+| **stdio Transport** | JSON-RPC 2.0 over stdio（默认） | ✅ 已落地 |
+| **HTTP/SSE Transport** | `agent_go mcp --http`：POST /mcp 处理请求 + GET /mcp SSE 推送 + GET /health 健康检查；Bearer token 鉴权（`AGENT_GO_MCP_HTTP_TOKEN`）；支持远程接入 | ✅ 已落地 |
+
+#### Agent 可恢复性（错误自修复）
+
+| 能力 | 说明 | 状态 |
+|------|------|------|
+| **错误 `fix` 字段** | 错误响应携带可执行修复指引（`ERROR_TEMPLATES` 预定义 7 种错误类型），Agent 收到错误后可自主恢复 | ✅ 已落地 |
+| **任务发现** | `list_tasks` 支持状态过滤 + 分页，Agent 无需提前知道 task_id | ✅ 已落地 |
+| **任务取消** | `cancel_task` 终止子进程 + meta.json 标记 `cancelled`（保留已完成结果与 metering） | ✅ 已落地 |
+| **生命周期状态机** | `cancelled` / `stale_aborted` 状态可恢复（`resume` 支持） | ✅ 已落地 |
+
+#### 可观测性
+
+| 能力 | 说明 | 状态 |
+|------|------|------|
+| **并行活动追踪** | ActivityTracker per-subtask 活动（时间戳 + 单调序号），异步任务也有实时活动可查（`_start_activity_monitor`） | ✅ 已落地 |
+| **进度推送** | `notifications/progress` 实时推送 + SSE 广播到所有已连接客户端 | ✅ 已落地 |
+
+#### CLI 交互引导
+
+| 能力 | 说明 | 状态 |
+|------|------|------|
+| **失败恢复闭环引导** | 失败后输出可复制执行的完整操作路径（inspect → review → resume → 不阻断重试） | ✅ 已落地 |
+| **后续操作卡片** | 报告末尾输出 review / approve / pr / resume 命令清单 | ✅ 已落地 |
+
+### 设计原则（本次落地沉淀）
+
+1. **错误不是终点，是指引** — 每个错误响应携带 `fix` 字段（可执行修复指令），让 Agent 能自主恢复而非死循环
+2. **上下文按需加载** — Resources 原语替代 tool 全量返回，减少 Agent 的 token 消耗和推理负担
+3. **人类和 Agent 用同一套核心，不同交互壳** — stdio / HTTP 共用 `handle_message`，差异只在传输层
+4. **安全默认本地** — HTTP 默认绑定 127.0.0.1，token 鉴权可选；repo allowlist 保护文件系统边界
+
+### 后续迭代（待评估）
+
+> **2026-08-01**：下表方向已全部落地（见上文「已落地能力清单」与 roadmap 快照），暂无待评估项；Activity store 持久化列为远期候选。
+
+| 方向 | 说明 | 状态 |
+|------|------|------|
+| Sampling 原语 | Server 向 Agent 反向询问（破坏性操作确认） | ✅ 已落地（`request_sampling` + cancel_task `confirm`） |
+| 增量 Plan 迭代 + 实时 Diff | 人类修改 Plan 时展示变更差异 | ✅ 已落地（`show_plan_diff` + 菜单 [V] 版本历史） |
+| 波次进度卡片 | wave N/M 分组进度显示 | ✅ 已落地 |
+| 多 profile | `--profile` 切换配置（~/.agent_go/profiles/） | ✅ 已落地 |
+| SKILL.md 自描述 | `agent_go skills show <name>` 输出完整 SKILL.md | ✅ 已落地 |
+| Activity store 持久化 | 服务重启不丢失活动追踪 | 远期候选 |
+
+## 办公能力扩展：MCP 消费 + 产物导出（S9，设计中）
+
+> **状态**：设计稿完成（2026-08-01，见 [design/office-capability-extension.md](design/office-capability-extension.md)），排入 roadmap S9
+> **决策结论**：不自建 Office 编辑器，补齐"搬运"（MCP 消费）与"交付"（产物导出）两个架构能力
+
+### 背景
+
+agent_go 当前是**代码 diff 导向的编排器**——交付物只有 git commit/PR。但知识工作中"报告、演示、数据表"等产物同样需要自动化。业界已通过 MCP 协议将 Office 文档操作标准化（excel-mcp-server 4084★、office-powerpoint-mcp-server 1847★），出现"CLI + MCP 双模工具层"范式。
+
+agent_go 的护城河是 Plan → Decompose → Execute 编排层，不是文档引擎。因此正确定位是**跨层搬运者**：补齐两个结构性缺口，复用生态工具。
+
+### 两个结构性缺口
+
+| 缺口 | 现状 | 后果 |
+|------|------|------|
+| **A. 无外部工具消费** | 仅作 MCP server 暴露，不消费外部 server；工具硬编码 4 个（Read/Write/Edit/Bash），沙箱禁网络 | 无法接入 Office MCP 生态，子任务只能改代码 |
+| **B. 无产物导出** | 子任务在临时 worktree 执行，pipeline 完成后清理 worktree | 生成的文档随清理丢失，无法交付用户 |
+
+### 能力 A：MCP 消费层
+
+让子任务调用用户配置的外部 MCP server 工具，如同原生工具。
+
+**配置契约**（`config.json` 新增 `mcp_servers`）：
+
+```jsonc
+{
+  "mcp_servers": {
+    "excel": {"command": "uvx", "args": ["excel-mcp-server", "stdio"]},
+    "ppt": {"command": "uvx", "args": ["--from", "office-powerpoint-mcp-server", "ppt_mcp_server"]}
+  }
+}
+```
+
+- 命名空间约定：外部工具暴露为 `{server}__{tool}`（如 `excel__read_sheet`），避免重名
+- `tool_filter` 白名单收窄能力（省 token），`scope` 控制可见性（worker/planner_only）
+- 故障隔离：server 启动失败降级 warning，不阻断 pipeline（与 notify/skills 同级）
+
+### 能力 B：产物导出路径
+
+区分 code-diff（worktree→commit）与 artifact（文件→用户目录）。
+
+- **声明制**：子任务写入 `worktree/__artifacts__/` 的文件视为产物
+- **收尾收集**：pipeline 清理 worktree 前扫描 `__artifacts__/`，复制到 `--artifact-dir`
+- **CLI**：`--artifact-dir ~/reports` 显式指定；不指定则向后兼容（产物留 worktree）
+
+```bash
+agent_go run ./repo "读取 sales.xlsx 生成季度汇报 PPT" \
+  --yes --artifact-dir ~/reports --config office.json
+# → ~/reports/{task_id}/{sub_id}/Q2_report.pptx
+```
+
+### 不做什么（防范围蔓延）
+
+| 排除项 | 理由 |
+|--------|------|
+| ❌ 内建 Office 编辑器 | 生态成熟，自建是重复造轮子 |
+| ❌ 云端文档协作（OneDrive/SharePoint） | 走 ms365 MCP server，agent_go 不感知云协议 |
+| ❌ 产物版本管理 / 在线预览 | 产物是表达层输出，交给用户侧 DMS / 关联应用 |
+
+### 新增验收 KPI
+
+> 编号接续现有 K1–K9，避开基础设施化方向的 K10（知识注入采纳率）。
+
+| # | 指标 | 目标 |
+|---|------|------|
+| K12 | MCP 工具调用成功率 | ≥95%（排除用户配置错误） |
+| K13 | 产物导出完整率 | 100%（声明产物必达用户目录） |
+
+详细设计见 [design/office-capability-extension.md](design/office-capability-extension.md)。
+
 ## 基础设施化方向（评估中）
 
 > **状态**：设计草案完成（见 [design/infrastructure-api-design.md](design/infrastructure-api-design.md)），待论证必要性和可行性后决定是否投入。
+>
+> **2026-08-01 进展**：本方向的核心接口层已先行落地——**CLI `--json`**（全局标志 + Console 抽象）与 **MCP Server**（JSON-RPC 2.0，6 tools + Resources/Prompts 原语 + stdio/HTTP 双 transport）均已可用，详见上文「CLI 与 MCP 交互层」。下方表格保留为完整规划。
 
 ### 定位扩展
 
@@ -381,9 +525,10 @@ $$
 | 能力 | 说明 | 优先级 | 设计文档 |
 |------|------|--------|---------|
 | **Python API** | `run_task()` 返回结构化 `TaskResult`，替代 CLI 的 `None` 输出 | P0 | §3.1 |
-| **CLI --json** | 所有子命令支持 JSON 输出，供外部脚本调用 | P0 | §3.4 |
+| **CLI --json** | 所有子命令支持 JSON 输出，供外部脚本调用 | P0 | §3.4（✅ 全局 `--json` 标志已落地） |
+| **MCP Server** | JSON-RPC 2.0 over stdio / HTTP+SSE，6 tools + Resources/Prompts 原语 | P0 | ✅ 已落地（2026-08-01） |
 | **事件总线** | 全生命周期 `emit_event` + `subscribe_event` + `events.jsonl` | P1 | §4 |
-| **状态查询 API** | `query_task()` / `query_project_trend()` 统一查询入口 | P1 | §3.1 |
+| **状态查询 API** | `query_task()` / `query_project_trend()` 统一查询入口 | P1 | §3.1（MCP `inspect_task` / `list_tasks` / Resources `summary` 已提供等价能力） |
 | **知识存储** | `KnowledgeStore` 项目级经验沉淀，Plan prompt 自动注入 | P2 | §5 |
 | **CI/CD 集成** | GitHub Action / pre-commit hook / GitLab CI 模板 | P3 | §6 |
 | **IDE 插件** | VS Code Extension（进度面板 + 一键运行 + 审查入口） | P4 | §6.3 |

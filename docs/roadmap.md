@@ -3,12 +3,14 @@
 > 基线：2026-07-24，v2.0.0，684 测试全绿，14 项已知缺陷清零。
 > 目标对齐 [prd.md](prd.md) 的 Q3 / 年度 KPI；差距分析依据见 prd.md「P0 缺失功能」「P1 重点」章节。
 
-## 进度快照（2026-07-25 更新，1130 测试全绿）
+## 进度快照（2026-08-01 更新，1387 测试全绿）
 
 | 迭代 | 状态 | 说明 |
 |------|------|------|
-| S1 计量日志 | ✅ 完成 | planner/worker 双角色 metering.jsonl 全链路（run + resume）；eval cost per-role 拆分；修复 executor 计量路径死代码、api.py router 路径 NameError |
-| S1 M2 失败摘要 | ✅ 完成 | `failure_reason`（验证命令 + exit code + stderr 尾部）写入结果，`show` 展示 |
+| **CLI/MCP 交互层** | ✅ 完成（2026-08-01） | MCP 6 tools（新增 `list_tasks` / `cancel_task`）+ Resources 原语（6 个）+ Prompts 原语（3 个 SOP 模板）+ **HTTP/SSE Transport**（`agent_go mcp --http`，Bearer token 鉴权）；错误响应 `fix` 字段（ERROR_TEMPLATES 7 种类型）；ActivityTracker 并行活动追踪（异步任务后台监控）；CLI 失败恢复闭环引导 + 后续操作卡片；任务生命周期 `cancelled` 状态可恢复。设计稿：[design/cli-mcp-design-analysis.md](design/cli-mcp-design-analysis.md) + [design/cli-mcp-interaction-analysis.md](design/cli-mcp-interaction-analysis.md) |
+| **CLI/MCP 保留项落地** | ✅ 完成（2026-08-01） | 波次进度卡片（`_estimate_wave_count` + wave N/M 卡片）；`skills show <name>` SKILL.md 自描述；多 profile（`--profile` / `AGENT_GO_PROFILE` → `~/.agent_go/profiles/`）；增量 Plan 迭代 + 实时 Diff（`show_plan_diff` + 菜单 [V] 版本历史）；Sampling 原语（`request_sampling` stdio 双向 + cancel_task `confirm`）。改进清单全部闭环 |
+| **测试加固** | ✅ 完成（2026-08-01） | 1387 测试全绿（+25 CLI/MCP 特性测试） |
+| S1 计量日志 | ✅ 完成 | planner/worker 双角色 metering.jsonl 全链路（run + resume）；eval cost per-role 拆分；修复 executor 计量路径死代码、api.py router 路径 NameError || S1 M2 失败摘要 | ✅ 完成 | `failure_reason`（验证命令 + exit code + stderr 尾部）写入结果，`show` 展示 |
 | S2 验证循环 | ✅ 完成（2026-07-25） | 全链路验收修复 8 项缺口（含 wave 调度排除 blocked 的关键 bug、CLI 配置贯通）+ 剩余项落地：Stop Hook GoalInjector（`--goal-hook`）、retry_timeout 硬超时、goal.enabled 默认对齐 false、`--goal` 开关 |
 | M1 完成通知 | ✅ 完成 | `notify.py` 多通道（desktop/webhook/command）+ 事件订阅 + IM 适配器，设计稿：[design/notification-webhook-spec.md](design/notification-webhook-spec.md) |
 | S4 模型路由 | 🔶 部分推进 | `router.py`（角色路由 + 熔断 + 降级留痕）已落地，设计稿：[design/router-multi-provider-extension.md](design/router-multi-provider-extension.md)；**复杂度双通道已完成**（2026-07-25：Planner 打 difficulty 标签 → `worker_models` 映射 → claude `--model`，计量记录 difficulty/真实模型） |
@@ -65,6 +67,22 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 
 **年度出关**：K1 ≥97%、K3 ≤1.5min、K8 ≥90%、K5 ≥99.9%（S1 起恢复成功率埋点已积累一个季度数据）。
 
+## Q4 2026 扩展：办公能力（S9，设计中）
+
+> **状态**：设计稿完成（2026-08-01，见 [design/office-capability-extension.md](design/office-capability-extension.md)），排入 S9
+> **决策**：不自建 Office 编辑器，补齐 MCP 消费 + 产物导出两个架构能力，复用已成标准的 Office MCP 生态
+> **前提**：依赖 S4 路由机制稳定（外部 MCP server 也是模型路由的对象）+ $/pass 门禁不劣化
+
+| 迭代 | 交付物 | 对应缺口 | 预估 | 验收门禁 |
+|------|--------|---------|------|---------|
+| **S9-A**（12 月） | **MCP 消费层**：新增 `mcp_client.py`（MCPClientPool + MCPServerConnection，stdlib 实现 JSON-RPC over stdio）；`config.json` 新增 `mcp_servers` 节（command/args/env/enabled/tool_filter/scope）；`pipeline.py` 启动时拉起连接池、结束时 finally 回收；外部工具命名空间 `{server}__{tool}` 合并进 AgentLoop `tools` 字段 + claude CLI `--mcp-config` 透传；故障隔离（启动失败降级 warning 不阻断 pipeline，与 notify/skills 同级） | 缺口 A：无外部工具消费 | ~1 周 | 配置 excel/ppt MCP server 后，子任务能调用 `excel__read_sheet`；server 启动失败时任务正常完成；无僵尸进程（K10 ≥95%） |
+| **S9-B**（12 月） | **产物导出路径**：新增 `artifacts.py`（collect_from_worktree + export + render_export_summary）；`__artifacts__/` 约定目录（声明制）；`--artifact-dir` CLI 参数 + `artifact_dir` config；`pipeline.py` 清理 worktree 前扫描收集；TASK.md prompt 注入产物目录约定；final report 列出导出清单 | 缺口 B：无产物导出 | ~4 天 | 子任务写 `__artifacts__/report.pptx` + `--artifact-dir ~/reports` → 文件出现在目标目录；不指定时向后兼容（K11 = 100%） |
+| **S9-C**（次年 1 月） | **端到端场景验证 + 文档**：Office MCP 集成指南（excel/ppt/ms365 三套配置示例 + openpyxl 公式陷阱说明）；eval_suite 新增"文档生成"类任务（验证产物完整率）；`tool_filter`/`scope` 调优指南 | 闭环验证 | ~3 天 | 端到端：`agent_go run ... --artifact-dir` 生成完整 PPT 报告并导出成功 |
+
+**S9 出关口径**：K10（MCP 工具调用成功率）≥95%、K11（产物导出完整率）=100%、$/pass 不劣化（外部工具调用的 token 计入 metering，受门禁约束）。
+
+依赖关系：S9-A 与 S9-B 可并行（A 改 pipeline 启动/收尾的连接管理，B 改 worktree 清理前的产物收集，两者改动点不重叠）；S9-C 依赖 A+B 完成。**S9 整体不阻塞年度出关口径**——它是能力扩展，K1/K8/K4 核心指标不依赖它。
+
 ## 2027 Q1 展望：基础设施化（评估中）
 
 > **状态**：设计草案完成（[design/infrastructure-api-design.md](design/infrastructure-api-design.md)），待论证必要性和可行性后决定是否投入。
@@ -72,7 +90,7 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 
 | 迭代 | 交付物 | 预估 | 验收门禁 |
 |------|--------|------|---------|
-| **I9**（1 月） | Python API 增强：`run_task()` 返回 `TaskResult` + CLI `--json`（所有子命令） | ~3d | 外部 Python 脚本 `from agent_go import run_task; result = run_task(...)` 能拿到结构化结果 |
+| **I9**（1 月） | Python API 增强：`run_task()` 返回 `TaskResult` + CLI `--json`（所有子命令） | ~3d | 外部 Python 脚本 `from agent_go import run_task; result = run_task(...)` 能拿到结构化结果（CLI `--json` 全局标志 ✅ 已落地，MCP 已提供结构化 tool 接口） |
 | **I10**（1 月） | 事件总线：`emit_event` / `subscribe_event` + `events.jsonl` + Webhook 生命周期事件 | ~2d | 全生命周期事件（plan.generated → subtask.started → subtask.completed → pipeline.completed）可订阅、可落盘 |
 | **I10** | 状态查询 API：`query_task()` / `query_project_trend()` | ~1d | `query_task("task-xxx").status` 返回 "completed"或"failed" |
 | **I11**（2 月） | 知识存储：`KnowledgeStore` 数据模型 + 文件读写 + `_extract_patterns` 增量更新 + Plan 注入 | ~3d | 连续跑 3 个同类 task，第 4 个的 Plan prompt 包含历史验证命令 |
@@ -164,5 +182,9 @@ K4≤$0.04            K4≤$0.02            K9≥10
 5. ~~模型分级 + 评估机制设计稿~~ ✅ 已完成（2026-07-25，[design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md)）
 6. ~~S8 P0 模型评估机制落地~~ ✅ 已完成（2026-07-25，pricing.py + bench.py + eval_suite + cross_judge.py P1）
 7. ~~核心解耦~~ ✅ 已完成（2026-07-25，evaluator/notify/goal/skills/agent_loop 全部动态 import + try/except）
+8. ~~CLI/MCP 交互层改进~~ ✅ 已完成（2026-08-01，MCP 6 tools + Resources/Prompts 原语 + HTTP/SSE transport + 错误 fix 字段 + CLI 恢复引导，1362 测试全绿）
+9. ~~PRD/Roadmap 文档同步~~ ✅ 已完成（2026-08-01，prd.md 新增「CLI 与 MCP 交互层」章节，roadmap 快照更新）
+10. ~~办公能力扩展设计稿~~ ✅ 已完成（2026-08-01，[design/office-capability-extension.md](design/office-capability-extension.md)；prd.md 新增「办公能力扩展」章节 + K10/K11；roadmap 排入 S9）
+11. ~~CLI/MCP 保留项落地~~ ✅ 已完成（2026-08-01，波次进度卡片 / skills show / 多 profile / 增量 Plan Diff / Sampling 原语，1387 测试全绿，改进清单全部闭环）
 
-**下一批**：对照 bench 真实执行（3 模型 × 22 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线；KPI 数据采集验证（K1/K8 是否因 S2/S4 提升）。
+**下一批**：对照 bench 真实执行（3 模型 × 22 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线；KPI 数据采集验证（K1/K8 是否因 S2/S4 提升）；**S9-A MCP 消费层**（`mcp_client.py` + `mcp_servers` config）待启动。

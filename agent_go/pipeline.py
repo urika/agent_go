@@ -32,6 +32,25 @@ def _save_meta_atomic(meta: dict, task_dir: Path) -> None:
     os.replace(tmp_path, meta_path)
 
 
+def _estimate_wave_count(subtasks: list[dict], completed_ids: set = frozenset()) -> int:
+    """估算拓扑波次总数（仅计算不执行，P1-4 波次进度卡片用）。
+
+    对剩余子任务重复分层：每轮取出所有依赖已满足的子任务为一个 wave。
+    依赖循环时提前终止，返回已算出的波次数。
+    """
+    remaining = [s for s in subtasks if s["id"] not in completed_ids]
+    done = set(completed_ids)
+    waves = 0
+    while remaining:
+        wave = [s for s in remaining if all(d in done for d in s.get("depends_on", []))]
+        if not wave:
+            break  # 依赖循环或无法满足
+        done.update(s["id"] for s in wave)
+        remaining = [s for s in remaining if s["id"] not in done]
+        waves += 1
+    return waves
+
+
 def _record_subtask_result(
     st: dict,
     result: dict,
@@ -170,6 +189,8 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         "parallel": parallel,
     })
     wave_num = 0
+    # P1-4: 预估算总波次（拓扑分层，仅计算不执行），用于波次进度卡片
+    total_waves = _estimate_wave_count(confirmed, completed_ids) or 1
     if parallel > 1 and total > 1:
         logger.info(f"[并发] max_workers={parallel}, 拓扑调度，剩余 {len(remaining)} 个子任务")
 
@@ -219,9 +240,16 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         actual_workers = min(parallel, len(wave)) if parallel > 1 else 1
         console.emit("wave_start", {
             "wave_idx": wave_num,
+            "total_waves": total_waves,
             "subtask_ids": [st["id"] for st in wave],
             "parallel": actual_workers,
         })
+
+        # P1-4: 波次进度卡片 — 人类可读分组显示（JSON 模式下由 console 转为事件）
+        _wave_labels = [f"{st['id']} ({st.get('title', '?')[:40]})" for st in wave]
+        console.subtitle(f"═══ Wave {wave_num + 1}/{total_waves} ({actual_workers} 并行) ═══")
+        for _w in _wave_labels:
+            console.print(f"  ▶ {_w}")
 
         # P1-4: 每波前确认（仅 CLI 非 TUI 模式，step_confirm=True）
         if step_confirm and not _interrupted.is_set():
@@ -288,7 +316,18 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                             f.cancel()
                         break
 
-        console.emit("wave_complete", {"wave_idx": wave_num})
+        # P1-4: 波次完成汇总（人类可读 + 结构化事件）
+        _wave_done = sum(1 for st in wave if st["id"] in completed_ids)
+        _wave_fail = sum(1 for st in wave if st["id"] in failed_ids or st["id"] in blocked_ids)
+        console.emit("wave_complete", {
+            "wave_idx": wave_num, "total_waves": total_waves,
+            "done": _wave_done, "failed": _wave_fail,
+        })
+        if _wave_fail:
+            console.print(f"  ⚠️ Wave {wave_num + 1} 完成: {_wave_done - _wave_fail} ✅ / {_wave_fail} ❌")
+        elif _wave_done:
+            console.print(f"  ✅ Wave {wave_num + 1} 完成: {_wave_done} 个子任务")
+        console.sep("─", 50)
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
         if _interrupted.is_set():

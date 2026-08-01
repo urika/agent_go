@@ -200,13 +200,15 @@ TOOLS = [
     },
     {
         "name": "cancel_task",
-        "description": "取消正在运行的任务：终止子进程，将 meta.json 标记为 cancelled（保留已完成结果与 metering）。不可逆",
+        "description": "取消正在运行的任务：终止子进程，将 meta.json 标记为 cancelled（保留已完成结果与 metering）。不可逆。confirm=true 时先通过 sampling 向 Host 请求确认",
         "annotations": {"title": "Cancel running task", "readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
         "inputSchema": {
             "type": "object",
             "required": ["task_id"],
             "properties": {
                 "task_id": {"type": "string"},
+                "confirm": {"type": "boolean", "default": False,
+                            "description": "取消前通过 sampling/createMessage 请求 Host 确认（stdio transport 可用）"},
             }
         }
     },
@@ -347,6 +349,7 @@ class MCPServer:
         self._activity_store: dict[str, dict] = {}  # task_id -> {current_activity, activity_per_subtask}
         self._tracker = ActivityTracker()  # 并行活动追踪（时间戳 + 线程安全）
         self._notification_sink = notification_sink
+        self._sampling_seq = 0  # R-5: sampling 请求 id 递增计数
 
     def _parse_allowed_repos(self) -> list[str]:
         raw = os.environ.get("AGENT_GO_MCP_ALLOWED_REPOS", "")
@@ -918,10 +921,34 @@ class MCPServer:
         }
 
     def _tool_cancel_task(self, args: dict) -> dict:
-        """取消正在运行的任务（P0-3）：终止子进程 + meta.json 标记 cancelled。"""
+        """取消正在运行的任务（P0-3）：终止子进程 + meta.json 标记 cancelled。
+
+        confirm=true 时先通过 sampling 向 Host 请求确认（R-5）；
+        sampling 不可用/超时时 fail-open 直接执行（保持既有行为）。
+        """
         task_id = args["task_id"]
         td = self._ensure_task_dir(task_id)
         meta_path = td / "meta.json"
+
+        # R-5: 破坏性操作确认（可选）
+        if args.get("confirm", False):
+            n_done = 0
+            if meta_path.exists():
+                try:
+                    meta0 = json.loads(meta_path.read_text(encoding="utf-8"))
+                    n_done = sum(1 for r in meta0.get("results", [])
+                                 if r.get("status") in ("completed", "no_changes"))
+                except (json.JSONDecodeError, OSError):
+                    pass
+            question = (
+                f"⚠️ 请求确认取消任务 {task_id}（已完成 {n_done} 个子任务）。\n"
+                f"取消后：子进程将被终止，已完成结果与 metering 保留，"
+                f"可通过 resume_task 续跑。确认取消？[Y/N]"
+            )
+            confirmed = self.sampling_confirm(question, timeout=20.0)
+            if not confirmed:
+                return {"task_id": task_id, "status": "running", "cancelled": False,
+                        "message": "Host 未确认取消，任务保持运行"}
 
         proc = None
         with self._lock:
@@ -1305,6 +1332,17 @@ class MCPServer:
                 self._send(self._error_payload(None, -32700, "Parse error"))
                 continue
 
+            # R-5 Sampling：先检查是否为 server 发起的 sampling/createMessage 响应
+            mid = msg.get("id")
+            with self._lock:
+                is_deferred = mid in self._deferred
+            if is_deferred:
+                with self._lock:
+                    event = self._deferred.pop(mid)
+                    self._deferred_result[mid] = msg
+                event.set()
+                continue
+
             resp = self.handle_message(msg, wait_sync=False)
             if resp is not None:
                 self._send(resp)
@@ -1316,6 +1354,88 @@ class MCPServer:
                     proc.terminate()
                 except Exception:
                     pass
+
+    # ── R-5 Sampling 原语 ──────────────────────────────────────
+
+    def request_sampling(self, prompt: str, max_tokens: int = 100,
+                         timeout: float = 30.0,
+                         system_prompt: str = "") -> Optional[dict]:
+        """发起 sampling/createMessage 请求，等待客户端（Host）响应。
+
+        用途：server 在关键决策点（如破坏性操作确认）反向询问 LLM/用户。
+        MCP 规范要求 Host 将 sampling 请求展示给用户审核后回复。
+
+        返回:
+            客户端响应 dict（{"role": ..., "content": [...]} 或完整 response）
+            或 None —— 超时 / 客户端不可达（HTTP transport 无双向通道）/ 无响应
+
+        Fail-open 设计：sampling 不可用时返回 None，调用方自行决定降级行为。
+        """
+        # HTTP transport 无客户端→server 的双向通道，sampling 不可用
+        if self._notification_sink is not None:
+            logger.info("HTTP transport 不支持 sampling（无双向通道），跳过")
+            return None
+
+        with self._lock:
+            self._sampling_seq += 1
+            req_id = f"sampling-{self._sampling_seq}"
+
+        params: dict[str, Any] = {
+            "messages": [{"role": "user", "content": prompt}],
+            "maxTokens": max_tokens,
+        }
+        if system_prompt:
+            params["systemPrompt"] = system_prompt
+
+        event = threading.Event()
+        with self._lock:
+            self._deferred[req_id] = event
+            self._deferred_result[req_id] = None
+
+        self._send({"jsonrpc": JSONRPC_VERSION, "id": req_id,
+                    "method": "sampling/createMessage", "params": params})
+
+        ok = event.wait(timeout)
+        with self._lock:
+            result = self._deferred_result.pop(req_id, None)
+            self._deferred.pop(req_id, None)
+        if not ok:
+            logger.warning("sampling/createMessage 超时（%.0fs），返回 None", timeout)
+            return None
+        if result is None:
+            return None
+        # 提取客户端回复内容（兼容 {"result": {...}} 与 {"content": [...]} 两种形状）
+        resp = result.get("result", result)
+        if isinstance(resp, dict) and "content" in resp:
+            return resp
+        if isinstance(resp, dict) and resp.get("error"):
+            logger.warning("sampling 请求被客户端拒绝: %s", resp["error"])
+            return None
+        return resp
+
+    def sampling_confirm(self, question: str, timeout: float = 30.0) -> bool:
+        """简化确认包装：向 Host 提问，期待 [Y]/[N] 类回答。
+
+        Returns:
+            True=确认 / False=拒绝 / 不可用时默认 True（fail-open，
+            调用方负责传递「未能确认」的语义——见 cancel_task 的 confirm 参数）。
+        """
+        resp = self.request_sampling(question, max_tokens=20, timeout=timeout)
+        if resp is None:
+            return True  # fail-open：无法确认时按通过处理
+        # 提取文本回复
+        content = resp.get("content", [])
+        text = ""
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict):
+                    text += str(c.get("text", ""))
+        else:
+            text = str(content)
+        text = text.strip().upper()
+        if not text:
+            return True
+        return text.startswith(("Y", "YES", "是", "确认"))
 
 
 def main(args=None):

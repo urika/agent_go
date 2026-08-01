@@ -38,6 +38,10 @@ def _build_parser():
     )
     parser.add_argument("--json", action="store_true", dest="json_mode",
                         help="Output JSON Lines (machine-readable, stderr for interactive prompts)")
+    parser.add_argument("--config", default=argparse.SUPPRESS,
+                        help="Path to config JSON file (default: ~/.agent_go/config.json)")
+    parser.add_argument("--profile", default=argparse.SUPPRESS,
+                        help="Configuration profile name: ~/.agent_go/profiles/<name>.json 或 ~/.agent_go/config.<name>.json")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # run 子命令
@@ -82,7 +86,7 @@ def _build_parser():
                             help="每波执行前暂停确认（适用于交互式非 TUI 场景）")
     run_parser.add_argument("--auto-init", action="store_true",
                             help="目标目录非 git 仓库时自动 git init + 首次 commit（默认关闭）")
-    run_parser.add_argument("--config", help="Path to config JSON file (default: ~/.agent_go/config.json)")
+    run_parser.add_argument("--config", default=argparse.SUPPRESS, help="Path to config JSON file (default: ~/.agent_go/config.json)")
 
     # resume 子命令
     resume_parser = subparsers.add_parser("resume", help="Resume a paused/interrupted task")
@@ -121,7 +125,13 @@ def _build_parser():
     subparsers.add_parser("config", help="View current configuration")
 
     # skills 子命令
-    subparsers.add_parser("skills", help="List available Skills")
+    skills_parser = subparsers.add_parser("skills", help="List available Skills")
+    skills_sub = skills_parser.add_subparsers(dest="skills_subcommand", help="Skills operation")
+    skills_sub.add_parser("list", help="List all available Skills")
+    show_skill_parser = skills_sub.add_parser("show", help="Show a Skill's full SKILL.md content (agent-readable)")
+    show_skill_parser.add_argument("name", help="Skill name")
+    show_skill_parser.add_argument("--json", action="store_true", dest="json_mode",
+                                   help="Output as JSON (frontmatter + body + raw)")
 
     # agents 子命令
     subparsers.add_parser("agents", help="List available Agent types")
@@ -422,7 +432,7 @@ def cmd_run(args=None):
 
     if plan is not None:
         # API 成功 → Plan 确认流程
-        confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration=1, task=task)
+        confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration=1, task=task, plan_dir=task_dir)
         # 检查降级信号
         if confirmed_plan == "__FALLBACK__":
             console.print(f"\n⚠️ 降级到本地规则拆解...")
@@ -437,6 +447,7 @@ def cmd_run(args=None):
                 # 保存上一版 Plan 快照后再生
                 if plan:
                     _save_plan_snapshot(task_dir, plan, iteration - 1)
+                _prev_plan = dict(plan) if plan else None  # R-4: diff 基线
                 try:
                     plan = generate_plan(task, repo, config, logger, "", regen_docs, iteration, skill_plan_context, no_cache=no_cache)
                 except Exception as e:
@@ -448,7 +459,11 @@ def cmd_run(args=None):
                     confirmed_plan = None
                     break
                 plan["_original_task"] = task
-                confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration, task=task)
+                if _prev_plan:
+                    # R-4: 实时 diff——用户知道重新生成改了什么
+                    from .ui import show_plan_diff
+                    show_plan_diff(_prev_plan, plan)
+                confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration, task=task, plan_dir=task_dir)
                 if confirmed_plan == "__FALLBACK__":
                     console.print(f"\n⚠️ 降级到本地规则拆解...")
                     subtasks = decompose_fallback(task, repo, config, logger)
@@ -1655,8 +1670,39 @@ def cmd_clean() -> None:
     else:
         console.print("已取消")
 
-def cmd_skills() -> None:
-    """列出所有可用的 Skill。"""
+def cmd_skills(args=None) -> None:
+    """列出或查看 Skill。agent_go skills [list | show <name>]。"""
+    from .skills import get_skill_full
+
+    sub = getattr(args, "skills_subcommand", None) if args else None
+
+    # show <name>：输出完整 SKILL.md（人类可读 / --json 结构化，供 Agent 自描述读取）
+    if sub == "show":
+        name = args.name
+        info = get_skill_full(name)
+        if not info:
+            console.error(f"Skill 不存在: {name}。可用: agent_go skills list")
+            return
+        if getattr(args, "json_mode", False):
+            console.print(json.dumps({
+                "name": info["name"], "description": info["description"],
+                "path": info["path"], "frontmatter": info["frontmatter"],
+                "body": info["body"], "allowed_tools": info["allowed_tools"],
+            }, indent=2, ensure_ascii=False))
+            return
+        console.print(f"\n📚 Skill: {info['name']}")
+        console.print(f"📄 {info['path']}")
+        console.sep("─", 55)
+        console.print(f"📝 描述: {info['description']}")
+        if info["allowed_tools"]:
+            console.print(f"🔧 工具白名单: {', '.join(info['allowed_tools'])}")
+        console.sep("─", 55)
+        # 原始 SKILL.md（含 frontmatter）——Agent 可直接读取完整使用说明
+        if info["raw"]:
+            console.force(info["raw"])
+        return
+
+    # 默认：list（原有逻辑）
     skills = list_skills()
     if not skills:
         console.print("\n暂无可用 Skill。在 ~/.agent_go/skills/<name>/SKILL.md 创建。")
@@ -1668,6 +1714,7 @@ def cmd_skills() -> None:
         desc = s["description"][:45] + "..." if len(s["description"]) > 45 else s["description"]
         console.print(f"{s['name']:<30} {desc}")
     console.sep("─", 55)
+    console.print("查看完整内容: agent_go skills show <name>")
 
 def cmd_cache(args=None):
     """Plan 缓存管理。"""
@@ -1992,6 +2039,11 @@ def main() -> None:
         parser = _build_parser()
         args = parser.parse_args()
 
+        # R-3: --profile 写入环境变量，供所有 load_config() 调用点统一解析
+        profile = getattr(args, "profile", None)
+        if profile:
+            os.environ["AGENT_GO_PROFILE"] = profile
+
         if not args.command:
             parser.print_help()
             return
@@ -2013,7 +2065,7 @@ def main() -> None:
         elif args.command == "pr":
             cmd_pr(args)
         elif args.command == "skills":
-            cmd_skills()
+            cmd_skills(args)
         elif args.command == "agents":
             cmd_agents()
         elif args.command == "cache":

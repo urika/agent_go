@@ -129,6 +129,32 @@ def load_skills(names: list[str], project_root: Optional[Path] = None) -> list[S
     return skills
 
 
+def get_skill_full(name: str, project_root: Optional[Path] = None) -> Optional[dict]:
+    """获取 Skill 完整内容（frontmatter + body + 原始 SKILL.md 文本）。
+
+    供 `agent_go skills show <name>` 使用——AI Agent 可直接读取
+    SKILL.md 原始内容获得完整使用说明（R-2 SKILL.md 自描述）。
+    """
+    s = load_skill(name, project_root)
+    if not s:
+        return None
+    raw = ""
+    if s.path.exists():
+        try:
+            raw = s.path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raw = ""
+    return {
+        "name": s.name,
+        "description": s.description,
+        "path": str(s.path),
+        "frontmatter": s.frontmatter,
+        "body": s.body,
+        "raw": raw,
+        "allowed_tools": s.allowed_tools,
+    }
+
+
 def list_skills(project_root: Optional[Path] = None) -> list[dict]:
     """列出所有已安装的 Skill（名称 + description）。"""
     result = []

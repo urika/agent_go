@@ -202,6 +202,74 @@ def _console_force_title(msg: str) -> None:
 def _console_force_subtitle(msg: str) -> None:
     console.force(f"\n── {msg} ──")
 
+
+def compute_plan_diff(prev_plan: dict, new_plan: dict) -> list[dict]:
+    """对比两个 Plan 版本，返回步骤级变更摘要（R-4 增量 Plan 迭代）。
+
+    返回列表，每项:
+      {"type": "added"|"removed"|"modified"|"overview",
+       "id": 步骤 id（overview 为空）, "title": 标题, "fields": 修改的字段名列表}
+    """
+    changes: list[dict] = []
+
+    if prev_plan.get("overview") != new_plan.get("overview"):
+        changes.append({"type": "overview", "id": "", "title": "概述", "fields": ["overview"]})
+
+    steps1 = {s["id"]: s for s in prev_plan.get("steps", []) if "id" in s}
+    steps2 = {s["id"]: s for s in new_plan.get("steps", []) if "id" in s}
+
+    for _added_sid in sorted(steps2.keys() - steps1.keys()):
+        changes.append({"type": "added", "id": _added_sid,
+                        "title": steps2[_added_sid].get("title", "?"), "fields": []})
+    for _removed_sid in sorted(steps1.keys() - steps2.keys()):
+        changes.append({"type": "removed", "id": _removed_sid,
+                        "title": steps1[_removed_sid].get("title", "?"), "fields": []})
+
+    # 对比相同 id 步骤的字段差异
+    _compare_fields = ["title", "description", "files", "verification", "difficulty", "agent_type", "skills"]
+    for _common_sid in sorted(steps1.keys() & steps2.keys()):
+        s1, s2 = steps1[_common_sid], steps2[_common_sid]
+        changed_fields = []
+        for f in _compare_fields:
+            v1, v2 = s1.get(f), s2.get(f)
+            if isinstance(v1, list) and isinstance(v2, list):
+                if set(v1) != set(v2):
+                    changed_fields.append(f)
+            elif str(v1) != str(v2):
+                changed_fields.append(f)
+        if changed_fields:
+            changes.append({"type": "modified", "id": _common_sid, "title": s2.get("title", "?"),
+                            "fields": changed_fields})
+
+    return changes
+
+
+_FIELD_LABELS = {
+    "title": "标题", "description": "描述", "files": "文件", "verification": "验证",
+    "difficulty": "难度", "agent_type": "代理", "skills": "技能", "overview": "概述",
+}
+
+
+def show_plan_diff(prev_plan: dict, new_plan: dict, force: bool = True) -> None:
+    """打印两个 Plan 版本的变更摘要（R-4）。force=True 时即使 quiet 也输出。"""
+    changes = compute_plan_diff(prev_plan, new_plan)
+    if not changes:
+        console.force("\n📊 Plan 变更: 无差异（重新生成结果与上一版相同）")
+        return
+    _out = console.force if force else console.print
+    _out("\n📊 Plan 变更摘要:")
+    for c in changes:
+        if c["type"] == "added":
+            _out(f"  🆕 新增: {c['id']} {c['title']}")
+        elif c["type"] == "removed":
+            _out(f"  🗑️ 删除: {c['id']} {c['title']}")
+        elif c["type"] == "modified":
+            labels = ", ".join(_FIELD_LABELS.get(f, f) for f in c["fields"])
+            _out(f"  ✏️ 修改: {c['id']} {c['title']} ({labels})")
+        elif c["type"] == "overview":
+            _out("  📝 概述: 已修改")
+    _out("")
+
 def print_plan(plan: dict[str, Any], config: dict[str, Any], force: bool = False) -> None:
     """紧凑展示 Plan（P0-5）。低信息密度字段折叠，水平布局减少行数。"""
     behavior = config.get("behavior", {})
@@ -263,6 +331,29 @@ def print_plan(plan: dict[str, Any], config: dict[str, Any], force: bool = False
     _sep("=", 70)
 
 
+def _show_inline_plan_history(task_dir: Path) -> None:
+    """R-4: 内联展示 Plan 版本历史（confirm_plan [V] 选项）。"""
+    plans_dir = task_dir / "plans"
+    versions = []
+    if plans_dir.exists():
+        versions = sorted([f.stem for f in plans_dir.glob("v*.json")], key=lambda x: int(x[1:]))
+    if not versions:
+        console.force("📋 Plan 版本历史: (暂无历史版本)")
+        return
+    console.force("\n📋 Plan 版本历史:")
+    for v in versions:
+        try:
+            data = json.loads((plans_dir / f"{v}.json").read_text(encoding="utf-8"))
+            saved_at = data.get("saved_at", "?")[:19]
+            plan = data.get("plan", {})
+            steps = plan.get("steps", plan.get("subtasks", []))
+            titles = "; ".join(s.get("title", "?")[:25] for s in steps[:3])
+            console.force(f"  v{v} ({saved_at}) {len(steps)} 步骤: {titles}...")
+        except Exception as e:
+            console.force(f"  v{v}: ❌ 读取失败: {e}")
+    console.force("")
+
+
 def _edit_plan_via_editor(plan: dict[str, Any], logger: logging.Logger) -> None:
     """用 $EDITOR 编辑完整 Plan。编辑后原地修改 plan dict。"""
     editor = os.environ.get("EDITOR", "vi")
@@ -316,10 +407,12 @@ def _prompt_fallback(logger: logging.Logger) -> str:
             sys.exit(0)
         console.print("无效输入（F=降级, R=重试, N=取消）")
 
-def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "") -> tuple[Optional[dict[str, Any]], Optional[list[str]]]:
+def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "", plan_dir: Optional[Path] = None) -> tuple[Optional[dict[str, Any]], Optional[list[str]]]:
     """
     用户确认 Plan。支持默认同意模式。
     返回: (plan, doc_paths) 或 (None, doc_paths)（R 重新生成）或 ("__FALLBACK__", None)
+
+    plan_dir: 任务目录（可选）。提供时支持 [V] 内联查看 Plan 版本历史（R-4）。
     """
     behavior = config.get("behavior", {})
     auto_confirm = behavior.get("auto_confirm_plan", False)
@@ -358,6 +451,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
         console.force("  [E] 编辑某个步骤")
         console.force("  [M] 用 $EDITOR 编辑完整方案")
         console.force("  [R] 重新生成方案")
+        console.force("  [V] 查看 Plan 版本历史") if plan_dir else None
         console.force("  [N] 取消任务")
 
         choice = safe_input("\n> ").strip().upper()
@@ -373,6 +467,12 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
         elif choice == "R":
             logger.info("用户请求重新生成")
             return None, reference_doc_paths
+        elif choice == "V":
+            # R-4: 内联查看 Plan 版本历史（需 plan_dir）
+            if plan_dir:
+                _show_inline_plan_history(plan_dir)
+            else:
+                console.force("⚠️ 无任务目录，无法查看版本历史（此阶段的历史在任务执行后可用 agent_go plan-history 查看）")
         elif choice == "E":
             idx_str = safe_input(f"编辑第几个步骤 (1-{len(plan['steps'])}): ").strip()
             if idx_str.isdigit() and 1 <= int(idx_str) <= len(plan["steps"]):
@@ -405,12 +505,14 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
             logger.info(f"用户补充: {supplement[:200]}...")
             existing_docs = read_reference_docs(reference_doc_paths, repo, logger) if reference_doc_paths else ""
             iteration += 1
+            _prev_plan = dict(plan)  # R-4: 重生成前保存，用于 diff
             try:
                 original = plan.get("_original_task", task)
                 plan = generate_plan(original, repo, config, logger, supplement, existing_docs, iteration)
                 plan["_original_task"] = original
                 plan_api_failure_count = 0
                 console.force(f"\n🔄 已重新生成（第 {iteration} 版）")
+                show_plan_diff(_prev_plan, plan)  # R-4: 实时 diff
             except Exception as e:
                 logger.error(f"重新生成失败: {e}")
                 console.force(f"⚠️ 失败: {e}")
@@ -434,12 +536,14 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 continue
             logger.info(f"挂载 {len(reference_doc_paths)} 个文档，重新生成")
             iteration += 1
+            _prev_plan = dict(plan)  # R-4: 重生成前保存，用于 diff
             try:
                 original = plan.get("_original_task", task)
                 plan = generate_plan(original, repo, config, logger, "", docs_content, iteration)
                 plan["_original_task"] = original
                 plan_api_failure_count = 0
                 console.force(f"\n🔄 已重新生成（第 {iteration} 版）")
+                show_plan_diff(_prev_plan, plan)  # R-4: 实时 diff
             except Exception as e:
                 logger.error(f"重新生成失败: {e}")
                 console.force(f"⚠️ 失败: {e}")

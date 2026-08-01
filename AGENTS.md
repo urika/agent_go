@@ -59,8 +59,10 @@ agent_go replay <task-id> --json
 agent_go checkpoint list <task-id>
 agent_go checkpoint restore <task-id> --sub <sub-id> --id <checkpoint-id>
 
-# MCP server (JSON-RPC 2.0 over stdio)
+# MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)
 agent_go mcp
+agent_go mcp --http --host 127.0.0.1 --port 8090   # HTTP transport: POST /mcp + GET /mcp (SSE) + GET /health
+AGENT_GO_MCP_HTTP_TOKEN=xxx agent_go mcp --http   # 启用 Bearer token 鉴权
 
 # Monitor running tasks
 agent_go status --watch
