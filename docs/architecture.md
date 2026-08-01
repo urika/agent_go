@@ -172,3 +172,36 @@ agent_go/bench.py（编排器，不 import pipeline/executor）
     agent_go eval judge --results results.jsonl --judge-models M1,M2
     agent_go eval judge calibrate --llm-scores ... --human-scores ...
 ```
+
+### S9 办公能力扩展架构（⏳ 设计中，2026-08-01）
+
+> 设计稿见 [design/office-capability-extension.md](design/office-capability-extension.md)。补齐两个结构性缺口，使 agent_go 从"代码 diff 导向"扩展为"可交付任意产物"的编排器。**不自建 Office 编辑器**，复用已成标准的 Office MCP 生态。
+
+```
+能力 A：MCP 消费层（让子任务调用外部 MCP server 工具）
+  agent_go/mcp_client.py（新增）
+    MCPClientPool — 多 server 连接池，pipeline 启动时 start_all()，finally stop_all()
+    MCPServerConnection — 单 server 生命周期（subprocess + JSON-RPC initialize 握手）
+    命名空间约定：外部工具暴露为 {server}__{tool}（如 excel__read_sheet）
+  集成点：
+    pipeline.py — 启动拉起连接池 / 结束回收
+    agent_loop.py — tools 字段合并原生 + MCP 工具，dispatch 按命名空间路由
+    executor.py — claude CLI 路径透传 --mcp-config
+  配置：config.json 新增 mcp_servers 节（command/args/env/enabled/tool_filter/scope）
+  容错：server 启动失败降级 warning 不阻断 pipeline（与 notify/skills 同级）
+
+能力 B：产物导出路径（让生成的文件交付到用户目录，不被 worktree 清理吃掉）
+  agent_go/artifacts.py（新增）
+    collect_from_worktree — 扫描 worktree/__artifacts__/** 收集产物
+    export — 复制到 --artifact-dir/{task_id}/{sub_id}/
+    render_export_summary — 生成导出清单（供 final report）
+  集成点：
+    pipeline.py — 清理 worktree 前（pipeline.py:378）调用 export
+    executor.py — TASK.md 注入 __artifacts__/ 产物目录约定
+  配置：--artifact-dir CLI + artifact_dir config（null = 向后兼容不导出）
+  交付物分类：
+    code-diff（代码变更）→ worktree → commit → tag → PR（现有）
+    artifact（产物文件）→ __artifacts__/ → artifact_dir（新增）
+```
+
+**与解耦原则的关系**：MCP 消费层和产物导出属于 **核心编排能力**（pipeline 集成点），不是可选增强——它们改变交付模型本身。但 MCP server 连接本身遵循动态 import + try/except 容错（server 失败不阻断），延续解耦原则 2。

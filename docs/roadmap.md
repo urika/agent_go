@@ -75,11 +75,11 @@ K1≥92% K8≥80% K4≤$0.05            K1≥97% K4≤$0.03 K3≤1.5min
 
 | 迭代 | 交付物 | 对应缺口 | 预估 | 验收门禁 |
 |------|--------|---------|------|---------|
-| **S9-A**（12 月） | **MCP 消费层**：新增 `mcp_client.py`（MCPClientPool + MCPServerConnection，stdlib 实现 JSON-RPC over stdio）；`config.json` 新增 `mcp_servers` 节（command/args/env/enabled/tool_filter/scope）；`pipeline.py` 启动时拉起连接池、结束时 finally 回收；外部工具命名空间 `{server}__{tool}` 合并进 AgentLoop `tools` 字段 + claude CLI `--mcp-config` 透传；故障隔离（启动失败降级 warning 不阻断 pipeline，与 notify/skills 同级） | 缺口 A：无外部工具消费 | ~1 周 | 配置 excel/ppt MCP server 后，子任务能调用 `excel__read_sheet`；server 启动失败时任务正常完成；无僵尸进程（K10 ≥95%） |
-| **S9-B**（12 月） | **产物导出路径**：新增 `artifacts.py`（collect_from_worktree + export + render_export_summary）；`__artifacts__/` 约定目录（声明制）；`--artifact-dir` CLI 参数 + `artifact_dir` config；`pipeline.py` 清理 worktree 前扫描收集；TASK.md prompt 注入产物目录约定；final report 列出导出清单 | 缺口 B：无产物导出 | ~4 天 | 子任务写 `__artifacts__/report.pptx` + `--artifact-dir ~/reports` → 文件出现在目标目录；不指定时向后兼容（K11 = 100%） |
+| **S9-A**（12 月） | **MCP 消费层**：新增 `mcp_client.py`（MCPClientPool + MCPServerConnection，stdlib 实现 JSON-RPC over stdio）；`config.json` 新增 `mcp_servers` 节（command/args/env/enabled/tool_filter/scope）；`pipeline.py` 启动时拉起连接池、结束时 finally 回收；外部工具命名空间 `{server}__{tool}` 合并进 AgentLoop `tools` 字段 + claude CLI `--mcp-config` 透传；故障隔离（启动失败降级 warning 不阻断 pipeline，与 notify/skills 同级） | 缺口 A：无外部工具消费 | ~1 周 | 配置 excel/ppt MCP server 后，子任务能调用 `excel__read_sheet`；server 启动失败时任务正常完成；无僵尸进程（K12 ≥95%） |
+| **S9-B**（12 月） | **产物导出路径**：新增 `artifacts.py`（collect_from_worktree + export + render_export_summary）；`__artifacts__/` 约定目录（声明制）；`--artifact-dir` CLI 参数 + `artifact_dir` config；`pipeline.py` 清理 worktree 前扫描收集；TASK.md prompt 注入产物目录约定；final report 列出导出清单 | 缺口 B：无产物导出 | ~4 天 | 子任务写 `__artifacts__/report.pptx` + `--artifact-dir ~/reports` → 文件出现在目标目录；不指定时向后兼容（K13 = 100%） |
 | **S9-C**（次年 1 月） | **端到端场景验证 + 文档**：Office MCP 集成指南（excel/ppt/ms365 三套配置示例 + openpyxl 公式陷阱说明）；eval_suite 新增"文档生成"类任务（验证产物完整率）；`tool_filter`/`scope` 调优指南 | 闭环验证 | ~3 天 | 端到端：`agent_go run ... --artifact-dir` 生成完整 PPT 报告并导出成功 |
 
-**S9 出关口径**：K10（MCP 工具调用成功率）≥95%、K11（产物导出完整率）=100%、$/pass 不劣化（外部工具调用的 token 计入 metering，受门禁约束）。
+**S9 出关口径**：K12（MCP 工具调用成功率）≥95%、K13（产物导出完整率）=100%、$/pass 不劣化（外部工具调用的 token 计入 metering，受门禁约束）。
 
 依赖关系：S9-A 与 S9-B 可并行（A 改 pipeline 启动/收尾的连接管理，B 改 worktree 清理前的产物收集，两者改动点不重叠）；S9-C 依赖 A+B 完成。**S9 整体不阻塞年度出关口径**——它是能力扩展，K1/K8/K4 核心指标不依赖它。
 
@@ -184,7 +184,7 @@ K4≤$0.04            K4≤$0.02            K9≥10
 7. ~~核心解耦~~ ✅ 已完成（2026-07-25，evaluator/notify/goal/skills/agent_loop 全部动态 import + try/except）
 8. ~~CLI/MCP 交互层改进~~ ✅ 已完成（2026-08-01，MCP 6 tools + Resources/Prompts 原语 + HTTP/SSE transport + 错误 fix 字段 + CLI 恢复引导，1362 测试全绿）
 9. ~~PRD/Roadmap 文档同步~~ ✅ 已完成（2026-08-01，prd.md 新增「CLI 与 MCP 交互层」章节，roadmap 快照更新）
-10. ~~办公能力扩展设计稿~~ ✅ 已完成（2026-08-01，[design/office-capability-extension.md](design/office-capability-extension.md)；prd.md 新增「办公能力扩展」章节 + K10/K11；roadmap 排入 S9）
+10. ~~办公能力扩展设计稿~~ ✅ 已完成（2026-08-01，[design/office-capability-extension.md](design/office-capability-extension.md)；prd.md 新增「办公能力扩展」章节 + K12/K13；roadmap 排入 S9）
 11. ~~CLI/MCP 保留项落地~~ ✅ 已完成（2026-08-01，波次进度卡片 / skills show / 多 profile / 增量 Plan Diff / Sampling 原语，1387 测试全绿，改进清单全部闭环）
 
 **下一批**：对照 bench 真实执行（3 模型 × 22 任务 × 3 重复）→ `eval models` 决策矩阵 + `eval judge` 交叉评判，建立 K1/K8/K4 真实基线；KPI 数据采集验证（K1/K8 是否因 S2/S4 提升）；**S9-A MCP 消费层**（`mcp_client.py` + `mcp_servers` config）待启动。
