@@ -28,7 +28,7 @@ def mock_tasks(tmp_path: Path, monkeypatch) -> Generator[dict, None, None]:
         "task": "测试任务 A",
         "status": "completed",
         "repo": "/tmp/repo-a",
-        "created_at": "2026-08-02T10:00:00",
+        "created": "2026-08-02T10:00:00",
         "subtasks": [
             {"id": "sub-1", "title": "子任务1", "difficulty": "easy",
              "agent_type": "developer", "depends_on": [], "skills": ["test"]},
@@ -37,18 +37,23 @@ def mock_tasks(tmp_path: Path, monkeypatch) -> Generator[dict, None, None]:
              "description": "描述2", "verification": ["pytest -q"],
              "files_hint": ["a.py"], "risks": ["风险"]},
         ],
+        # 注意：results 故意按完成顺序（sub-2 先完成）存放，且带 subtask_id ——
+        # 复现运行中任务的真实 meta.json 形态，验证 API 按 subtask_id 匹配
+        # 而非按下标配对（下标配对会把 sub-1 显示成 failed）
         "results": [
-            {"status": "completed", "duration_sec": 10.5, "retry_count": 0,
-             "verify_ok": True, "exit_code": 0, "summary": "完成",
-             "agent_type_source": "llm", "worktree": "/tmp/wt/sub-1",
+            {"subtask_id": "sub-2", "status": "failed", "duration_sec": 30.0,
+             "retry_count": 2, "verify_ok": False, "exit_code": 1,
+             "summary": "失败", "failure_reason": "测试未通过",
+             "worktree": "/tmp/wt/sub-2",
+             "verification_results": [{"command": "pytest", "type": "shell",
+                                       "passed": False, "duration_sec": 3.0}]},
+            {"subtask_id": "sub-1", "status": "completed", "duration_sec": 10.5,
+             "retry_count": 0, "verify_ok": True, "exit_code": 0,
+             "summary": "完成", "agent_type_source": "llm",
+             "worktree": "/tmp/wt/sub-1",
              "verification_results": [{"command": "pytest", "type": "shell",
                                        "passed": True, "duration_sec": 2.0}],
              "change_stats": {"files_changed": 1}},
-            {"status": "failed", "duration_sec": 30.0, "retry_count": 2,
-             "verify_ok": False, "exit_code": 1, "summary": "失败",
-             "failure_reason": "测试未通过", "worktree": "/tmp/wt/sub-2",
-             "verification_results": [{"command": "pytest", "type": "shell",
-                                       "passed": False, "duration_sec": 3.0}]},
         ],
     }), encoding="utf-8")
     (task1 / "execution.log").write_text(
@@ -145,6 +150,19 @@ class TestApiTaskDetail:
         except urllib.error.HTTPError as e:
             assert e.code == 404
 
+    def test_results_matched_by_subtask_id_not_index(self, base_url, mock_tasks):
+        """results 乱序（完成顺序 ≠ 子任务顺序）时仍按 subtask_id 配对。
+
+        fixture 中 results[0] 是 sub-2(failed)、results[1] 是 sub-1(completed)，
+        下标配对会把 sub-1 错标为 failed。
+        """
+        _, d = _get(f"{base_url}/api/tasks/{mock_tasks['task1']}")
+        by_id = {s["id"]: s for s in d["subtasks"]}
+        assert by_id["sub-1"]["status"] == "completed"
+        assert by_id["sub-1"]["verify_ok"] is True
+        assert by_id["sub-2"]["status"] == "failed"
+        assert by_id["sub-2"]["retry_count"] == 2
+
 
 class TestApiSubtaskDetail:
     """W3: 子任务展开显示验证结果/改动统计。"""
@@ -179,6 +197,18 @@ class TestApiSubtaskLog:
         # task2 无 execution.log
         _, d = _get(f"{base_url}/api/tasks/{mock_tasks['task2']}/sub-1/log")
         assert d["lines"] == []
+
+    def test_log_sub1_not_confused_with_sub10(self, base_url, mock_tasks):
+        """sub-1 不能误命中 sub-10 的日志行（子串匹配回归）。"""
+        td = mock_tasks["dir"] / mock_tasks["task1"]
+        (td / "execution.log").write_text(
+            "[subtask] sub-10 start\nsub-10 exclusive line\n"
+            "[subtask] sub-1 start\nsub-1 own line\n",
+            encoding="utf-8")
+        _, d = _get(f"{base_url}/api/tasks/{mock_tasks['task1']}/sub-1/log")
+        texts = [ln["text"] for ln in d["lines"]]
+        assert any("sub-1 own line" in t for t in texts)
+        assert not any("sub-10 exclusive line" in t for t in texts)
 
 
 class TestApiMetering:
@@ -236,6 +266,15 @@ class TestAuth:
                 headers={"Authorization": "Bearer sec"})
             with urllib.request.urlopen(req) as r:
                 assert r.status == 200
+            # query token（EventSource 无法自定义请求头的场景）→ 200
+            with urllib.request.urlopen(f"{base}/api/tasks?token=sec") as r:
+                assert r.status == 200
+            # 错误 query token → 401
+            try:
+                urllib.request.urlopen(f"{base}/api/tasks?token=bad")
+                assert False, "should 401"
+            except urllib.error.HTTPError as e:
+                assert e.code == 401
             # 首页无需鉴权
             with urllib.request.urlopen(f"{base}/") as r:
                 assert r.status == 200
@@ -498,8 +537,8 @@ class TestBaseline:
         cost_bl.write_text(json.dumps({"dollar_per_pass_rate": 0.05}), encoding="utf-8")
         monkeypatch.setattr(ws, "_resolve_workspace_file",
                             lambda n: bench_bl if "baseline.jsonl" in n else cost_bl)
-        # cost_baseline 用 CONFIG_PATH.parent，patch config
-        monkeypatch.setattr("agent_go.config.CONFIG_PATH", cost_bl)
+        # cost_baseline 用 CONFIG_PATH.parent，patch web_server 模块级引用
+        monkeypatch.setattr(ws, "CONFIG_PATH", cost_bl)
         d = ws.api_baseline()
         assert d["bench_baseline"]["total_runs"] == 1
         assert d["cost_gate_baseline"]["data"]["dollar_per_pass_rate"] == 0.05
@@ -525,14 +564,27 @@ class TestConfig:
         assert "..." in key
         assert key.startswith("sk-1") and key.endswith("cdef")
 
-    def test_config_short_key_preserved(self, mock_tasks, monkeypatch):
-        """短 key（≤8 字符）不脱敏（保留原样避免信息全丢）。"""
+    def test_config_short_key_fully_masked(self, mock_tasks, monkeypatch):
+        """短 key（≤8 字符）完全遮蔽为 ***（不透出任何字符）。"""
         import agent_go.web_server as ws
         fake_cfg = {"plan_api": {"api_key": "short"}}
         monkeypatch.setattr(ws, "load_config", lambda: fake_cfg)
         monkeypatch.setattr(ws, "CONFIG_PATH", mock_tasks["dir"] / "config.json")
         d = ws.api_config()
-        assert d["config"]["plan_api"]["api_key"] == "short"
+        assert d["config"]["plan_api"]["api_key"] == "***"
+
+    def test_config_masks_keys_in_lists(self, mock_tasks, monkeypatch):
+        """list 嵌套 dict 里的敏感字段也要脱敏。"""
+        import agent_go.web_server as ws
+        fake_cfg = {"backends": [{"name": "b1", "token": "tok-123456789"},
+                                 {"name": "b2"}]}
+        monkeypatch.setattr(ws, "load_config", lambda: fake_cfg)
+        monkeypatch.setattr(ws, "CONFIG_PATH", mock_tasks["dir"] / "config.json")
+        d = ws.api_config()
+        masked = d["config"]["backends"][0]["token"]
+        assert masked != "tok-123456789"
+        assert "..." in masked
+        assert d["config"]["backends"][1]["name"] == "b2"  # 非敏感字段不受影响
 
 
 class TestStorage:
