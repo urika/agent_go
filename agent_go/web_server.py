@@ -934,6 +934,12 @@ def main(args: Any = None) -> None:  # CLI 入口
     """agent_go web [--host H] [--port P] [--token T]"""
     import argparse
 
+    # 兼容两种调用：CLI 分发传入已解析 Namespace（args 无 .split 方法），
+    # 直接命令行调用传入 argv 列表。
+    if isinstance(args, argparse.Namespace):
+        serve_web(host=args.host, port=args.port, token=args.token)
+        return
+
     parser = argparse.ArgumentParser(prog="agent_go web",
                                      description="只读 Web 观察平台")
     parser.add_argument("--host", default="127.0.0.1")
