@@ -188,7 +188,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
 | `tui.py` | Curses status dashboard |
 | `workflow_gen.py` | GitHub Actions workflow generation (ci command) |
-| `web_server.py` | Read-only Web observability platform: task list/subtask detail/logs/metering/replay, stdlib http.server + SPA |
+| `web_server.py` | Read-only Web observability platform: tasks/overview(cost trend)/cost(by_model/role)/models/config/storage, stdlib http.server + SPA |
 | `lint.py` | AST-based static checks: suspicious for-loop body truncation |
 
 ## Key Design Decisions

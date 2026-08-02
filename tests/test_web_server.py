@@ -273,3 +273,297 @@ class TestServeConfig:
         assert sig.parameters["token"].default is None
         assert sig.parameters["port"].default == 8091
         assert sig.parameters["host"].default == "127.0.0.1"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 路径穿越防护（P0-1）
+# ═══════════════════════════════════════════════════════════════
+
+class TestPathTraversal:
+    """task_id / sub_id 严格校验，防路径穿越。"""
+
+    @pytest.mark.parametrize("tid", [
+        "../../etc/passwd", "..%2F..%2Fetc", "task-../../../etc",
+        "task-20260802-100000-111-aaaa/../../etc", "task-/etc/passwd",
+        "", "task-", "task-2026", "not-a-task",
+    ])
+    def test_invalid_task_id_rejected(self, tid):
+        import agent_go.web_server as ws
+        assert ws._valid_task_id(tid) is False
+        assert ws._task_dir(tid) is None
+        assert ws.api_task(tid) is None
+        assert ws.api_metering(tid) is None
+        assert ws.api_plan(tid) is None
+        assert ws.api_replay(tid) is None
+        assert ws.api_assessment(tid) is None
+
+    @pytest.mark.parametrize("tid", [
+        "task-20260802-100000-111-aaaa",  # 新格式
+        "task-20260515-103800",            # 旧格式
+    ])
+    def test_valid_task_id_accepted(self, tid):
+        import agent_go.web_server as ws
+        assert ws._valid_task_id(tid) is True
+
+    @pytest.mark.parametrize("sid", [
+        "sub/../../etc", "sub-1/../other", "../etc", "sub 1", "sub\\x00",
+    ])
+    def test_invalid_sub_id_rejected(self, sid):
+        import agent_go.web_server as ws
+        assert ws._valid_sub_id(sid) is False
+
+    def test_valid_sub_id_accepted(self):
+        import agent_go.web_server as ws
+        for s in ["sub-1", "sub_2", "subA", "1"]:
+            assert ws._valid_sub_id(s) is True
+
+
+# ═══════════════════════════════════════════════════════════════
+# 全局视图（P0-2）
+# ═══════════════════════════════════════════════════════════════
+
+class TestOverview:
+    """总览大盘：KPI + 7 天成本趋势。"""
+
+    def test_overview_kpi(self, mock_tasks):
+        import agent_go.web_server as ws
+        d = ws.api_overview()
+        assert "kpi" in d
+        # mock_tasks 造了 2 个任务（1 completed + 1 running）
+        assert d["kpi"]["total"] == 2
+        assert d["kpi"]["completed"] == 1
+        assert d["kpi"]["running"] == 1
+        assert d["kpi"]["today_cost"] >= 0  # 不崩溃即可（ts 可能不含今日）
+
+    def test_overview_cost_trend_7d(self, mock_tasks):
+        import agent_go.web_server as ws
+        d = ws.api_overview()
+        trend = d["cost_trend_7d"]
+        assert len(trend) == 7
+        # 每天都有 date + cost 字段
+        for day in trend:
+            assert "date" in day and "cost" in day
+            assert day["cost"] >= 0
+
+
+class TestCost:
+    """全局成本分析。"""
+
+    def test_cost_aggregation(self, mock_tasks):
+        import agent_go.web_server as ws
+        d = ws.api_cost()
+        # mock_tasks 的 task1 metering 有 0.01 + 0.02 = 0.03
+        assert d["total_cost"] >= 0.03
+        assert len(d["by_model"]) >= 1
+        assert len(d["by_role"]) >= 1
+        # by_model 至少有 m1 或 deepseek-v4-pro
+        model_names = [m["name"] for m in d["by_model"]]
+        assert "m1" in model_names or "deepseek-v4-pro" in model_names
+
+    def test_top_tasks_sorted_desc(self, mock_tasks):
+        import agent_go.web_server as ws
+        d = ws.api_cost()
+        tops = d["top_tasks"]
+        if len(tops) >= 2:
+            assert tops[0]["cost"] >= tops[1]["cost"]
+        assert all("task_id" in t and "cost" in t for t in tops)
+
+    def test_by_model_has_pct(self, mock_tasks):
+        import agent_go.web_server as ws
+        d = ws.api_cost()
+        for m in d["by_model"]:
+            assert "pct" in m and 0 <= m["pct"] <= 100
+
+
+class TestModels:
+    """模型生产力对比。"""
+
+    def test_production_aggregation(self, mock_tasks):
+        import agent_go.web_server as ws
+        d = ws.api_models()
+        # mock_tasks 的 worker 调用用 m1
+        prod = d["production"]
+        assert isinstance(prod, list)
+        # 应该至少有 m1
+        models = [p["model"] for p in prod]
+        assert "m1" in models
+        m1 = next(p for p in prod if p["model"] == "m1")
+        assert m1["calls"] >= 1
+        assert m1["cost"] > 0
+        assert m1["task_count"] >= 1
+
+    def test_bench_may_be_empty(self, mock_tasks):
+        """bench 数据可选（无 results.jsonl 时不崩溃）。"""
+        import agent_go.web_server as ws
+        d = ws.api_models()
+        assert "bench" in d
+        assert isinstance(d["bench"], list)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 数据对象黑洞（P1）
+# ═══════════════════════════════════════════════════════════════
+
+class TestAssessment:
+    """假阳性评估事件。"""
+
+    def test_assessment_with_data(self, mock_tasks):
+        import agent_go.web_server as ws
+        # 造 assessment.jsonl
+        td = mock_tasks["dir"] / mock_tasks["task1"]
+        (td / "assessment.jsonl").write_text("\n".join([
+            json.dumps({"passed": True, "confidence": 0.9,
+                        "evaluator_model": "gpt-5", "reason": "正确"}),
+            json.dumps({"passed": False, "confidence": 0.3,
+                        "evaluator_model": "gpt-5", "reason": "错误"}),
+        ]) + "\n", encoding="utf-8")
+        d = ws.api_assessment(mock_tasks["task1"])
+        assert d["total"] == 2
+        assert d["passed"] == 1
+        assert d["failed"] == 1
+        assert d["false_positive_rate"] == 0.5
+        assert d["by_evaluator_model"]["gpt-5"] == 2
+
+    def test_assessment_empty(self, mock_tasks):
+        """任务无 assessment.jsonl 时返回空聚合（不 None）。"""
+        import agent_go.web_server as ws
+        d = ws.api_assessment(mock_tasks["task2"])
+        assert d["total"] == 0
+        assert d["false_positive_rate"] == 0
+
+    def test_assessment_invalid_task_id(self, mock_tasks):
+        import agent_go.web_server as ws
+        assert ws.api_assessment("../../etc") is None
+
+
+class TestCrossJudge:
+    """交叉评判矩阵。"""
+
+    def test_cross_judge_with_data(self, mock_tasks, monkeypatch):
+        import agent_go.web_server as ws
+        # 造 cross_judge_scores.jsonl（在 cwd 下）
+        scores_file = mock_tasks["dir"] / "cross_judge_scores.jsonl"
+        monkeypatch.setattr(ws.Path, "cwd", staticmethod(lambda: mock_tasks["dir"]))
+        scores_file.write_text("\n".join([
+            json.dumps({"candidate_model": "claude", "judge_model": "gpt-5",
+                        "semantic_score": 4.0, "false_positive": False}),
+            json.dumps({"candidate_model": "claude", "judge_model": "claude",
+                        "semantic_score": -1, "error": "自评禁止（LLM-as-Judge 自偏）"}),
+        ]) + "\n", encoding="utf-8")
+        d = ws.api_cross_judge()
+        assert d["total_records"] == 2
+        assert d["self_blocked"] == 1
+
+    def test_cross_judge_empty(self, mock_tasks, monkeypatch):
+        import agent_go.web_server as ws
+        monkeypatch.setattr(ws.Path, "cwd", staticmethod(lambda: mock_tasks["dir"]))
+        d = ws.api_cross_judge()
+        assert d["total_records"] == 0
+        assert d["self_blocked"] == 0
+
+
+class TestBenchResults:
+    """bench 模型对照结果。"""
+
+    def test_bench_results(self, mock_tasks, monkeypatch):
+        import agent_go.web_server as ws
+        # 让 _bench_results_path 指向 tmp_path 下的文件
+        bench_file = mock_tasks["dir"] / "results.jsonl"
+        bench_file.write_text("\n".join([
+            json.dumps({"model": "m1", "completed": 3, "failed": 1,
+                        "total_cost_usd": 0.5, "pass_rate": 0.75}),
+            json.dumps({"model": "m2", "completed": 2, "failed": 2,
+                        "total_cost_usd": 0.3, "pass_rate": 0.5}),
+        ]) + "\n", encoding="utf-8")
+        # patch _bench_results_path
+        monkeypatch.setattr(ws, "_bench_results_path", lambda: bench_file)
+        d = ws.api_bench_results()
+        assert d["total_runs"] == 2
+        assert len(d["by_model"]) == 2
+        m1 = next(m for m in d["by_model"] if m["model"] == "m1")
+        assert m1["runs"] == 1
+        assert m1["avg_pass_rate"] == 0.75
+
+
+class TestBaseline:
+    """baseline（bench 裸跑 + cost 门禁）。"""
+
+    def test_baseline_returns_both(self, mock_tasks, monkeypatch):
+        import agent_go.web_server as ws
+        # patch 路径让两个 baseline 都指向 tmp
+        bench_bl = mock_tasks["dir"] / "baseline.jsonl"
+        bench_bl.write_text(json.dumps({"model": "claude", "completed": 1}) + "\n",
+                            encoding="utf-8")
+        cost_bl = mock_tasks["dir"] / "cost_baseline.json"
+        cost_bl.write_text(json.dumps({"dollar_per_pass_rate": 0.05}), encoding="utf-8")
+        monkeypatch.setattr(ws, "_resolve_workspace_file",
+                            lambda n: bench_bl if "baseline.jsonl" in n else cost_bl)
+        # cost_baseline 用 CONFIG_PATH.parent，patch config
+        monkeypatch.setattr("agent_go.config.CONFIG_PATH", cost_bl)
+        d = ws.api_baseline()
+        assert d["bench_baseline"]["total_runs"] == 1
+        assert d["cost_gate_baseline"]["data"]["dollar_per_pass_rate"] == 0.05
+
+
+# ═══════════════════════════════════════════════════════════════
+# 配置查看 + 磁盘运维（P2）
+# ═══════════════════════════════════════════════════════════════
+
+class TestConfig:
+    """配置查看（含 api_key 脱敏）。"""
+
+    def test_config_masks_api_key(self, mock_tasks, monkeypatch):
+        import agent_go.web_server as ws
+        # patch load_config 返回带 api_key 的配置
+        fake_cfg = {"plan_api": {"api_key": "sk-1234567890abcdef",
+                                  "model": "m1"}}
+        monkeypatch.setattr(ws, "load_config", lambda: fake_cfg)
+        monkeypatch.setattr(ws, "CONFIG_PATH", mock_tasks["dir"] / "config.json")
+        d = ws.api_config()
+        key = d["config"]["plan_api"]["api_key"]
+        assert key != "sk-1234567890abcdef"  # 已脱敏
+        assert "..." in key
+        assert key.startswith("sk-1") and key.endswith("cdef")
+
+    def test_config_short_key_preserved(self, mock_tasks, monkeypatch):
+        """短 key（≤8 字符）不脱敏（保留原样避免信息全丢）。"""
+        import agent_go.web_server as ws
+        fake_cfg = {"plan_api": {"api_key": "short"}}
+        monkeypatch.setattr(ws, "load_config", lambda: fake_cfg)
+        monkeypatch.setattr(ws, "CONFIG_PATH", mock_tasks["dir"] / "config.json")
+        d = ws.api_config()
+        assert d["config"]["plan_api"]["api_key"] == "short"
+
+
+class TestStorage:
+    """磁盘占用 + 孤儿目录。"""
+
+    def test_storage_aggregation(self, mock_tasks):
+        import agent_go.web_server as ws
+        d = ws.api_storage()
+        assert d["task_count"] == 2  # mock_tasks 造了 2 个
+        assert d["total_size"] > 0  # 字节数（meta+log+metering 至少几百字节）
+        assert "total_size_mb" in d
+        assert len(d["top_tasks"]) == 2
+        # 排序：大的在前
+        if len(d["top_tasks"]) >= 2:
+            assert d["top_tasks"][0]["size"] >= d["top_tasks"][1]["size"]
+
+    def test_storage_detects_orphans(self, mock_tasks):
+        """无 meta.json 的目录被识别为孤儿。"""
+        import agent_go.web_server as ws
+        orphan = mock_tasks["dir"] / "task-20260802-900000-999-cccc"
+        orphan.mkdir()
+        (orphan / "execution.log").write_text("log only", encoding="utf-8")
+        d = ws.api_storage()
+        assert d["orphan_count"] >= 1
+        orphan_names = [o["name"] for o in d["orphans"]]
+        assert orphan.name in orphan_names
+
+    def test_storage_empty_dir(self, tmp_path, monkeypatch):
+        """AGENT_GO_DIR 不存在时安全返回。"""
+        import agent_go.web_server as ws
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", tmp_path / "nonexistent")
+        d = ws.api_storage()
+        assert d["total_size"] == 0
+        assert d["task_count"] == 0

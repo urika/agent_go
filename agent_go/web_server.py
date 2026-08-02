@@ -21,14 +21,17 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
-from .config import AGENT_GO_DIR
+from .config import AGENT_GO_DIR, CONFIG_PATH, load_config
 from .console import _LazyConsole
+# 复用 eval 的 JSONL/JSON 读取（与 bench/cross_judge 同源，避免实现漂移）
+from .eval import _read_jsonl, _read_json
 
 logger = logging.getLogger(__name__)
 console = _LazyConsole()
@@ -38,29 +41,29 @@ MAX_LOG_LINE = 2000  # execution.log 单行截断长度（防大响应）
 # 任务目录前缀：只有匹配 task-* 的目录才纳入观察（与 cmd_list 一致）
 _TASK_PREFIX = "task-"
 
+# task_id 合法格式：task-YYYYMMDD-HHMMSS[-mmm-hhhh]（兼容新旧两种格式）
+# 严格校验防止路径穿越（../../etc/passwd 之类）
+_TASK_ID_RE = re.compile(r"^task-\d{8}-\d{6}(?:-\d{3}-[0-9a-f]{4})?$")
+# sub_id 合法格式：字母数字 + 连字符/下划线，禁止路径分隔符
+_SUB_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-def _read_json(path: Path) -> Optional[dict]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+
+def _valid_task_id(task_id: str) -> bool:
+    """校验 task_id 格式，防止路径穿越。"""
+    return bool(_TASK_ID_RE.match(task_id))
+
+
+def _valid_sub_id(sub_id: str) -> bool:
+    """校验 sub_id 格式，禁止路径分隔符与 ..。"""
+    return bool(_SUB_ID_RE.match(sub_id))
+
+
+def _task_dir(task_id: str) -> Optional[Path]:
+    """返回校验通过的任务目录 Path，不合法或不存在返回 None。"""
+    if not _valid_task_id(task_id):
         return None
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    records = []
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        pass
-    return records
+    td = AGENT_GO_DIR / task_id
+    return td if td.is_dir() else None
 
 
 def _list_task_dirs() -> list[Path]:
@@ -72,7 +75,7 @@ def _list_task_dirs() -> list[Path]:
     )
 
 
-def _task_meta(task_dir: Path) -> Optional[dict]:
+def _task_meta(task_dir: Path) -> dict:
     return _read_json(task_dir / "meta.json")
 
 
@@ -81,7 +84,7 @@ def api_tasks() -> list[dict]:
     out = []
     for td in _list_task_dirs():
         meta = _task_meta(td)
-        if not meta:
+        if not meta:  # eval._read_json 不存在/坏文件返回 {}
             continue
         results = meta.get("results", []) or []
         # 从 results 汇总执行指标
@@ -105,15 +108,15 @@ def api_tasks() -> list[dict]:
             "cost_usd": round(cost, 4),
             "total_elapsed_sec": round(total_elapsed, 1),
             "total_retries": retries,
-            "created": meta.get("created_at", ""),
+            "created": meta.get("created", ""),
             "mtime": td.joinpath("meta.json").stat().st_mtime,
         })
     return sorted(out, key=lambda x: x["mtime"], reverse=True)
 
 
 def api_task(task_id: str) -> Optional[dict]:
-    td = AGENT_GO_DIR / task_id
-    if not td.is_dir() or not td.name.startswith(_TASK_PREFIX):
+    td = _task_dir(task_id)
+    if td is None:
         return None
     meta = _task_meta(td)
     if not meta:
@@ -147,7 +150,7 @@ def api_task(task_id: str) -> Optional[dict]:
         "task": meta.get("task", ""),
         "status": meta.get("status", "unknown"),
         "repo": meta.get("repo", ""),
-        "created_at": meta.get("created_at", ""),
+        "created_at": meta.get("created", ""),
         "subtasks": items,
         "meta": {
             k: meta.get(k) for k in ("planner_model", "source_batch")
@@ -157,8 +160,10 @@ def api_task(task_id: str) -> Optional[dict]:
 
 
 def api_subtask_detail(task_id: str, sub_id: str) -> Optional[dict]:
-    td = AGENT_GO_DIR / task_id
-    if not td.is_dir():
+    if not _valid_sub_id(sub_id):
+        return None
+    td = _task_dir(task_id)
+    if td is None:
         return None
     meta = _task_meta(td)
     if not meta:
@@ -208,7 +213,11 @@ def _extract_subtask_log(task_id: str, sub_id: str, limit: int = 400) -> list[di
     匹配规则：以子任务启动/提交标记为段落边界（如含 sub_id 的 INFO/DEBUG 行）。
     返回 [{line_no, level, message}]，每行截断 MAX_LOG_LINE 字符。
     """
-    td = AGENT_GO_DIR / task_id
+    if not _valid_sub_id(sub_id):
+        return []
+    td = _task_dir(task_id)
+    if td is None:
+        return []
     log_path = td / "execution.log"
     if not log_path.exists():
         return []
@@ -250,8 +259,8 @@ def _extract_subtask_log(task_id: str, sub_id: str, limit: int = 400) -> list[di
 
 
 def api_metering(task_id: str) -> Optional[dict]:
-    td = AGENT_GO_DIR / task_id
-    if not td.is_dir():
+    td = _task_dir(task_id)
+    if td is None:
         return None
     records = _read_jsonl(td / "metering.jsonl")
     by_role: dict[str, dict] = {}
@@ -296,8 +305,8 @@ def api_metering(task_id: str) -> Optional[dict]:
 
 def api_replay(task_id: str) -> Optional[dict]:
     from .replay import _build_timeline, _collect_summary
-    td = AGENT_GO_DIR / task_id
-    if not td.is_dir():
+    td = _task_dir(task_id)
+    if td is None:
         return None
     data = _read_json(td / "meta.json")
     if not data:
@@ -312,8 +321,8 @@ def api_replay(task_id: str) -> Optional[dict]:
 
 
 def api_plan(task_id: str) -> Optional[dict]:
-    td = AGENT_GO_DIR / task_id
-    if not td.is_dir():
+    td = _task_dir(task_id)
+    if td is None:
         return None
     plan_md = ""
     plan_md_path = td / "PLAN.md"
@@ -332,6 +341,427 @@ def api_plan(task_id: str) -> Optional[dict]:
                 "content": (p.read_text(encoding="utf-8", errors="replace") or "")[:20000],
             })
     return {"plan_md": plan_md, "versions": versions}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 全局视图（跨任务聚合）— 解决观测缺口 B：无全局聚合视图
+# ═══════════════════════════════════════════════════════════════
+
+def _iter_all_metering() -> list[dict]:
+    """遍历所有任务的 metering.jsonl，返回扁平化的事件列表（带 task_id）。
+
+    用于跨任务成本/模型分析。每条附加 task_id 字段以便溯源。
+    """
+    out = []
+    for td in _list_task_dirs():
+        for rec in _read_jsonl(td / "metering.jsonl"):
+            rec.setdefault("task_id", td.name)
+            out.append(rec)
+    return out
+
+
+def _parse_date(ts: str) -> str:
+    """从 metering ts（ISO 格式）提取 YYYY-MM-DD，失败返回空。"""
+    if not ts or not isinstance(ts, str):
+        return ""
+    # 形如 2026-08-02T16:04:20 或 2026-08-02 16:04:20
+    return ts[:10] if len(ts) >= 10 and ts[4] == "-" else ""
+
+
+def api_overview() -> dict:
+    """总览大盘：KPI 卡片 + 近 7 天成本趋势 + 健康告警。
+
+    数据源：遍历所有任务的 meta.json + metering.jsonl。
+    """
+    today = time.strftime("%Y-%m-%d")
+    task_counts = {"total": 0, "running": 0, "completed": 0, "failed": 0,
+                   "blocked": 0, "today_completed": 0, "today_cost": 0.0}
+    cost_by_day: dict[str, float] = {}  # YYYY-MM-DD -> cost
+    dollar_per_pass_rate = None
+    completed_with_cost = 0
+    total_cost_for_pass = 0.0
+
+    for td in _list_task_dirs():
+        meta = _task_meta(td)
+        if not meta:
+            continue
+        task_counts["total"] += 1
+        status = meta.get("status", "")
+        if status in task_counts:
+            task_counts[status] += 1
+        created = meta.get("created", "")
+        if created.startswith(today) and status == "completed":
+            task_counts["today_completed"] += 1
+
+        results = meta.get("results", []) or []
+        completed = sum(1 for r in results if r.get("status") == "completed")
+
+        # 成本按天聚合（从 metering 的 ts）
+        metering = _read_jsonl(td / "metering.jsonl")
+        task_cost = 0.0
+        for rec in metering:
+            cost = rec.get("cost_usd", 0) or 0
+            task_cost += cost
+            day = _parse_date(rec.get("ts", ""))
+            if day:
+                cost_by_day[day] = cost_by_day.get(day, 0.0) + cost
+
+        # $/pass rate（completed > 0 时才计入）
+        if completed > 0 and task_cost > 0:
+            completed_with_cost += completed
+            total_cost_for_pass += task_cost
+
+    if completed_with_cost > 0:
+        dollar_per_pass_rate = round(total_cost_for_pass / completed_with_cost, 6)
+
+    task_counts["today_cost"] = round(cost_by_day.get(today, 0.0), 4)
+
+    # 近 7 天趋势
+    days_7 = []
+    for i in range(6, -1, -1):
+        d = time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400))
+        days_7.append({"date": d, "cost": round(cost_by_day.get(d, 0.0), 4)})
+
+    return {
+        "kpi": task_counts,
+        "dollar_per_pass_rate": dollar_per_pass_rate,
+        "cost_trend_7d": days_7,
+    }
+
+
+def api_cost() -> dict:
+    """全局成本分析：by_model / by_role 分解 + Top N 任务。
+
+    数据源：全部任务的 metering.jsonl（按 actual_model / role 聚合）。
+    """
+    by_model: dict[str, dict] = {}
+    by_role: dict[str, dict] = {}
+    task_costs: list[dict] = []
+    total_cost = 0.0
+
+    for td in _list_task_dirs():
+        metering = _read_jsonl(td / "metering.jsonl")
+        task_cost = sum(r.get("cost_usd", 0) or 0 for r in metering)
+        if task_cost > 0:
+            task_costs.append({"task_id": td.name, "cost": round(task_cost, 4)})
+        total_cost += task_cost
+        for rec in metering:
+            cost = rec.get("cost_usd", 0) or 0
+            model = rec.get("actual_model") or rec.get("virtual_model") or "unknown"
+            role = rec.get("role", "unknown")
+            m = by_model.setdefault(model, {"cost": 0.0, "calls": 0,
+                                            "prompt_tokens": 0, "completion_tokens": 0})
+            m["cost"] += cost
+            m["calls"] += 1
+            m["prompt_tokens"] += rec.get("prompt_tokens", 0) or 0
+            m["completion_tokens"] += rec.get("completion_tokens", 0) or 0
+            r = by_role.setdefault(role, {"cost": 0.0, "calls": 0})
+            r["cost"] += cost
+            r["calls"] += 1
+
+    # 排序 + 占比
+    def _with_pct(d: dict, total: float) -> list[dict]:
+        items = [{"name": k, **{kk: round(vv, 4) if isinstance(vv, float) else vv
+                                for kk, vv in v.items()},
+                  "pct": round(v["cost"] / total * 100, 2) if total > 0 else 0}
+                 for k, v in d.items()]
+        return sorted(items, key=lambda x: x["cost"], reverse=True)
+
+    task_costs.sort(key=lambda x: x["cost"], reverse=True)
+    return {
+        "total_cost": round(total_cost, 4),
+        "by_model": _with_pct(by_model, total_cost),
+        "by_role": _with_pct(by_role, total_cost),
+        "top_tasks": task_costs[:20],
+    }
+
+
+def api_models() -> dict:
+    """模型生产力对比：生产 metering 聚合 + bench results.jsonl 对照。
+
+    生产数据：从全部任务 metering 聚合每模型的 cost/calls/passes（passes 从
+    对应 meta.json 的 results completed 数派生）。
+    Bench 数据：读 eval_suite/results.jsonl（bench 产物），按 model 聚合。
+    """
+    # ── 生产数据 ──
+    prod: dict[str, dict] = {}
+    for td in _list_task_dirs():
+        meta = _task_meta(td)
+        if not meta:
+            continue
+        completed = sum(1 for r in (meta.get("results") or [])
+                        if r.get("status") == "completed")
+        for rec in _read_jsonl(td / "metering.jsonl"):
+            model = rec.get("actual_model") or rec.get("virtual_model") or "unknown"
+            # 只统计 worker 角色的（代表实际执行模型）
+            if rec.get("role") != "worker":
+                continue
+            m = prod.setdefault(model, {"cost": 0.0, "calls": 0, "tasks": set(),
+                                        "completed": 0})
+            m["cost"] += rec.get("cost_usd", 0) or 0
+            m["calls"] += 1
+            m["tasks"].add(td.name)
+            m["completed"] += completed  # 近似：每个 worker 调用关联任务 completed 数
+    prod_rows = [{
+        "model": k,
+        "cost": round(v["cost"], 4),
+        "calls": v["calls"],
+        "task_count": len(v["tasks"]),
+        "avg_cost_per_call": round(v["cost"] / v["calls"], 6) if v["calls"] else 0,
+    } for k, v in prod.items()]
+    prod_rows.sort(key=lambda x: x["cost"], reverse=True)
+
+    # ── Bench 数据 ──
+    bench_rows = []
+    bench_path = _bench_results_path()
+    if bench_path.exists():
+        from .bench import analyze_model_productivity
+        analysis = analyze_model_productivity(bench_path)
+        if "models" in analysis:
+            for model, info in analysis["models"].items():
+                bench_rows.append({
+                    "model": model,
+                    "sample_size": info.get("sample_size", 0),
+                    "avg_pass_rate": info.get("avg_pass_rate", 0),
+                    "avg_cost_usd": info.get("avg_cost_usd", 0),
+                    "dollar_per_pass": info.get("dollar_per_pass", 0),
+                    "recommendation": info.get("recommendation", ""),
+                })
+
+    return {"production": prod_rows, "bench": bench_rows}
+
+
+def _bench_results_path() -> Path:
+    """定位 eval_suite/results.jsonl（优先 cwd，回退仓库根）。"""
+    cwd_candidate = Path.cwd() / "eval_suite" / "results.jsonl"
+    if cwd_candidate.exists():
+        return cwd_candidate
+    # 回退：web_server.py 所在包的上两级（仓库根）
+    repo_root = Path(__file__).resolve().parent.parent
+    return repo_root / "eval_suite" / "results.jsonl"
+
+
+def _resolve_workspace_file(name: str) -> Path:
+    """定位工作区下的文件（优先 cwd，回退仓库根）。"""
+    cwd_candidate = Path.cwd() / name
+    if cwd_candidate.exists():
+        return cwd_candidate
+    repo_root = Path(__file__).resolve().parent.parent
+    return repo_root / name
+
+
+# ═══════════════════════════════════════════════════════════════
+# 数据对象黑洞（P1）— assessment / cross_judge / bench-results / baseline
+# ═══════════════════════════════════════════════════════════════
+
+def api_assessment(task_id: str) -> Optional[dict]:
+    """假阳性评估事件（task 级 assessment.jsonl）。
+
+    返回逐事件明细 + 聚合（按 passed/confidence 分布）。
+    """
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    records = _read_jsonl(td / "assessment.jsonl")
+    passed = sum(1 for r in records if r.get("passed"))
+    failed = sum(1 for r in records if not r.get("passed"))
+    by_model: dict[str, int] = {}
+    for r in records:
+        m = r.get("evaluator_model", "unknown")
+        by_model[m] = by_model.get(m, 0) + 1
+    return {
+        "total": len(records),
+        "passed": passed,
+        "failed": failed,
+        "false_positive_rate": round(failed / len(records), 4) if records else 0,
+        "by_evaluator_model": by_model,
+        "records": records[:200],  # 限制响应大小
+    }
+
+
+def api_cross_judge() -> dict:
+    """交叉评判矩阵（cross_judge_scores.jsonl）。
+
+    返回 candidate × judge 的评分矩阵 + 自评拦截统计。
+    """
+    path = _resolve_workspace_file("cross_judge_scores.jsonl")
+    records = _read_jsonl(path)
+    # 按 candidate_model × judge_model 聚合
+    matrix: dict[tuple[str, str], list[float]] = {}
+    self_blocked = 0
+    errors = 0
+    for r in records:
+        if r.get("error"):
+            if "自评禁止" in (r.get("error") or ""):
+                self_blocked += 1
+            else:
+                errors += 1
+            continue
+        cand = r.get("candidate_model", "?")
+        judge = r.get("judge_model", "?")
+        score = r.get("semantic_score", 0)
+        matrix.setdefault((cand, judge), []).append(score)
+
+    matrix_rows = [{
+        "candidate": cand, "judge": judge,
+        "avg_score": round(sum(scores) / len(scores), 2),
+        "samples": len(scores),
+        "avg_false_positive": None,  # 单独算
+    } for (cand, judge), scores in matrix.items()]
+
+    return {
+        "total_records": len(records),
+        "self_blocked": self_blocked,
+        "errors": errors,
+        "matrix": matrix_rows[:200],
+        "source_path": str(path),
+    }
+
+
+def api_bench_results() -> dict:
+    """bench 模型对照结果（eval_suite/results.jsonl）。"""
+    path = _bench_results_path()
+    records = _read_jsonl(path)
+    # 按 model 聚合
+    by_model: dict[str, dict] = {}
+    for r in records:
+        m = r.get("model", "?")
+        agg = by_model.setdefault(m, {"runs": 0, "completed": 0, "failed": 0,
+                                       "total_cost": 0.0, "pass_rates": []})
+        agg["runs"] += 1
+        agg["completed"] += r.get("completed", 0) or 0
+        agg["failed"] += r.get("failed", 0) or 0
+        agg["total_cost"] += r.get("total_cost_usd", 0) or 0
+        if r.get("pass_rate") is not None:
+            agg["pass_rates"].append(r["pass_rate"])
+
+    model_rows = [{
+        "model": m,
+        "runs": v["runs"],
+        "avg_pass_rate": round(sum(v["pass_rates"]) / len(v["pass_rates"]), 4)
+                         if v["pass_rates"] else 0,
+        "total_cost": round(v["total_cost"], 4),
+    } for m, v in by_model.items()]
+    model_rows.sort(key=lambda x: x["total_cost"], reverse=True)
+
+    return {
+        "total_runs": len(records),
+        "by_model": model_rows,
+        "records": records[:200],  # 最近 200 条
+        "source_path": str(path),
+    }
+
+
+def api_baseline() -> dict:
+    """claude 裸跑基线（eval_suite/baseline.jsonl）+ $/pass 门禁基线。
+
+    合并两个 baseline 概念：
+    1. bench baseline.jsonl（claude -p 裸跑对照）
+    2. cost_baseline.json（$/pass 门禁回归基线，全局）
+    """
+    # 1. bench baseline
+    bench_path = _resolve_workspace_file("eval_suite/baseline.jsonl")
+    bench_records = _read_jsonl(bench_path)
+
+    # 2. cost 门禁基线
+    from .config import CONFIG_PATH
+    cost_baseline_path = CONFIG_PATH.parent / "cost_baseline.json"
+    cost_baseline = _read_json(cost_baseline_path)
+
+    return {
+        "bench_baseline": {
+            "total_runs": len(bench_records),
+            "records": bench_records[:100],
+            "source_path": str(bench_path),
+        },
+        "cost_gate_baseline": {
+            "data": cost_baseline,
+            "source_path": str(cost_baseline_path),
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 配置查看（P2-1）+ 磁盘运维（P2-2）
+# ═══════════════════════════════════════════════════════════════
+
+def api_config() -> dict:
+    """只读展示用户配置（config.json + role_skill_map.json + 熔断器状态）。"""
+    config = load_config()
+    # 脱敏：隐藏 api_key（只保留前后 4 字符）
+    def _mask(d: dict) -> dict:
+        out = {}
+        for k, v in d.items():
+            if isinstance(v, dict):
+                out[k] = _mask(v)
+            elif k in ("api_key", "token") and isinstance(v, str) and len(v) > 8:
+                out[k] = v[:4] + "..." + v[-4:]
+            else:
+                out[k] = v
+        return out
+    config = _mask(config)
+
+    # role_skill_map
+    rsmap_path = CONFIG_PATH.parent / "role_skill_map.json"
+    role_skill_map = _read_json(rsmap_path) if rsmap_path.exists() else None
+
+    return {
+        "config": config,
+        "config_path": str(CONFIG_PATH),
+        "role_skill_map": role_skill_map,
+        "role_skill_map_path": str(rsmap_path),
+    }
+
+
+def api_storage() -> dict:
+    """磁盘占用分析：task 目录大小排行 + 孤儿目录（无 meta.json）检测。
+
+    数据源：遍历 AGENT_GO_DIR。用于运维（748+ 任务累积监控）。
+    """
+    if not AGENT_GO_DIR.exists():
+        return {"total_size": 0, "total_size_mb": 0.0,
+                "task_count": 0, "orphan_count": 0,
+                "top_tasks": [], "orphans": []}
+
+    def _dir_size(path: Path) -> int:
+        total = 0
+        for p in path.iterdir():
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+            elif p.is_dir():
+                total += _dir_size(p)
+        return total
+
+    tasks = []
+    orphans = []
+    total = 0
+    for d in AGENT_GO_DIR.iterdir():
+        if not d.is_dir() or not d.name.startswith(_TASK_PREFIX):
+            continue
+        try:
+            size = _dir_size(d)
+        except OSError:
+            continue
+        total += size
+        has_meta = (d / "meta.json").exists()
+        entry = {"name": d.name, "size": size, "has_meta": has_meta}
+        if has_meta:
+            tasks.append(entry)
+        else:
+            orphans.append(entry)
+
+    tasks.sort(key=lambda x: x["size"], reverse=True)
+    return {
+        "total_size": total,
+        "total_size_mb": round(total / 1024 / 1024, 2),
+        "task_count": len(tasks),
+        "orphan_count": len(orphans),
+        "top_tasks": tasks[:20],  # 最大的 20 个
+        "orphans": orphans,
+    }
 
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -446,6 +876,41 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[1] == "tasks" and parts[4] == "log":
                 data = _extract_subtask_log(parts[2], parts[3])
                 self._reply_json(200, {"lines": data})
+                return
+            # ── 全局视图（P0-2）──
+            if len(parts) == 2 and parts[1] == "overview":
+                self._reply_json(200, api_overview())
+                return
+            if len(parts) == 2 and parts[1] == "cost":
+                self._reply_json(200, api_cost())
+                return
+            if len(parts) == 2 and parts[1] == "models":
+                self._reply_json(200, api_models())
+                return
+            # ── 数据对象黑洞（P1）──
+            if len(parts) == 3 and parts[1] == "assessment":
+                data = api_assessment(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 2 and parts[1] == "cross-judge":
+                self._reply_json(200, api_cross_judge())
+                return
+            if len(parts) == 2 and parts[1] == "bench-results":
+                self._reply_json(200, api_bench_results())
+                return
+            if len(parts) == 2 and parts[1] == "baseline":
+                self._reply_json(200, api_baseline())
+                return
+            # ── 配置查看（P2-1）──
+            if len(parts) == 2 and parts[1] == "config":
+                self._reply_json(200, api_config())
+                return
+            # ── 磁盘运维（P2-2）──
+            if len(parts) == 2 and parts[1] == "storage":
+                self._reply_json(200, api_storage())
                 return
             if len(parts) == 2 and parts[1] == "events":
                 self._stream_events(query)
@@ -592,16 +1057,51 @@ _SPA_HTML = """<!DOCTYPE html>
   .kv-table td { padding:4px 8px; font-size:12px; }
   .diff-stats { font-size:12px; color:var(--dim); }
   .vline { width:1px; height:14px; background:var(--border); }
+  .nav-tabs { display:flex; gap:4px; margin-left:12px; }
+  .nav-tab { background:transparent; border:none; color:var(--dim);
+             padding:6px 12px; cursor:pointer; font-size:14px;
+             border-bottom:2px solid transparent; }
+  .nav-tab:hover { color:var(--text); }
+  .nav-tab.active { color:var(--blue); border-bottom-color:var(--blue); }
+  .kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+              gap:12px; margin-bottom:20px; }
+  .kpi-card { background:var(--panel); border:1px solid var(--border);
+              border-radius:8px; padding:14px 18px; }
+  .kpi-card .label { color:var(--dim); font-size:12px; margin-bottom:4px; }
+  .kpi-card .val { font-size:22px; font-weight:600; }
+  .kpi-card .val.green { color:var(--green); }
+  .kpi-card .val.red { color:var(--red); }
+  .kpi-card .val.yellow { color:var(--yellow); }
+  .section-title { font-size:15px; font-weight:600; margin:20px 0 10px;
+                   color:var(--text); border-left:3px solid var(--blue);
+                   padding-left:10px; }
+  .trend-chart { background:#0b0d11; border:1px solid var(--border);
+                 border-radius:8px; padding:16px; margin:10px 0; }
+  .json-view { background:#0b0d11; border:1px solid var(--border); border-radius:6px;
+               padding:10px; overflow:auto; font-size:12px;
+               font-family:"SF Mono",Menlo,Consolas,monospace;
+               white-space:pre-wrap; max-height:600px; }
+  .warn-banner { background:rgba(210,153,34,0.1); border:1px solid var(--yellow);
+                 border-radius:8px; padding:10px 14px; margin-bottom:16px;
+                 color:var(--yellow); }
 </style>
 </head>
 <body>
 <header>
   <h1>🌐 agent_go 观察平台</h1>
+  <nav class="nav-tabs">
+    <button class="nav-tab active" data-view="tasks">📋 任务</button>
+    <button class="nav-tab" data-view="overview">📊 总览</button>
+    <button class="nav-tab" data-view="cost">💰 成本</button>
+    <button class="nav-tab" data-view="models">🤖 模型</button>
+    <button class="nav-tab" data-view="config">⚙️ 配置</button>
+    <button class="nav-tab" data-view="storage">💾 运维</button>
+  </nav>
   <span class="badge" id="connBadge">连接中…</span>
   <div class="status" id="headerStatus"></div>
 </header>
 <div class="container">
-  <div class="filters">
+  <div id="filtersBar" class="filters">
     <input type="text" id="searchInput" placeholder="🔍 搜索任务/ID/描述…">
     <span id="statusFilters"></span>
     <button class="filter-btn" id="refreshBtn">🔄 刷新</button>
@@ -815,9 +1315,9 @@ function renderSubDetail(d) {
     '<div class="tab-panel active" data-panel="overview">'+
       '<div class="kv">'+
       '<dt>描述</dt><dd>'+esc(d.description||'')+'</dd>'+
-      '<dt>依赖</dt><dd>'+(d.depends_on.length?d.depends_on.join(', '):'—')+'</dd>'+
-      '<dt>文件</dt><dd>'+(d.files_hint.length?d.files_hint.join(', '):'—')+'</dd>'+
-      '<dt>技能</dt><dd>'+(d.skills.length?d.skills.join(', '):'—')+'</dd>'+
+      '<dt>依赖</dt><dd>'+(Array.isArray(d.depends_on)&&d.depends_on.length?d.depends_on.join(', '):'—')+'</dd>'+
+      '<dt>文件</dt><dd>'+(Array.isArray(d.files_hint)&&d.files_hint.length?d.files_hint.join(', '):'—')+'</dd>'+
+      '<dt>技能</dt><dd>'+(Array.isArray(d.skills)&&d.skills.length?d.skills.join(', '):'—')+'</dd>'+
       '<dt>Agent</dt><dd>'+esc(d.agent_type||'developer')+'（'+esc(r.agent_type_source||'default')+'）</dd>'+
       '<dt>状态</dt><dd>'+esc(r.status||'—')+'</dd>'+
       '<dt>耗时</dt><dd>'+fmtDur(r.duration_sec)+'</dd>'+
@@ -905,6 +1405,175 @@ function renderTimeline(d) {
     : '<div class="kv"><dt>无时间线</dt><dd></dd></div>';
 }
 
+// ── 视图切换 + 新视图渲染（P0-2 / P1 / P2）─────────────────
+let currentView = 'tasks';
+
+function switchView(name) {
+  currentView = name;
+  document.querySelectorAll('.nav-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.view === name);
+  });
+  // 只有任务视图显示 filters
+  document.getElementById('filtersBar').style.display = (name === 'tasks') ? '' : 'none';
+  const main = document.getElementById('mainView');
+  main.innerHTML = '<div class="loading">加载中…</div>';
+  try {
+    if (name === 'tasks') loadTasks();
+    else if (name === 'overview') loadOverview();
+    else if (name === 'cost') loadCost();
+    else if (name === 'models') loadModels();
+    else if (name === 'config') loadConfig();
+    else if (name === 'storage') loadStorage();
+  } catch (e) {
+    main.innerHTML = '<div class="err">'+esc(e.message)+'</div>';
+  }
+}
+
+async function loadOverview() {
+  const d = await api('/api/overview');
+  const k = d.kpi || {};
+  const dpr = d.dollar_per_pass_rate;
+  // KPI 卡片
+  let html = '<div class="kpi-grid">'+
+    kpiCard('任务总数', k.total||0, 'blue')+
+    kpiCard('运行中', k.running||0, k.running>0?'yellow':'')+
+    kpiCard('已完成', k.completed||0, 'green')+
+    kpiCard('失败', k.failed||0, k.failed>0?'red':'')+
+    kpiCard('今日完成', k.today_completed||0, 'green')+
+    kpiCard('今日成本', fmtCost(k.today_cost||0), '')+
+    kpiCard('$/pass rate', dpr!=null?('$'+Number(dpr).toFixed(4)):'—',
+            dpr!=null&&dpr>0.05?'red':'green')+
+    '</div>';
+  // 7 天成本趋势（SVG 柱状图）
+  html += '<div class="section-title">📈 近 7 天成本趋势</div>';
+  html += renderTrendChart(d.cost_trend_7d || []);
+  document.getElementById('mainView').innerHTML = html;
+}
+
+function kpiCard(label, val, color) {
+  const cls = color ? ' '+color : '';
+  return '<div class="kpi-card"><div class="label">'+esc(label)+'</div>'+
+    '<div class="val'+cls+'">'+esc(val)+'</div></div>';
+}
+
+function renderTrendChart(days) {
+  if (!days.length) return '<div class="kv"><dt>无数据</dt><dd></dd></div>';
+  const maxCost = Math.max(...days.map(d => d.cost), 0.01);
+  const w = 60, h = 120, pad = 30;
+  const totalW = days.length * (w + 10) + pad * 2;
+  const bars = days.map((d, i) => {
+    const barH = maxCost > 0 ? (d.cost / maxCost) * h : 0;
+    const x = pad + i * (w + 10);
+    const y = pad + h - barH;
+    return '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+barH+'" fill="var(--blue)" rx="3">'+
+      '<title>'+esc(d.date)+': $'+Number(d.cost).toFixed(4)+'</title></rect>'+
+      '<text x="'+(x+w/2)+'" y="'+(pad+h+18)+'" text-anchor="middle" fill="var(--dim)" font-size="11">'+esc(d.date.slice(5))+'</text>'+
+      '<text x="'+(x+w/2)+'" y="'+(y-5)+'" text-anchor="middle" fill="var(--text)" font-size="11">$'+Number(d.cost).toFixed(2)+'</text>';
+  }).join('');
+  return '<div class="trend-chart"><svg width="'+totalW+'" height="'+(pad*2+h+30)+'">'+
+    bars+'</svg></div>';
+}
+
+async function loadCost() {
+  const d = await api('/api/cost');
+  let html = '<div class="section-title">💵 全局成本总览</div>';
+  html += '<div class="kpi-grid">'+
+    kpiCard('总成本', fmtCost(d.total_cost||0), 'blue')+
+    '</div>';
+  // by_model
+  html += '<div class="section-title">按模型分解</div>';
+  const modelRows = (d.by_model||[]).map(m =>
+    '<tr><td>'+esc(m.name)+'</td><td>'+fmtCost(m.cost)+'</td><td>'+m.pct+'%</td>'+
+    '<td>'+m.calls+'</td><td>'+m.prompt_tokens+'</td><td>'+m.completion_tokens+'</td></tr>'
+  ).join('');
+  html += '<table><thead><tr><th>模型</th><th>成本</th><th>占比</th>'+
+    '<th>调用数</th><th>prompt tokens</th><th>completion tokens</th></tr></thead><tbody>'+modelRows+'</tbody></table>';
+  // by_role
+  html += '<div class="section-title">按角色分解</div>';
+  const roleRows = (d.by_role||[]).map(r =>
+    '<tr><td>'+esc(r.name)+'</td><td>'+fmtCost(r.cost)+'</td><td>'+r.pct+'%</td><td>'+r.calls+'</td></tr>'
+  ).join('');
+  html += '<table><thead><tr><th>角色</th><th>成本</th><th>占比</th><th>调用数</th></tr></thead><tbody>'+roleRows+'</tbody></table>';
+  // Top N 任务
+  html += '<div class="section-title">💸 成本最高的 20 个任务</div>';
+  const topRows = (d.top_tasks||[]).map((t,i) =>
+    '<tr class="task-row" data-id="'+esc(t.task_id)+'">'+
+    '<td>'+(i+1)+'</td><td>'+esc(t.task_id)+'</td><td>'+fmtCost(t.cost)+'</td></tr>'
+  ).join('');
+  html += '<table><thead><tr><th>#</th><th>任务</th><th>成本</th></tr></thead><tbody>'+topRows+'</tbody></table>';
+  document.getElementById('mainView').innerHTML = html;
+  // 复用任务详情展开
+  document.querySelectorAll('#mainView .task-row').forEach(row => {
+    row.addEventListener('click', () => { switchView('tasks'); setTimeout(()=>{
+      document.getElementById('searchInput').value = row.dataset.id;
+      renderTasks();
+    }, 100); });
+  });
+}
+
+async function loadModels() {
+  const d = await api('/api/models');
+  let html = '<div class="section-title">🏭 生产环境模型成本（实际任务 metering）</div>';
+  const prodRows = (d.production||[]).map(m =>
+    '<tr><td>'+esc(m.model)+'</td><td>'+fmtCost(m.cost)+'</td>'+
+    '<td>'+m.calls+'</td><td>'+m.task_count+'</td>'+
+    '<td>$'+Number(m.avg_cost_per_call||0).toFixed(6)+'</td></tr>'
+  ).join('') || '<tr><td colspan="5">无数据</td></tr>';
+  html += '<table><thead><tr><th>模型</th><th>总成本</th><th>调用数</th>'+
+    '<th>任务数</th><th>avg $/call</th></tr></thead><tbody>'+prodRows+'</tbody></table>';
+  // bench 对比
+  html += '<div class="section-title">🧪 Bench 模型决策矩阵（实验数据）</div>';
+  if (d.bench && d.bench.length) {
+    const benchRows = d.bench.map(m =>
+      '<tr><td>'+esc(m.model)+'</td><td>'+m.sample_size+'</td>'+
+      '<td>'+((m.avg_pass_rate||0)*100).toFixed(1)+'%</td>'+
+      '<td>'+fmtCost(m.avg_cost_usd||0)+'</td>'+
+      '<td>$'+Number(m.dollar_per_pass||0).toFixed(4)+'</td>'+
+      '<td>'+esc(m.recommendation||'—')+'</td></tr>'
+    ).join('');
+    html += '<table><thead><tr><th>模型</th><th>样本</th><th>通过率</th>'+
+      '<th>avg 成本</th><th>$/pass</th><th>建议</th></tr></thead><tbody>'+benchRows+'</tbody></table>';
+  } else {
+    html += '<div class="kv"><dt>无 bench 数据</dt><dd>（运行 agent_go eval bench 生成）</dd></div>';
+  }
+  document.getElementById('mainView').innerHTML = html;
+}
+
+async function loadConfig() {
+  const d = await api('/api/config');
+  let html = '<div class="section-title">⚙️ 用户配置（config.json，api_key 已脱敏）</div>';
+  html += '<div class="json-view">'+esc(JSON.stringify(d.config, null, 2))+'</div>';
+  html += '<div class="kv" style="margin-top:10px"><dt>配置路径</dt><dd>'+esc(d.config_path)+'</dd></div>';
+  if (d.role_skill_map) {
+    html += '<div class="section-title">🎭 角色-Skill 映射</div>';
+    html += '<div class="json-view">'+esc(JSON.stringify(d.role_skill_map, null, 2))+'</div>';
+    html += '<div class="kv" style="margin-top:10px"><dt>路径</dt><dd>'+esc(d.role_skill_map_path)+'</dd></div>';
+  }
+  document.getElementById('mainView').innerHTML = html;
+}
+
+async function loadStorage() {
+  const d = await api('/api/storage');
+  let html = '<div class="section-title">💾 磁盘占用</div>';
+  html += '<div class="kpi-grid">'+
+    kpiCard('总占用', d.total_size_mb+' MB', 'blue')+
+    kpiCard('任务目录', d.task_count, '')+
+    kpiCard('孤儿目录', d.orphan_count, d.orphan_count>0?'yellow':'')+
+    '</div>';
+  if (d.orphan_count > 0) {
+    html += '<div class="warn-banner">⚠️ 检测到 '+d.orphan_count+' 个孤儿目录（无 meta.json，可能是异常中断的残留）。'+
+            '可用 <code>agent_go clean --orphans</code> 清理。</div>';
+  }
+  html += '<div class="section-title">📦 最大任务目录 Top 20</div>';
+  const rows = (d.top_tasks||[]).map((t,i) =>
+    '<tr><td>'+(i+1)+'</td><td>'+esc(t.name)+'</td>'+
+    '<td>'+(t.size/1024/1024).toFixed(2)+' MB</td>'+
+    '<td>'+(t.has_meta?'✓':'<span class="st-failed">✗ 孤儿</span>')+'</td></tr>'
+  ).join('');
+  html += '<table><thead><tr><th>#</th><th>任务</th><th>大小</th><th>meta</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  document.getElementById('mainView').innerHTML = html;
+}
+
 function setConn(ok) {
   const b = document.getElementById('connBadge');
   b.textContent = ok ? '● 已连接' : '○ 连接断开';
@@ -915,13 +1584,22 @@ function connectSSE() {
   if (sse) sse.close();
   sse = new EventSource('/api/events?interval=5');
   sse.addEventListener('message', e => {
-    try { const m = JSON.parse(e.data); if (m.type === 'refresh') loadTasks(); } catch(_) {}
+    try {
+      const m = JSON.parse(e.data);
+      if (m.type === 'refresh') {
+        // 仅任务视图自动刷新（其他视图按需手动刷新，避免覆盖用户正在看的页面）
+        if (currentView === 'tasks') loadTasks();
+      }
+    } catch(_) {}
   });
   sse.onerror = () => { setTimeout(connectSSE, 5000); };
 }
 
-document.getElementById('refreshBtn').onclick = loadTasks;
+document.getElementById('refreshBtn').onclick = () => switchView(currentView);
 document.getElementById('searchInput').addEventListener('input', renderTasks);
+document.querySelectorAll('.nav-tab').forEach(tab => {
+  tab.addEventListener('click', () => switchView(tab.dataset.view));
+});
 loadTasks();
 connectSSE();
 </script>
