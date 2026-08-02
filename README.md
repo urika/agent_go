@@ -154,7 +154,7 @@ agent_go/
 ├── cross_judge.py       # Cross-model judgment matrix + human calibration
 ├── assessment.py        # False-positive evaluation data layer
 ├── artifacts.py         # Artifact export (S9-B: __artifacts__/ -> --artifact-dir)
-├── web_server.py        # Read-only Web observability platform (agent_go web)
+├── web_server.py        # Web observability platform: tasks/overview/cost/models/config/storage (agent_go web)
 └── lint.py              # AST-based static checks
 agent_go.py               # Entry-point wrapper
 tests/                    # 1569 tests across 61 test files
