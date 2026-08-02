@@ -442,6 +442,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
              str(repo), task["task"],
              "--yes", "--headless", "--preserve-worktrees",
              "--parallel", "1",   # S10-P2：顺序执行，消除并发对 elapsed/cost 的干扰
+             "--no-cache",        # 质量校验：禁用 plan cache，确保 planner metering 完整采集（planner_model 字段）
              "--config", tmp_config],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=str(workspace_dir),

@@ -341,6 +341,22 @@ render_export_summary(export_result)    → 生成导出清单（final report �
 lint_for_loop_truncation(path) → 检测 for 循环体被截断（循环变量在循环外使用）
 ```
 
+## web_server.py — 只读 Web 观察平台（agent_go web）
+
+```
+api_tasks()             → 遍历 AGENT_GO_DIR/task-* 读 meta.json 返回任务清单（含 metering 聚合成本）
+api_task(task_id)       → 任务详情（subtasks[] + results[]，含 agent_type_source/skills/difficulty）
+api_subtask_detail(task_id, sub_id) → 子任务验证结果/改动统计/worktree/agent prompt
+_extract_subtask_log(task_id, sub_id) → 从 execution.log 提取子任务日志段（每行截断 2000 字符）
+api_metering(task_id)   → metering.jsonl 按 role 聚合（count/cost/tokens/latency）+ 明细
+api_replay(task_id)     → 复用 replay.py _build_timeline/_collect_summary
+api_plan(task_id)       → PLAN.md + plans/v{ver}.json
+WebHandler(BaseHTTPRequestHandler) → GET 路由 + Bearer token 鉴权 + SSE /api/events（轮询 mtime 刷新）
+serve_web(host, port, token) → ThreadingHTTPServer 启动（默认 127.0.0.1:8091）
+  ── 前端：单文件内嵌 HTML SPA（任务清单→展开任务→子任务→tab: 概览/验证/日志/计量/时间线）
+  ── 设计：只读全 GET、不触碰 worktree/git、无框架仅 stdlib
+```
+
 ## agent_loop.py — 自主 Agent 循环 (--agent-loop)
 
 ```

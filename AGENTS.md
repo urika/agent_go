@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (36 modules, ~16,500 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (37 modules, ~17,300 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
 
@@ -95,11 +95,15 @@ agent_go skills show <name>
 agent_go agents
 agent_go config
 
-# List / show / clean
-agent_go list
-agent_go show <task-id>
-agent_go clean
-```
+ # List / show / clean
+ agent_go list
+ agent_go show <task-id>
+ agent_go clean
+
+# Read-only Web observability (task list / subtask detail / logs / metering / timeline)
+agent_go web --host 127.0.0.1 --port 8091   # 打开 http://127.0.0.1:8091
+agent_go web --token xxx                     # 可选 Bearer token 鉴权
+ ```
 
 ## Architecture
 
@@ -145,7 +149,7 @@ resume <task-id>    → reruns uncompleted subtasks from meta.json state
 
 If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuilds `meta.json` from worktree state: commit+verify-pass → completed, commit+verify-fail → failed, no commit+orphan changes → reset (resume reruns it), no commit+no changes → no_changes. It never commits orphan changes itself — commit stays the sole completion boundary for resume correctness.
 
-## Key Modules (36 modules, ~16,500 lines)
+## Key Modules (37 modules, ~17,300 lines)
 
 | Module | Purpose |
 |--------|---------|
@@ -184,6 +188,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
 | `tui.py` | Curses status dashboard |
 | `workflow_gen.py` | GitHub Actions workflow generation (ci command) |
+| `web_server.py` | Read-only Web observability platform: task list/subtask detail/logs/metering/replay, stdlib http.server + SPA |
 | `lint.py` | AST-based static checks: suspicious for-loop body truncation |
 
 ## Key Design Decisions
@@ -197,13 +202,14 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 - **Verification loop**: Failed subtasks auto-retry with full failure context (stdout/stderr/git diff) injected into fix prompt. Configurable max retries (`--max-retries`). Worktree preserved for manual inspection on final failure.
 - **Worktree preservation**: Failed/blocked subtask worktrees are preserved after pipeline completion. `agent_go inspect <task-id>` lists paths and branch names for manual review.
 - **Result review (M7)**: `agent_go review --task <task-id>` aggregates per-file diff summaries across subtasks with approve/reject/changes-requested decisions; `--deep` runs independent-model per-subtask analysis.
-- **Difficulty routing**: Planner tags subtasks with `difficulty`; `worker_models` config maps difficulty to a model name passed via `claude --model`; `worker_backends` maps model names to API base URLs (per-subtask `ANTHROPIC_BASE_URL` injection, overrides `worker_base_url`); difficulty and actual model recorded in metering.
+- **Difficulty routing**: Planner tags subtasks with `difficulty`; `worker_models` config maps difficulty to a model name passed via `claude --model`; `worker_backends` maps model names to API base URLs (per-subtask `ANTHROPIC_BASE_URL` injection, overrides `worker_base_url`); difficulty and actual model recorded in metering. `local_model_names` (optional) maps a routed name to its real local backend name (e.g. `claude-haiku-4-5` → `Qwen3.6-27B-4bit`) as a fallback when `/status` probing fails.
 - **Planner API isolation**: `planner_api` config block overrides `plan_api` for plan generation only — supports independent model/provider for planning vs execution.
 - **Crash recovery**: commit is the sole completion boundary. `agent_go recover` never commits orphan changes on your behalf — it only classifies worktree state so `resume` knows what to rerun.
 - **MCP dual role**: agent_go is both an MCP server (`mcp_server.py` / `mcp_http.py`, exposing run/resume/inspect/review/list/cancel tools + resources + prompts) and an MCP consumer (`mcp_client.py`, letting subtasks call tools from external MCP servers, namespaced `mcp__{server}__{tool}`). Consumer failures are isolated per-server and degrade to a warning rather than blocking the pipeline.
 - **Config**: `~/.agent_go/config.json` (auto-created). Shallow-merged with `DEFAULT_CONFIG`.
 - **API key**: `AGENT_GO_API_KEY` env var > `config.json` `api_key`. Template vars (`${VAR_NAME}`) resolved from environment.
-- **Local model cost tracking**: `local_models` list marks model names routed to local backends — metering cost is zeroed for matched models.
+- **Local model cost tracking**: `local_models` list marks model names routed to local backends — metering cost is zeroed for matched models. Local backend is auto-detected when `worker_backends` / `worker_base_url` points to `127.0.0.1`/`localhost` (injects `AGENT_GO_IS_LOCAL`); the real backend model name is probed from the proxy's `/status` page (supports hot model switching via SIGHUP) or falls back to `local_model_names` config, then `routed_model`.
+- **Cost recomputation (actual model pricing)**: claude CLI's `total_cost_usd` is billed at Anthropic prices, but `claude-*` route names may resolve to cheaper backends (e.g. `claude-haiku-4-5`/`claude-sonnet-4-6` → `deepseek-v4-flash`, `claude-opus-4-7` → `deepseek-v4-pro`). Worker metering recomputes `cost_usd` from the **actual model** (parsed from claude's `assistant.message.model`) using `MODEL_PRICES`, preventing 10-16x cost inflation; unknown models fall back to claude's reported cost. Local models stay zero-cost.
 - **Logging**: Dual-format — INFO human-readable + DEBUG JSON events.
 - **Output abstraction**: `Console` class (quiet/verbose modes) is injected at CLI entry and shared via module-level default. All user-facing output goes through it — no bare `print()` calls.
 - **Sandbox**: Prefers `greywall`, falls back to native `claude`.
@@ -212,7 +218,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 ## Testing
 
 ```bash
-pytest tests/           # 1554 tests (~62s)
+pytest tests/           # 1569 tests (~60s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -269,7 +275,7 @@ for fut in as_completed(futures):
 
 ```
 	agent_go/           # 36 Python modules (~16,500 lines)
-	tests/              # 60 test files, 1554 tests
+	tests/              # 61 test files, 1569 tests
 eval_suite/         # Standard task suite for eval bench (22 tasks + 4 fixtures)
 docs/design/        # Design docs, requirements, product roadmap
 docs/archive/       # Historical code review records

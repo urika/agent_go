@@ -1,7 +1,7 @@
 # agent_go
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-1554%20passed-green)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1569%20passed-green)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stdlib Only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)]()
 
@@ -87,6 +87,7 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 | `eval models` | **Productivity report** — per-model pass_rate / $/pass / K8 / lint/test regression / recommendation |
 | `eval judge` | **Cross-judgment** — N-model mutual review with self-bias prevention + self-bias quantification |
 | `eval judge calibrate` | **Human calibration** — compare LLM vs human scores, detect unreliable judges |
+| `web` | **Read-only Web observability** — task list / subtask detail / logs / metering / timeline at `127.0.0.1:8091` (`--host`/`--port`/`--token` optional) |
 
 ### Options
 
@@ -153,9 +154,10 @@ agent_go/
 ├── cross_judge.py       # Cross-model judgment matrix + human calibration
 ├── assessment.py        # False-positive evaluation data layer
 ├── artifacts.py         # Artifact export (S9-B: __artifacts__/ -> --artifact-dir)
+├── web_server.py        # Read-only Web observability platform (agent_go web)
 └── lint.py              # AST-based static checks
 agent_go.py               # Entry-point wrapper
-tests/                    # 1554 tests across 60 test files
+tests/                    # 1569 tests across 61 test files
 eval_suite/               # Standard task suite for eval bench (22 tasks + 4 fixtures)
 ```
 
@@ -192,7 +194,7 @@ Config at `~/.agent_go/config.json` (auto-created). See [`config.example.json`](
 ```bash
 pip3 install pytest pytest-mock
 
-pytest tests/              # 1554 tests (~62s)
+pytest tests/              # 1569 tests (~60s)
 pytest tests/ -q           # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 ```

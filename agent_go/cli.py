@@ -17,6 +17,7 @@ from .eval import cmd_eval
 from .replay import cmd_replay
 from .checkpoint import list_checkpoints, restore_checkpoint, SnapshotManager
 from .mcp_server import main as cmd_mcp
+from .web_server import main as cmd_web
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
 from .git_utils import init_git_repo
@@ -272,6 +273,12 @@ def _build_parser():
                             help="以 HTTP/SSE transport 运行（默认 stdio）。POST /mcp 处理请求，GET /mcp 为 SSE 推送")
     mcp_parser.add_argument("--host", default="127.0.0.1", help="HTTP 绑定地址（默认 127.0.0.1，仅本地）")
     mcp_parser.add_argument("--port", type=int, default=8090, help="HTTP 监听端口（默认 8090）")
+
+    # web 子命令
+    web_parser = subparsers.add_parser("web", help="只读 Web 观察平台（任务清单/子任务明细/日志/metering/时间线）")
+    web_parser.add_argument("--host", default="127.0.0.1", help="绑定地址（默认 127.0.0.1，仅本地）")
+    web_parser.add_argument("--port", type=int, default=8091, help="监听端口（默认 8091）")
+    web_parser.add_argument("--token", default=None, help="可选 Bearer token 鉴权（默认关闭）")
 
     # router 子命令
     router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")
@@ -2252,6 +2259,8 @@ def main() -> None:
             cmd_checkpoint(args)
         elif args.command == "mcp":
             cmd_mcp(args)
+        elif args.command == "web":
+            cmd_web(args)
     except KeyboardInterrupt:
         console.print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)
