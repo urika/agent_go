@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (36 modules, ~16,500 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, crash recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel completion notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (37 modules, ~17,300 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, crash recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel completion notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`, `http.server`).
 
@@ -210,7 +210,7 @@ Other patterns worth a second look: thread safety on shared mutable state (`resu
 ## Testing
 
 ```bash
-pytest tests/           # 1554 tests (~62s)
+pytest tests/           # 1569 tests (~60s)
 pytest tests/ -q        # Quiet mode
 pytest tests/ -k "not integration"  # Unit tests only
 pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
@@ -220,7 +220,7 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 
 ```
 agent_go/           # 36 package modules (~16,500 lines)
-tests/              # 60 test files, 1554 tests
+tests/              # 61 test files, 1569 tests
 eval_suite/         # Standard task suite for eval bench (tasks + fixtures)
 docs/
 ├── README.md       # 文档索引
