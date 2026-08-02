@@ -345,15 +345,19 @@ lint_for_loop_truncation(path) → 检测 for 循环体被截断（循环变量�
 
 ```
 api_tasks()             → 遍历 AGENT_GO_DIR/task-* 读 meta.json 返回任务清单（含 metering 聚合成本）
-api_task(task_id)       → 任务详情（subtasks[] + results[]，含 agent_type_source/skills/difficulty）
+api_task(task_id)       → 任务详情（subtasks[] + results[]，按 subtask_id 匹配，含 agent_type_source/skills/difficulty）
 api_subtask_detail(task_id, sub_id) → 子任务验证结果/改动统计/worktree/agent prompt
-_extract_subtask_log(task_id, sub_id) → 从 execution.log 提取子任务日志段（每行截断 2000 字符）
+_extract_subtask_log(task_id, sub_id) → 从 execution.log 提取子任务日志段（边界正则匹配，防 sub-1/sub-10 误中）
 api_metering(task_id)   → metering.jsonl 按 role 聚合（count/cost/tokens/latency）+ 明细
 api_replay(task_id)     → 复用 replay.py _build_timeline/_collect_summary
 api_plan(task_id)       → PLAN.md + plans/v{ver}.json
-WebHandler(BaseHTTPRequestHandler) → GET 路由 + Bearer token 鉴权 + SSE /api/events（轮询 mtime 刷新）
+api_overview/cost/models → 全局聚合视图；api_assessment/cross_judge/bench_results/baseline → 评估数据
+api_config()            → config.json 只读展示（api_key/token 递归脱敏，短 key 全遮蔽）
+api_storage()           → 磁盘占用 Top20 + 孤儿目录检测
+WebHandler(BaseHTTPRequestHandler) → GET 路由 + Bearer token / ?token= query 鉴权 + SSE /api/events（轮询 mtime 刷新）
 serve_web(host, port, token) → ThreadingHTTPServer 启动（默认 127.0.0.1:8091）
-  ── 前端：单文件内嵌 HTML SPA（任务清单→展开任务→子任务→tab: 概览/验证/日志/计量/时间线）
+  ── 前端：单文件内嵌 HTML SPA（任务清单→展开任务→子任务→tab: 概览/验证/日志/计量/时间线 + 总览/成本/模型/配置/运维视图）
+  ── 前端鉴权：401 时 prompt 输入 token 存 sessionStorage，fetch 带 Authorization 头，SSE 走 ?token= query
   ── 设计：只读全 GET、不触碰 worktree/git、无框架仅 stdlib
 ```
 

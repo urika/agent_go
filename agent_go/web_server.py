@@ -15,6 +15,15 @@ API 一览（前缀 /api）：
   GET /api/tasks/<id>/metering        metering 按 role 聚合 + 明细
   GET /api/tasks/<id>/replay          执行时间线（复用 replay.py）
   GET /api/tasks/<id>/plan            PLAN.md + plans/
+  GET /api/tasks/<id>/assessment      假阳性评估事件（assessment.jsonl）
+  GET /api/overview                   总览大盘：KPI + 近 7 天成本趋势
+  GET /api/cost                       全局成本：by_model/by_role + Top 任务
+  GET /api/models                     模型生产力：生产 metering + bench 对照
+  GET /api/cross-judge                交叉评判矩阵（cross_judge_scores.jsonl）
+  GET /api/bench-results              bench 模型对照结果
+  GET /api/baseline                   claude 裸跑基线 + $/pass 门禁基线
+  GET /api/config                     用户配置只读展示（api_key 脱敏）
+  GET /api/storage                    磁盘占用 + 孤儿目录检测
   GET /api/events                     SSE：任务状态变化实时推送
 """
 from __future__ import annotations
@@ -96,6 +105,10 @@ def api_tasks() -> list[dict]:
         # 成本从 metering.jsonl 聚合（meta.json results 不含 cost）
         metering_records = _read_jsonl(td / "metering.jsonl")
         cost = sum(r.get("cost_usd", 0) or 0 for r in metering_records)
+        try:
+            mtime = td.joinpath("meta.json").stat().st_mtime
+        except OSError:
+            continue  # 目录刚被 clean 清理的竞态窗口，跳过
         out.append({
             "id": td.name,
             "task": meta.get("task", ""),
@@ -109,7 +122,7 @@ def api_tasks() -> list[dict]:
             "total_elapsed_sec": round(total_elapsed, 1),
             "total_retries": retries,
             "created": meta.get("created", ""),
-            "mtime": td.joinpath("meta.json").stat().st_mtime,
+            "mtime": mtime,
         })
     return sorted(out, key=lambda x: x["mtime"], reverse=True)
 
@@ -123,9 +136,13 @@ def api_task(task_id: str) -> Optional[dict]:
         return None
     subtasks = meta.get("subtasks", []) or []
     results = meta.get("results", []) or []
+    # 按 subtask_id 匹配：运行中/崩溃恢复的任务 results 是完成顺序而非
+    # 子任务顺序（pipeline 结束时才重排），下标配对会张冠李戴
+    results_by_id = {r.get("subtask_id"): r for r in results
+                     if isinstance(r, dict) and r.get("subtask_id")}
     items = []
     for i, st in enumerate(subtasks):
-        r = results[i] if i < len(results) else {}
+        r = results_by_id.get(st.get("id")) or {}
         items.append({
             "id": st.get("id", f"sub-{i+1}"),
             "title": st.get("title", ""),
@@ -134,16 +151,16 @@ def api_task(task_id: str) -> Optional[dict]:
             "skills": st.get("skills", []) or [],
             "agent_type": st.get("agent_type", ""),
             "verification": st.get("verification", []) or [],
-            "status": (r or {}).get("status", "pending"),
-            "duration_sec": (r or {}).get("duration_sec"),
-            "retry_count": (r or {}).get("retry_count"),
-            "verify_ok": (r or {}).get("verify_ok"),
-            "exit_code": (r or {}).get("exit_code"),
-            "summary": (r or {}).get("summary", ""),
-            "failure_reason": (r or {}).get("failure_reason", ""),
-            "worktree": (r or {}).get("worktree", ""),
-            "agent_type_source": (r or {}).get("agent_type_source",
-                                               st.get("_agent_type_source", "")),
+            "status": r.get("status", "pending"),
+            "duration_sec": r.get("duration_sec"),
+            "retry_count": r.get("retry_count"),
+            "verify_ok": r.get("verify_ok"),
+            "exit_code": r.get("exit_code"),
+            "summary": r.get("summary", ""),
+            "failure_reason": r.get("failure_reason", ""),
+            "worktree": r.get("worktree", ""),
+            "agent_type_source": r.get("agent_type_source",
+                                       st.get("_agent_type_source", "")),
         })
     return {
         "id": td.name,
@@ -170,12 +187,15 @@ def api_subtask_detail(task_id: str, sub_id: str) -> Optional[dict]:
         return None
     subtasks = meta.get("subtasks", []) or []
     results = meta.get("results", []) or []
+    # 按 subtask_id 匹配（同 api_task：results 顺序不保证等于子任务顺序）
+    results_by_id = {r.get("subtask_id"): r for r in results
+                     if isinstance(r, dict) and r.get("subtask_id")}
     idx = next((i for i, st in enumerate(subtasks)
                 if st.get("id") == sub_id), None)
     if idx is None:
         return None
     st = subtasks[idx]
-    r = results[idx] if idx < len(results) else {}
+    r = results_by_id.get(sub_id) or {}
     return {
         "id": sub_id,
         "title": st.get("title", ""),
@@ -211,7 +231,7 @@ def _extract_subtask_log(task_id: str, sub_id: str, limit: int = 400) -> list[di
     """从 execution.log 提取该子任务的日志段。
 
     匹配规则：以子任务启动/提交标记为段落边界（如含 sub_id 的 INFO/DEBUG 行）。
-    返回 [{line_no, level, message}]，每行截断 MAX_LOG_LINE 字符。
+    返回 [{line_no, text}]，每行截断 MAX_LOG_LINE 字符。
     """
     if not _valid_sub_id(sub_id):
         return []
@@ -227,24 +247,30 @@ def _extract_subtask_log(task_id: str, sub_id: str, limit: int = 400) -> list[di
             all_lines = f.readlines()
     except OSError:
         return []
+    # 边界匹配：避免 sub-1 误命中 sub-10/sub-11（子任务 >9 个时）
+    sub_pat = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(sub_id)
+                         + r"(?![A-Za-z0-9_-])")
     # 找子任务相关行：行内含 sub_id（作为 sub-N 出现的部分）
     start_idx = None
     for i, ln in enumerate(all_lines):
-        if sub_id in ln:
+        if sub_pat.search(ln):
             start_idx = i
             break
     if start_idx is None:
         return []
-    # 段落上边界：从 start_idx 往前回退到上一个含 "[subtask]" 或子任务启动标记的行
+    # 段落上边界：从 start_idx 往前回退到本子任务的启动标记行；
+    # 遇到其他子任务的 "[subtask]" 标记即停（不得跨段）
     begin = start_idx
     for i in range(start_idx - 1, max(-1, start_idx - 200), -1):
-        if "[subtask]" in all_lines[i] or "start subtask" in all_lines[i].lower():
-            begin = i
+        line = all_lines[i]
+        if "[subtask]" in line or "start subtask" in line.lower():
+            if sub_pat.search(line):
+                begin = i
             break
     # 下边界：往后到下一个子任务启动标记或文件尾
     end = len(all_lines)
     for i in range(start_idx + 1, min(len(all_lines), start_idx + 3000)):
-        if "[subtask]" in all_lines[i] and sub_id not in all_lines[i]:
+        if "[subtask]" in all_lines[i] and not sub_pat.search(all_lines[i]):
             end = i
             break
     for i in range(begin, min(end, len(all_lines))):
@@ -346,19 +372,6 @@ def api_plan(task_id: str) -> Optional[dict]:
 # ═══════════════════════════════════════════════════════════════
 # 全局视图（跨任务聚合）— 解决观测缺口 B：无全局聚合视图
 # ═══════════════════════════════════════════════════════════════
-
-def _iter_all_metering() -> list[dict]:
-    """遍历所有任务的 metering.jsonl，返回扁平化的事件列表（带 task_id）。
-
-    用于跨任务成本/模型分析。每条附加 task_id 字段以便溯源。
-    """
-    out = []
-    for td in _list_task_dirs():
-        for rec in _read_jsonl(td / "metering.jsonl"):
-            rec.setdefault("task_id", td.name)
-            out.append(rec)
-    return out
-
 
 def _parse_date(ts: str) -> str:
     """从 metering ts（ISO 格式）提取 YYYY-MM-DD，失败返回空。"""
@@ -479,29 +492,21 @@ def api_cost() -> dict:
 def api_models() -> dict:
     """模型生产力对比：生产 metering 聚合 + bench results.jsonl 对照。
 
-    生产数据：从全部任务 metering 聚合每模型的 cost/calls/passes（passes 从
-    对应 meta.json 的 results completed 数派生）。
+    生产数据：从全部任务 metering 聚合每模型（worker 角色）的 cost/calls/task 数。
     Bench 数据：读 eval_suite/results.jsonl（bench 产物），按 model 聚合。
     """
     # ── 生产数据 ──
     prod: dict[str, dict] = {}
     for td in _list_task_dirs():
-        meta = _task_meta(td)
-        if not meta:
-            continue
-        completed = sum(1 for r in (meta.get("results") or [])
-                        if r.get("status") == "completed")
         for rec in _read_jsonl(td / "metering.jsonl"):
             model = rec.get("actual_model") or rec.get("virtual_model") or "unknown"
             # 只统计 worker 角色的（代表实际执行模型）
             if rec.get("role") != "worker":
                 continue
-            m = prod.setdefault(model, {"cost": 0.0, "calls": 0, "tasks": set(),
-                                        "completed": 0})
+            m = prod.setdefault(model, {"cost": 0.0, "calls": 0, "tasks": set()})
             m["cost"] += rec.get("cost_usd", 0) or 0
             m["calls"] += 1
             m["tasks"].add(td.name)
-            m["completed"] += completed  # 近似：每个 worker 调用关联任务 completed 数
     prod_rows = [{
         "model": k,
         "cost": round(v["cost"], 4),
@@ -664,7 +669,6 @@ def api_baseline() -> dict:
     bench_records = _read_jsonl(bench_path)
 
     # 2. cost 门禁基线
-    from .config import CONFIG_PATH
     cost_baseline_path = CONFIG_PATH.parent / "cost_baseline.json"
     cost_baseline = _read_json(cost_baseline_path)
 
@@ -688,17 +692,19 @@ def api_baseline() -> dict:
 def api_config() -> dict:
     """只读展示用户配置（config.json + role_skill_map.json + 熔断器状态）。"""
     config = load_config()
-    # 脱敏：隐藏 api_key（只保留前后 4 字符）
-    def _mask(d: dict) -> dict:
-        out = {}
-        for k, v in d.items():
-            if isinstance(v, dict):
-                out[k] = _mask(v)
-            elif k in ("api_key", "token") and isinstance(v, str) and len(v) > 8:
-                out[k] = v[:4] + "..." + v[-4:]
-            else:
-                out[k] = v
-        return out
+    sensitive_keys = ("api_key", "token")
+
+    # 脱敏：api_key/token 字段一律隐藏（长 key 保留前后 4 字符便于辨认，
+    # 短 key 完全遮蔽）；递归处理嵌套 dict 与 list
+    def _mask(value: Any, key: str = "") -> Any:
+        if isinstance(value, dict):
+            return {k: _mask(v, k) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_mask(item, key) for item in value]
+        if key in sensitive_keys and isinstance(value, str) and value:
+            return value[:4] + "..." + value[-4:] if len(value) > 8 else "***"
+        return value
+
     config = _mask(config)
 
     # role_skill_map
@@ -775,13 +781,19 @@ class WebHandler(BaseHTTPRequestHandler):
 
     # ── 鉴权 ─────────────────────────────────────────────────
 
-    def _auth_ok(self) -> bool:
+    def _auth_ok(self, query: str = "") -> bool:
         token = getattr(self.server, "token", None)  # type: ignore[attr-defined]
         if not token:
             return True
         auth = self.headers.get("Authorization", "")
         api_key = self.headers.get("X-Api-Key", "")
-        return auth == f"Bearer {token}" or api_key == token
+        if auth == f"Bearer {token}" or api_key == token:
+            return True
+        # EventSource 无法自定义请求头，允许 ?token= query 传递（仅 SSE 等场景）
+        for pair in query.split("&"):
+            if pair.startswith("token=") and unquote(pair[6:]) == token:
+                return True
+        return False
 
     # ── 工具 ─────────────────────────────────────────────────
 
@@ -807,8 +819,8 @@ class WebHandler(BaseHTTPRequestHandler):
     def _reply_html(self, body: str) -> None:
         self._reply(200, "text/html; charset=utf-8", body.encode("utf-8"))
 
-    def _auth_guard(self) -> bool:
-        if not self._auth_ok():
+    def _auth_guard(self, query: str = "") -> bool:
+        if not self._auth_ok(query):
             self._reply_json(401, {"error": "unauthorized"})
             return False
         return True
@@ -825,7 +837,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._reply_json(200, {"status": "ok", "server": "agent_go-web"})
             return
         if path.startswith("/api/"):
-            if not self._auth_guard():
+            if not self._auth_guard(parsed.query):
                 return
             self._route_api(path, parsed.query)
             return
@@ -930,7 +942,10 @@ class WebHandler(BaseHTTPRequestHandler):
             if "=" in pair:
                 k, v = pair.split("=", 1)
                 params[k] = unquote(v)
-        interval = max(2, min(30, int(params.get("interval", "5"))))
+        try:
+            interval = max(2, min(30, int(params.get("interval", "5"))))
+        except ValueError:
+            interval = 5
         last_signature = self._tasks_signature()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1138,10 +1153,22 @@ function fmtCost(c) {
   return '$'+Number(c).toFixed(4);
 }
 
+// token 鉴权：服务器启用 --token 时，fetch 带 Authorization 头；
+// 401 时提示输入并存 sessionStorage（EventSource 走 ?token= query，见 connectSSE）
+let authToken = sessionStorage.getItem('agent_go_token') || '';
+
 async function api(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error('HTTP '+r.status);
-  return r.json();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const headers = authToken ? {'Authorization': 'Bearer '+authToken} : {};
+    const r = await fetch(path, {headers});
+    if (r.status === 401 && attempt === 0) {
+      const t = prompt('🔐 服务器启用了 token 鉴权，请输入 token：');
+      if (t) { authToken = t; sessionStorage.setItem('agent_go_token', t); continue; }
+    }
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    return r.json();
+  }
+  throw new Error('HTTP 401');
 }
 
 function statusIcon(st) {
@@ -1218,35 +1245,26 @@ function renderTasks() {
   document.querySelectorAll('.task-row').forEach(row => {
     row.addEventListener('click', () => toggleTask(row.dataset.id, row));
   });
-  document.getElementById('searchInput').oninput = renderTasks;
 }
 
 // ── 任务详情展开 ────────────────────────────────────────────
 async function toggleTask(id, row) {
   const existing = document.querySelector('.task-detail[data-id="'+id+'"]');
-  if (existing) {
-    existing.classList.remove('open');
-    setTimeout(() => existing.remove(), 200);
-    return;
-  }
-  let detail = document.querySelector('.task-detail[data-id="'+id+'"]');
-  if (!detail) {
-    const tr = document.createElement('tr');
-    tr.className = 'task-detail';
-    tr.dataset.id = id;
-    const td = document.createElement('td');
-    td.colSpan = 7;
-    td.innerHTML = '<div class="detail-box"><div class="loading">加载任务详情…</div></div>';
-    tr.appendChild(td);
-    row.after(tr);
-    tr.classList.add('open');
-    try {
-      const data = await api('/api/tasks/'+encodeURIComponent(id));
-      td.innerHTML = renderTaskDetail(data);
-      bindDetailEvents(id, tr);
-    } catch (e) {
-      td.innerHTML = '<div class="detail-box"><div class="err">'+esc(e.message)+'</div></div>';
-    }
+  if (existing) { existing.remove(); return; }
+  const tr = document.createElement('tr');
+  tr.className = 'task-detail open';
+  tr.dataset.id = id;
+  const td = document.createElement('td');
+  td.colSpan = 7;
+  td.innerHTML = '<div class="detail-box"><div class="loading">加载任务详情…</div></div>';
+  tr.appendChild(td);
+  row.after(tr);
+  try {
+    const data = await api('/api/tasks/'+encodeURIComponent(id));
+    td.innerHTML = renderTaskDetail(data);
+    bindDetailEvents(id, tr);
+  } catch (e) {
+    td.innerHTML = '<div class="detail-box"><div class="err">'+esc(e.message)+'</div></div>';
   }
 }
 
@@ -1315,9 +1333,9 @@ function renderSubDetail(d) {
     '<div class="tab-panel active" data-panel="overview">'+
       '<div class="kv">'+
       '<dt>描述</dt><dd>'+esc(d.description||'')+'</dd>'+
-      '<dt>依赖</dt><dd>'+(Array.isArray(d.depends_on)&&d.depends_on.length?d.depends_on.join(', '):'—')+'</dd>'+
-      '<dt>文件</dt><dd>'+(Array.isArray(d.files_hint)&&d.files_hint.length?d.files_hint.join(', '):'—')+'</dd>'+
-      '<dt>技能</dt><dd>'+(Array.isArray(d.skills)&&d.skills.length?d.skills.join(', '):'—')+'</dd>'+
+      '<dt>依赖</dt><dd>'+(Array.isArray(d.depends_on)&&d.depends_on.length?d.depends_on.map(esc).join(', '):'—')+'</dd>'+
+      '<dt>文件</dt><dd>'+(Array.isArray(d.files_hint)&&d.files_hint.length?d.files_hint.map(esc).join(', '):'—')+'</dd>'+
+      '<dt>技能</dt><dd>'+(Array.isArray(d.skills)&&d.skills.length?d.skills.map(esc).join(', '):'—')+'</dd>'+
       '<dt>Agent</dt><dd>'+esc(d.agent_type||'developer')+'（'+esc(r.agent_type_source||'default')+'）</dd>'+
       '<dt>状态</dt><dd>'+esc(r.status||'—')+'</dd>'+
       '<dt>耗时</dt><dd>'+fmtDur(r.duration_sec)+'</dd>'+
@@ -1417,16 +1435,14 @@ function switchView(name) {
   document.getElementById('filtersBar').style.display = (name === 'tasks') ? '' : 'none';
   const main = document.getElementById('mainView');
   main.innerHTML = '<div class="loading">加载中…</div>';
-  try {
-    if (name === 'tasks') loadTasks();
-    else if (name === 'overview') loadOverview();
-    else if (name === 'cost') loadCost();
-    else if (name === 'models') loadModels();
-    else if (name === 'config') loadConfig();
-    else if (name === 'storage') loadStorage();
-  } catch (e) {
-    main.innerHTML = '<div class="err">'+esc(e.message)+'</div>';
-  }
+  // 返回 loader 的 Promise，调用方可链式等待渲染完成
+  if (name === 'tasks') return loadTasks();
+  if (name === 'overview') return loadOverview();
+  if (name === 'cost') return loadCost();
+  if (name === 'models') return loadModels();
+  if (name === 'config') return loadConfig();
+  if (name === 'storage') return loadStorage();
+  return Promise.resolve();
 }
 
 async function loadOverview() {
@@ -1502,12 +1518,14 @@ async function loadCost() {
   ).join('');
   html += '<table><thead><tr><th>#</th><th>任务</th><th>成本</th></tr></thead><tbody>'+topRows+'</tbody></table>';
   document.getElementById('mainView').innerHTML = html;
-  // 复用任务详情展开
+  // 复用任务详情展开：跳转到任务视图并定位到该任务（等待加载完成再填搜索框）
   document.querySelectorAll('#mainView .task-row').forEach(row => {
-    row.addEventListener('click', () => { switchView('tasks'); setTimeout(()=>{
-      document.getElementById('searchInput').value = row.dataset.id;
-      renderTasks();
-    }, 100); });
+    row.addEventListener('click', () => {
+      switchView('tasks').then(() => {
+        document.getElementById('searchInput').value = row.dataset.id;
+        renderTasks();
+      });
+    });
   });
 }
 
@@ -1582,7 +1600,8 @@ function setConn(ok) {
 
 function connectSSE() {
   if (sse) sse.close();
-  sse = new EventSource('/api/events?interval=5');
+  const qs = '?interval=5' + (authToken ? '&token='+encodeURIComponent(authToken) : '');
+  sse = new EventSource('/api/events'+qs);
   sse.addEventListener('message', e => {
     try {
       const m = JSON.parse(e.data);
@@ -1592,7 +1611,10 @@ function connectSSE() {
       }
     } catch(_) {}
   });
-  sse.onerror = () => { setTimeout(connectSSE, 5000); };
+  // EventSource 自带自动重连；仅在彻底关闭（CLOSED）时才手动重建，避免连接叠加
+  sse.onerror = () => {
+    if (sse.readyState === EventSource.CLOSED) setTimeout(connectSSE, 5000);
+  };
 }
 
 document.getElementById('refreshBtn').onclick = () => switchView(currentView);
