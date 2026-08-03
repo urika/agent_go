@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 
 from .console import _LazyConsole
+from .config import write_censored_event
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 # 解耦：notify 是可选增强，删除模块级 import 以匹配 architecture.md 解耦原则
@@ -30,6 +31,27 @@ def _save_meta_atomic(meta: dict, task_dir: Path) -> None:
         encoding="utf-8",
     )
     os.replace(tmp_path, meta_path)
+
+
+def _meter_total_cost(metering_path: str) -> float:
+    """聚合 metering.jsonl 的累计成本（任务级，用于成本控制 L3 熔断）。"""
+    if not metering_path:
+        return 0.0
+    total = 0.0
+    try:
+        with open(metering_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                total += ev.get("cost_usd", 0.0) or 0.0
+    except OSError:
+        return 0.0
+    return total
 
 
 def _estimate_wave_count(subtasks: list[dict], completed_ids: set = frozenset()) -> int:
@@ -248,6 +270,36 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         wave = [st for st in remaining
                 if st["id"] not in blocked_ids
                 and all(dep in completed_ids for dep in st.get("depends_on", []))]
+
+        # S10 成本控制 L3：任务级熔断（跨子任务）。每次调度新 wave 前聚合 metering
+        # 累计成本，超 max_budget_usd 则停止调度并将剩余子任务标记 blocked。
+        # 默认关闭（cost_control.enabled=False 不检查）。
+        _cc_cfg = (config or {}).get("cost_control") or {}
+        if _cc_cfg.get("enabled") and wave:
+            _max_budget = _cc_cfg.get("max_budget_usd", 0.0) or 0.0
+            _meter_path = (config or {}).get("_metering_path", "")
+            if _max_budget > 0 and _meter_path:
+                _spent = _meter_total_cost(_meter_path)
+                if _spent >= _max_budget:
+                    logger.warning(
+                        f"[cost_control L3] 任务累计成本 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}，"
+                        f"停止调度剩余 {len(remaining)} 个子任务")
+                    write_censored_event(_meter_path, level="L3", sub_id="",
+                                         spent=_spent, budget=_max_budget,
+                                         reason=f"任务累计成本 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}")
+                    for st in remaining:
+                        if st["id"] not in results_map:
+                            results_map[st["id"]] = {
+                                "subtask_id": st["id"], "status": "blocked",
+                                "exit_code": -1, "summary": f"成本熔断（累计 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}）",
+                                "blocked_by": ["cost_control"],
+                                "failure_reason": "任务成本超预算熔断",
+                                "worktree": "", "sandbox_type": "headless",
+                                "verify_ok": False, "duration_sec": 0,
+                            }
+                            completed_ids.add(st["id"])
+                    break
+
         if not wave:
             logger.error("依赖循环或无法满足的依赖！")
             # 将无法调度的子任务标记为失败，避免收尾时 meta 误标 completed

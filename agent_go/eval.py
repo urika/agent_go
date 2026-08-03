@@ -881,6 +881,10 @@ def cmd_eval(args=None) -> None:
         # S10-P2：对照基线（claude -p 裸跑，不走 harness）
         from .bench import cmd_baseline
         cmd_baseline(args)
+    elif sub == "cost-baseline":
+        # S10：删失校正成本基线（排除 timed_out 右删失，P90×tolerance）
+        from .bench import cmd_cost_baseline
+        cmd_cost_baseline(args)
     elif sub == "models":
        # 模型生产力决策矩阵
        from .bench import cmd_models

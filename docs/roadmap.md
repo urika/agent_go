@@ -160,7 +160,7 @@ S11-P0 和 S10-P1 可并行启动，改动点不重叠（S11 改 CLI + api.py pr
 | 迭代 | 交付物 | 论文对应 | 预估 | 验收门禁 |
 |------|--------|---------|------|---------|
 | **H2-1**（10–11 月） | **KnowledgeStore 落地**：Factual Memory（项目规则自动维护）+ Experiential Memory（验证命令成功率 / 分解策略有效性）+ Memory Maintenance（合并/去重/过期） | §4.2.2 Persistent Memory | ~3d | 同类任务第 3 次执行时 Plan prompt 自动包含历史验证命令模式 |
-| **H2-1** | **成本预算硬约束**：`--max-cost $X` 任务级上限 + 事前预估→事中监控→超限熔断 + $/pass 标度律数据积累 | §7.3.1 Cost-aware Agency | ~2d | `--max-cost 0.30` 执行中超限自动熔断并输出已花费明细 |
+| **H2-1** | **成本预算硬约束**：`--max-cost $X` 任务级上限 + 事前预估→事中监控→超限熔断 + $/pass 标度律数据积累 | §7.3.1 Cost-aware Agency | ✅ 已提前实现（S10） | ✅ L1 `--max-budget-usd` + L2 子任务累计 + L3 `--max-cost` 任务级熔断；默认关闭，`eval cost-baseline` 删失校正基线校准预算 |
 | **H2-2**（11–12 月） | **分支式工作流（Branching）**：Plan 阶段对 `difficulty=hard` 步骤生成备选路径 + 验证失败时回退到分叉点尝试替代策略 + 轻量评估选最优 | §4.1.3 Branching Workflows | ~3d | 注入故障的端到端用例：验证失败→自动切换备选方案→第二路径成功 |
 | **H2-2** | **Runtime-adaptive Hooks**：Hook 根据执行状态动态调整（如「连续 3 次验证失败→自动降低 difficulty 并换模型」） | §4.5.3 Runtime-adaptive Hooks | ~2d | 配置可切换的动态 Hook 规则，日志记录触发原因 |
 
