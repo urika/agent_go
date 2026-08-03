@@ -150,6 +150,16 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         ]
         if allowed_tools:
             cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+        # S10 成本控制 L1：单次 claude 调用硬上限（--max-budget-usd，claude >=2.1 原生支持）
+        # 按 difficulty 读取 cost_control.per_subtask_budget_usd；默认关闭（enabled=False 不注入）
+        _cost_cfg = (_cfg or {}).get("cost_control") or {}
+        if _cost_cfg.get("enabled"):
+            _diff = env.get("AGENT_GO_DIFFICULTY", "medium")
+            _budgets = _cost_cfg.get("per_subtask_budget_usd", {}) or {}
+            # 未知难度回退 medium（避免该难度子任务无成本保护）
+            _budget = _budgets.get(_diff) or _budgets.get("medium")
+            if _budget and _budget > 0:
+                cmd.extend(["--max-budget-usd", str(_budget)])
         # S4 复杂度双通道：difficulty 路由的模型（env 由 executor 注入）
         _routed_model = env.get("AGENT_GO_CLAUDE_MODEL", "")
         if _routed_model:

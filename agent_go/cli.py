@@ -94,6 +94,8 @@ def _build_parser():
                             help="目标目录非 git 仓库时自动 git init + 首次 commit（默认关闭）")
     run_parser.add_argument("--artifact-dir", default=None,
                             help="产物导出目录：子任务写入 worktree/__artifacts__/ 的文件在此收集导出（默认不导出）")
+    run_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
+                            help="任务级成本预算（USD）：累计 metering 成本超限即熔断剩余子任务（默认关闭）")
     run_parser.add_argument("--config", default=argparse.SUPPRESS, help="Path to config JSON file (default: ~/.agent_go/config.json)")
 
     # resume 子命令
@@ -114,6 +116,8 @@ def _build_parser():
                                help="验证失败不阻断下游依赖（默认阻断）")
     resume_parser.add_argument("--artifact-dir", default=None,
                                help="产物导出目录：收集各 worktree/__artifacts__/ 的文件（覆盖 meta 中的记录）")
+    resume_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
+                               help="任务级成本预算（USD）：累计 metering 成本超限即熔断剩余子任务（默认关闭）")
 
     # list 子命令
     subparsers.add_parser("list", help="List all historical tasks")
@@ -196,7 +200,7 @@ def _build_parser():
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
-    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "models", "judge", "all"],
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "judge", "all"],
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
@@ -221,7 +225,9 @@ def _build_parser():
     eval_parser.add_argument("--source-batch", dest="source_batch", default="",
                              help="批次标识（bench 子命令，如 baseline / results_v2 / smoke-*，写入每条 record）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
-                             help="读取结果文件（models 子命令）")
+                             help="读取结果文件（models/cost-baseline 子命令，逗号分隔多个文件）")
+    eval_parser.add_argument("--tolerance", dest="tolerance", type=float, default=1.5,
+                             help="成本基线预算 = P90 × tolerance（cost-baseline 子命令，默认 1.5）")
     # judge 子命令参数
     eval_parser.add_argument("--judge-models", dest="judge_models",
                              help="评判模型列表，逗号分隔（judge 子命令）")
@@ -418,6 +424,14 @@ def cmd_run(args=None):
     # Phase 1 配套：结构化计量日志路径
     config["_metering_path"] = str(task_dir / "metering.jsonl")
     config["_task_id"] = task_id
+
+    # S10 成本控制：--max-cost 开启 L3 任务级熔断（默认关闭）
+    if getattr(args, "max_cost", None):
+        _cc = dict(config.get("cost_control") or {})
+        _cc["enabled"] = True
+        _cc["max_budget_usd"] = float(args.max_cost)
+        config["cost_control"] = _cc
+        logger.info(f"[cost_control] --max-cost ${args.max_cost} 已启用 L3 任务级熔断")
 
     logger = setup_logger(task_id, task_dir)
     logger.info("=" * 60)
@@ -715,6 +729,14 @@ def cmd_resume(args=None):
     # 与 cmd_run 一致：注入计量路径与任务 ID，否则 resume 后 planner/worker 计量丢失
     config["_metering_path"] = str(task_dir / "metering.jsonl")
     config["_task_id"] = task_id
+
+    # S10 成本控制：--max-cost 开启 L3 任务级熔断（默认关闭）
+    if args and getattr(args, "max_cost", None):
+        _cc = dict(config.get("cost_control") or {})
+        _cc["enabled"] = True
+        _cc["max_budget_usd"] = float(args.max_cost)
+        config["cost_control"] = _cc
+        logger.info(f"[cost_control] --max-cost ${args.max_cost} 已启用 L3 任务级熔断")
 
     # CLI 覆盖：--max-retries / --no-verify-block / --artifact-dir（args 模式）
     if args and getattr(args, 'max_retries', None) is not None:

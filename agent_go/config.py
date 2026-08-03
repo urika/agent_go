@@ -71,6 +71,21 @@ DEFAULT_CONFIG = {
         "local_model_name": "qwen",
         "enable_rules": True
     },
+    "cost_control": {
+        # S10 成本控制三层（全部默认关闭，开启前须先立成本基线）
+        # L1 单次 claude 调用硬上限（--max-budget-usd），按 difficulty 读取
+        # L2 子任务累计上限（跨重试，防修复循环烧钱）
+        # L3 任务级熔断（跨子任务，pipeline 调度前聚合 metering）
+        "enabled": False,
+        "max_budget_usd": 0.50,          # L3 任务总预算
+        "per_subtask_budget_usd": {      # L1 单次调用上限（按难度）
+            "easy": 0.10,
+            "medium": 0.20,
+            "hard": 0.50,
+        },
+        "subtask_multiplier": 2.5,       # L2 子任务累计 = 单次上限 × 系数
+        "on_exceed": "stop",             # 超限行为：stop（熔断）| warn（仅告警）
+    },
     "skills": {
         "auto_discover": False,     # 是否自动匹配 Skill（基于任务描述）
         "max_auto_skills": 3       # 自动匹配时最多加载 N 个 Skill
@@ -236,6 +251,36 @@ _metering_lock = threading.Lock()
 
 def log_event(logger: logging.Logger, event: str, data: dict[str, Any]) -> None:
     logger.debug(json.dumps({"timestamp": datetime.now().isoformat(), "event": event, **data}, ensure_ascii=False))
+
+
+def write_censored_event(metering_path: Any, level: str, sub_id: str = "",
+                         spent: float = 0.0, budget: float = 0.0,
+                         reason: str = "") -> None:
+    """写入删失（censored）计量事件到 metering.jsonl（测量/控制解耦）。
+
+    成本控制熔断时调用：真实成本实际是「≥ spent」，熔断只是停止了继续花费，
+    不改变「已花费」这一事实。写入 censored 事件让基线统计能识别右删失记录，
+    避免把「被截断的成本」当成「自然成本」用于预测。
+
+    Args:
+        metering_path: metering.jsonl 路径（空则跳过）
+        level: 熔断层级 L1/L2/L3
+        sub_id: 子任务 id（任务级为 ""）
+        spent: 熔断时已累计成本（右删失下限）
+        budget: 触发的预算上限
+        reason: 熔断原因描述
+    """
+    if not metering_path:
+        return
+    meter_event(metering_path, {
+        "event": "cost_censored",
+        "level": level,
+        "sub_id": sub_id,
+        "cost_usd": round(float(spent or 0.0), 6),
+        "budget_usd": round(float(budget or 0.0), 6),
+        "censored": True,          # 右删失标记：真实成本 ≥ cost_usd
+        "reason": reason,
+    })
 
 
 def meter_event(metering_path: Any, event: dict[str, Any]) -> None:

@@ -409,10 +409,13 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             evaluator_cfg = dict(user_config["evaluator"])
             evaluator_cfg["enabled"] = True  # bench 强制启用语义评估
             config["evaluator"] = evaluator_cfg
-        # 继承用户的 skills / agent_loop 配置（skill 自动发现等），否则 bench 默认关闭
+        # 继承用户的 skills / agent_loop / verification 配置（skill 自动发现等），否则 bench 默认关闭
         for _k in ("skills", "agent_loop", "verification"):
             if user_config.get(_k):
                 config[_k] = dict(user_config[_k])
+        # S10 成本控制：透传任务 YAML 的 cost_control（每任务开关，默认 enabled=false）
+        if task.get("cost_control"):
+            config["cost_control"] = dict(task["cost_control"])
         # --no-skills 时强制关闭 skill 自动发现（用于 skill on/off 对比）
         if no_skills:
             config.setdefault("skills", {})["auto_discover"] = False
@@ -1030,6 +1033,154 @@ def cmd_models(args=None) -> None:
     console.print("效率 = passes/dollar (每美元获得的通过率，越高越经济)")
     console.print("K8   = 通过 record 中 zero-retry 占比（首次验证通过率，§3.4 修订口径）")
     console.print("$/pass = sum(cost) / sum(pass_rate)，raw 口径，跨批次可比（§3.1）")
+
+
+# ═══════════════════════════════════════════════════════════════
+# S10 成本基线（测量/控制解耦 + 删失校正）
+# ═══════════════════════════════════════════════════════════════
+
+def compute_cost_baseline(results_paths: list, tasks_dir: str = "eval_suite",
+                          exclude_timed_out: bool = True,
+                          tolerance: float = 1.5) -> dict:
+    """基于 bench 结果计算删失校正的成本基线（P90 × tolerance 预算）。
+
+    测量/控制解耦原则：
+      - 基线只统计「自然成本」——排除被 timeout/熔断截断（timed_out=True）的
+        记录，避免右删失把真实成本系统性压低。
+      - 被截断记录属于「已知下限」（censored），不参与 mean/P90 计算。
+      - 预测因子：difficulty × model × plan_step_count（子任务数）。
+
+    Args:
+        results_paths: 一个或多个 results*.jsonl 路径
+        tasks_dir: eval_suite 目录（用于按 task_id 映射 difficulty）
+        exclude_timed_out: 排除 timed_out=True 记录（默认 True，删失校正）
+        tolerance: 预算 = P90 × tolerance
+
+    Returns:
+        {"per_difficulty_model": {diff: {model: {n, mean, p90, budget}}},
+         "per_difficulty": {diff: {n, mean, p90, budget}},
+         "summary": {...}}
+    """
+    from pathlib import Path
+
+    records: list[dict] = []
+    for _p in (results_paths if isinstance(results_paths, (list, tuple)) else [results_paths]):
+        for line in Path(_p).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    if not records:
+        return {"error": "无数据"}
+
+    # 按 task_id 映射 difficulty（从任务 YAML 读取）
+    task_diff: dict[str, str] = {}
+    tasks_dir_p = Path(tasks_dir)
+    if tasks_dir_p.is_dir():
+        for tf in sorted((tasks_dir_p / "tasks").glob("*.yaml")):
+            try:
+                _t = yaml.safe_load(tf.read_text(encoding="utf-8"))
+                if _t and _t.get("id"):
+                    task_diff[_t["id"]] = _t.get("difficulty", "medium")
+            except Exception:
+                continue
+
+    # 删失校正：排除被截断记录（timed_out=True → 右删失，真实成本 ≥ 记录值）
+    if exclude_timed_out:
+        _censored = [r for r in records if r.get("timed_out")]
+        records = [r for r in records if not r.get("timed_out")]
+    else:
+        _censored = []
+
+    def _p90(vals: list) -> float:
+        if not vals:
+            return 0.0
+        vals = sorted(vals)
+        _i = min(len(vals) - 1, int(round(0.9 * (len(vals) - 1))))
+        return vals[_i]
+
+    per_dm: dict[str, dict] = {}
+    per_diff: dict[str, list] = {}
+    _steps: list[int] = []
+
+    for r in records:
+        model = r.get("model", "unknown")
+        tid = r.get("task_id", "")
+        diff = task_diff.get(tid, "medium")
+        cost = r.get("total_cost_usd", 0.0) or 0.0
+        steps = r.get("plan_step_count") or r.get("total_subtasks") or 0
+        _steps.append(int(steps))
+        per_dm.setdefault(diff, {}).setdefault(model, []).append(cost)
+        per_diff.setdefault(diff, []).append(cost)
+
+    out = {"per_difficulty_model": {}, "per_difficulty": {}}
+    for diff, by_model in per_dm.items():
+        out["per_difficulty_model"][diff] = {}
+        for model, costs in by_model.items():
+            out["per_difficulty_model"][diff][model] = {
+                "n": len(costs),
+                "mean": round(sum(costs) / len(costs), 6),
+                "p90": round(_p90(costs), 6),
+                "budget": round(_p90(costs) * tolerance, 6),
+            }
+    for diff, costs in per_diff.items():
+        out["per_difficulty"][diff] = {
+            "n": len(costs),
+            "mean": round(sum(costs) / len(costs), 6),
+            "p90": round(_p90(costs), 6),
+            "budget": round(_p90(costs) * tolerance, 6),
+        }
+
+    _all = [c for diff in per_diff.values() for c in diff]
+    out["summary"] = {
+        "total_records": len(records),
+        "censored_records": len(_censored),
+        "exclude_timed_out": exclude_timed_out,
+        "tolerance": tolerance,
+        "overall_mean": round(sum(_all) / len(_all), 6) if _all else 0.0,
+        "overall_p90": round(_p90(_all), 6) if _all else 0.0,
+        "overall_budget": round(_p90(_all) * tolerance, 6) if _all else 0.0,
+        "avg_plan_step_count": round(sum(_steps) / len(_steps), 2) if _steps else 0.0,
+    }
+    return out
+
+
+def cmd_cost_baseline(args=None) -> None:
+    """输出删失校正的成本基线表（agent_go eval cost-baseline）。"""
+    _workspace = Path(__file__).resolve().parent.parent
+    paths_arg = getattr(args, "results", None) or "eval_suite/results.jsonl"
+    results_paths = [p.strip() for p in paths_arg.split(",") if p.strip()]
+    results_paths = [_workspace / p if not Path(p).is_absolute() else Path(p) for p in results_paths]
+    tasks_dir = _workspace / (getattr(args, "tasks", None) or "eval_suite")
+    tolerance = float(getattr(args, "tolerance", 1.5) or 1.5)
+
+    baseline = compute_cost_baseline(results_paths, tasks_dir=str(tasks_dir),
+                                     exclude_timed_out=True, tolerance=tolerance)
+    if "error" in baseline:
+        console.error(baseline["error"])
+        return
+
+    console.print(f"成本基线（P90×{tolerance}，排除超时删失 {baseline['summary']['censored_records']} 条）")
+    console.print(f"总计 {baseline['summary']['total_records']} 条自然成本记录")
+    console.print("")
+    console.print("┌ 按难度 × 模型 ─────────────────────────────────────┐")
+    console.print(f"{'难度':<8} {'模型':<18} {'n':>4} {'mean':>8} {'P90':>8} {'预算':>8}")
+    for diff in sorted(baseline["per_difficulty_model"]):
+        for model, m in sorted(baseline["per_difficulty_model"][diff].items()):
+            console.print(f"{diff:<8} {model:<18} {m['n']:>4} ${m['mean']:>7.4f} "
+                          f"${m['p90']:>7.4f} ${m['budget']:>7.4f}")
+    console.print("")
+    console.print("┌ 按难度（整体）────────────────────────────────────┐")
+    console.print(f"{'难度':<8} {'n':>4} {'mean':>8} {'P90':>8} {'预算':>8}")
+    for diff in sorted(baseline["per_difficulty"]):
+        m = baseline["per_difficulty"][diff]
+        console.print(f"{diff:<8} {m['n']:>4} ${m['mean']:>7.4f} ${m['p90']:>7.4f} ${m['budget']:>7.4f}")
+    console.print(f"\n总体预算（P90×{tolerance}）: ${baseline['summary']['overall_budget']:.4f}")
+    console.print(f"平均子任务数: {baseline['summary']['avg_plan_step_count']}")
+    console.print("注：预算基于自然成本（排除 timed_out 右删失）。被熔断记录会写入 "
+                  "metering.jsonl 的 cost_censored 事件继续累计（测量与控制解耦）。")
 
 
 # ═══════════════════════════════════════════════════════════════

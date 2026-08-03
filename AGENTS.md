@@ -80,6 +80,7 @@ agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3
 agent_go eval bench --source-batch results_v2        # 批次标识（跨批次追溯，S10-P1）
 agent_go eval baseline --candidate-models M1,M2      # 对照基线：claude -p 裸跑（不走 harness，S10-P2）
 agent_go eval models --results eval_suite/results.jsonl
+agent_go eval cost-baseline --results eval_suite/results_v3.jsonl,eval_suite/results_v4_calib.jsonl   # 删失校正成本基线（排除 timed_out 右删失，P90×tolerance，S10）
 agent_go eval judge --results eval_suite/results.jsonl --judge-models M1,M2
 agent_go eval judge calibrate --llm-scores ... --human-scores ...
 agent_go eval gate --baseline 0.05
@@ -210,6 +211,8 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 - **API key**: `AGENT_GO_API_KEY` env var > `config.json` `api_key`. Template vars (`${VAR_NAME}`) resolved from environment.
 - **Local model cost tracking**: `local_models` list marks model names routed to local backends — metering cost is zeroed for matched models. Local backend is auto-detected when `worker_backends` / `worker_base_url` points to `127.0.0.1`/`localhost` (injects `AGENT_GO_IS_LOCAL`); the real backend model name is probed from the proxy's `/status` page (supports hot model switching via SIGHUP) or falls back to `local_model_names` config, then `routed_model`.
 - **Cost recomputation (actual model pricing)**: claude CLI's `total_cost_usd` is billed at Anthropic prices, but `claude-*` route names may resolve to cheaper backends (e.g. `claude-haiku-4-5`/`claude-sonnet-4-6` → `deepseek-v4-flash`, `claude-opus-4-7` → `deepseek-v4-pro`). Worker metering recomputes `cost_usd` from the **actual model** (parsed from claude's `assistant.message.model`) using `MODEL_PRICES`, preventing 10-16x cost inflation; unknown models fall back to claude's reported cost. Local models stay zero-cost.
+- **Cost control (3-layer, default off)**: L1 single-call hard cap via `claude --max-budget-usd` (per difficulty from `cost_control.per_subtask_budget_usd`, unknown difficulty falls back to medium); L2 subtask cumulative cap across retries (`per_subtask_budget_usd × subtask_multiplier`, read from metering.jsonl); L3 task-level circuit break (`--max-cost` sets `cost_control.max_budget_usd`, pipeline checks cumulative metering before each wave). All layers gated by `cost_control.enabled` (default False); budgets must be calibrated from `eval cost-baseline` before enabling.
+- **Measurement/control decoupling**: baseline uses only natural-cost records (timed_out=True excluded — right-censored); circuit-break writes `cost_censored` events to metering.jsonl and keeps accumulating (cost control doesn't stop measurement). `eval cost-baseline` computes P90×tolerance budgets by difficulty×model.
 - **Logging**: Dual-format — INFO human-readable + DEBUG JSON events.
 - **Output abstraction**: `Console` class (quiet/verbose modes) is injected at CLI entry and shared via module-level default. All user-facing output goes through it — no bare `print()` calls.
 - **Sandbox**: Prefers `greywall`, falls back to native `claude`.

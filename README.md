@@ -26,6 +26,7 @@ Give Claude Code a complex task — refactoring auth, upgrading dependencies, ad
 - **Evaluation** — `eval quality/perf/cost/reliability/ux` built-in analytics
 - **Release gate** — `eval gate --baseline 0.05` enforces $/pass rate budget (北极星指标); CI step fails on regression
 - **Model benchmark** — `eval bench --models M1,M2` compares N models on standard task suite (sequential `--parallel 1`, dynamic timeout, per-subtask `binary_pass`/`semantic_pass`/`plan_step_count`); `eval baseline` runs `claude -p` bare-line control; `eval models` outputs decision matrix ($/pass unified, K8, lint/test regression); records `timed_out`/`judge_model`/`planner_model`/`source_batch` per run (S10-P1/P2); `eval judge` runs cross-model judgment with self-bias quantification
+- **Cost control (3-layer, default off)** — L1 `claude --max-budget-usd` single-call cap, L2 subtask cumulative cap across retries, L3 task-level circuit break (`--max-cost`); all gated by `cost_control.enabled`; censored-adjusted baseline via `eval cost-baseline` (excludes timed_out records, P90×tolerance)
 - **Cross-judgment** — `eval judge --judge-models M1,M2` runs N-model mutual review with self-bias prevention; `eval judge calibrate` for human calibration
 
 ## Quick Start
@@ -85,6 +86,7 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 | `eval bench` | **Model benchmark** — compare N models on standard task suite, output decision matrix; `--source-batch` records batch identity; sequential `--parallel 1` + dynamic timeout + code quality (lint/tests) collection (S10-P2) |
 | `eval baseline` | **Bare-line control** — `claude -p` runs without harness, quantifies harness ROI (S10-P2) |
 | `eval models` | **Productivity report** — per-model pass_rate / $/pass / K8 / lint/test regression / recommendation |
+| `eval cost-baseline` | **Censored-adjusted cost baseline** — per-difficulty×model P90×tolerance budgets, excludes timed_out right-censored records (S10) |
 | `eval judge` | **Cross-judgment** — N-model mutual review with self-bias prevention + self-bias quantification |
 | `eval judge calibrate` | **Human calibration** — compare LLM vs human scores, detect unreliable judges |
 | `web` | **Read-only Web observability** — task list / subtask detail / logs / metering / timeline at `127.0.0.1:8091` (`--host`/`--port`/`--token` optional) |
