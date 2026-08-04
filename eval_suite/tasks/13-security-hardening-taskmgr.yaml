@@ -14,3 +14,10 @@ verification:
   - "python -c \"from src.cli import cmd_add; import sys; sys.argv=['cli','add','valid']; cmd_add(); print('add OK')\""
   - "python -c \"from src.models import Task; t=Task.sanitize('<script>alert(1)</script>normal'); assert 'script' not in t.description and t.description=='normal'; print('sanitize OK')\""
 timeout: 600
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.6
+  per_subtask_budget_usd: 0.5
+  on_exceed: stop

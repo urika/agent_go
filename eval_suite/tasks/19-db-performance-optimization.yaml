@@ -48,3 +48,10 @@ verification:
   - "python -m pytest tests/test_blog_api.py -q"
   - "pip install -e . && python -m pytest tests/test_performance.py -q -v"
 timeout: 1800
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.6
+  per_subtask_budget_usd: 0.5
+  on_exceed: stop

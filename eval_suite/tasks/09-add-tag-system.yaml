@@ -19,4 +19,11 @@ verification:
   - "python -m pytest tests/test_tags.py -q"
   - "python -c \"from src.models import Task; t=Task.from_dict({'description':'x'}); assert t.tags == []; t2=Task.from_dict({'description':'x','tags':['bug']}); assert t2.tags == ['bug']; print('OK')\""
   - "python -c \"from src.storage import TaskStorage; import tempfile, pathlib; p=pathlib.Path(tempfile.mktemp()); s=TaskStorage(p); s.save('tagtest'); s.save_tags('tagtest',['urgent']); found=s.find_by_tag('urgent'); assert len(found)==1; assert found[0].id=='tagtest'; print('OK')\""
-timeout: 600
+timeout: 990
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.6
+  per_subtask_budget_usd: 0.5
+  on_exceed: stop

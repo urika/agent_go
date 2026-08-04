@@ -15,3 +15,10 @@ verification:
   - "python -m pytest tests/test_concurrent.py -q"
   - "python -c \"from src.storage import TaskStorage; import tempfile, pathlib; p=pathlib.Path(tempfile.mktemp()); s=TaskStorage(p); s.save('x'); data=s.load_all(); assert len(data)==1 and data[0].description=='x'; print('Atomic OK')\""
 timeout: 600
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.6
+  per_subtask_budget_usd: 0.5
+  on_exceed: stop

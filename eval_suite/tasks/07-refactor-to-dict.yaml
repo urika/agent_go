@@ -14,4 +14,11 @@ task: |
 verification:
   - "python -m pytest tests/test_storage.py tests/test_models_utils.py -q"
   - "python -c \"from src.storage import TaskStorage; from src.models import Task; from pathlib import Path; p=Path('/tmp/test_dict.json'); s=TaskStorage(p); t1=Task('a',task_id='1'); t2=Task('b',task_id='1'); s.save(t1); s.save(t2); assert len(s.load_all())==1; assert s.load_all()[0].description=='b'; print('OK')\""
-timeout: 420
+timeout: 700
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.25
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

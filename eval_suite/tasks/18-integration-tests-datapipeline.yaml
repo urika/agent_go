@@ -23,3 +23,10 @@ verification:
   - "python -m pytest tests/test_cli_integration.py tests/test_cli.py -q"
   - "python -c \"from pathlib import Path; assert Path('tests/fixtures/sample.csv').exists(); print('fixtures OK')\""
 timeout: 600
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.6
+  per_subtask_budget_usd: 0.5
+  on_exceed: stop
