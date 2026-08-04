@@ -53,7 +53,7 @@ class TestDiscoverSkills(_MakeSkillDirMixin):
         assert result == []
 
     def test_partial_match(self, tmp_path):
-        """部分关键词匹配"""
+        """部分关键词匹配（多词重叠命中）"""
         self._make_skill_dir(tmp_path, "frontend-react",
                              "前端 React 组件开发与测试")
 
@@ -61,6 +61,20 @@ class TestDiscoverSkills(_MakeSkillDirMixin):
             result = discover_skills("编写 React 组件测试用例")
         assert len(result) > 0
         assert result[0].name == "frontend-react"
+
+    def test_single_english_word_no_match(self, tmp_path):
+        """单一英文泛词不匹配（防止 skill description 中的弱义词误配，
+        如 orm-optimizer 的 "verification" 与任务模板字段重叠）"""
+        self._make_skill_dir(tmp_path, "frontend-react",
+                             "前端 React 组件开发与测试")
+
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            result = discover_skills("编写 React 组件测试用例")
+        # 英文单词 "react" 不满足 ≥2 词规则（中文词除外），不匹配
+        # 注意：此描述含中文词，走 CJK 分支应仍匹配；用纯英文单泛词验证
+        result2 = discover_skills("implement authentication module")
+        names = [s.name for s in result2]
+        assert "frontend-react" not in names
 
     def test_sort_by_overlap_count(self, tmp_path):
         """按匹配关键词数排序，重叠词多的排在前面"""
@@ -108,14 +122,18 @@ class TestDiscoverSkills(_MakeSkillDirMixin):
         assert result == []
 
     def test_case_insensitive_match(self, tmp_path):
-        """大小写不敏感匹配"""
+        """大小写不敏感匹配（多词重叠命中）"""
         self._make_skill_dir(tmp_path, "security-review",
                              "Security Audit — Authentication, Authorization")
 
         with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            # 单英文泛词 "authentication" 不满足 ≥2 词规则，不匹配
             result = discover_skills("implement AUTHENTICATION module")
-        assert len(result) > 0
-        assert result[0].name == "security-review"
+            assert len(result) == 0
+            # 多词重叠（authentication + authorization）命中，且大小写不敏感
+            result2 = discover_skills("implement AUTHENTICATION and AUTHORIZATION flows")
+            assert len(result2) > 0
+            assert result2[0].name == "security-review"
 
     def test_punctuation_handling(self, tmp_path):
         """标点符号不影响关键词提取"""

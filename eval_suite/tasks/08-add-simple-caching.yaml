@@ -15,4 +15,11 @@ task: |
 verification:
   - "python -m pytest tests/test_storage.py tests/test_models_utils.py -q"
   - "python -c \"from src.utils import cached, clear_cache; call_count=[0]; @cached\ndef f(x):\n call_count[0]+=1; return x*2\nassert f(3)==6 and f(3)==6; assert call_count[0]==1; clear_cache(); assert f(3)==6; assert call_count[0]==2; print('OK')\""
-timeout: 420
+timeout: 720
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.25
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

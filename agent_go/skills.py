@@ -183,6 +183,25 @@ def list_skills(project_root: Optional[Path] = None) -> list[dict]:
     return result
 
 
+def _tokenize_words(text: str) -> set[str]:
+    """分词：英文按单词提取，连续 CJK 按字符拆分。
+
+    中文无空格分词，`\\w+` 会把「组件开发与测试」整段合并为单个 token，
+    导致 CJK 关键词重叠判定失真。此函数把 CJK 连续串拆成单字符 token
+    （接近按字分词），英文保持单词粒度，使 overlap 统计可靠。
+    """
+    tokens: set[str] = set()
+    for m in re.finditer(r"[a-z0-9]+|[^\W\d_]+", text.lower()):
+        w = m.group()
+        if re.fullmatch(r"[a-z0-9]+", w):
+            tokens.add(w)
+        else:
+            # CJK 串：按字符拆分
+            for ch in w:
+                tokens.add(ch)
+    return tokens
+
+
 def discover_skills(task: str, project_root: Optional[Path] = None, max_skills: int = 3) -> list[Skill]:
     """根据任务描述自动匹配 Skill（关键词命中 description）。"""
     all_skills = list_skills(project_root)
@@ -192,10 +211,24 @@ def discover_skills(task: str, project_root: Optional[Path] = None, max_skills: 
     for info in all_skills:
         desc_lower = info["description"].lower()
         # 检查 description 中是否有任何词出现在 task 中
-        desc_words = set(re.findall(r"\w+", desc_lower))
-        task_words = set(re.findall(r"\w+", task_lower))
-        overlap = desc_words & task_words
-        if overlap:
+        desc_words = _tokenize_words(desc_lower)
+        task_words = _tokenize_words(task_lower)
+        # 排除通用结构词（任务模板字段名、弱语义词），避免单词误配
+        _skip = {
+            "verification", "validate", "valid", "list", "read", "write",
+            "create", "file", "files", "string", "function", "functions",
+            "input", "output", "task", "return", "returns", "add", "using",
+            "and", "the", "a", "an", "of", "for", "in", "with", "to",
+            "py", "str", "txt", "all", "any", "its", "it", "are", "is",
+            "be", "by", "on", "at", "as", "or", "not", "no", "each",
+        }
+        overlap = (desc_words & task_words) - _skip
+        # 排除纯数字（任务编号/规则序号，无语义），防数字误配
+        overlap = {w for w in overlap if not w.isdigit()}
+        # 至少 2 个实质词重叠才匹配，防止单泛词误配（如 orm-optimizer 的
+        # "verification" 与任务模板字段重叠）。CJK 按字符分词后能产出
+        # 正常的多字重叠，故不再需要中文单词特例。
+        if len(overlap) >= 2:
             s = load_skill(info["name"], project_root)
             if s:
                 matched.append((len(overlap), s))

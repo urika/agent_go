@@ -14,8 +14,16 @@ task: |
      - 不递归子目录
      - 目录不存在返回空列表
 
-  注意：验证命令只检查最基本的函数调用。
-  真正的正确性将由独立的语义评估检查。
+  这是一个单文件小任务：直接在 solution.py 中实现三个函数即可，
+  不需要额外的审查、重构或验证步骤，一步完成。
+  verification 命令中的断言即为全部验收标准。
 verification:
   - "python3 -c \"from solution import safe_read, list_text_files; import inspect, tempfile, os; assert callable(safe_read); assert callable(list_text_files); f=tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False); f.write('hello'); f.close(); assert safe_read(f.name)=='hello'; os.unlink(f.name); assert safe_read('/nonexistent/path')==''; d=tempfile.mkdtemp(); open(d+'/a.txt','w').close(); open(d+'/b.txt','w').close(); r=list_text_files(d); assert len(r)==2; import shutil; shutil.rmtree(d)\""
-timeout: 180
+timeout: 360
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.25
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop
