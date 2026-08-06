@@ -6,6 +6,11 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.coverage
+*.egg-info/
+
+# zcode plan files
+.zcode/
 
 # macOS
 .DS_Store
@@ -13,4 +18,5 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+.obsidian/
 2026-05-15-211101-command-messageinitcommand-message.txt

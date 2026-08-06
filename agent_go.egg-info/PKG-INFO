@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: agent_go
-Version: 2.0.0
-Summary: Plan Mode orchestration tool — decomposes tasks, runs them in isolated worktrees with Claude Code
-Requires-Python: >=3.9
-License-File: LICENSE
-Dynamic: license-file
