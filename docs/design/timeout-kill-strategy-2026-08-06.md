@@ -88,6 +88,7 @@ timeout/kill 在本系统里存在于**三个互不相同的表面**，v2/v3 分
 - `stuck` = `IDLE_TIMEOUT` 触发；`hard_timeout` = retry_timeout 触发；`over_budget_l2/l3` = cost_control 触发；`cleanup_race` = 子任务全 completed+verified 但进程被杀。
 - `cleanup_race` 在 `_collect_result` 里**计为通过**（修正假失败）。
 - metering/`write_censored_event` 已有 level 字段，可复用为 kill_reason 载体。
+- **持久化时机（review 修订）**：当前 S12-P0 实现是 `_collect_result` **事后推断**（方案 B：从 timed_out + per_subtask + cost 反推），对 SIGKILL 已鲁棒。但第十节 runtime failure_class **驱动重试决策**时需 kill_reason 在 kill 之前可得——采用方案 A（kill 决策点先写 `kill_state`/metering 事件 → SIGTERM 给 grace 落盘 → 仍不退才 SIGKILL）+ 方案 B 反推兜底。**SIGKILL 事件可能丢失，fallback 反推是 mandatory。**
 
 ### G2. 修 `_collect_result` 的 aborted 分支（与 G1 同源）
 **问题**：`all_passed` 在 aborted 分支前冻结，`binary_pass` 用旧值、`completed` 用新值，二者矛盾（详见度量诊断缺陷 1）。且 `all([])==True` 陷阱让"全失败"被判 binary_pass=True。
@@ -97,32 +98,53 @@ timeout/kill 在本系统里存在于**三个互不相同的表面**，v2/v3 分
 ### G3. per-task 预算输入
 **问题**：`max_budget_usd` 是全局 config，用户无法对单个任务设预算。与 PRD「预算限制下」诉求脱节——用户要的是"这次任务别超 $0.30"，不是全局均值。
 
-**设计要点**：支持 `--budget` CLI 参数 / Task Spec 字段 → 注入为该任务的 L3 上限，覆盖 config 默认。结合 PRD 的 Spec 准入（S11-P0）天然落点。
+**设计要点**（review 修订）：
+- 支持 `--budget` CLI 参数 / Task Spec 字段 → 注入为该任务的 L3 上限，覆盖 config 默认。结合 S11 Spec 准入天然落点。
+- **默认值动态化**：不用全局固定值（如 0.50），而用 `Σ(per_subtask_budget_usd[difficulty] × subtask_multiplier × len(subtasks))` 动态计算——否则 hard 任务 10 子任务与 easy 任务 2 子任务共用同一 L3 上限，导致 hard 过早熔断。
+- **budget_mode 三态**（Spec 字段）：`strict` = 超预算 block；`degrade` = 触发 G4 降级；`ignore` = 关 L3（仅 L1/L2 生效）。把 G3/G4 串成一个连贯的预算策略。
 
 ### G4. L3 优雅降级（模型降档），而非硬 block
 **问题**：L3 现在把剩余子任务标 `blocked`（硬停）。预算压力下更优解是**降级**（切便宜模型继续），保留部分产出，而非全弃。
 
 **设计要点**：`on_exceed` 增加 `degrade` 选项 → 剩余子任务切 `worker_models` 下一档（如 hard→medium 模型）继续调度，并在结果里标 `degraded=True`。需配合 `worker_models_fallback` 已有的升级表（对称设计一个降级表）。
 
+**降级质量门（review 修订）**：降级模型可能 verify 必败（如 hard 任务 Opus→Sonnet 断崖），此时 degrade 只是"延长死亡时间"而非保产出。需加安全阀：
+- 降级后子任务 `max_retries` 降为 **1**（不无限烧降级模型的钱）；
+- 降级后**连续 N 个子任务 verify 失败 → 自动回退 `stop`**（不再降级烧钱）；
+- 结果标 `degraded=True`，让最终验收人知道"这部分是便宜模型做的，需重点 review"。
+
 ### G5. 规划期欠分解检测
 **问题**：高难度任务被欠分解成 1-2 个长子任务 → 单子任务耗时长 → 撞 retry_timeout（即便 hard ×2.5）。根因在规划期，不在执行期。
 
 **设计要点**：Plan 后加守卫——`difficulty ∈ {hard}` 且 `len(subtasks) < 阈值` → 触发再分解或强制升 worker 模型档。落地 PRD 原则 #5。
 
+**阈值分阶段（review 修订）**：硬编码阈值会误杀"确需少量子任务的 hard 任务"（如给现有模块加单点功能）。分两版：**V1** 阈值 = `difficulty_base_subtasks[hard]=3`（硬编码，快速落地）；**V2** 从 `verify_state.json` 历史重试率学习——"hard 任务中子任务数 ≤N 的 retry 率是否显著高于 >N 的"，数据驱动定阈值。
+
 ### G6. bench 侧 `_dynamic_timeout` 改按难度（测量侧）
 **问题**：bench 外壳的 `_dynamic_timeout = max(YAML, 子任务数×150+120)` 按子任务数，但耗时由难度驱动——这是"控制变量指错方向"的实证（见度量诊断根因 A）。
 
-**设计要点**：改为 `max(YAML, 难度基准×系数 + 缓冲)`，或与 retry_timeout 的难度倍数对齐。**仅影响测量，不影响产品**，但关系到 KPI 可信度。
+**设计要点**（review 强调）：改为 `max(YAML, 难度基准 × mult + 缓冲)`，**mult 直接复用 retry_timeout 的难度倍数表 `{easy:1, med:1.5, hard:2.5}`**——保持测量侧与执行侧口径一致，避免"bench 按子任务数、产品按难度"两套逻辑分叉制造噪声。**仅影响测量，不影响产品**，但关系到 KPI 可信度。
 
 ### G7. infra/API 指数退避重试（验证循环）—— 最高 ROI 小改动
 **问题**：claude 因 API 故障 / cost=0 退出时，验证循环**立即重试 ×3**——若 API 持续宕机，3 次重试几秒内锤同一个不可用端点，浪费且无益。infra 故障多为瞬时，应"等"而非"锤"。
 
-**设计要点**：对 cost=0 / API-error 类 claude 退出，retry 间插入指数退避（如 30s / 60s / 120s）而非立即重试。cost≈0 故退避几乎免费；且直接服务 PRD 及格线"周五 run、关机走人、周一 merge"——否则一次凌晨 API 抖动废掉整夜无人值守任务。
+**设计要点**（review 修订：按状态码差异化，非统一退避）：对 cost=0 / API-error 类 claude 退出，**按 HTTP 状态码 / error subtype 拆分退避表**：
+
+| 信号 | 策略 |
+|------|------|
+| **429 rate-limit** | 尊重 `Retry-After` 头，无则短退避 |
+| **529 / 503 overload** | 指数退避，**短基线**（10s / 20s / 40s） |
+| **网络超时 / DNS** | 指数退避（30s / 60s / 120s） |
+| **401 / 403 鉴权失败** | **零退避，立即停 + 告警**（见第十一节 #3 陷阱） |
+
+cost≈0 故退避几乎免费；直接服务 PRD 及格线"周五 run、关机走人、周一 merge"——否则一次凌晨 API 抖动废掉整夜无人值守任务。退避期间做健康探测（第十节），恢复即重试，不死等定时器。
 
 ### G8. 验证循环 kill_reason 感知（不重试预算熔断）
 **问题**：当前验证循环不区分 kill_reason——一个因 L2 预算熔断而停的子任务，仍可能被验证失败触发重试，**花更多钱在已超预算的任务上**，违背预算约束本身。
 
 **设计要点**：retry 前检查 kill_reason / cost_control 熔断标记——`over_budget` 类直接判 Failed、不进重试；`cleanup_race` 不重试（已成功）；`infra` 走 G7 退避。与 G1（kill_reason 贯穿）配合。
+
+**状态机联动（review 修订）**：`kill_reason` 是子任务生命周期事件的 **mandatory 字段**——验证循环状态机：`subtask 结束 → 写 kill_reason → 验证循环读取决策`：`over_budget`/`cleanup_race` 短路（失败/成功，不 verify）；`infra` 走 G7 退避；`stuck`/`hard_timeout` 正常 verify 但 max_retries 可能已耗尽。**验证循环不启动 verify，除非 kill_reason 已解析**（G1 方案 A 的写入 + 方案 B 的反推二选一可得）。
 
 ---
 
@@ -130,27 +152,29 @@ timeout/kill 在本系统里存在于**三个互不相同的表面**，v2/v3 分
 
 > 严格遵循用户要求：**本节是路线设计，不含代码实现。**
 
-**Phase 0（前置，必须最先）— 修测量**
+**Phase 0（前置，必须最先）— 修测量 + stuck 快速补丁**
 - G1（kill_reason 打标）+ G2（`_collect_result` 修正）
+- **+ S2 快速补丁**（review 修订）：仅加 worktree 文件变更检测（实现简单、低风险），先把最明显的"等 pytest/build"误杀压下来——stuck 误杀独立于 cost_control，是产品运行时体验痛点，不必等 Phase 3 全多维方案
 - 完成后用新口径重算 v2/v3/v4，**确认 cost_control 开启前的真实通过率/成本基线**
 - 这是 chicken-egg 的破局点：度量诊断说"开启 cost_control 前须立基线"，但立基线需要可信度量 → 必须先修度量
 
-**Phase 1 — 开启已就绪的 cost_control**
+**Phase 1 — 开启已就绪的 cost_control + 无人值守鲁棒性**
 - 在 Phase 0 冻结的基线上，小范围开启 L1/L2/L3（`enabled=True`）
-- 引入 G3（per-task `--budget`），让用户能对单任务设约束
+- 引入 G3（per-task `--budget` + 动态默认 + budget_mode），让用户能对单任务设约束
+- **G7（infra/API 差异化退避）前置到此**（review 修订）：它是"开启 cost_control 后无人值守"的命门——cost_control 开了若没有 infra 退避，一次 API 抖动仍废掉整夜。实现独立、ROI 极高，不该等 Phase 4
+- G8（验证循环 kill_reason 感知，依赖 Phase 0 的 G1，顺带落地）
 - 观察 kill_reason 分布，校准 `per_subtask_budget_usd` / `max_budget_usd` / `subtask_multiplier`
 
 **Phase 2 — 补降级与规划守卫**
-- G4（L3 `degrade` 降级路径）
-- G5（规划期欠分解检测）
-- G6（bench `_dynamic_timeout` 按难度，顺带修测量）
+- G4（L3 `degrade` 降级路径 + 降级质量门）
+- G5（规划期欠分解检测，V1 硬编码阈值）
+- G6（bench `_dynamic_timeout` 复用 retry_timeout 难度倍数，顺带修测量）
 
 **Phase 3 — stuck 误杀规避（详见第八节）**
-- `IDLE_TIMEOUT` 从"纯静默单维"升级为**多维活性**（claude 事件 ∨ worktree 文件变更 ∨ 进程树 CPU）+ **grace 复检门**，把"在干活却被当卡死"的误杀压到接近 0；并收窄 stuck-kill 的职责范围（让 budget + 轮数上限管常见情况）
+- `IDLE_TIMEOUT` 从"纯静默单维"升级为**多维活性**（claude 事件 ∨ worktree 文件变更 ∨ 进程树 CPU）+ **grace 复检门**（Phase 0 的 S2 快速补丁已先行，此处补全 S3 进程树 CPU + grace 复检门），把"在干活却被当卡死"的误杀压到接近 0
 
-**Phase 4 — 重试策略（详见第九节）**
-- G7（infra/API 指数退避，替代立即重试 ×3）—— 最高 ROI，服务无人值守鲁棒性
-- G8（验证循环 kill_reason 感知：不重试 `over_budget` / `cleanup_race`）
+**Phase 4 — 自适应重试（长期）**
+- metering + kill_reason + 重试结果 → "失败类 × 策略 → 历史成功率"学习，按命中率路由（KnowledgeStore / H3-2 经验分类）；从规则版（前十节）升级为经验版
 
 ---
 
@@ -164,6 +188,10 @@ timeout/kill 在本系统里存在于**三个互不相同的表面**，v2/v3 分
 | **per-task 预算的 UX** | `--budget` 放 CLI 还是 Task Spec 字段？默认值取 config 还是按难度？ | 倾向 Spec 字段（S11 准入）+ CLI 覆盖 |
 | **L3 降级 vs block 的策略选择** | 降级能保部分产出但可能引入质量不一致；block 干脆但浪费已花预算 | 建议 `on_exceed` 默认 `degrade`，`stop` 可选 |
 | **bench 外壳与产品不一致** | 表面 A 按子任务数、表面 B 按难度，两套 timeout 逻辑分叉 | G6 统一到难度口径，避免测量与实际脱节 |
+| **`git status` 大 monorepo 性能（review）** | 第八节 S2 用 `git status --porcelain` 每 N 秒扫 worktree，大型 monorepo（10万+文件）可能 1-3s/次，反噬主循环 | 限定 `git status --porcelain <关心子目录>`，或用 `inotify`/`fsevents` 监听；spec 标注"性能敏感场景需优化" |
+| **`ps` 遍历子孙跨平台（review）** | 第八节 S3 用 `ps` 遍历 `active_pids` 子孙——macOS 与 Linux 的 `ps`/`--ppid` 语法不通用，"纯 stdlib 可实现"过乐观 | 提供平台抽象层 `get_process_tree_cpu()`，明确支持矩阵（macOS/Linux），或用 `pgrep -P` |
+| **cleanup_race 写入竞态（review）** | 第七节定义需"全子任务 completed+verify_ok"，若 SIGKILL 落在二者写入之间会漏判 | 实际 `meta.json` 原子写使二者在同一 snapshot 一致，竞态窗口基本不存在；防御性可放宽为"全 completed-or-verified 且无 failed" |
+| **`--auto-resume` 子任务级 checkpoint（review）** | 任务级 `meta.json` 难支持并发/细粒度恢复，resume 可能重跑已完成子任务 | 现有 per-subtask `verify_state.json` + commit 边界已提供子任务级 checkpoint；`--auto-resume` 应基于它而非新造 |
 
 ---
 
