@@ -523,6 +523,14 @@ Phase 4（1 天）:
 
 > **K8 定义（修订）**：`total_retries == 0` 的 record 占比。更精确的修订定义为「通过 record 中 zero-retry 占比」，但当前 schema 缺少 `binary_pass` 字段，暂时沿用原定义。详见 [bench-v2-data-requirements.md](design/bench-v2-data-requirements.md) §3.4。
 
+> **⚠️ 2026-08-06 度量有效性警示（覆盖上表达标/差距状态）**：上述 Bench v1 基线经度量审计发现**不可直接采信**，K1/K4/K8 的达标与差距状态均为**临时**：
+> - `binary_pass` 实现缺陷——55% 的 v3 记录"全子任务失败但 binary_pass=True"（计算时序错位 + `all([])` 空真值陷阱）→ K1/K8 的"通过"判定不可信；
+> - `pass_rate` 假失败——v3 名义通过率 34%，修正（计入已完成已验证却被收尾超时 zeroed 的记录）后真实 ~67% → K1 基线可能偏低约 37pp；
+> - v1/v2/v3/v4 是**四套不同采集器**，PRD 基线钉在 v1、代码已演进到 v3/v4，跨版本不可比 → K8"🟢达标"建立在另一把尺子上；
+> - 20-24% 的 cost=0 记录（infra/API 故障）混入失败分母 → 把基础设施可用性与模型能力混为一谈。
+>
+> **结论**：K8 的"🟢达标"、K1 的"🔴-8.1pp"、K4 的"7-14x"在度量修复前**均非定论**，不应据此刻板考核。修复路径见 [design/bench-metric-validity-2026-08-06.md](design/bench-metric-validity-2026-08-06.md)（度量诊断）与 [design/timeout-kill-strategy-2026-08-06.md](design/timeout-kill-strategy-2026-08-06.md)（kill/成本策略）。**修正口径下的历史重估基线**见 [design/bench-baseline-corrected-2026-08-06.md](design/bench-baseline-corrected-2026-08-06.md)（v3 修正通过率 ~67%、$/pass ~$0.053；权威基线待用修复后采集器重跑冻结）。对应 roadmap 已排入 **S12**。
+
 ## 北极星指标
 
 **单位成本的验收通过率（$/pass）** — 将成本纳入质量指标，防止「不计成本堆质量」或「省钱产出垃圾」两种极端。
@@ -534,6 +542,8 @@ $/pass = sum(total_cost_usd) / sum(pass_rate)
 ```
 
 含义：「获得一个等效完全通过所需的美元成本」。以 raw cost 和 raw pass_rate 为准，在分析阶段计算，不复用 `dollar_per_pass` field。
+
+> **⚠️ 分母概念缺陷（2026-08-06 识别）**：`sum(pass_rate)` 把"部分完成"当成"等效完全通过"——upstream→downstream 依赖链下，1/4 子任务完成被记为 0.25 个 pass，但下游被 blocked 时实际是 **0 个可交付物**。这系统性低估真实单交付成本，使 $/pass 偏乐观。修正方向：分母改为**任务级成功计数**（全部子任务通过才算 1），并叠加 `kill_reason` 过滤（`cleanup_race` 计通过、`over_budget` 单列、infra 不计分母）。修正前 $/pass 的绝对值不可作为达标判定，仅适合同口径内的相对比较（如模型排序）。详见 [design/bench-metric-validity-2026-08-06.md](design/bench-metric-validity-2026-08-06.md) 缺陷 2。
 
 | | 当前（Bench v1 实测） | Q3 目标 | 年度 |
 |---|----------------------|---------|------|

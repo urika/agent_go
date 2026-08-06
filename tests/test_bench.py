@@ -690,3 +690,131 @@ def test_run_baseline_one_verification_fails(tmp_path, monkeypatch):
     assert r["binary_pass"] is False
     assert r["failed"] == 1
 
+
+# ─────────────────────────── S12-P0：度量修正（kill_reason / cleanup_race / all([])）───────────────────────────
+
+def test_cleanup_race_credits_pass_on_timeout_all_done(tmp_path):
+    """S12-P0：超时被杀但全部子任务已 completed+verify_ok → cleanup_race，计为通过。
+
+    v3 65 条假失败的根因场景：旧逻辑要求 results 覆盖全部计划子任务 id
+    （_all_resulted），但 SIGKILL 常导致 meta.subtasks 未完整落盘，于是把已完工
+    任务误判失败。新逻辑只要求 timed_out + 所有已落盘 result 都完成已验证。
+    """
+    td = tmp_path / "task-timeout-done"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "completed", "verify_ok": True},
+        {"subtask_id": "sub-2", "status": "completed", "verify_ok": True},
+    ])
+    # 故意不写 subtasks 元数据（模拟 SIGKILL 前 meta.subtasks 未落盘）+ 不写 metering
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 960.0, -9, "",
+        exact_td=td, expected_task="Some task", timed_out=True,
+    )
+    assert result["kill_reason"] == "cleanup_race"
+    assert result["completed"] == 2
+    assert result["pass_rate"] == 1.0
+    assert result["binary_pass"] is True
+    assert result["all_verify_ok"] is True
+
+
+def test_cleanup_race_partial_meta_coverage(tmp_path):
+    """超时 + 全部已落盘 result 完成已验证，但未覆盖计划全集 → 仍计 cleanup_race 通过。
+
+    与旧 test_collect_result_stale_aborted_partial_subtasks 的关键差异：
+    旧逻辑（依赖 _all_resulted）会判失败；S12-P0（只看 _all_results_done + timed_out）判通过。
+    """
+    td = tmp_path / "task-partial-done"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "completed", "verify_ok": True},
+    ])
+    meta_path = td / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["subtasks"] = [{"id": "sub-1"}, {"id": "sub-2"}]  # 计划 2 个，只落盘 1 个
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 960.0, -9, "",
+        exact_td=td, expected_task="Some task", timed_out=True,
+    )
+    assert result["kill_reason"] == "cleanup_race"
+    assert result["completed"] == 1
+    assert result["pass_rate"] == 1.0
+
+
+def test_kill_reason_none_on_normal_pass(tmp_path):
+    """正常通过（非超时、全部完成）→ kill_reason=none。"""
+    td = tmp_path / "task-ok"
+    _write_full_meta(td, "Some task", "completed", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True},
+    ])
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 100.0, 0, "",
+        exact_td=td, expected_task="Some task",
+    )
+    assert result["kill_reason"] == "none"
+    assert result["binary_pass"] is True
+
+
+def test_kill_reason_stuck_on_timeout_incomplete(tmp_path):
+    """超时被杀且子任务未全部完成 → stuck_or_hardtimeout，计失败。"""
+    td = tmp_path / "task-timeout-stuck"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "completed", "verify_ok": True},
+        {"subtask_id": "sub-2", "status": "failed", "verify_ok": False},
+    ])
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 960.0, -9, "",
+        exact_td=td, expected_task="Some task", timed_out=True,
+    )
+    assert result["kill_reason"] == "stuck_or_hardtimeout"
+    assert result["completed"] == 0
+    assert result["pass_rate"] == 0.0
+
+
+def test_all_empty_not_vacuously_true(tmp_path):
+    """S12-P0 修 all([])：无 completed 子任务时 all_verify_ok / binary_pass 不应为 True。
+
+    旧 `all(r.verify_ok for r in results if status=='completed')` 对空集返回 True，
+    会把"全失败"误判为通过（v2 41 条 / v3 binary_pass 55% 矛盾的根因之一）。
+    """
+    td = tmp_path / "task-all-failed"
+    _write_full_meta(td, "Some task", "completed", [
+        {"id": "sub-1", "status": "failed", "verify_ok": False},
+        {"id": "sub-2", "status": "blocked", "verify_ok": False},
+    ])
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 100.0, 0, "",
+        exact_td=td, expected_task="Some task",
+    )
+    assert result["all_verify_ok"] is False  # 旧 all([]) 会得 True
+    assert result["binary_pass"] is False
+    assert result["completed"] == 0
+    assert result["kill_reason"] != "none"
+
+
+def test_kill_reason_infra_on_zero_cost(tmp_path):
+    """未通过 + 非超时 + cost=0（无 metering）→ infra（基础设施故障，非能力失败）。"""
+    td = tmp_path / "task-infra"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "failed", "verify_ok": False},
+    ])
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 50.0, -9, "",
+        exact_td=td, expected_task="Some task", timed_out=False,
+    )
+    assert result["kill_reason"] == "infra"
+
+
+def test_kill_reason_interrupted_with_cost(tmp_path):
+    """未通过 + 非超时 + cost>0 → interrupted_or_unknown（花钱了但没成，非 infra）。"""
+    td = tmp_path / "task-interrupted"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "failed", "verify_ok": False},
+    ])
+    (td / "metering.jsonl").write_text(
+        json.dumps({"cost_usd": 0.05, "latency_ms": 1000}) + "\n", encoding="utf-8")
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 50.0, -9, "",
+        exact_td=td, expected_task="Some task", timed_out=False,
+    )
+    assert result["kill_reason"] == "interrupted_or_unknown"
+
