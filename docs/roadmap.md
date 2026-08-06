@@ -48,6 +48,8 @@ K1≥92% K8≥80% K4≤$0.05                     K1≥97% K4≤$0.03 K3≤1.5min
 
 > **2026-08-01**：Bench v1 实测 KPI 基线（K1 83.9%、K8 88.9%、K4 $0.34-0.69、$/pass $0.39）。K8 已超额完成 Q3 目标，K1 差距 8.1pp，K4/$/pass 差距 7-14x。Q3 $0.05 成本目标在当前技术栈下极其激进，S10 完成后以 bench 实测数据做最终判定。
 
+> **⚠️ 2026-08-06 度量审计更正**：上表 KPI 基线（K1/K4/K8/$/pass）经 [bench-metric-validity-2026-08-06.md](design/bench-metric-validity-2026-08-06.md) 审计发现**不可直接采信**——`binary_pass` 缺陷（55% v3 记录自相矛盾）、`pass_rate` 假失败（v3 34% 实为 ~67%）、四套采集器不可比、infra 故障混入分母。**S10「可信 KPI 基线」目标在度量修复前不算达成**：v2/v3/v4 的 bench 数字须先经 S12-P0 修复口径、重算后才可信。K8"🟢达标"/K1"🔴"/K4"7-14x"均为临时状态。
+
 ## Q3 2026（7–9 月）：补上信任与成本两根支柱
 
 | 迭代 | 交付物 | 对应缺口 | 预估 | 验收门禁 |
@@ -239,6 +241,21 @@ K4≤$0.04            K4≤$0.02            K9≥10
 1. ~~S11-P0~~ ✅ 完成（`cd5361c`，`--spec` + `spec template` + L1 硬门禁）
 2. ~~S10-P1~~ ✅ 完成（`551b713` + `929bd58`，Bench v2 Schema + Cross-Judge）
 3. ~~S11 L1.5~~ ✅ 完成（`216882b`，AST 冲突检测）
-4. ~~S10-P2 全因子 Bench Tier 1 编排~~ ✅ 代码完成（2026-08-01：P1 字段 + `--parallel 1` + 代码质量维度 + `eval baseline` 对照基线 + 动态 timeout）。**198 次全因子运行 + 对照基线运行待执行**（hard 任务 timeout 达 30min，预估全量 ~15-20h 墙钟）
+4. ~~S10-P2 全因子 Bench Tier 1 编排~~ ✅ 代码完成（2026-08-01：P1 字段 + `--parallel 1` + 代码质量维度 + `eval baseline` 对照基线 + 动态 timeout）。**198 次全因子运行 + 对照基线运行待执行**（hard 任务 timeout 达 30min，预估全量 ~15-20h 墙钟）。⚠️ **但其结果在 S12-P0 修度量前不可信**——v2/v3/v4 已暴露 `binary_pass`/`pass_rate`/假失败缺陷，重跑前应先修采集口径
 5. **S10-P2b spec 细节梯度实验**（与 S10-P2 并行，复刻 [arXiv:2603.24284](design/sdd-references-and-frameworks.md) L0-L3 梯度）— 填补 SDD 无对照实验空白
 6. **KnowledgeStore 设计细化（H2-1）**— 在 cross_judge 结果完备后启动数据模型和接口设计
+
+---
+
+### S12：度量修复 + 成本控制启用 + stuck-kill 重设计（2026-08-06 立项，**当前最高优先**）
+
+> 触发：[bench-metric-validity-2026-08-06.md](design/bench-metric-validity-2026-08-06.md) + [timeout-kill-strategy-2026-08-06.md](design/timeout-kill-strategy-2026-08-06.md)。bench 暴露的通过率崩塌有一半是测量假象，且 cost_control 三层代码就绪却因度量不可信而不敢开。本迭代破局 chicken-egg，让 S10 的"可信基线"真正达成。
+
+| 阶段 | 交付物 | 预估 | 验收门禁 |
+|------|--------|------|---------|
+| **S12-P0（前置，必须最先）** | **修度量**：① `kill_reason ∈ {none,stuck,hard_timeout,over_budget_l2/l3,cleanup_race,interrupted}` 贯穿运行时→度量；② 修 `_collect_result`（`binary_pass` 移到 aborted 分支后算、`all([])` 判 False、`pass_rate` 分母用计划子任务数、`cleanup_race` 计为通过）；③ 用新口径重算 v2/v3/v4，立**冻结基线** | ~2-3 天 | 重算后 v3 通过率从 34% 回到 ~67%（验证修复正确）；四类 kill_reason 可区分；KPI 基线冻结到单一采集器+22 任务 |
+| **S12-P1** | **启用 cost_control**：在 P0 冻结基线上小范围开 L1/L2/L3（`enabled=True`）+ per-task `--budget`（Spec 字段/CLI）→ KPI 分母按 `kill_reason` 拆分（预算熔断不进能力失败分母） | ~2 天 | cost_control 开启后 `over_budget` 单列报告，不污染 pass_rate；`--budget` 可对单任务设约束 |
+| **S12-P2** | **降级 + 规划守卫**：L3 `on_exceed=degrade`（切便宜模型继续，标 `degraded=True`，对称 `worker_models_fallback`）；Plan 期欠分解检测（高难度 + 低子任务数 → 再分解或升模型）；bench `_dynamic_timeout` 改按难度 | ~3 天 | L3 降级路径保部分产出；硬任务欠分解被前置拦截 |
+| **S12-P3** | **stuck 误杀规避**：`IDLE_TIMEOUT` 从纯静默升级为多维活性（claude 事件 ∨ worktree 文件变更 ∨ 进程树 CPU）+ grace 复检门；收窄 stuck-kill 职责（让 budget + 轮数上限管常见情况） | ~3 天 | 慢工具（build/test >600s）不再被误杀；仅"无事件 ∧ 无文件变更 ∧ 无 CPU"经 grace 复检才记 `kill_reason=stuck_confirmed` |
+
+**S12 出关口径**：KPI 基线以冻结口径重测并锁定；cost_control 三层可安全默认开启且 `over_budget` 不污染能力失败分母；stuck 误杀率（在干活的任务被杀）降至接近 0。**S12-P0 是 S10 重跑、S6 Reviewer 灰度、KnowledgeStore 的共同前置**——度量不可信前这些都不该推进。

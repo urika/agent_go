@@ -266,6 +266,15 @@ def _run_baseline_one(task: dict, repo: Path, model: str, task_id: str,
             "tests_broken": _tests_broken_for_worktree(work),
         }
         elapsed = round(time.time() - start, 2)
+        # kill_reason（baseline 单子任务路径，与 _collect_result 同口径）
+        if verification_ok:
+            _bl_kill_reason = "none"
+        elif exit_code == -1:
+            _bl_kill_reason = "stuck_or_hardtimeout"
+        elif (cost_usd or 0) == 0:
+            _bl_kill_reason = "infra"
+        else:
+            _bl_kill_reason = "interrupted_or_unknown"
 
         return {
             "task_id": task_id,
@@ -289,6 +298,7 @@ def _run_baseline_one(task: dict, repo: Path, model: str, task_id: str,
             "source_batch": source_batch,
             "semantic_pass": None,
             "binary_pass": verification_ok,
+            "kill_reason": _bl_kill_reason,
             "per_subtask": [],
             "plan_step_count": 0,
             "lint_errors": quality["lint_errors"],
@@ -743,7 +753,10 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     completed = sum(1 for r in results if r.get("status") == "completed")
     failed = sum(1 for r in results if r.get("status") == "failed")
     retry_total = sum(r.get("retry_count", 0) for r in results)
-    all_passed = all(r.get("verify_ok", False) for r in results if r.get("status") == "completed")
+    # S12-P0：修 all([]) 空真值陷阱——「零个 completed」时 all() 返回 True 会把全失败
+    # 误判为通过。要求至少一个 completed 才可能 all_passed。
+    _completed_results = [r for r in results if r.get("status") == "completed"]
+    all_passed = bool(_completed_results) and all(r.get("verify_ok", False) for r in _completed_results)
 
     # S10-P2：代码质量维度（§4.1）—— 从保留 worktree 聚合 lint_errors / tests_broken
     quality = _collect_quality(td) if td else {"lint_errors": 0, "tests_broken": 0}
@@ -764,9 +777,8 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     if _semantic_checked:
         semantic_pass = all(_semantic_passed_flags)
 
-    # binary_pass：全部子任务 verify_ok，且（语义评估启用时）语义全部通过。
-    #   语义评估未启用（semantic_pass is None）时退化为 all_verify_ok 判定。
-    binary_pass = all_passed and (semantic_pass is not False)
+    # binary_pass 在下方 aborted 修正之后计算（S12-P0：修时序错位——
+    # 原先在 aborted 分支之前冻结，导致 completed=0 但 binary_pass=True 的矛盾）。
 
     # per_subtask：每个子任务的简明细（供按子任务失败模式分析）
     per_subtask = [
@@ -798,19 +810,28 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         _aborted = False
     else:
         _aborted = exit_code != 0 or meta_status in ("stale_aborted", "aborted", "interrupted", "cancelled")
+    _cleanup_race = False  # 收尾竞态：子任务全完成已验证，仅进程被杀
     if _aborted:
         # 区分「收尾被杀（已完工）」与「中途被杀（未完工）」
         _planned_ids = {st.get("id") for st in (meta.get("subtasks") or [])}
         _result_ids = {r.get("subtask_id") or r.get("id") for r in results if r.get("subtask_id") or r.get("id")}
         _all_resulted = bool(_planned_ids) and _planned_ids.issubset(_result_ids)
-        _all_done = bool(results) and all(
+        # _all_results_done：所有已落盘 result 都 completed+verify_ok（不要求覆盖计划全集）
+        _all_results_done = bool(results) and all(
             r.get("status") == "completed" and r.get("verify_ok") is True
             for r in results
         )
-        if _all_done and _all_resulted:
-            # 已完工（收尾阶段被杀）：保持原 completed/all_passed 判定。
-            # 仅当 results 覆盖了全部计划子任务时才视为完工——避免无 subtasks
-            # 元数据或子任务确实未跑完时误判通过。
+        if _all_results_done and timed_out:
+            # cleanup_race（S12-P0）：子任务全完成已验证，进程在收尾阶段被杀 → 计为通过。
+            # 不再依赖 _all_resulted（计划 id 覆盖）——SIGKILL 常导致 meta.subtasks 未完整
+            # 落盘，旧逻辑因此把已完工任务误判失败（v3 65 条假失败 / 通过率被腰斩的根因）。
+            _cleanup_race = True
+            completed = len(results)
+            failed = 0
+            all_passed = True
+            console.debug(f"[collect] {task_id} cleanup_race：全部子任务完成已验证，收尾被杀计为通过 (exit={exit_code}, status={meta_status})")
+        elif _all_results_done and _all_resulted:
+            # 已完工（非超时收尾被杀）：保持原 completed/all_passed 判定
             console.debug(f"[collect] {task_id} aborted但全部子任务完成，视为完工 (exit={exit_code}, status={meta_status})")
         else:
             # 中途被杀（未完工）：所有子任务不计通过
@@ -818,6 +839,23 @@ def _collect_result(task_id: str, model: str, elapsed: float,
             failed = sum(1 for r in results
                          if r.get("status") in ("failed", "blocked"))
             all_passed = False
+
+    # binary_pass 在 aborted 修正之后计算（S12-P0 修时序错位）；
+    # all_passed 已要求至少一个 completed，故 all([]) 陷阱不再成立。
+    binary_pass = all_passed and (semantic_pass is not False)
+
+    # kill_reason 分类（S12-P0）：把"进程被杀"与"任务失败"解耦——
+    # cleanup_race 计通过、预算熔断单列、infra 不计能力失败。
+    if _cleanup_race:
+        kill_reason = "cleanup_race"
+    elif all_passed:
+        kill_reason = "none"
+    elif timed_out:
+        kill_reason = "stuck_or_hardtimeout"
+    elif (total_cost or 0) == 0:
+        kill_reason = "infra"
+    else:
+        kill_reason = "interrupted_or_unknown"
 
     return {
         "task_id": task_id,
@@ -842,6 +880,7 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         # S10-P2：P1 字段
         "semantic_pass": semantic_pass,
         "binary_pass": binary_pass,
+        "kill_reason": kill_reason,
         "per_subtask": per_subtask,
         "plan_step_count": plan_step_count,
         # S10-P2：代码质量维度（§4.1，从保留 worktree 聚合）
