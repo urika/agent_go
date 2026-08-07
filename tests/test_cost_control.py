@@ -75,8 +75,10 @@ class TestL1MaxBudget:
         assert captured["cmd"][idx + 1] == "0.2"  # medium
 
     def test_disabled_no_inject(self):
+        """S12 冷启动：L1 由 l1_enabled 独立控制；显式 l1_enabled=False 才完全不注入。"""
         captured = self._capture_cmd(cost_cfg={
             "enabled": False,
+            "l1_enabled": False,
             "per_subtask_budget_usd": {"easy": 0.1, "medium": 0.2, "hard": 0.5},
         })
         assert "--max-budget-usd" not in captured["cmd"]
@@ -84,6 +86,15 @@ class TestL1MaxBudget:
     def test_no_config_no_inject(self):
         captured = self._capture_cmd(cost_cfg=None)
         assert "--max-budget-usd" not in captured["cmd"]
+
+    def test_l1_enabled_default_true_cold_start(self):
+        """S12 冷启动：cost_control 无 enabled/l1_enabled 时，L1 默认开（防单次失控）。"""
+        captured = self._capture_cmd(cost_cfg={
+            "per_subtask_budget_usd": {"easy": 0.2, "medium": 0.4, "hard": 1.0},
+        })
+        assert "--max-budget-usd" in captured["cmd"]
+        idx = captured["cmd"].index("--max-budget-usd")
+        assert captured["cmd"][idx + 1] == "0.4"  # medium 冷启动宽松默认
 
     def test_unknown_difficulty_falls_back_to_medium(self):
         """未知难度在 per_subtask_budget_usd 无对应键 → 回退 medium 预算。"""

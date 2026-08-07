@@ -906,6 +906,64 @@ class TestGoalWatchdog:
         # 复检发现文件活性 → 复位，不 kill；进程最终自然退出
         mock_proc.kill.assert_not_called()
 
+    def test_s12p3_mtime_detects_single_file_rewrite(self, logger, tmp_path):
+        """CR-M2 回归：单个 dirty 文件被改写（git status 集合恒定、仅 mtime 变）→
+        快照 mtime 段变化 → grace 复检判为活性 → 不 kill。
+        修复前 _st.stdout.strip() 吃掉 porcelain 首行前导空格，_line[3:] 偏移错位 →
+        首文件路径解析失败、mtime 静默丢失 → 复检误判全静默 → 误杀。"""
+        import os as _os
+        import subprocess as _sp
+        # 真实 git worktree + 一个已提交文件（dirty）——必须在 mock 之前执行
+        wt = tmp_path / "work"
+        wt.mkdir()
+        _sp.run(["git", "init", "-q"], cwd=wt)
+        _sp.run(["git", "config", "user.email", "t@t.t"], cwd=wt)
+        _sp.run(["git", "config", "user.name", "t"], cwd=wt)
+        f = wt / "existing.py"
+        f.write_text("a=1\n")
+        _sp.run(["git", "add", "-A"], cwd=wt)
+        _sp.run(["git", "commit", "-qm", "init"], cwd=wt)
+        f.write_text("a=2\n")  # worktree dirty → git status 恒为 " M existing.py"
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 12370
+        call_count = [0]
+
+        def polling():
+            call_count[0] += 1
+            if call_count[0] > 40:
+                return 0
+            return None
+
+        mock_proc.poll.side_effect = polling
+        mock_proc.stdout.readline.side_effect = ["", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = 0
+
+        import itertools as _it
+        time_gen = _it.count(0, 1000)
+
+        _run_call = [0]
+
+        def _rr(*_a, **_k):
+            _run_call[0] += 1
+            if _run_call[0] % 2 == 1:  # git status（奇数次：baseline + recheck）
+                # 模拟"改写既有文件"：每次采样前刷新 mtime（git status 集合保持不变）
+                f.write_text(f"a={_run_call[0]}\n")
+                _os.utime(f, (_run_call[0], _run_call[0]))
+                # 返回恒定 porcelain（集合不变）—— 修复前 mtime 段会因偏移丢失
+                return MagicMock(stdout=" M existing.py\n")
+            return MagicMock(stdout="")  # ps（偶数次）→ 无 CPU 行
+
+        with patch("time.time", side_effect=lambda: next(time_gen)):
+            with patch("time.sleep"):
+                with patch("agent_go.subtask.subprocess.run", side_effect=_rr):
+                    with patch("subprocess.Popen", return_value=mock_proc):
+                        _run_headless("task", wt, {}, logger, "sub-mtime")
+
+        # mtime 被检出 → 复检判活性 → 复位 → 进程自然退出，不 kill
+        mock_proc.kill.assert_not_called()
+
     @patch("subprocess.Popen")
     def test_s12p3_all_signals_dead_confirms_stuck(self, mock_popen, logger):
         """S12-P3：事件/文件/CPU 全静默经 grace 复检确认 stuck → kill"""

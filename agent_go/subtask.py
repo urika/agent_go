@@ -149,15 +149,20 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         try:
             _st = subprocess.run(["git", "status", "--porcelain"], cwd=str(wt),
                                  capture_output=True, text=True, timeout=10)
-            _status = _st.stdout.strip() if isinstance(_st.stdout, str) else ""
-            # dirty 文件 mtime 快照：取被改写/新增文件的 max(mtime) 增强活性检测。
-            # 遍历 git status 输出的路径（相对 worktree），取最近修改时间戳拼接。
+            _raw = _st.stdout if isinstance(_st.stdout, str) else ""
+            _status = _raw.strip()  # 仅用于返回比较串（首尾空白不影响相等比较）
+            # dirty 文件 mtime 快照：取被改写/新增文件的 mtime 增强活性检测。
+            # 路径解析必须用【原始未 strip】输出：porcelain v1 格式为 "XY <path>"，
+            # XY 含前导空格（如 " M file.py"），整串 strip 会吃掉首行前导空格 →
+            # _line[3:] 偏移错位 → 首文件路径解析失败、mtime 静默丢失（CR 复盘修正）。
             _mtime_part = ""
             if _status:
                 _mtimes = []
-                for _line in _status.splitlines():
-                    # porcelain 格式：XY <path>（XY 两字符状态码 + 空格 + 路径）
-                    _p = _line[3:] if len(_line) > 3 else _line.strip()
+                for _line in _raw.splitlines():
+                    _p = _line[3:] if len(_line) > 3 else ""
+                    if " -> " in _p:  # rename/copy："XY ORIG -> PATH" 取目标路径
+                        _p = _p.split(" -> ", 1)[1]
+                    _p = _p.strip().strip('"')
                     if not _p:
                         continue
                     _fp = wt / _p
@@ -271,10 +276,12 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         ]
         if allowed_tools:
             cmd.extend(["--allowedTools", ",".join(allowed_tools)])
-        # S10 成本控制 L1：单次 claude 调用硬上限（--max-budget-usd，claude >=2.1 原生支持）
-        # 按 difficulty 读取 cost_control.per_subtask_budget_usd；默认关闭（enabled=False 不注入）
+        # S10/S12 成本控制 L1：单次 claude 调用硬上限（--max-budget-usd，claude >=2.1 原生支持）
+        # 按 difficulty 读取 cost_control.per_subtask_budget_usd。
+        # 冷启动策略：L1 由 l1_enabled 独立控制（默认 True），与 L2/L3 的 enabled 解耦——
+        # L1 误杀风险最低（只杀单次异常调用），是冷启动唯一安全默认开启的层。
         _cost_cfg = (_cfg or {}).get("cost_control") or {}
-        if _cost_cfg.get("enabled"):
+        if _cost_cfg.get("l1_enabled", True) or _cost_cfg.get("enabled"):
             _diff = env.get("AGENT_GO_DIFFICULTY", "medium")
             _budgets = _cost_cfg.get("per_subtask_budget_usd", {}) or {}
             # 未知难度回退 medium（避免该难度子任务无成本保护）

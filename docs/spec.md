@@ -129,7 +129,7 @@ write_censored_event(path, level, sub_id, spent, budget, reason)
 safe_input(prompt)           → input() 包装，EOF → ""
 ```
 
-`cost_control` 配置块（S10/S12）：`enabled`(默认 False) + `max_budget_usd`(L3) + `per_subtask_budget_usd`(按难度，L1) + `subtask_multiplier`(L2) + `on_exceed` + `budget_mode`(S12-P1：`strict`/`degrade`/`ignore`)。
+`cost_control` 配置块（S10/S12）：`enabled`(默认 False，L2/L3 总开关) + `l1_enabled`(默认 True，L1 独立开关，冷启动防单次失控) + `max_budget_usd`(L3) + `per_subtask_budget_usd`(按难度，L1 冷启动宽松默认 easy 0.20/medium 0.40/hard 1.00) + `subtask_multiplier`(L2) + `on_exceed` + `budget_mode`(S12-P1：`strict`/`degrade`/`ignore`)。
 
 ## console.py — 输出抽象 (216 行)
 

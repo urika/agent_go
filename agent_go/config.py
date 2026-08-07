@@ -72,19 +72,22 @@ DEFAULT_CONFIG = {
         "enable_rules": True
     },
     "cost_control": {
-        # S10 成本控制三层（全部默认关闭，开启前须先立成本基线）
-        # L1 单次 claude 调用硬上限（--max-budget-usd），按 difficulty 读取
-        # L2 子任务累计上限（跨重试，防修复循环烧钱）
-        # L3 任务级熔断（跨子任务，pipeline 调度前聚合 metering）
-        "enabled": False,
-        "max_budget_usd": 0.50,          # L3 任务总预算
-        "per_subtask_budget_usd": {      # L1 单次调用上限（按难度）
-            "easy": 0.10,
-            "medium": 0.20,
-            "hard": 0.50,
+        # S10/S12 成本控制三层。
+        # 冷启动策略（无基线时）：
+        #   - L1 单次调用上限（--max-budget-usd）：l1_enabled 独立控制，默认开。
+        #     误杀风险最低（只杀单次异常调用），防"一次失控烧钱"，是冷启动唯一安全默认开启的层。
+        #   - L2 子任务累计 / L3 任务级熔断：依赖 enabled 总开关，默认关。
+        #     这两层是"判死"机制，基线不可信时误杀率高，须用 eval cost-baseline 校准后才开。
+        "enabled": False,              # L2/L3 总开关（依赖冻结基线，默认关）
+        "l1_enabled": True,            # L1 独立开关（冷启动默认开，防单次失控）
+        "max_budget_usd": 0.50,        # L3 任务总预算
+        "per_subtask_budget_usd": {    # L1 单次调用上限（按难度）；冷启动宽松默认
+            "easy": 0.20,              # 基线 P90×1.5 约 $0.10，冷启动取 2x 留余量
+            "medium": 0.40,            # 基线 P90×1.5 约 $0.10-0.17，冷启动取 2x
+            "hard": 1.00,              # 基线 P90×1.5 约 $0.19-0.36，冷启动取宽松上界
         },
-        "subtask_multiplier": 2.5,       # L2 子任务累计 = 单次上限 × 系数
-        "on_exceed": "stop",             # 超限行为：stop（熔断）| warn（仅告警）
+        "subtask_multiplier": 2.5,     # L2 子任务累计 = 单次上限 × 系数
+        "on_exceed": "stop",           # 超限行为：stop（熔断）| warn（仅告警）
         # S12-P1 G3 per-task 预算策略：strict=超预算 block；degrade=切便宜模型继续；
         # ignore=关 L3（仅 L1/L2 生效）。与 --budget / Task Spec 字段配合。
         "budget_mode": "strict",
