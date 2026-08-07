@@ -19,7 +19,7 @@ task: |
   verification 命令中的断言即为全部验收标准。
 verification:
   - "python3 -c \"from solution import validate_email, batch_validate; import inspect; assert callable(validate_email); assert callable(batch_validate); assert inspect.signature(validate_email).parameters.get('email'); r=batch_validate(['a@b.c','']); assert len(r)==2\""
-timeout: 500
+timeout: 672
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

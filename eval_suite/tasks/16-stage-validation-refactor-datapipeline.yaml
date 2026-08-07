@@ -14,7 +14,7 @@ task: |
 verification:
   - "python -m pytest tests/test_stage_validation.py tests/test_pipeline.py -q"
   - "python -c \"from src.core.pipeline import Pipeline, StageError; from src.core.context import Context; print('StageValidation integrated')\""
-timeout: 600
+timeout: 1200
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

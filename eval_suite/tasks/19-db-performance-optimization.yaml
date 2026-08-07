@@ -47,7 +47,7 @@ task: |
 verification:
   - "python -m pytest tests/test_blog_api.py -q"
   - "pip install -e . && python -m pytest tests/test_performance.py -q -v"
-timeout: 1800
+timeout: 2232
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

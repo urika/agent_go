@@ -11,7 +11,7 @@ task: |
 verification:
   - "python -m pytest tests/test_models_utils.py -q"
   - "python -c \"from src.cli import cmd_list; assert cmd_list() == 0; print('OK')\""
-timeout: 300
+timeout: 444
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

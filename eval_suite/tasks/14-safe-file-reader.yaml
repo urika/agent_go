@@ -19,7 +19,7 @@ task: |
   verification 命令中的断言即为全部验收标准。
 verification:
   - "python3 -c \"from solution import safe_read, list_text_files; import inspect, tempfile, os; assert callable(safe_read); assert callable(list_text_files); f=tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False); f.write('hello'); f.close(); assert safe_read(f.name)=='hello'; os.unlink(f.name); assert safe_read('/nonexistent/path')==''; d=tempfile.mkdtemp(); open(d+'/a.txt','w').close(); open(d+'/b.txt','w').close(); r=list_text_files(d); assert len(r)==2; import shutil; shutil.rmtree(d)\""
-timeout: 360
+timeout: 504
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

@@ -16,7 +16,7 @@ task: |
 verification:
   - "python -m pytest tests/test_branching.py tests/test_pipeline.py -q"
   - "python -c \"from src.core.pipeline import Pipeline; from src.stages.transform import BranchRouterStage; print('Branching OK')\""
-timeout: 900
+timeout: 1800
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

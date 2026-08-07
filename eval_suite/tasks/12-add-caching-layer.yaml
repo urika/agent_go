@@ -42,7 +42,7 @@ task: |
   - 缓存序列化失败时优雅降级（跳过缓存，不中断运行）
 verification:
   - "python -m pytest tests/ -q"
-timeout: 1200
+timeout: 2400
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

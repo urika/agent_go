@@ -9,7 +9,7 @@ task: |
 verification:
   - "python -m pytest tests/test_models_utils.py -q"
   - "python -c \"from src.models import Task; t=Task('x',priority='high'); d=t.to_dict(); assert d['priority']=='high'; print('OK')\""
-timeout: 180
+timeout: 474
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

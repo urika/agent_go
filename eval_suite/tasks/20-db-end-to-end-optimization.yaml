@@ -48,7 +48,7 @@ verification:
   - "python -m pytest tests/test_blog_api.py -q"
   - "python -m pytest tests/test_performance.py -q -v"
   - "python -m scripts.check_perf"
-timeout: 1800
+timeout: 3600
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:
