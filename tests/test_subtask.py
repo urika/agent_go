@@ -295,16 +295,17 @@ class TestRunHeadless:
         assert mock_popen.call_count == 2
 
     @patch("subprocess.Popen")
-    def test_idle_timeout_kills_process(self, mock_popen, logger):
-        """超时应被 kill"""
+    @patch("agent_go.subtask.subprocess.run", return_value=MagicMock(stdout=""))
+    def test_idle_timeout_kills_process(self, mock_run, mock_popen, logger):
+        """多维活性全静默 + grace 复检确认 stuck 后应被 kill"""
         mock_proc = MagicMock()
         mock_proc.pid = 12347
-        # poll 返回 None（进程运行中）
+        # poll 返回 None（进程运行中）；循环需覆盖 600s idle + 120s grace 复检
         call_count = [0]
 
         def polling():
             call_count[0] += 1
-            if call_count[0] > 3:
+            if call_count[0] > 30:
                 return 0  # 被 kill 后进程退出
             return None
 
@@ -314,15 +315,11 @@ class TestRunHeadless:
         mock_proc.returncode = -9
         mock_popen.return_value = mock_proc
 
-        # 模拟 time.time: 前几次返回 100, 之后返回 701+ (idle > 600s)
-        time_values = [100, 100, 100, 100, 701, 701, 701]
-
-        def time_side():
-            while True:
-                for v in time_values:
-                    yield v
-                yield 701  # 无限供应
-        time_gen = time_side()
+        # 模拟 time.time：单调递增步长 1000。last_ts 读到某值后，后续 time 与它相差
+        # >1000（> IDLE_TIMEOUT=600）触发 grace（suspected=下一值），再差 1000（> grace 120s）
+        # 复检确认 stuck → kill。不依赖精确调用次数（兼容多维活性初始化）。
+        import itertools as _it
+        time_gen = _it.count(0, 1000)
 
         with patch("time.time", side_effect=lambda: next(time_gen)):
             with patch("time.sleep"):
@@ -334,7 +331,8 @@ class TestRunHeadless:
         mock_proc.kill.assert_called_once()
 
     @patch("subprocess.Popen")
-    def test_idle_timeout_records_kill_reason(self, mock_popen, logger, tmp_path):
+    @patch("agent_go.subtask.subprocess.run", return_value=MagicMock(stdout=""))
+    def test_idle_timeout_records_kill_reason(self, mock_run, mock_popen, logger, tmp_path):
         """S12-P0 G1：IDLE_TIMEOUT 杀进程时，_run_headless 返回对象携带 kill_reason=stuck，
         并写 kill_state 事件到 metering.jsonl（运行时 kill 分类贯穿）。"""
         mock_proc = MagicMock()
@@ -343,7 +341,7 @@ class TestRunHeadless:
 
         def polling():
             call_count[0] += 1
-            if call_count[0] > 3:
+            if call_count[0] > 30:
                 return 0
             return None
 
@@ -353,15 +351,10 @@ class TestRunHeadless:
         mock_proc.returncode = -9
         mock_popen.return_value = mock_proc
 
-        # idle > 600s 触发（无限供应 701，供 _record_kill 内 meter_event 也调用 time.time）
-        time_values = [100, 100, 100, 100, 701]
-
-        def time_side():
-            while True:
-                for v in time_values:
-                    yield v
-                yield 701
-        time_gen = time_side()
+        # idle > 600s 触发 grace，再推进 120s 完成复检确认 stuck。
+        # 单调递增步长 1000，兼容多维活性初始化 + _record_kill 内 meter_event 消耗 time.time。
+        import itertools as _it
+        time_gen = _it.count(0, 1000)
         meter_path = tmp_path / "metering.jsonl"
 
         with patch("time.time", side_effect=lambda: next(time_gen)):
@@ -402,13 +395,11 @@ class TestRunHeadless:
         mock_proc.returncode = -9
         mock_popen.return_value = mock_proc
 
-        # run_start=0，第一次循环检查即跳到 1000（> hard_timeout=300）
-        def time_side():
-            for v in [0, 0, 0]:
-                yield v
-            while True:
-                yield 1000
-        time_gen = time_side()
+        # run_start 读取某个递增 time 值，循环后续 time 更大 → time.time()-run_start > hard_timeout。
+        # 步长 1000（> hard_timeout=300），不依赖精确的 time.time 调用次数（兼容多维活性初始化）。
+        import itertools as _it
+        _counter = _it.count(0, 1000)
+        time_gen = _counter
 
         with patch("time.time", side_effect=lambda: next(time_gen)):
             with patch("time.sleep"):
@@ -873,6 +864,92 @@ class TestGoalWatchdog:
         mock_proc.kill.assert_not_called()
         assert "goal turn count" not in log_text
         assert "轮数超限" not in log_text
+
+    @patch("subprocess.Popen")
+    def test_s12p3_grace_recheck_finds_activity_resets(self, mock_popen, logger):
+        """S12-P3：事件静默超时进入 grace，复检发现 S2/S3 活性（慢工具在干活）→ 不 kill"""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12360
+        call_count = [0]
+
+        def polling():
+            call_count[0] += 1
+            if call_count[0] > 40:
+                return 0
+            return None
+
+        mock_proc.poll.side_effect = polling
+        mock_proc.stdout.readline.side_effect = ["", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        # 单调递增 time：进入 grace 后，复检阶段 S2 返回有变更（模拟 build 写产物）→ 复位
+        import itertools as _it
+        time_gen = _it.count(0, 1000)
+
+        # 用 side_effect 控制 subprocess.run：git status 每次返回递增内容（模拟 build
+        # 持续写产物，S2 活性持续变化）→ grace 复检总发现活性 → 永不 kill。
+        # ps 调用（第偶数次）返回空行表（_process_cpu_ticks 解析为无 CPU）。
+        _run_call = [0]
+
+        def _rr(*_a, **_k):
+            _run_call[0] += 1
+            if _run_call[0] % 2 == 1:  # git status（奇数调用）
+                return MagicMock(stdout=f" M file{_run_call[0]}\n")
+            return MagicMock(stdout="")  # ps（偶数调用）→ 无 CPU 行
+        with patch("time.time", side_effect=lambda: next(time_gen)):
+            with patch("time.sleep"):
+                with patch("agent_go.subtask.subprocess.run", side_effect=_rr):
+                    result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-p3")
+
+        # 复检发现文件活性 → 复位，不 kill；进程最终自然退出
+        mock_proc.kill.assert_not_called()
+
+    @patch("subprocess.Popen")
+    def test_s12p3_all_signals_dead_confirms_stuck(self, mock_popen, logger):
+        """S12-P3：事件/文件/CPU 全静默经 grace 复检确认 stuck → kill"""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12361
+        call_count = [0]
+
+        def polling():
+            call_count[0] += 1
+            if call_count[0] > 40:
+                return 0
+            return None
+
+        mock_proc.poll.side_effect = polling
+        mock_proc.stdout.readline.side_effect = ["", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = -9
+        mock_popen.return_value = mock_proc
+
+        import itertools as _it
+        time_gen = _it.count(0, 1000)
+
+        # 全部信号无活性：git status 恒定空串、ps 恒定 -1（循环供应防 StopIteration）
+        run_results = [
+            MagicMock(stdout=""),
+            MagicMock(stdout=""),
+            MagicMock(stdout=""),
+            MagicMock(stdout=""),
+        ]
+        _rr_iter = iter(run_results)
+
+        def _rr(*_a, **_k):
+            try:
+                return next(_rr_iter)
+            except StopIteration:
+                return MagicMock(stdout="")
+
+        with patch("time.time", side_effect=lambda: next(time_gen)):
+            with patch("time.sleep"):
+                with patch("agent_go.subtask.subprocess.run", side_effect=_rr):
+                    result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-p3b")
+
+        mock_proc.kill.assert_called_once()
+        assert getattr(result, "kill_reason", None) == "stuck"
 
 
 # ═══════════════════════════════════════════════════════════════

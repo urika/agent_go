@@ -134,6 +134,57 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     # 退出码常量已提升至模块级（EXIT_CODE_INTERACTION）
     IDLE_TIMEOUT = 600   # 10 分钟纯静默才 kill（思考阶段无任何事件）
     HEARTBEAT = 60       # 60s 无事件发心跳
+    # S12-P3 多维活性 + grace 复检门：stuck 判定从"单维事件静默"升级为
+    # "claude 事件 ∨ worktree 文件变更 ∨ 进程树 CPU"三正交信号，任一活跃即续命。
+    # 单次静默永不直接杀——先进入 STUCK_GRACE_SEC 宽限态，复检 S2/S3 仍无活性才确认。
+    STUCK_GRACE_SEC = 120          # grace 复检宽限窗
+
+    def _file_activity_snapshot(wt: Path) -> str:
+        """S2 活性快照：worktree 的 git status --porcelain 输出 + 顶层目录 mtime。
+        claude 静默等 build/测试时磁盘在动（写产物），git status 会反映。失败返回空串。
+        """
+        try:
+            _st = subprocess.run(["git", "status", "--porcelain"], cwd=str(wt),
+                                 capture_output=True, text=True, timeout=10)
+            _out = _st.stdout
+            return _out.strip() if isinstance(_out, str) else ""
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return ""
+
+    def _process_cpu_ticks(proc_pid: int) -> int:
+        """S3 活性：claude 进程树累计 CPU ticks（utime+stime 总和）。
+        CPU-bound 工作（编译/计算）即使无事件无文件变更也有 CPU 消耗。
+        ps -o utime=,stime= 返回 ticks（macOS 上为秒数，够用）。失败返回 -1。
+        """
+        try:
+            _cp = subprocess.run(["ps", "-o", "pid=,ppid=,utime=,stime=", "-A"],
+                                 capture_output=True, text=True, timeout=10)
+            _rows = {}
+            _children: dict[int, list[int]] = {}
+            for _line in (_cp.stdout or "").splitlines():
+                _parts = _line.split()
+                if len(_parts) >= 4:
+                    try:
+                        _pid, _ppid = int(_parts[0]), int(_parts[1])
+                        _ticks = float(_parts[2]) + float(_parts[3])
+                    except ValueError:
+                        continue
+                    _rows[_pid] = _ticks
+                    _children.setdefault(_ppid, []).append(_pid)
+            _total = 0.0
+            _seen = set()
+            _stack = [proc_pid]
+            while _stack:
+                _p = _stack.pop()
+                if _p in _seen:
+                    continue
+                _seen.add(_p)
+                if _p in _rows:
+                    _total += _rows[_p]
+                _stack.extend(_children.get(_p, []))
+            return int(_total * 100)  # 放大避免亚秒粒度丢失
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return -1
 
     # Phase 1 配套：累计所有 attempt 的 Claude usage（result 事件提取）
     claude_usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "duration_ms": 0, "num_turns": 0, "model": ""}
@@ -223,6 +274,12 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         tool_input = [""]
         goal_turn_count = [0]
         goal_watchdog_triggered = [False]
+        # S12-P3 多维活性 + grace 复检门。S2(worktree 文件)/S3(进程树 CPU) 采样
+        # **惰性化**：仅在进入 grace 宽限态后启用，正常执行（事件活跃）不调用 subprocess，
+        # 避免干扰现有流程与测试。_last_alive_ts 由 S1 事件刷新。
+        _last_alive_ts = [last_ts[0]]
+        _stuck_suspected_ts = [None]  # 进入 grace 宽限态的时间（None=未进入）
+        _grace_baseline = [("", -1)]  # 进入宽限态时的 (S2 快照, S3 CPU ticks) 基线
 
         def parse_and_log(raw_line: str, label: str) -> None:
             s = raw_line.rstrip()
@@ -230,6 +287,8 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 return
             ts = datetime.now().strftime("%H:%M:%S")
             last_ts[0] = time.time()
+            _last_alive_ts[0] = time.time()  # S12-P3 S1：事件流活性
+            _stuck_suspected_ts[0] = None    # 事件恢复 → 退出 grace 宽限态
 
             # 交互检测（stderr 文本行）
             if label == "err":
@@ -372,11 +431,41 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 proc.kill()
                 break
             idle = time.time() - last_ts[0]
-            if idle > IDLE_TIMEOUT:
-                logger.error(f"claude {idle:.0f}s 无事件 (attempt={attempt})，强制终止")
-                _record_kill("stuck")
-                proc.kill()
-                break
+            # S12-P3 grace 复检门：单次静默永不直接杀。S1 事件静默超时 → 进入宽限态，
+            # 采样 S2(git status)/S3(进程树 CPU) 基线，等 STUCK_GRACE_SEC 后复检；
+            # 有活性（文件变更或 CPU 消耗）则复位，全死才确认 stuck。
+            _alive_idle = time.time() - _last_alive_ts[0]
+            if _alive_idle > IDLE_TIMEOUT:
+                if _stuck_suspected_ts[0] is None:
+                    # 首次触发 → 进入待裁定宽限态，采样基线快照
+                    _stuck_suspected_ts[0] = time.time()
+                    _grace_baseline[0] = (
+                        _file_activity_snapshot(worktree),
+                        _process_cpu_ticks(proc.pid),
+                    )
+                    logger.error(
+                        f"claude {_alive_idle:.0f}s 无事件，进入 grace 复检（{STUCK_GRACE_SEC}s）…")
+                elif time.time() - _stuck_suspected_ts[0] >= STUCK_GRACE_SEC:
+                    # grace 结束复检：S2/S3 与基线相比有活性 → 假警报复位；全死 → 确认 stuck
+                    _recheck_file = _file_activity_snapshot(worktree)
+                    _recheck_cpu = _process_cpu_ticks(proc.pid)
+                    _base_file, _base_cpu = _grace_baseline[0]
+                    _file_active = _recheck_file != _base_file
+                    _cpu_active = _recheck_cpu > _base_cpu
+                    if not _file_active and not _cpu_active:
+                        logger.error(
+                            f"claude {_alive_idle:.0f}s 无多维活性（事件/文件/CPU 全静默），"
+                            f"grace 复检确认 stuck，强制终止")
+                        _record_kill("stuck")
+                        proc.kill()
+                        break
+                    else:
+                        # 复检发现活性（假警报）→ 复位计时器，继续
+                        logger.info(
+                            f"[stuck_recheck] grace 复检发现活性（file={_file_active} cpu={_cpu_active}），"
+                            f"复位计时器继续等待")
+                        _last_alive_ts[0] = time.time()
+                        _stuck_suspected_ts[0] = None
             # Phase 2: GoalInjector 看门狗
             if GOAL_WATCHDOG_ENABLED and not goal_watchdog_triggered[0]:
                 elapsed = time.time() - goal_start_ts[0]

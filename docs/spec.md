@@ -98,6 +98,10 @@ _run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) 
   ── stream-json result 事件提取 usage/cost → 写 metering.jsonl (worker 角色)
   ── S12-P0 G1：IDLE/hard_timeout/goal kill 决策点写 kill_state 事件 (kill_reason) 到
      metering.jsonl，返回值附带 kill_reason → executor 归因写入子任务结果
+  ── S12-P3：IDLE_TIMEOUT 多维活性 + grace 复检门 —— stuck 判定从纯事件静默升级为
+     S1(claude 事件) ∨ S2(worktree git status 文件活性) ∨ S3(进程树 CPU) 三信号；
+     单次静默进入 STUCK_GRACE_SEC=120 宽限态，复检 S2/S3 仍无活性才 kill（kill_reason=stuck），
+     慢工具（build/test 静默写产物或有 CPU 消耗）不再被误杀。S2/S3 采样惰性（仅宽限态启用）
 _git_merge_upstream(src, dst, tag, logger, ...)   → 上游产物 merge
 ```
 
