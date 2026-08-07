@@ -379,6 +379,8 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
                                    active_pids_lock=active_pids_lock, allowed_tools=allowed_tools,
                                    shared_activity=shared_activity,
                                    config=_effective_config(config))
+            # S12-P0 G1：result 自带 kill_reason 属性（_run_headless 写入），
+            # 由 run_subtask 读取后传入 _verify_changes 归因。
         finally:
             _progress_stop.set()
             t.join(timeout=2)
@@ -645,8 +647,12 @@ def _meter_cost_for_sub(metering_path: str, sub_id: str) -> float:
 
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
-                    task_dir=None, config=None, interrupt_event=None):
+                    task_dir=None, config=None, interrupt_event=None, initial_kill_reason=None):
     """Verify changes, commit if needed, run verification commands. Returns verification dict."""
+    # S12-P0 G1：追踪本子任务最后一次 _run_headless 的 kill_reason（运行时 kill 分类）。
+    # initial_kill_reason 来自首次 _run_claude 的 result（_run_headless 在 subprocess 内运行）。
+    _latest_kill_reason = [initial_kill_reason]
+
     # Phase 1: 从运行时 config 读取 max_retries（默认 3，CLI --max-retries 可覆盖）
     _cfg = _effective_config(config)
     max_retries = _cfg.get("verification", {}).get("max_retries", 3)
@@ -965,6 +971,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     _sub_cost = _meter_cost_for_sub(_meter_path, sub_id)
                     if _sub_cost >= _sub_limit:
                         verify_ok = False
+                        _latest_kill_reason[0] = "over_budget_l2"
                         logger.warning(
                             f"[cost_control L2] 子任务 {sub_id} 累计成本 ${_sub_cost:.4f} "
                             f"≥ 上限 ${_sub_limit:.4f}（{_sub_budget}×{_sub_mult}），停止修复重试")
@@ -1028,10 +1035,13 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             _difficulty_mult = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(_difficulty, 1.5)
             retry_timeout = min(int(_base_timeout * _difficulty_mult), 900)
             logger.info(f"[retry_timeout] difficulty={_difficulty} base={_base_timeout}s mult={_difficulty_mult} → timeout={retry_timeout}s")
-            _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
-                          active_pids=active_pids, active_pids_lock=active_pids_lock,
-                          allowed_tools=allowed_tools, hard_timeout=retry_timeout,
-                          config=_cfg)
+            _fix_result = _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
+                                        active_pids=active_pids, active_pids_lock=active_pids_lock,
+                                        allowed_tools=allowed_tools, hard_timeout=retry_timeout,
+                                        config=_cfg)
+            # S12-P0 G1：捕获 fix 重试的 kill_reason（修复超时等）
+            if hasattr(_fix_result, "kill_reason") and getattr(_fix_result, "kill_reason"):
+                _latest_kill_reason[0] = getattr(_fix_result, "kill_reason")
 
             # git add + commit + tag
             subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
@@ -1085,6 +1095,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         "verification_results": verification_results,
         "verification_confidence": verification_confidence,
         "verification_state": verification_state,
+        # S12-P0 G1：子任务级 kill_reason（运行时 kill 分类，供度量侧归因）
+        "kill_reason": _latest_kill_reason[0] or ("none" if verify_ok else None),
     }
 
 
@@ -1417,6 +1429,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         active_pids, active_pids_lock, logger, issue_ref=issue_ref,
         allowed_tools=agent.claude_config.get("allowed_tools", []) if agent else None,
         task_dir=task_dir, config=config,
+        initial_kill_reason=getattr(result, "kill_reason", None),
     )
     has_changes = verify_results["has_changes"]
     summary = verify_results["summary"]
@@ -1500,4 +1513,6 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             "timing": metrics_timing,
             "change_stats": metrics_changes,
             "merge_results": merge_results,
-            "verification_results": verification_results}
+            "verification_results": verification_results,
+            # S12-P0 G1：子任务级 kill_reason（none/stuck/hard_timeout/over_budget_l2/...）
+            "kill_reason": verify_results.get("kill_reason") if isinstance(verify_results, dict) else None}

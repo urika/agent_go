@@ -334,6 +334,56 @@ class TestRunHeadless:
         mock_proc.kill.assert_called_once()
 
     @patch("subprocess.Popen")
+    def test_idle_timeout_records_kill_reason(self, mock_popen, logger, tmp_path):
+        """S12-P0 G1：IDLE_TIMEOUT 杀进程时，_run_headless 返回对象携带 kill_reason=stuck，
+        并写 kill_state 事件到 metering.jsonl（运行时 kill 分类贯穿）。"""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12348
+        call_count = [0]
+
+        def polling():
+            call_count[0] += 1
+            if call_count[0] > 3:
+                return 0
+            return None
+
+        mock_proc.poll.side_effect = polling
+        mock_proc.stdout.readline.side_effect = ["", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = -9
+        mock_popen.return_value = mock_proc
+
+        # idle > 600s 触发（无限供应 701，供 _record_kill 内 meter_event 也调用 time.time）
+        time_values = [100, 100, 100, 100, 701]
+
+        def time_side():
+            while True:
+                for v in time_values:
+                    yield v
+                yield 701
+        time_gen = time_side()
+        meter_path = tmp_path / "metering.jsonl"
+
+        with patch("time.time", side_effect=lambda: next(time_gen)):
+            with patch("time.sleep"):
+                result = _run_headless(
+                    "task", Path("/tmp/work"),
+                    {"AGENT_GO_METERING_PATH": str(meter_path), "AGENT_GO_TASK_ID": "task-kr",
+                     "AGENT_GO_DIFFICULTY": "hard"},
+                    logger, "sub-kr"
+                )
+
+        mock_proc.kill.assert_called_once()
+        assert getattr(result, "kill_reason", None) == "stuck"
+        # kill_state 事件已写入 metering
+        assert meter_path.exists()
+        lines = meter_path.read_text(encoding="utf-8").strip().split("\n")
+        kill_events = [json.loads(l) for l in lines if json.loads(l).get("event") == "kill_state"]
+        assert len(kill_events) >= 1
+        assert kill_events[0]["kill_reason"] == "stuck"
+        assert kill_events[0]["sub_id"] == "sub-kr"
+
+    @patch("subprocess.Popen")
     def test_hard_timeout_kills_process(self, mock_popen, logger):
         """hard_timeout 到点即 kill（修复重试的 retry_timeout 控制，不依赖事件活动）"""
         mock_proc = MagicMock()

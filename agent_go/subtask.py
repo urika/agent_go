@@ -140,6 +140,29 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
 
     def _run_one(prompt: str, attempt: int) -> tuple[subprocess.Popen, list[str], bool]:
         """启动 claude -p (stream-json) 并实时解析事件。"""
+        # S12-P0 G1：记录 kill 原因（stuck / hard_timeout / goal_timeout / goal_turns）。
+        # kill_reason 通过闭包写入 _kill_reason，供外层 _run_headless 上报结果。
+        _kill_reason: list[Optional[str]] = [None]
+        run_start_ref: list[float] = [0.0]  # 供 _record_kill 计算耗时，循环开始时置真实值
+
+        def _record_kill(reason: str) -> None:
+            _kill_reason[0] = reason
+            # 与 worker metering 同路径写 kill_state 事件（测量/控制解耦，审计完整）
+            _mp = env.get("AGENT_GO_METERING_PATH", "")
+            if _mp:
+                try:
+                    from .config import meter_event
+                    meter_event(_mp, {
+                        "role": "worker",
+                        "event": "kill_state",
+                        "sub_id": sub_id,
+                        "attempt": attempt,
+                        "kill_reason": reason,
+                        "elapsed_sec": round(time.time() - run_start_ref[0], 2),
+                    })
+                except Exception:
+                    logger.debug("kill_state metering 写入失败（忽略）")
+
         cmd = [
             "claude", "-p", prompt,
             "--permission-mode", "bypassPermissions",
@@ -338,17 +361,20 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
 
         idle_logged_at = 0
         run_start = time.time()
+        run_start_ref[0] = run_start  # 供 _record_kill 闭包读取耗时
         while proc.poll() is None:
             # 硬超时（如修复重试的 retry_timeout）：到点即 kill，不依赖事件活动
             if hard_timeout and time.time() - run_start > hard_timeout:
                 logger.error(f"claude 硬超时 ({hard_timeout}s, attempt={attempt})，强制终止")
                 log_event(logger, "headless_hard_timeout",
                           {"sub_id": sub_id, "attempt": attempt, "limit": hard_timeout})
+                _record_kill("hard_timeout")
                 proc.kill()
                 break
             idle = time.time() - last_ts[0]
             if idle > IDLE_TIMEOUT:
                 logger.error(f"claude {idle:.0f}s 无事件 (attempt={attempt})，强制终止")
+                _record_kill("stuck")
                 proc.kill()
                 break
             # Phase 2: GoalInjector 看门狗
@@ -358,12 +384,14 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                     logger.error(f"claude goal 循环超时 ({elapsed:.0f}s > {GOAL_TIMEOUT}s)，强制终止")
                     log_event(logger, "goal_timeout", {"sub_id": sub_id, "elapsed": elapsed, "limit": GOAL_TIMEOUT})
                     goal_watchdog_triggered[0] = True
+                    _record_kill("goal_timeout")
                     proc.kill()
                     break
                 if goal_turn_count[0] >= MAX_GOAL_TURNS:
                     logger.error(f"claude goal 轮数超限 ({goal_turn_count[0]} >= {MAX_GOAL_TURNS})，强制终止")
                     log_event(logger, "goal_turns_exceeded", {"sub_id": sub_id, "turns": goal_turn_count[0], "limit": MAX_GOAL_TURNS})
                     goal_watchdog_triggered[0] = True
+                    _record_kill("goal_turns_exceeded")
                     proc.kill()
                     break
             if idle > HEARTBEAT and idle - idle_logged_at > HEARTBEAT:
@@ -383,6 +411,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             log_event(logger, "goal_turns_exceeded",
                       {"sub_id": sub_id, "turns": goal_turn_count[0], "limit": MAX_GOAL_TURNS})
             goal_watchdog_triggered[0] = True
+            _record_kill("goal_turns_exceeded")
             try:
                 proc.kill()
             except (ProcessLookupError, OSError):
@@ -392,7 +421,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 active_pids.discard(proc.pid)
         else:
             active_pids.discard(proc.pid)
-        return proc, lines, waiting[0]
+        return proc, lines, waiting[0], _kill_reason[0]
 
     RETRY_SUFFIX = (
 "\n\n【系统指令】你必须立即完成上述所有任务，直接执行文件创建和修改操作。"
@@ -409,6 +438,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     all_lines = []
     final_rc = -1
     interaction = False
+    final_kill_reason = None  # S12-P0 G1：最后一次 attempt 的 kill_reason
 
     for attempt in range(MAX_ATTEMPTS):
         if attempt == 0:
@@ -418,7 +448,9 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             log_event(logger, "subtask_headless_retry", {"id": sub_id, "attempt": attempt + 1})
             prompt = task_md + RETRY_SUFFIX
 
-        proc, lines, waiting = _run_one(prompt, attempt + 1)
+        proc, lines, waiting, kill_reason = _run_one(prompt, attempt + 1)
+        if kill_reason:
+            final_kill_reason = kill_reason
         all_lines.extend(lines)
         all_lines.append(f"--- attempt={attempt+1} exit_code={proc.returncode} ---")
         # 正则检测 或 退出码为 SIGINT(130) 都视为交互
@@ -503,8 +535,11 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         })
         logger.info(f"{PFX} Claude 执行计量: {claude_usage_total['prompt_tokens']}+{claude_usage_total['completion_tokens']} tokens, ${_cost:.4f}{' (本地模型, 成本 0)' if _is_local else ''}")
 
-    return subprocess.CompletedProcess(
+    _cp = subprocess.CompletedProcess(
         [], final_rc,
         stdout="\n".join(all_lines),
         stderr=""
     )
+    # S12-P0 G1：把 kill_reason 附到返回对象（executor 读取写入子任务结果）
+    _cp.kill_reason = final_kill_reason  # type: ignore[attr-defined]
+    return _cp

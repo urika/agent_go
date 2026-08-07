@@ -95,6 +95,8 @@ _run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) 
   ── goal 配置优先级：运行时 config > env > 磁盘 (goal.enabled/max_turns/timeout_seconds)
   ── S4: AGENT_GO_CLAUDE_MODEL env → claude --model；计量记录 difficulty/真实模型
   ── stream-json result 事件提取 usage/cost → 写 metering.jsonl (worker 角色)
+  ── S12-P0 G1：IDLE/hard_timeout/goal kill 决策点写 kill_state 事件 (kill_reason) 到
+     metering.jsonl，返回值附带 kill_reason → executor 归因写入子任务结果
 _git_merge_upstream(src, dst, tag, logger, ...)   → 上游产物 merge
 ```
 

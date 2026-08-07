@@ -294,6 +294,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                                 "exit_code": -1, "summary": f"成本熔断（累计 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}）",
                                 "blocked_by": ["cost_control"],
                                 "failure_reason": "任务成本超预算熔断",
+                                "kill_reason": "over_budget_l3",
                                 "worktree": "", "sandbox_type": "headless",
                                 "verify_ok": False, "duration_sec": 0,
                             }

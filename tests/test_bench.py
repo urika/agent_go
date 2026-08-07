@@ -411,7 +411,7 @@ def test_collect_result_per_subtask_structure(tmp_path):
     r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
     assert r["per_subtask"][0] == {
         "sub_id": "sub-1", "status": "completed", "retries": 2,
-        "verify_ok": True, "semantic_ok": True,
+        "verify_ok": True, "semantic_ok": True, "kill_reason": None,
     }
     assert r["per_subtask"][1]["semantic_ok"] is None  # 无 semantic 结果
 
@@ -478,7 +478,8 @@ def test_collect_result_p1_fields_backward_compat(tmp_path):
     assert r["semantic_pass"] is None
     assert r["binary_pass"] is True  # all_verify_ok 且无语义
     assert r["per_subtask"] == [{"sub_id": "sub-1", "status": "completed",
-                                 "retries": 0, "verify_ok": True, "semantic_ok": None}]
+                                 "retries": 0, "verify_ok": True, "semantic_ok": None,
+                                 "kill_reason": None}]
     assert r["plan_step_count"] == 0  # 旧 meta 无 subtasks
 
 
@@ -817,4 +818,52 @@ def test_kill_reason_interrupted_with_cost(tmp_path):
         exact_td=td, expected_task="Some task", timed_out=False,
     )
     assert result["kill_reason"] == "interrupted_or_unknown"
+
+
+def test_kill_reason_runtime_over_budget_l2_priority(tmp_path):
+    """S12-P0 G1：子任务结果携带运行时 kill_reason=over_budget_l2 →
+    任务级 kill_reason 采用 over_budget_l2（预算熔断优先于 stuck/infra 反推）。"""
+    td = tmp_path / "task-l2-budget"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "failed", "verify_ok": False,
+         "kill_reason": "over_budget_l2"},
+    ])
+    # 有成本 + 非超时，反推本应是 interrupted_or_unknown；但运行时 kill_reason 优先
+    (td / "metering.jsonl").write_text(
+        json.dumps({"cost_usd": 0.30, "latency_ms": 1000}) + "\n", encoding="utf-8")
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 100.0, 0, "",
+        exact_td=td, expected_task="Some task", timed_out=False,
+    )
+    assert result["kill_reason"] == "over_budget_l2"
+    assert result["per_subtask"][0]["kill_reason"] == "over_budget_l2"
+
+
+def test_kill_reason_runtime_stuck_beats_infra(tmp_path):
+    """S12-P0 G1：子任务 kill_reason=stuck（运行时 IDLE 杀）→ 任务级 stuck，
+    即使 cost=0 本会反推 infra。运行时分类优先。"""
+    td = tmp_path / "task-stuck-runtime"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "failed", "verify_ok": False,
+         "kill_reason": "stuck"},
+    ])
+    # 无 metering（cost=0）→ 反推 infra；但运行时 stuck 优先
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 700.0, -9, "",
+        exact_td=td, expected_task="Some task", timed_out=True,
+    )
+    assert result["kill_reason"] == "stuck"
+
+
+def test_kill_reason_runtime_none_on_pass(tmp_path):
+    """S12-P0 G1：通过任务（all_passed）+ 无运行时 kill_reason → none。"""
+    td = tmp_path / "task-pass-runtime"
+    _write_full_meta(td, "Some task", "completed", [
+        {"subtask_id": "sub-1", "status": "completed", "verify_ok": True},
+    ])
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 60.0, 0, "",
+        exact_td=td, expected_task="Some task", timed_out=False,
+    )
+    assert result["kill_reason"] == "none"
 

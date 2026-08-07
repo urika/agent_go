@@ -788,6 +788,8 @@ def _collect_result(task_id: str, model: str, elapsed: float,
             "retries": _r.get("retry_count", 0),
             "verify_ok": bool(_r.get("verify_ok", False)),
             "semantic_ok": _subtask_semantic_ok(_r),
+            # S12-P0 G1：子任务级 kill_reason（运行时写入，度量侧归因）
+            "kill_reason": _r.get("kill_reason"),
         }
         for _r in results
     ]
@@ -846,7 +848,23 @@ def _collect_result(task_id: str, model: str, elapsed: float,
 
     # kill_reason 分类（S12-P0）：把"进程被杀"与"任务失败"解耦——
     # cleanup_race 计通过、预算熔断单列、infra 不计能力失败。
-    if _cleanup_race:
+    # 优先采用运行时写入的子任务级 kill_reason（G1：subtask/executor/pipeline 决策点写），
+    # 无运行时记录时按数据反推（方案 B 兜底）。
+    _runtime_kill = [r.get("kill_reason") for r in results if r.get("kill_reason")]
+    if _runtime_kill:
+        # 任务级取子任务 kill_reason 中最"严重"的一个：over_budget 优先，其次 stuck/hard_timeout
+        if any(k in ("over_budget_l2", "over_budget_l3") for k in _runtime_kill):
+            kill_reason = "over_budget_l2" if "over_budget_l2" in _runtime_kill else "over_budget_l3"
+        elif any(k in ("stuck", "hard_timeout", "goal_timeout", "goal_turns_exceeded") for k in _runtime_kill):
+            kill_reason = next(k for k in ("stuck", "hard_timeout", "goal_timeout", "goal_turns_exceeded")
+                               if k in _runtime_kill)
+        elif _cleanup_race:
+            kill_reason = "cleanup_race"
+        elif all_passed:
+            kill_reason = "none"
+        else:
+            kill_reason = "interrupted_or_unknown"
+    elif _cleanup_race:
         kill_reason = "cleanup_race"
     elif all_passed:
         kill_reason = "none"
@@ -923,6 +941,23 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         pass_rates = [it["pass_rate"] for it in items]
         avg_pass_rate = round(sum(pass_rates) / n, 4) if n else 0
 
+        # S12-P0 修正口径：对历史记录（per_subtask 已含真实子任务状态），用 per_subtask
+        # 重算"修正通过率"——cleanup_race（全部子任务完成已验证但收尾被杀）计为通过，
+        # 使旧采集器的 pass_rate 与修正后 _collect_result 口径一致（v3 34%→~67%）。
+        # 新采集器产出的记录 pass_rate 已含 cleanup_race 修正，重算结果与之等价。
+        # 任务级判定：headline 通过 OR 全部子任务 completed+verify_ok（cleanup_race）。
+        def _corrected_pass(it: dict) -> float:
+            if (it.get("pass_rate") or 0) > 0:
+                return 1.0
+            _ps = it.get("per_subtask") or []
+            if _ps and all(p.get("status") == "completed" and p.get("verify_ok") for p in _ps):
+                return 1.0  # cleanup_race：全完成已验证，计为通过
+            return 0.0
+
+        corrected_pass_rates = [_corrected_pass(it) for it in items]
+        avg_corrected_pass_rate = round(sum(corrected_pass_rates) / n, 4) if n else 0
+        _sum_corr_pass = sum(corrected_pass_rates)
+
         # S10-P1 统一口径（bench-v2-data-requirements.md §3.1）：
         #   $/pass = sum(total_cost_usd) / sum(pass_rate)
         # 以 raw cost 和 raw pass_rate 为准，不依赖 record 级 dollar_per_pass 字段（跨批次可比）。
@@ -960,6 +995,7 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         models[model] = {
             "sample_size": n,
             "avg_pass_rate": avg_pass_rate,
+            "avg_corrected_pass_rate": avg_corrected_pass_rate,  # S12-P0 修正口径（cleanup_race 计入）
             "avg_cost_usd": avg_cost,
             "dollar_per_pass": dollar_per_pass,
             "dollar_per_pass_legacy": cost_per_pass,
@@ -1055,7 +1091,7 @@ def cmd_models(args=None) -> None:
 
     console.print(f"\n📊 模型生产力评估（{data['total_runs']} 次执行）")
     console.print("─" * 118)
-    console.print(f"{'模型':<22} {'样本':>4} {'通过率':>7} {'$/pass':>9} {'K8':>6} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
+    console.print(f"{'模型':<22} {'样本':>4} {'通过率':>7} {'修正':>7} {'$/pass':>9} {'K8':>6} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
     console.print("─" * 118)
 
     for model, m in data["models"].items():
@@ -1065,13 +1101,16 @@ def cmd_models(args=None) -> None:
         eff_str = f"{eff:>7.1f}" if eff > 0 else "     -"
         k8 = m.get("k8_zero_retry_pass_rate")
         k8_str = f"{k8:>5.0%}" if k8 is not None else "    -"
-        console.print(f"{icon} {model:<20} {m['sample_size']:>4} {m['avg_pass_rate']:>6.0%} "
+        corr = m.get("avg_corrected_pass_rate")
+        corr_str = f"{corr:>6.0%}" if corr is not None else "     -"
+        console.print(f"{icon} {model:<20} {m['sample_size']:>4} {m['avg_pass_rate']:>6.0%} {corr_str} "
                       f"${(m['dollar_per_pass'] or 0):>8.4f} {k8_str} {eff_str} {fp_str:>7} "
                       f"{m['recommendation']:<12} {m['reason']}")
     console.print("─" * 118)
     console.print("效率 = passes/dollar (每美元获得的通过率，越高越经济)")
     console.print("K8   = 通过 record 中 zero-retry 占比（首次验证通过率，§3.4 修订口径）")
     console.print("$/pass = sum(cost) / sum(pass_rate)，raw 口径，跨批次可比（§3.1）")
+    console.print("修正   = S12-P0 修正口径通过率（cleanup_race 计通过，历史数据按 per_subtask 重算）")
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -253,7 +253,7 @@ K4≤$0.04            K4≤$0.02            K9≥10
 
 | 阶段 | 交付物 | 预估 | 验收门禁 |
 |------|--------|------|---------|
-| **S12-P0（前置，必须最先）** | **修度量**：① `kill_reason ∈ {none,stuck,hard_timeout,over_budget_l2/l3,cleanup_race,interrupted}` 贯穿运行时→度量；② 修 `_collect_result`（`binary_pass` 移到 aborted 分支后算、`all([])` 判 False、`pass_rate` 分母用计划子任务数、`cleanup_race` 计为通过）；③ 用新口径重算 v2/v3/v4，立**冻结基线** | ~2-3 天 | 重算后 v3 通过率从 34% 回到 ~67%（验证修复正确）；四类 kill_reason 可区分；KPI 基线冻结到单一采集器+22 任务 |
+| **S12-P0（前置，必须最先）** | **修度量**：① `kill_reason ∈ {none,stuck,hard_timeout,over_budget_l2/l3,cleanup_race,interrupted}` 贯穿运行时→度量；② 修 `_collect_result`（`binary_pass` 移到 aborted 分支后算、`all([])` 判 False、`pass_rate` 分母用计划子任务数、`cleanup_race` 计为通过）；③ 用新口径重算 v2/v3/v4，立**冻结基线** | ~2-3 天 | ✅ **代码完成**（2026-08-07）：G1 运行时 kill_reason 贯穿（subtask IDLE/hard_timeout/goal 决策点写 `kill_state` 事件 + executor L2 熔断 `over_budget_l2` + pipeline L3 `over_budget_l3`）；G2 `_collect_result` 修正已随 `4f9d428` 落地；`eval models` 新增修正通过率列（cleanup_race 计入）。**验证：v3 通过率 34%→67%（recompute + eval models 双确认），1640 测试全绿**。剩余：权威基线需用修复后采集器重跑全因子冻结 |
 | **S12-P1** | **启用 cost_control**：在 P0 冻结基线上小范围开 L1/L2/L3（`enabled=True`）+ per-task `--budget`（Spec 字段/CLI）→ KPI 分母按 `kill_reason` 拆分（预算熔断不进能力失败分母） | ~2 天 | cost_control 开启后 `over_budget` 单列报告，不污染 pass_rate；`--budget` 可对单任务设约束 |
 | **S12-P2** | **降级 + 规划守卫**：L3 `on_exceed=degrade`（切便宜模型继续，标 `degraded=True`，对称 `worker_models_fallback`）；Plan 期欠分解检测（高难度 + 低子任务数 → 再分解或升模型）；bench `_dynamic_timeout` 改按难度 | ~3 天 | L3 降级路径保部分产出；硬任务欠分解被前置拦截 |
 | **S12-P3** | **stuck 误杀规避**：`IDLE_TIMEOUT` 从纯静默升级为多维活性（claude 事件 ∨ worktree 文件变更 ∨ 进程树 CPU）+ grace 复检门；收窄 stuck-kill 职责（让 budget + 轮数上限管常见情况） | ~3 天 | 慢工具（build/test >600s）不再被误杀；仅"无事件 ∧ 无文件变更 ∧ 无 CPU"经 grace 复检才记 `kill_reason=stuck_confirmed` |
