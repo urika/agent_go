@@ -76,7 +76,7 @@ AGENT_GO_MCP_HTTP_TOKEN=xxx agent_go mcp --http   # 启用 Bearer token 鉴权
 agent_go status --watch
 
 # Model benchmark / cross-judgment / evaluation / gate
-agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3
+agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3   # 启动前探测实际后端+校验定价（S12）
 agent_go eval bench --source-batch results_v2        # 批次标识（跨批次追溯，S10-P1）
 agent_go eval baseline --candidate-models M1,M2      # 对照基线：claude -p 裸跑（不走 harness，S10-P2）
 agent_go eval models --results eval_suite/results.jsonl

@@ -400,10 +400,12 @@ cmd_status_tui()  → curses 多面板实时监控（agent_go status --watch）
 
 ## bench.py — 模型对照评估编排器 (585 行)
 
-> **状态**：S8 P0 已落地 + S10-P1 schema 扩展 + S10-P2 P1 字段/代码质量/对照基线/动态 timeout。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
+> **状态**：S8 P0 已落地 + S10-P1 schema 扩展 + S10-P2 P1 字段/代码质量/对照基线/动态 timeout + S12 运行前模型-价格预检。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
 
 ```
 cmd_bench(args)                            → 对照运行编排器
+  ── 启动前 S12 预检：_preflight_model_pricing 探测实际后端模型 + 校验定价覆盖
+       （缺定价交互询问/--yes 仅告警；路由名有定价则沿用）
   ── --tasks eval_suite/                   标准任务集（YAML，带 ground-truth 验证）
   ── --models M1,M2,M3                     被评模型（每模型跑全部任务）
   ── --repeat N                            每任务重复 N 次（默认 3）
@@ -489,6 +491,9 @@ calibrate_judge(llm_path, human_csv)       → 人工校准
 MODEL_PRICES        → {model: {prompt, completion}} 定价表（USD/百万tokens）
 MODEL_TIER          → {frontier/value/lite: [models]} 模型档位（供 difficulty 路由）
 PROVIDER_DEFAULT_MODEL → provider → 默认模型（7 个 provider 含 google/volcengine/moonshot/zhipu）
+resolve_price(model)      → S12 运行前预检：解析模型定价（精确匹配 + 版本后缀回退），缺价返回 None
+missing_price_models(list) → 返回缺定价的模型列表（预检用）
+format_price_for_report   → 报告用定价串，缺价标注 ⚠️
 ```
 
 ## query.py — 结构化查询 API（待落地）
