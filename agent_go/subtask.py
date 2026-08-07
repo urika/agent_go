@@ -284,8 +284,13 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         if _cost_cfg.get("l1_enabled", True) or _cost_cfg.get("enabled"):
             _diff = env.get("AGENT_GO_DIFFICULTY", "medium")
             _budgets = _cost_cfg.get("per_subtask_budget_usd", {}) or {}
-            # 未知难度回退 medium（避免该难度子任务无成本保护）
-            _budget = _budgets.get(_diff) or _budgets.get("medium")
+            # 兼容旧格式：S10 时代 per_subtask_budget_usd 是标量（单任务统一值），
+            # S12 冷启动改为 dict {easy,medium,hard}。标量时所有难度用同一值。
+            if not isinstance(_budgets, dict):
+                _budget = float(_budgets) if _budgets else 0.0
+            else:
+                # 未知难度回退 medium（避免该难度子任务无成本保护）
+                _budget = _budgets.get(_diff) or _budgets.get("medium")
             if _budget and _budget > 0:
                 cmd.extend(["--max-budget-usd", str(_budget)])
         # S4 复杂度双通道：difficulty 路由的模型（env 由 executor 注入）
