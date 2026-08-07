@@ -97,7 +97,7 @@ def _build_parser():
     run_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
                             help="任务级成本预算（USD）：累计 metering 成本超限即熔断剩余子任务（默认关闭）")
     run_parser.add_argument("--budget", type=float, default=None, dest="budget",
-                            help="per-task 成本预算（USD，S12-P1 G3）：覆盖 cost_control.max_budget_usd，等价于 --max-cost")
+                            help="--max-cost 的别名（per-task 成本预算，S12-P1 G3）；同传时 --budget 生效")
     run_parser.add_argument("--budget-mode", choices=["strict", "degrade", "ignore"], default=None, dest="budget_mode",
                             help="预算策略（S12-P1 G3）：strict=超预算 block；degrade=切便宜模型继续；ignore=关 L3（默认 strict）")
     run_parser.add_argument("--config", default=argparse.SUPPRESS, help="Path to config JSON file (default: ~/.agent_go/config.json)")
@@ -123,7 +123,7 @@ def _build_parser():
     resume_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
                                help="任务级成本预算（USD）：累计 metering 成本超限即熔断剩余子任务（默认关闭）")
     resume_parser.add_argument("--budget", type=float, default=None, dest="budget",
-                               help="per-task 成本预算（USD，S12-P1 G3）：覆盖 cost_control.max_budget_usd，等价于 --max-cost")
+                               help="--max-cost 的别名（per-task 成本预算，S12-P1 G3）；同传时 --budget 生效")
     resume_parser.add_argument("--budget-mode", choices=["strict", "degrade", "ignore"], default=None, dest="budget_mode",
                                help="预算策略（S12-P1 G3）：strict=超预算 block；degrade=切便宜模型继续；ignore=关 L3（默认 strict）")
 

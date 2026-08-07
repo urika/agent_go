@@ -291,6 +291,8 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     while remaining:
         # S12-P1 G4 安全阀：degrade 模式下，降级子任务连续失败 ≥3 个 → 回退 stop，
         # 避免在便宜模型上无限烧钱（降级模型 verify 必败时 degrade 只是"延长死亡时间"）。
+        # CR-H1 修复：置 `_degrade_aborted` 哨兵，防止同轮 L3 检查（成本只增不减）把
+        # 刚置 False 的 _degraded 又改回 True，导致"回退 stop"永不生效。
         if isinstance(config, dict) and config.get("_degraded"):
             _streak = int(config.get("_degrade_fail_streak", 0) or 0)
             if _streak >= 3:
@@ -298,6 +300,7 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                     f"[degrade] 连续 {_streak} 个降级子任务失败，回退 stop（不再降级烧钱）")
                 config["_degraded"] = False
                 config["_degrade_fail_streak"] = 0
+                config["_degrade_aborted"] = True
         # M6: 分离已阻断的子任务（上游失败 → 下游不执行）
         # block_on_failure=false（--no-verify-block）时跳过阻断，下游照常调度
         block_on_failure = config.get("verification", {}).get("block_on_failure", True)
@@ -337,12 +340,19 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             _budget_mode = _cc_cfg.get("budget_mode", "strict")
             _max_budget = _cc_cfg.get("max_budget_usd") or 0.0
             if not _max_budget:
-                _max_budget = _dynamic_task_budget(_cc_cfg, remaining)
+                # CR-M1 修复：任务级预算应在规划时一次性确定（confirmed 全量），
+                # 不随波次 remaining 缩短而下降，否则任务越接近完成越容易误触 L3。
+                _max_budget = _dynamic_task_budget(_cc_cfg, confirmed)
             _meter_path = (config or {}).get("_metering_path", "")
             if _budget_mode != "ignore" and _max_budget > 0 and _meter_path:
                 _spent = _meter_total_cost(_meter_path)
                 if _spent >= _max_budget:
-                    if _budget_mode == "degrade":
+                    # CR-H1 修复：_degrade_aborted 哨兵置位后，降级已回退 stop，
+                    # 不再因 _spent≥_max_budget（成本只增不减）重复进入降级分支。
+                    _can_degrade = (_budget_mode == "degrade"
+                                    and not (isinstance(config, dict)
+                                             and config.get("_degrade_aborted")))
+                    if _can_degrade:
                         # G4 优雅降级：不硬停，给剩余子任务打降级标记（切便宜模型继续），
                         # 保留部分产出。run_subtask 读到 config["_degraded"] 后降档模型。
                         logger.warning(

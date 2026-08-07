@@ -900,10 +900,11 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 logger.info(f"验证全部通过 (attempt={attempt_label})")
                 break
 
-            # S12-P1 G8：验证循环 kill_reason 感知（不重试预算熔断 / cleanup_race 计成功）
+            # S12-P1 G8：验证循环 kill_reason 感知（不重试预算熔断）
             # over_budget_l2/l3 → 直接 Failed，不进重试（再花更多钱在已超预算任务上违背约束）
-            # cleanup_race → 已成功，不重试
             # stuck/hard_timeout/goal_* → 正常 verify 但重试预算已受限
+            # （CR-L1：cleanup_race 仅在 bench 度量层合成，运行时不写入子任务 kill_reason，
+            #  此分支为防御性保留——若未来运行时引入该信号可直接视为通过，语义无害）
             _kill_reason_now = _latest_kill_reason[0] or ""
             if isinstance(_kill_reason_now, str) and _kill_reason_now.startswith("over_budget"):
                 verify_ok = False

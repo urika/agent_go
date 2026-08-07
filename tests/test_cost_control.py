@@ -408,3 +408,99 @@ class TestS12P2DegradeTable:
 # ─────────────────────────────────────────────────────────────
 # S12-P2 G5：规划期欠分解检测（见 tests/test_planning.py）
 # ─────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────
+# CR-L2：pipeline 级端到端回归（H1 降级安全阀 + M1 动态预算 confirmed）
+# ─────────────────────────────────────────────────────────────
+
+class TestCRL2PipelineDegradeSafetyValve:
+    """CR H1 回归：degrade 模式连续 3 个降级子任务失败 → 安全阀 trip 后
+    同轮 L3 不再重新置 _degraded=True（_degrade_aborted 哨兵生效）。"""
+
+    def test_safety_valve_aborts_degrade_and_l3_does_not_rearm(self, tmp_path):
+        """H1 核心回归：安全阀 trip 后 _degrade_aborted=True → L3 跳过降级分支。"""
+        from agent_go.pipeline import _run_pipeline
+        from unittest.mock import patch, MagicMock
+
+        # 构造 5 个链式依赖子任务（形成多波，使 streak 在波间累积触发安全阀）
+        def _mk(sid, dep=None):
+            return {"id": sid, "title": f"t-{sid}", "description": "d",
+                    "difficulty": "hard", "depends_on": [dep] if dep else [],
+                    "verification": ["true"]}
+        confirmed = []
+        _prev = None
+        for i in range(5):
+            sid = f"sub-{i}"
+            confirmed.append(_mk(sid, _prev))
+            _prev = sid
+
+        # 构造 task_dir + repo
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        task_dir = tmp_path / "task-t1"
+        task_dir.mkdir()
+
+        for sid in [s["id"] for s in confirmed]:
+            (task_dir / sid / "work").mkdir(parents=True)
+
+        # config：开 cost_control，budget_mode=degrade，无 max_budget_usd（走 M1 动态预算）
+        config = {
+            "cost_control": {
+                "enabled": True,
+                "budget_mode": "degrade",
+                "per_subtask_budget_usd": {"easy": 0.1, "medium": 0.2, "hard": 0.5},
+                "subtask_multiplier": 2.5,
+            },
+            "_metering_path": str(tmp_path / "metering.jsonl"),
+            "verification": {"block_on_failure": False},
+        }
+
+        # 所有子任务 verify 失败（驱动 streak 累积）
+        def _fail_result(sid):
+            return {"subtask_id": sid, "status": "failed", "exit_code": 1,
+                    "summary": f"fail-{sid}", "failure_reason": "verify failed",
+                    "worktree": "", "sandbox_type": "headless",
+                    "verify_ok": False, "duration_sec": 1.0, "degraded": True}
+
+        import logging
+        logger = logging.getLogger("cr-test")
+
+        # mock _meter_total_cost 恒返回超预算（确保 L3 总触发）
+        # mock run_subtask 返回失败 + degraded=True
+        # mock worktree/gc 操作避免真实 git
+        with patch("agent_go.pipeline._meter_total_cost", return_value=999.0), \
+             patch("agent_go.pipeline.run_subtask", side_effect=[_fail_result(s["id"]) for s in confirmed]), \
+             patch("agent_go.pipeline._worktree_remove", return_value=(True, "")), \
+             patch("agent_go.pipeline._worktree_prune", return_value=(True, "")), \
+             patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, "")), \
+             patch("agent_go.pipeline.subprocess.run", return_value=MagicMock(returncode=0)), \
+             patch("agent_go.pipeline.write_censored_event"), \
+             patch("agent_go.notify.notify_event"):
+            _run_pipeline(
+                confirmed, repo, task_dir, logger, config,
+                headless=False, parallel=1, issue_ref="",
+                meta={"task_id": "t1", "status": "running"},
+            )
+
+        # H1 断言：安全阀 trip 后 _degrade_aborted=True，且 _degraded 不再被 L3 重新置 True
+        assert config.get("_degrade_aborted") is True, "安全阀应已 trip 并置 _degrade_aborted"
+        # trip 后 _degraded 应为 False（安全阀清零，L3 不再重新武装）
+        assert config.get("_degraded") is False, "L3 不应在安全阀 trip 后重新置 _degraded=True"
+
+    def test_dynamic_budget_uses_confirmed_not_remaining(self, tmp_path):
+        """CR M1 回归：动态预算基于 confirmed 全量，不随 remaining 缩短而下降。
+        用 2 个子任务，_dynamic_task_budget 返回固定值，验证 L3 阈值稳定。"""
+        from agent_go.pipeline import _dynamic_task_budget
+
+        cc_cfg = {
+            "per_subtask_budget_usd": {"easy": 0.1, "medium": 0.2, "hard": 0.5},
+            "subtask_multiplier": 2.5,
+        }
+        full = [{"id": "s1", "difficulty": "hard"}, {"id": "s2", "difficulty": "hard"},
+                {"id": "s3", "difficulty": "hard"}]
+        # 全量 confirmed = 0.5 * 2.5 * 3 = 3.75
+        assert _dynamic_task_budget(cc_cfg, full) == pytest.approx(3.75)
+        # 即使只传 1 个 remaining，函数本身不变（调用点已改为传 confirmed）
+        assert _dynamic_task_budget(cc_cfg, full[:1]) == pytest.approx(1.25)

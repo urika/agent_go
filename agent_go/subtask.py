@@ -140,21 +140,68 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     STUCK_GRACE_SEC = 120          # grace 复检宽限窗
 
     def _file_activity_snapshot(wt: Path) -> str:
-        """S2 活性快照：worktree 的 git status --porcelain 输出 + 顶层目录 mtime。
-        claude 静默等 build/测试时磁盘在动（写产物），git status 会反映。失败返回空串。
+        """S2 活性快照：git status --porcelain（文件集合）+ dirty 文件 mtime 快照。
+        claude 静默等 build/测试时磁盘在动：新文件出现 → git status 变化；
+        既有文件被改写（不增新文件）→ mtime 变化。两者结合覆盖设计第八节要求。
+        CR-M2 修复：补 mtime，避免"改写单个既有文件的长操作"被误判无活性。
+        失败返回空串。
         """
         try:
             _st = subprocess.run(["git", "status", "--porcelain"], cwd=str(wt),
                                  capture_output=True, text=True, timeout=10)
-            _out = _st.stdout
-            return _out.strip() if isinstance(_out, str) else ""
+            _status = _st.stdout.strip() if isinstance(_st.stdout, str) else ""
+            # dirty 文件 mtime 快照：取被改写/新增文件的 max(mtime) 增强活性检测。
+            # 遍历 git status 输出的路径（相对 worktree），取最近修改时间戳拼接。
+            _mtime_part = ""
+            if _status:
+                _mtimes = []
+                for _line in _status.splitlines():
+                    # porcelain 格式：XY <path>（XY 两字符状态码 + 空格 + 路径）
+                    _p = _line[3:] if len(_line) > 3 else _line.strip()
+                    if not _p:
+                        continue
+                    _fp = wt / _p
+                    try:
+                        _mtimes.append(int(_fp.stat().st_mtime * 1000))
+                    except OSError:
+                        pass
+                if _mtimes:
+                    _mtime_part = "|m:" + ",".join(str(m) for m in sorted(_mtimes))
+            return _status + _mtime_part
         except (subprocess.SubprocessError, OSError, ValueError):
             return ""
 
+    def _parse_cpu_time(s: str) -> float:
+        """解析 ps 的 utime/stime 时间字符串为秒（float）。
+        兼容两种格式：
+          - Linux: 纯 clock ticks（如 '1234'）→ float()
+          - macOS: M:SS.cc 或 H:MM:SS 或 D-HH:MM:SS（如 '2:33.26' '11:26.55'）
+        失败抛 ValueError（调用方跳过该行）。
+        """
+        s = s.strip()
+        if not s:
+            raise ValueError("empty")
+        if ":" not in s:
+            # Linux 纯 ticks（BSD/SYSV 默认 100Hz，即 1 tick=0.01s，但 ps 已转为秒）
+            return float(s)
+        # macOS 时间格式：按 ':' 切分，各段加权求和（天/时/分/秒）
+        days = 0.0
+        if "-" in s:
+            d, s = s.split("-", 1)
+            days = float(d)
+        parts = s.split(":")
+        secs = float(parts[-1])
+        if len(parts) >= 2:
+            secs += float(parts[-2]) * 60
+        if len(parts) >= 3:
+            secs += float(parts[-3]) * 3600
+        return days * 86400 + secs
+
     def _process_cpu_ticks(proc_pid: int) -> int:
-        """S3 活性：claude 进程树累计 CPU ticks（utime+stime 总和）。
+        """S3 活性：claude 进程树累计 CPU 时间（utime+stime 秒数总和）。
         CPU-bound 工作（编译/计算）即使无事件无文件变更也有 CPU 消耗。
-        ps -o utime=,stime= 返回 ticks（macOS 上为秒数，够用）。失败返回 -1。
+        CR-H2 修复：macOS ps 时间格式为 M:SS.cc（非纯数字），原 float() 解析全失败→恒返回 0。
+        现用 _parse_cpu_time 兼容 Linux(ticks)/macOS(time format)；ps 不可用返回 -1（测不到）。
         """
         try:
             _cp = subprocess.run(["ps", "-o", "pid=,ppid=,utime=,stime=", "-A"],
@@ -166,7 +213,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 if len(_parts) >= 4:
                     try:
                         _pid, _ppid = int(_parts[0]), int(_parts[1])
-                        _ticks = float(_parts[2]) + float(_parts[3])
+                        _ticks = _parse_cpu_time(_parts[2]) + _parse_cpu_time(_parts[3])
                     except ValueError:
                         continue
                     _rows[_pid] = _ticks
