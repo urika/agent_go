@@ -33,7 +33,7 @@ task: |
   - 所有原有测试必须继续通过
   - 新测试在 tests/test_metrics.py 中
 verification:
-  - "python -m pytest tests/ -q"
+  - "python -m pytest tests/test_metrics.py -q"  # 指向任务要求新建的 metrics 测试，防止全量 pytest 假通过
 timeout: 1440
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）

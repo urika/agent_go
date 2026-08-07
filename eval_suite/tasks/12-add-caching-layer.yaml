@@ -41,7 +41,7 @@ task: |
   - 所有原有测试继续通过
   - 缓存序列化失败时优雅降级（跳过缓存，不中断运行）
 verification:
-  - "python -m pytest tests/ -q"
+  - "python -m pytest tests/test_cache.py -q"  # 指向任务要求新建的 cache 测试，防止全量 pytest 假通过
 timeout: 2400
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）

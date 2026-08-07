@@ -311,4 +311,27 @@ pytest <existing_tests>  # repo 原有测试套件
 
 ---
 
+## 八、已知限制与置信度边界（2026-08-07 审计）
+
+> 除模型计价外，影响 bench 结果可信度的因素已审计。已修复项见下方"已修复"；"已知限制"项记录为后续优化方向，不影响当前可信基线采集（但解读结果时须知悉）。
+
+### 已修复（本批审计闭环）
+- **P0-1 验证命令假通过**：`add-metrics-system` / `add-caching-layer` 原用 `pytest tests/ -q`（fixture 预置测试全过 → agent 不干活也 pass）。已改为指向任务要求新建的 `tests/test_metrics.py` / `tests/test_cache.py`——agent 必须实际实现才能通过。
+- **P0-2 fixture 状态一致性**：8 个 task-mgr 任务 repo 从绝对路径 `/Users/jinsongwang/test-target/task-mgr` 统一为相对 `eval_suite/fixtures/task-mgr`（内容已核实一致），消除人工污染风险 + 跨批次可比。
+
+### 已知限制（记录，不阻塞采集）
+| # | 限制 | 影响 | 缓解 |
+|---|------|------|------|
+| L1 | **无 temperature/seed 显式设置** | LLM 采样随机 → 重复 N 次 pass 波动混入"模型能力差异" | `--repeat 3` 缓解；云端 API 多不支持 seed |
+| L2 | **cache 计价未覆盖**（GLM/DS cache_read_input_tokens）| 长任务多调用时成本高估 | 当前任务多为单次调用，影响小 |
+| L3 | **semantic evaluator 质量依赖** | semantic_pass 波动影响 binary_pass | S12-P0 已 fail-closed（评估失败不判过）|
+| L4 | **任务描述无统一验收标准** | 部分任务 agent 自由发挥，产出不可比 | 与已采集数据不可比，改描述会破口径 |
+| L5 | **batch 口径混用**（v2/v3/v4 采集器版本不同）| 跨 batch 分析 schema 不一致 | 用 `--source-batch` 标识隔离，分析按 batch 过滤 |
+
+### 置信度边界
+- pass_rate 的可信度取决于任务验证命令质量（已验证：除 2 个已修任务外，其余 20 个任务验证均含新功能断言或指向需新建的测试文件）
+- 成本可信度依赖模型定价覆盖（已补全 glm-4.7/5.1/5.2/4.5-air + 运行前预检护航）
+
+---
+
 *关联文档：[bench-analysis-2026-08-01.md](../bench-analysis-2026-08-01.md) — v1 数据分析报告，本文档的需求来源。*
