@@ -259,3 +259,55 @@ K4≤$0.04            K4≤$0.02            K9≥10
 | **S12-P3** | **stuck 误杀规避**：`IDLE_TIMEOUT` 从纯静默升级为多维活性（claude 事件 ∨ worktree 文件变更 ∨ 进程树 CPU）+ grace 复检门；收窄 stuck-kill 职责（让 budget + 轮数上限管常见情况） | ~3 天 | 慢工具（build/test >600s）不再被误杀；仅"无事件 ∧ 无文件变更 ∧ 无 CPU"经 grace 复检才记 `kill_reason=stuck_confirmed` | ✅ 代码完成（2026-08-07：subtask.py `_file_activity_snapshot` S2 + `_process_cpu_ticks` S3 + `STUCK_GRACE_SEC=120` grace 复检门，惰性采样不干扰正常执行，1663 测试全绿）。**+ 失败清理策略**（2026-08-07，1667 测试全绿）：保留判定接入 `kill_reason`（cleanup_race 实际成功不保留 / degraded 强制保留+标记）；保留现场净化（.pytest_cache/__pycache__/pyc）；`clean --older-than` 保留期清理；final report 降级产物突出"需 review"标记。**+ 冷启动 L1 默认开 + 运行前模型-价格预检**（2026-08-07，1688 测试全绿）：L1 `l1_enabled` 独立开关默认 True（防单次失控，误杀风险最低）；`bench/baseline` 启动前 `_probe_actual_model` 探测实际后端 + `resolve_price` 校验定价覆盖（缺定价告警/中止）；智谱后端定价补全（glm-4.7/5.1/5.2/4.5-air）|
 
 **S12 出关口径**：KPI 基线以冻结口径重测并锁定；cost_control 三层可安全默认开启（L1 冷启动已默认开 `l1_enabled=True`，L2/L3 待基线后 `enabled=True`）且 `over_budget` 不污染能力失败分母；stuck 误杀率（在干活的任务被杀）降至接近 0。**S12-P0 是 S10 重跑、S6 Reviewer 灰度、KnowledgeStore 的共同前置**——度量不可信前这些都不该推进。
+
+---
+
+### S13：闭环治理与业务架构（2026-08-08 立项，**规划阶段，未实施**）
+
+> 触发：2026-08 多轮业务架构讨论（SDD / goal-process-task 三层 / 交付断点 / 问题跟踪 / 外部衔接 / 循环智能）。基于代码事实核查识别出 **5 个闭环缺口**（4 工程 + 1 智能），需统一治理而非散落修复。
+>
+> 设计文档：[design/business-architecture.md](design/business-architecture.md)（决策登记版 v0.2）。关联调研：[research-goal-loop-mechanism-2026-08-08.md](research-goal-loop-mechanism-2026-08-08.md)（循环智能缺口来源）。
+>
+> **当前状态**：📋 规划中。已落盘 A 类 6 项已决策 + B 类 5 项待决策（B1-B5），未写任何代码。B 类讨论完成后进入实施。
+
+#### 五大闭环缺口
+
+| 缺口 | 类型 | 紧急度 | 代码事实 | 拟对应工作 |
+|------|------|--------|---------|----------|
+| 1 交付闭环断裂 | 工程 | 🔴 最高 | fixture main 仅 1 commit，堆积 811 个孤立分支；cmd_pr 推 `HEAD:main`（bug） | M1 交付修复 |
+| 2 goal 回溯断裂 | 工程 | 🟡 中 | "无失败=completed"否定式，不回看 goal/acceptance | M4 goal 回溯 |
+| 3 问题跟踪断裂 | 工程 | 🟡 中 | 单任务内完整，跨任务"跑完即丢" | M5-M6 问题跟踪 + issue 联动 |
+| 4 spec 闭环断裂 | 工程 | 🟢 低 | --spec 历史 0 次使用，spec 不持久化 | M2-M4 spec 闭环（ROI 待 B3 决策） |
+| 5 循环智能断裂 | 智能 | 🟡 中 | 反应式重试，无无进展检测/根因分析/重规划 | B5 决策（a 保持/b 补全/c 最小止血） |
+
+#### 6 个候选 Milestone（待 B 类决策后启动）
+
+| M | 名称 | 缺口 | 预估 | 依赖 |
+|---|------|------|------|------|
+| M1 | 交付修复（merge-to-base + cmd_pr 修分支 + `agent_go merge`） | 1 | ~2 天 | 无（优先级最高候选） |
+| M2 | spec 持久化（SPEC.md + meta 加字段 + §5 结构化） | 4 | ~1 天 | 无 |
+| M3 | spec 端到端验证（真实 spec 跑通 + 修冒烟 bug） | 4 | ~1 天 | M2 |
+| M4 | goal 回溯（converge + ComplianceReport，纯观测不改 status） | 2 | ~2 天 | M3 |
+| M5 | 问题跟踪（Problem 实体 + problems.jsonl + 命令/dashboard） | 3 | ~2 天 | 无 |
+| M6 | issue 联动（`--track-issues` + problem sync） | 3 | ~1.5 天 | M5 |
+
+> 另有 M7-M10 候选来自循环智能调研（无进展检测/Reflexion/数据埋点/局部重规划），**未纳入**，待 B5 决策。
+
+#### 关键约束（不变量）
+
+- **IV-1** 产物必须能到达 main，不允许烂在 worktree
+- **IV-2** converge 纯观测，不改 task.status（合规度是正交维度）
+- **IV-3** 向后兼容，99.5% 无 spec 任务不受影响
+- **IV-4** Problem 是一等实体（有 id/状态/生命周期）
+- **IV-5** 边界克制，不做需求管理/排期/分工
+
+#### 待决策问题（B 类，阻塞实施）
+
+B2（缺口优先级）→ B5（循环智能层级）→ B4（问题跟踪定位）→ B1（merge 策略）→ B3（spec ROI）。详见 [design/business-architecture.md](design/business-architecture.md)。
+
+#### S13 与其他迭代的关系
+
+- **不阻塞 S12**（S12 是度量修复，独立推进）
+- **M1 交付修复**是 S13 内最高 ROI 候选，但优先级受 B2（agent_go 定位：交付工具 vs bench 工具）约束
+- **M4 goal 回溯**与 H2-1 KnowledgeStore 正交（goal 是单任务内回溯，KnowledgeStore 是跨任务记忆）
+- **B5 循环智能**若选 b/c，与 H2-2 Branching、H3-1 自调优存在能力重叠，需对齐避免重复建设
