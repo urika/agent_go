@@ -318,6 +318,7 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 
 - **位置**：`agent_go/eval.py:374-382`（旧实现，无条件 token 重算）+ `agent_go/subtask.py:370`（写 `actual_model="claude-code-executor"`）
 - **状态**：✅ 已修复（2026-07-25）— `analyze_cost` 改为优先用真实 `cost_usd`，token 重算仅补缺；未知模型不再兜底 deepseek
+- **S12 加固（2026-08-07）**：✅ 运行前模型-价格预检（`bench._probe_actual_model` 探测实际后端 + `pricing.resolve_price` 校验定价覆盖，缺定价告警/中止）；✅ 智谱后端定价补全（glm-4.7/5.1/5.2/4.5-air，消除 1.8x 虚高：claude-* 路由 → glm-4.7 按 $0.5556/$2.2222 重算 vs claude 报 Anthropic 价 $0.0429）
 - **严重度**：**P0**（北极星指标 $/pass rate 失真，门禁永远绿，违背存在意义）
 
 **问题**：`subtask.py:370` 默认写 `actual_model="claude-code-executor"`（Claude Code 子进程的真实标识），该字符串不在 `MODEL_PRICES`（仅 7 个模型）。旧 `analyze_cost:377` 对未知模型兜底 `MODEL_PRICES["deepseek-chat"]`（$0.27/$1.1 per Mtok），而真实 Claude 是 $3-15/Mtok——**成本被低估 11-22 倍**。`dollar_per_pass_rate` 因此被严重拉低，gate 永远通过。

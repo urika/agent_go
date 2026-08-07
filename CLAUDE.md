@@ -142,8 +142,8 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `metrics.py` | Data collection: timing, change stats, estimate_cost, aggregate_metering |
 | `eval.py` | Quality/perf/cost (per-role)/reliability/ux evaluation, eval gate ($/pass baseline + regression) |
 | `planning.py` | Planning helpers: estimate_task_duration |
-| `pricing.py` | Model price table (48 models), MODEL_TIER, provider defaults |
-| `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks |
+| `pricing.py` | Model price table (48 models), MODEL_TIER, provider defaults, resolve_price/missing_price_models pre-flight helpers |
+| `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks (pre-flight model-price probe) |
 | `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
 | `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
 | `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |

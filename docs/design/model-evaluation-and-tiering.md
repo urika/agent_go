@@ -2,6 +2,8 @@
 
 > **状态**：✅ P0 已实施（2026-07-25，`pricing.py` / `bench.py` / `cross_judge.py` / `eval_suite`）；P1 `router recommend` 待实施（排期见 [roadmap.md](../roadmap.md)）
 > **基线日期**：2026-07-25
+> **S12 更新（2026-08-07）**：✅ 智谱后端定价补全（glm-4.7/glm-5.1/glm-5.2/glm-4.5-air，联网查证）；✅ 运行前模型-价格预检（`bench.py _probe_actual_model` 探测实际后端 + `pricing.resolve_price` 校验定价覆盖，缺定价告警/中止）；✅ 实际路由验证：claude-haiku-4-5/sonnet-4-6/opus-4-7 → 智谱统一归一 glm-4.7（有定价，成本按真实模型计价）
+> **基线日期**：2026-07-25
 > **关联**：[prd.md §P1 角色感知模型路由](../prd.md) · [router-multi-provider-extension.md](router-multi-provider-extension.md) · [ISSUES.md ISSUE-26 计价失真](../ISSUES.md)
 > **数据源**：定价来自厂商官网 + 聚合平台（2025-2026 公开数据）；能力 benchmark 来自 SWE-bench 官方 + 独立第三方测试
 
