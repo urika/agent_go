@@ -228,6 +228,42 @@ result(success|fallback|quality_fail), fallback_reason
 - hard 任务是主要成本驱动（73% 成本），difficulty 路由的降本杠杆最大
 - 混合策略（Sonnet/Opus 规划 + Haiku 执行 easy/medium + Opus 执行 hard）：预计 $/pass ≈ $0.15-0.20，仍高于 $0.05 目标。需 KnowledgeStore + Plan 优化进一步压缩
 
+### 成本控制策略：冷启动 + 分层启用（2026-08-07 新增）
+
+> 关联：[S12 度量修复 + 成本控制启用](roadmap.md#s12)，[timeout-kill-strategy §表面C](design/timeout-kill-strategy-2026-08-06.md)
+
+**核心矛盾**：成本控制是"判死"机制（超预算即熔断/降级）。用拍脑袋的默认值开启，会**误杀本可成功的任务**——这比"没保护"更糟（让人误以为有护栏）。因此成本控制必须**分层启用**：误杀风险低的层冷启动即开，风险高的层须基线校准后才开。
+
+**三层架构与启用策略：**
+
+| 层 | 机制 | 冷启动默认 | 误杀风险 | 启用条件 |
+|----|------|-----------|---------|---------|
+| **L1** | 单次调用 `claude --max-budget-usd`（按 difficulty） | **✅ 开**（`l1_enabled=True`） | 最低（只杀单次异常调用） | 冷启动即开，防"一次失控烧钱" |
+| **L2** | 子任务累计（跨重试，`per_subtask × multiplier`） | ❌ 关（`enabled=False`） | 中（封顶重试循环） | 须 `eval cost-baseline` 校准 |
+| **L3** | 任务级熔断（跨子任务，`--budget`/`--max-cost`） | ❌ 关（`enabled=False`） | 最高（整个任务 block/degrade） | 须冻结基线 |
+
+**关键设计：L1 与 L2/L3 解耦**
+- `l1_enabled`（默认 True）独立控制 L1——冷启动安全的最低限度防护
+- `enabled`（默认 False）控制 L2/L3——判死机制，基线不可信时误杀率高
+- 用户三态：冷启动（默认配置即可）/ 有基线（`enabled=True` + 校准预算）/ 完全关（`l1_enabled=False`）
+
+**L1 冷启动宽松预算（宁可多花不多杀）：**
+
+| 难度 | 冷启动默认 | 基线 P90×1.5（参考） | 设计倍数 |
+|------|-----------|---------------------|---------|
+| easy | $0.20 | ~$0.10 | 2× 留余量 |
+| medium | $0.40 | ~$0.10-0.17 | 2-4× |
+| hard | $1.00 | ~$0.19-0.36 | 3-5× |
+
+给未知任务充足空间。基线建立后，用 `eval cost-baseline` 的 P90×tolerance 替换为精准值。
+
+**启用路径（chicken-egg 破局）：**
+1. 冷启动：默认配置 → L1 防失控，L2/L3 不误杀（**当前状态**）
+2. 立基线：`eval bench` 全因子 + `eval cost-baseline`（排除 timed_out 右删失，P90×1.5）
+3. 开 L2/L3：`enabled=True` + 校准预算，`over_budget` 单列不污染能力失败分母
+
+**与测量解耦**：预算熔断写 `cost_censored` 事件到 metering.jsonl 并继续累计（控制不中断测量）。`eval cost-baseline` 仅用自然成本记录（timed_out 排除），避免右删失污染。
+
 ### Bench v2 计划（2026-08-01 新增）
 
 > **一句话：Bench v1 暴露了数据采集、实验设计和统计方法的系统性缺口。Bench v2 在 v1 基础上补齐这些缺口，建立可信的 KPI 基线和模型选型决策依据。**

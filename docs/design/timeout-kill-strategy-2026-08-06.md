@@ -10,7 +10,7 @@
 
 逐行对照源码盘点后，结论与初版策略假设**显著不同**：
 
-> **当前产品已内置 progress-aware kill（`IDLE_TIMEOUT`）、按难度缩放的 retry_timeout、以及完整的三层 cost_control（L1/L2/L3）——它们全部代码就绪，仅被 `cost_control.enabled=False` 关闭。** v3 的「57% 超时」是 **bench 测量外壳**（`_run_with_grace`）造成的，不是产品运行时的成本控制；产品运行时本身**没有任务级墙钟 timeout**。
+> **当前产品已内置 progress-aware kill（`IDLE_TIMEOUT` 多维活性 + grace 复检）、按难度缩放的 retry_timeout、以及完整的三层 cost_control（L1/L2/L3）。L1 由 `l1_enabled` 独立控制（默认 True，冷启动防单次失控）；L2/L3 由 `enabled` 控制（默认 False，须基线校准后才开）。** v3 的「57% 超时」是 **bench 测量外壳**（`_run_with_grace`）造成的，不是产品运行时的成本控制；产品运行时本身**没有任务级墙钟 timeout**。
 
 因此优化**不是"从零造预算杀手"**，而是：① 修测量（让 `kill_reason` 可分类、修正把已完成计为失败的 bug）——这是能安全开启 cost_control 的**前置闸门**；② 补三处真实缺口（per-task 预算输入、L3 优雅降级、规划期欠分解检测）；③ 在冻结基线上开启已就绪的 cost_control。净新增工作量小且聚焦。
 
@@ -45,15 +45,21 @@ timeout/kill 在本系统里存在于**三个互不相同的表面**，v2/v3 分
 
 **结论：表面 B 已经是"progress-aware + 难度缩放"的设计**，与初版策略假设的"纯墙钟、按子任务数"不符——那个描述只对**表面 A（bench 外壳）**成立。
 
-### 表面 C：cost_control 三层（全部就绪，全部关闭）
+### 表面 C：cost_control 三层（L1 冷启动默认开，L2/L3 待基线）
 
-| 层 | 位置 | 机制 | 触发动作 | 配置 | 状态 |
-|----|------|------|---------|------|------|
-| **L1 单调用** | `subtask.py:153-162` | 给 claude 注入 `--max-budget-usd`（按难度） | claude 原生预算控制 | `per_subtask_budget_usd={easy:0.10,med:0.20,hard:0.50}` | 代码就绪 / enabled=False |
-| **L2 子任务累计** | `executor.py:958-974` | 跨重试累计 cost ≥ `单次×subtask_multiplier` | **停止修复重试**（final fail） | `subtask_multiplier=2.5` | 代码就绪 / enabled=False |
-| **L3 任务熔断** | `pipeline.py:275-300` | 任务累计 cost ≥ `max_budget_usd` | **剩余子任务标记 blocked** | `max_budget_usd=0.50`, `on_exceed=stop` | 代码就绪 / enabled=False |
+| 层 | 位置 | 机制 | 触发动作 | 配置 | 冷启动状态 |
+|----|------|------|---------|------|-----------|
+| **L1 单调用** | `subtask.py:153-162` | 给 claude 注入 `--max-budget-usd`（按难度） | claude 原生预算控制 | `l1_enabled=True`（独立开关），`per_subtask_budget_usd={easy:0.20,med:0.40,hard:1.00}`（宽松默认） | **✅ 冷启动默认开**（误杀风险最低） |
+| **L2 子任务累计** | `executor.py:958-974` | 跨重试累计 cost ≥ `单次×subtask_multiplier` | **停止修复重试**（final fail） | `subtask_multiplier=2.5`，gated by `enabled` | 代码就绪 / enabled=False（待基线） |
+| **L3 任务熔断** | `pipeline.py:275-300` | 任务累计 cost ≥ `max_budget_usd` | **剩余子任务标记 blocked**（或 `degrade` 降级） | `max_budget_usd=动态默认`，`on_exceed=stop`，gated by `enabled` | 代码就绪 / enabled=False（待基线） |
 
-三层都有 `write_censored_event` 审计落盘。**整套预算控制已实现，只差"开启 + 基线 + 度量可信"。**
+三层都有 `write_censored_event` 审计落盘（测量/控制解耦）。**L1 冷启动即开（防单次失控，误杀风险最低）；L2/L3 是判死机制，须 `eval cost-baseline` 校准后才开（基线不可信时误杀率高）。**
+
+**分层启用设计（S12 冷启动策略）：**
+- `l1_enabled`（默认 True）独立控制 L1——冷启动安全的最低限度防护（像保险丝，单次异常即断）
+- `enabled`（默认 False）控制 L2/L3——判死机制（像主断路器，需电工调好阈值才启用）
+- L1 冷启动预算取基线 P90×1.5 的 2-5x（宁可多花不多杀），基线建立后用 `eval cost-baseline` 替换精准值
+- 详见 [prd.md §成本控制策略](../prd.md)
 
 ---
 
@@ -63,7 +69,7 @@ timeout/kill 在本系统里存在于**三个互不相同的表面**，v2/v3 分
 
 | # | 策略 | 现状 | 净缺口 | 工作量 |
 |---|------|------|--------|--------|
-| 1 | 预算升为一等信号，timeout 降为安全网 | **L1/L2/L3 已实现预算控制**；表面 B 已是 progress-aware（timeout 本就是安全网） | (a) 仍 `enabled=False`；(b) 无 per-task 预算输入；(c) L3 靠 block 不靠降级 | 中 |
+| 1 | 预算升为一等信号，timeout 降为安全网 | **L1/L2/L3 已实现预算控制**；L1 冷启动默认开（`l1_enabled=True`）；表面 B 已是 progress-aware（timeout 本就是安全网） | (a) L2/L3 仍 `enabled=False`（须基线）；(b) ~~无 per-task 预算输入~~ ✅G3 已落地；(c) ~~L3 靠 block 不靠降级~~ ✅G4 已落地 | 中 |
 | 2 | kill 改"无进展"触发，非墙钟 | **`IDLE_TIMEOUT=600s` 已是无进展触发** | 纯静默判定偏粗（无法区分"深度思考"与"循环空转"），可加 token 速率/文件变更信号 | 小（增强） |
 | 3 | 时间预算按难度分档 | **retry_timeout 已按难度（hard ×2.5）** | 仅 bench 外壳 `_dynamic_timeout` 按子任务数（**测量侧**需改，见策略 4 尾） | 小（bench 侧） |
 | 4 | kill 分类打标（stuck/over_budget/cleanup_race）+ 修 `_collect_result` | **完全缺失**——kill 发生但结果不记原因；`_collect_result` 把 cleanup_race 计为失败 | 需新增 `kill_reason` 字段贯穿 B→A；修 `_collect_result` 的 aborted 分支 | **中（前置必做）** |
@@ -159,10 +165,11 @@ cost≈0 故退避几乎免费；直接服务 PRD 及格线"周五 run、关机�
 - 这是 chicken-egg 的破局点：度量诊断说"开启 cost_control 前须立基线"，但立基线需要可信度量 → 必须先修度量
 
 **Phase 1 — 开启已就绪的 cost_control + 无人值守鲁棒性**
-- 在 Phase 0 冻结的基线上，小范围开启 L1/L2/L3（`enabled=True`）
-- 引入 G3（per-task `--budget` + 动态默认 + budget_mode），让用户能对单任务设约束
+- ✅ **L1 冷启动默认开**（`l1_enabled=True`，S12 落地）：误杀风险最低，防单次失控
+- ⏳ 在 Phase 0 冻结的基线上，开启 L2/L3（`enabled=True`）—— 须 `eval cost-baseline` 校准预算
+- ✅ G3（per-task `--budget` + 动态默认 + budget_mode），让用户能对单任务设约束
 - **G7（infra/API 差异化退避）前置到此**（review 修订）：它是"开启 cost_control 后无人值守"的命门——cost_control 开了若没有 infra 退避，一次 API 抖动仍废掉整夜。实现独立、ROI 极高，不该等 Phase 4
-- G8（验证循环 kill_reason 感知，依赖 Phase 0 的 G1，顺带落地）
+- ✅ G8（验证循环 kill_reason 感知，依赖 Phase 0 的 G1，顺带落地）
 - 观察 kill_reason 分布，校准 `per_subtask_budget_usd` / `max_budget_usd` / `subtask_multiplier`
 
 **Phase 2 — 补降级与规划守卫**
@@ -364,7 +371,7 @@ T=600s 静默触发 → 不杀，转"待裁定宽限态"
 | 缺口 | 夜间后果 |
 |------|---------|
 | **infra 无退避（G7）** | 凌晨 API 抖动 5min → 立即重试 ×3 全锤同一不可用端点 → 子任务 Failed。本会 2min 自愈的瞬时故障废掉一个子任务 |
-| **cost_control 默认关** | 无人批准花费却无预算护栏；hard 任务重试循环可能夜间超预期烧钱 |
+| ~~**cost_control 默认关**~~ | ✅ **S12 冷启动策略已缓解**：L1 默认开（`l1_enabled=True`，防单次失控）；L2/L3 仍默认关（须基线校准，避免误杀）。完全开 L2/L3 需冻结基线（chicken-egg，S12 出关第 2 步） |
 | **无 `--auto-resume`** | 进程崩溃 / 机器睡眠 → 停 `interrupted`，第二天来是半成品、需手动 `resume` |
 
 **重试会反过来伤场景吗**：不会——`max_retries=3`（难度封顶）已把单子任务重试封到 ~4× 单次成本，`block_on_failure` 阻止级联烧钱。会伤的是"无界重试"（不存在）和"默认无预算护栏"（cost_control 缺口，非重试本身的错）。
@@ -509,5 +516,5 @@ T=600s 静默触发 → 不杀，转"待裁定宽限态"
 
 - **[bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md)**：本文是其第四节 timeout 专题的**可执行延伸**——根因诊断 → 策略评估 → 落地路线。G1/G2 直接对应那里的"度量层缺陷 1 + 问题 4"。
 - **[k4-cost-recalibration.md](k4-cost-recalibration.md)**：提供成本驱动因素（难度 4-5×、子任务数线性），是 G5/G6 难度口径的依据。
-- **`config.py` cost_control 块**：三层配置已就绪，Phase 1 仅需 `enabled=True` + 校准值。
+- **`config.py` cost_control 块**：三层配置已就绪。**L1 冷启动默认开**（`l1_enabled=True`）；L2/L3 开启需 `enabled=True` + 冻结基线校准值（`eval cost-baseline`）。
 - **`prd.md` §产品 KPI**：K4（$/pass）目标 ≤$0.05 与实测差 7-14×，本文不直接修目标，但 G3（per-task 预算）把"够不着的全局目标"转为"可执行的单任务约束"。
