@@ -67,13 +67,17 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
         req = _urlreq.Request(status_url, headers={"User-Agent": "agent_go-probe/1.0"})
         with _urlreq.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
-        # 解析第一个 "Model" 字段（本地后端真实模型名）
+        # 解析第一个 "Model" 字段（本地后端真实模型名）。
+        # 兼容两种 HTML 结构：llama.cpp 原生 <span class="label">Model</span><span class="value">...
+        # 与自定义代理页（如 Local LLM Stack）同结构。仅缓存成功结果——
+        # 失败不缓存，代理 SIGHUP 切换/短暂不可达恢复后能重新探测（避免空串永久生效）。
         m = re.search(r'<span class="label">Model</span><span class="value">([^<]+)</span>', body)
         if m:
             model = m.group(1).strip()
     except Exception:
         model = ""
-    _local_model_probe_cache[key] = model
+    if model:
+        _local_model_probe_cache[key] = model
     return model
 
 # 模块级常量：路径替换时的边界字符集（在 _build_task_md 和 run_subtask 中共享）
