@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from agent_go.bench import _dir_matches_task, _collect_result
 
@@ -875,3 +876,53 @@ def test_kill_reason_runtime_none_on_pass(tmp_path):
     )
     assert result["kill_reason"] == "none"
 
+
+
+# ─────────────────────────────────────────────────────────────
+# S12 运行前预检：_probe_actual_model / _preflight_model_pricing
+# ─────────────────────────────────────────────────────────────
+
+class TestPreflightModelPricing:
+    @patch("agent_go.bench._probe_actual_model", return_value="glm-4.7")
+    def test_all_known_price_returns_true(self, mock_probe, capsys):
+        from agent_go.bench import _preflight_model_pricing
+        assert _preflight_model_pricing(["claude-haiku-4-5"], interactive=False) is True
+        out = capsys.readouterr().out
+        assert "✅ 全部模型有定价" in out
+
+    @patch("agent_go.bench._probe_actual_model", return_value="mystery-backend")
+    def test_missing_actual_price_aborts_when_no(self, mock_probe, capsys):
+        """探测到无定价的实际模型 → interactive 回答 n → 返回 False（中止）。"""
+        from agent_go.bench import _preflight_model_pricing
+        with patch("builtins.input", return_value="n"):
+            assert _preflight_model_pricing(["mystery-model"], interactive=True) is False
+        out = capsys.readouterr().out
+        assert "⚠️" in out
+
+    @patch("agent_go.bench._probe_actual_model", return_value="mystery-backend")
+    def test_missing_price_continue_when_y(self, mock_probe, capsys):
+        """缺定价但用户确认继续 → 返回 True。"""
+        from agent_go.bench import _preflight_model_pricing
+        with patch("builtins.input", return_value="y"):
+            assert _preflight_model_pricing(["mystery-model"], interactive=True) is True
+
+    @patch("agent_go.bench._probe_actual_model", return_value="")
+    def test_probe_failure_uses_route_price(self, mock_probe, capsys):
+        """探测失败但路由名有定价 → 沿用路由名定价，视为通过。"""
+        from agent_go.bench import _preflight_model_pricing
+        assert _preflight_model_pricing(["claude-haiku-4-5"], interactive=False) is True
+        out = capsys.readouterr().out
+        assert "探测失败" in out
+        assert "✅" in out
+
+    def test_probe_actual_model_parses_response(self):
+        """_probe_actual_model 从 stream-json 响应解析 message.model。"""
+        from agent_go.bench import _probe_actual_model
+        fake_cp = MagicMock(stdout='{"type":"stream_event","event":{"message":{"model":"glm-4.7"}}}\n')
+        with patch("agent_go.bench.subprocess.run", return_value=fake_cp):
+            assert _probe_actual_model("claude-haiku-4-5") == "glm-4.7"
+
+    def test_probe_actual_model_timeout_returns_empty(self):
+        from agent_go.bench import _probe_actual_model
+        with patch("agent_go.bench.subprocess.run", side_effect=TimeoutError("x")):
+            assert _probe_actual_model("claude-haiku-4-5") == ""

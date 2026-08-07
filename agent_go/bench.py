@@ -126,7 +126,88 @@ _AGENT_GO_ENTRY = ["-m", "agent_go"]
 # 编排器
 # ═══════════════════════════════════════════════════════════════
 
-def cmd_bench(args=None) -> None:
+# ── S12 运行前预检：实际模型探测 + 定价完整性校验 ──
+
+def _probe_actual_model(model: str, timeout: int = 45) -> str:
+    """探测路由名实际解析到的后端模型。
+
+    用一次轻量 claude 调用（-p "hi" + --model <路由名> + stream-json），
+    从响应 message.model 解析真实模型（如 claude-haiku-4-5 → glm-4.7）。
+    调用失败或超时返回空串（调用方降级为"未知"，仅告警不阻断）。
+    """
+    if not model:
+        return ""
+    cmd = ["claude", "-p", "hi",
+           "--permission-mode", "bypassPermissions",
+           "--no-session-persistence",
+           "--output-format", "stream-json",
+           "--verbose",
+           "--include-partial-messages"]
+    if model:
+        cmd.extend(["--model", model])
+    try:
+        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                            cwd=str(Path(__file__).resolve().parent.parent))
+        for _line in (cp.stdout or "").splitlines():
+            try:
+                _ev = json.loads(_line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(_ev, dict):
+                _msg_model = _ev.get("message", {}).get("model", "")
+                if not _msg_model:
+                    # stream_event 包装：真实模型在 event.message.model
+                    _inner = _ev.get("event", {}) if _ev.get("type") == "stream_event" else {}
+                    _msg_model = _inner.get("message", {}).get("model", "")
+                if _msg_model:
+                    return str(_msg_model).strip()
+        return ""
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return ""
+
+
+def _preflight_model_pricing(models: list[str], interactive: bool = True) -> bool:
+    """运行前模型-价格预检：探测每个候选模型的实际后端 + 校验定价覆盖。
+
+    返回 True=可继续（所有模型有定价，或仅告警不阻断）；False=中止。
+    缺定价时：interactive=True 询问用户继续/中止；False（--yes）仅告警继续。
+    """
+    from .pricing import resolve_price, format_price_for_report
+
+    missing_actual: list[str] = []
+    unknown: list[str] = []
+    console.print("\n🔍 运行前模型-价格预检（探测实际后端 + 校验定价）…")
+    for _m in models:
+        _actual = _probe_actual_model(_m)
+        if _actual:
+            _has = resolve_price(_actual) is not None
+            console.print(f"  {_m} → 实际 {_actual} "
+                          f"[{'✅ 有定价 ' + format_price_for_report(_actual) if _has else '⚠️ 缺定价'}]")
+            if not _has:
+                missing_actual.append(f"{_m} → {_actual}")
+        else:
+            _has_route = resolve_price(_m) is not None
+            console.print(f"  {_m} → 探测失败 [{'✅ 路由名有定价（沿用）' if _has_route else '⚠️ 缺定价'}]")
+            if not _has_route:
+                unknown.append(_m)
+
+    if not missing_actual and not unknown:
+        console.print("  ✅ 全部模型有定价，可安全运行")
+        return True
+
+    console.warning("⚠️ 以下模型缺少定价，成本将按 claude 报告价（可能虚高）:")
+    for _x in missing_actual + unknown:
+        console.warning(f"    - {_x}")
+    console.warning("   建议：联网抓取确认定价后更新 pricing.py MODEL_PRICES")
+    if interactive:
+        try:
+            _resp = input("  继续运行（成本可能虚高）? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _resp = "n"
+        if _resp != "y":
+            console.error("预检未通过，中止运行（请先补充定价）")
+            return False
+    return True
     """对照运行编排器主函数。"""
     if yaml is None:
         console.warning("需要 PyYAML 以解析任务文件：pip install pyyaml")
@@ -152,6 +233,11 @@ def cmd_bench(args=None) -> None:
 
     if not models:
         console.error("至少指定一个 --candidate-models（逗号分隔）")
+        sys.exit(1)
+
+    # S12 运行前预检：探测实际后端模型 + 校验定价覆盖（缺定价询问/中止）
+    _no_confirm = bool(getattr(args, "yes", False)) or bool(getattr(args, "eval_all", False))
+    if not _preflight_model_pricing(models, interactive=not _no_confirm):
         sys.exit(1)
 
     task_files = sorted(tasks_dir.glob("tasks/*.yaml"))
@@ -337,6 +423,11 @@ def cmd_baseline(args=None) -> None:
 
     if not models:
         console.error("至少指定一个 --candidate-models（逗号分隔）")
+        sys.exit(1)
+
+    # S12 运行前预检：对照基线同样校验实际后端 + 定价覆盖
+    _no_confirm = bool(getattr(args, "yes", False)) or bool(getattr(args, "eval_all", False))
+    if not _preflight_model_pricing(models, interactive=not _no_confirm):
         sys.exit(1)
 
     task_files = sorted(tasks_dir.glob("tasks/*.yaml"))

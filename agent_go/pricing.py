@@ -7,7 +7,10 @@
 过期旧模型保留（供旧 metering 日志兼容），标注 ⚰️。
 """
 
-__all__ = ["MODEL_PRICES", "PROVIDER_DEFAULT_MODEL", "LEGACY_PROVIDER_DEFAULT_MODEL", "PROVIDER_DEFAULT_MODEL_CUTOFF", "MODEL_TIER"]
+__all__ = ["MODEL_PRICES", "PROVIDER_DEFAULT_MODEL", "LEGACY_PROVIDER_DEFAULT_MODEL", "PROVIDER_DEFAULT_MODEL_CUTOFF", "MODEL_TIER",
+           "resolve_price", "missing_price_models", "format_price_for_report"]
+
+from typing import Optional  # noqa: E402
 
 # ═══════════════════════════════════════════════════════════════
 # 定价表（USD / 百万 tokens，标准 API 价，非 batch/cache 价）
@@ -76,6 +79,10 @@ MODEL_PRICES = {
     "glm-5":                   {"prompt": 0.07, "completion": 0.14},   # 最新旗舰（¥0.5~1）
     "glm-4.6":                 {"prompt": 0.69, "completion": 2.08},   # ⚠️ 上一代（¥5/15）
     "glm-4.7-air":             {"prompt": 0.07, "completion": 0.14},   # GLM-4.7 Air（¥0.5）
+    "glm-4.7":                 {"prompt": 0.5556, "completion": 2.2222},  # GLM-4.7（¥4/16，2026-07 实测 claude-* 路由实际后端）
+    "glm-5.1":                 {"prompt": 0.8333, "completion": 3.3333},  # GLM-5.1（¥6/24，阿里云百炼=智谱官网）
+    "glm-5.2":                 {"prompt": 1.1111, "completion": 3.8889},  # GLM-5.2（¥8/28，智谱官方，settings 默认 sonnet）
+    "glm-4.5-air":             {"prompt": 0.1111, "completion": 0.2778},  # GLM-4.5-Air（¥0.8/2，2025-07-29 官方）
 
     # ── 旧版保留（⚰️ 供旧 metering 日志兼容） ──
     "deepseek-v4-flash-old":   {"prompt": 0.27, "completion": 1.1},
@@ -95,6 +102,7 @@ MODEL_TIER: dict[str, list[str]] = {
         "gpt-5.7", "gpt-5",
         "gemini-3.1-pro",
         "qwen-max",
+        "glm-5.2", "glm-5.1",
     ],
     "value": [
         # 主力性价比 — 大部分 production 任务
@@ -105,7 +113,7 @@ MODEL_TIER: dict[str, list[str]] = {
         "qwen3-max", "qwen-plus",
         "doubao-1.5-pro-32k",
         "kimi-k2", "kimi-k2.5",
-        "glm-5", "glm-4.6",
+        "glm-5", "glm-4.6", "glm-4.7",
     ],
     "lite": [
         # 轻量 — 高频、低成本、延迟敏感
@@ -114,7 +122,7 @@ MODEL_TIER: dict[str, list[str]] = {
         "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash", "gemini-3.5-flash",
         "deepseek-reasoner",
         "doubao-lite",
-        "glm-4.7-air",
+        "glm-4.7-air", "glm-4.5-air",
     ],
 }
 
@@ -147,6 +155,39 @@ LEGACY_PROVIDER_DEFAULT_MODEL = {
     "volcengine": "doubao-1.5-pro-32k",       # 未变更
     "zhipu":      "glm-5",                    # 未变更
 }
+
+# ═══════════════════════════════════════════════════════════════
+# 运行前模型-价格预检（S12 冷启动/基线校验）
+# ═══════════════════════════════════════════════════════════════
+
+
+def resolve_price(model: str) -> Optional[dict[str, float]]:
+    """解析模型定价。优先精确匹配；其次剥离版本号后缀匹配
+    （如 glm-4.7 的响应名带精度后缀时回退基础名）。找不到返回 None。
+    """
+    if not model:
+        return None
+    _m = model.strip()
+    if _m in MODEL_PRICES:
+        return MODEL_PRICES[_m]
+    # 剥离已知后缀回退：xxx-yyyyMMdd / xxx-vN 等
+    for _suffix in ("-20251001", "-20250514", "-v2", "-v3"):
+        if _m.endswith(_suffix) and _m[: -len(_suffix)] in MODEL_PRICES:
+            return MODEL_PRICES[_m[: -len(_suffix)]]
+    return None
+
+
+def missing_price_models(models: list[str]) -> list[str]:
+    """返回缺少定价的模型列表（用于运行前预检）。"""
+    return [m for m in models if m and resolve_price(m) is None]
+
+
+def format_price_for_report(model: str) -> str:
+    """报告用：返回模型定价的人类可读串，无定价标注 ⚠️ 缺价。"""
+    p = resolve_price(model)
+    if not p:
+        return f"{model} ⚠️ 缺定价"
+    return f"{model} ($ {p.get('prompt', 0)}/{p.get('completion', 0)})"
 
 # 模型升级生效日期：日志时间戳早于这个日期的使用 LEGACY_PROVIDER_DEFAULT_MODEL
 PROVIDER_DEFAULT_MODEL_CUTOFF = "2026-07-25"
