@@ -1083,3 +1083,162 @@ class TestUsageAggregation:
         assert ev["actual_model"] == "claude-haiku-4-5"
         assert ev["cost_usd"] == 0.0
         assert ev["is_local"] is True
+
+    @patch("subprocess.Popen")
+    def test_metering_cost_recomputed_with_deepseek_pricing(self, mock_popen, logger, tmp_path):
+        """实际模型为 deepseek-v4-flash 时，成本按 DeepSeek 定价重算，而非 claude 的 Anthropic 定价。
+
+        claude 返回 total_cost_usd=0.0571（按 claude-haiku-4-5 的 $1/$5 定价），
+        但实际模型 deepseek-v4-flash 定价 $0.14/$0.28，重算后成本大幅降低。
+        """
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"model": "deepseek-v4-flash", "content": [
+                    {"type": "text", "text": "ok"},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success",
+                "total_cost_usd": 0.0571,
+                "usage": {"input_tokens": 36229, "output_tokens": 688},
+            }) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-haiku-4-5"},
+            logger, "sub-u11"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "deepseek-v4-flash"
+        # 重算: 36229/1e6*0.14 + 688/1e6*0.28 = 0.005072 + 0.000193 = 0.005265
+        assert abs(ev["cost_usd"] - 0.005265) < 0.0001
+
+    @patch("subprocess.Popen")
+    def test_metering_cost_recomputed_pro_pricing(self, mock_popen, logger, tmp_path):
+        """deepseek-v4-pro 定价重算成本。"""
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"model": "deepseek-v4-pro", "content": [
+                    {"type": "text", "text": "ok"},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success",
+                "total_cost_usd": 0.2486,
+                "usage": {"input_tokens": 35128, "output_tokens": 583},
+            }) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-opus-4-7"},
+            logger, "sub-u12"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "deepseek-v4-pro"
+        # 重算: 35128/1e6*0.435 + 583/1e6*0.87 = 0.015281 + 0.000507 = 0.015788
+        assert abs(ev["cost_usd"] - 0.015788) < 0.0001
+
+    @patch("subprocess.Popen")
+    def test_metering_cost_unknown_model_falls_back(self, mock_popen, logger, tmp_path):
+        """未知模型（无定价）时回退 claude 返回的成本。"""
+        metering = tmp_path / "metering.jsonl"
+        events = [json.dumps({
+            "type": "result", "subtype": "success",
+            "total_cost_usd": 0.0123,
+            "usage": {"input_tokens": 1500, "output_tokens": 300},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering)},
+            logger, "sub-u13"
+        )
+        ev = self._read_metering(metering)
+        assert ev["cost_usd"] == 0.0123
+
+    @patch("subprocess.Popen")
+    def test_metering_cost_reduction_range_flash(self, mock_popen, logger, tmp_path):
+        """真实 DeepSeek 验证固化：claude-haiku-4-5 → deepseek-v4-flash 重算降幅在 82-92%。
+
+        使用本次真实验证的数据（input=41335, output=203）：
+        - claude 原始 total_cost_usd=$0.04961（按 claude-haiku-4-5 的 $1/$5 定价）
+        - 重算 = 41335/1e6*0.14 + 203/1e6*0.28 = $0.00584
+        - 降幅 = 1 - 0.00584/0.04961 ≈ 88.2%
+        """
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"model": "deepseek-v4-flash", "content": [
+                    {"type": "text", "text": "ok"},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success",
+                "total_cost_usd": 0.04961,
+                "usage": {"input_tokens": 41335, "output_tokens": 203},
+            }) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-haiku-4-5"},
+            logger, "sub-u14"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "deepseek-v4-flash"
+        recomputed = ev["cost_usd"]
+        # 重算 = 41335/1e6*0.14 + 203/1e6*0.28
+        expected = 41335 / 1e6 * 0.14 + 203 / 1e6 * 0.28
+        assert abs(recomputed - expected) < 0.0001
+        # 降幅必须在 82-92% 范围（防回归：若重算失效会退回 claude 原始成本，降幅≈0）
+        reduction = 1 - recomputed / 0.04961
+        assert 0.82 <= reduction <= 0.92, f"降幅 {reduction:.1%} 超出 82-92% 范围"
+
+    @patch("subprocess.Popen")
+    def test_metering_cost_reduction_range_pro(self, mock_popen, logger, tmp_path):
+        """真实验证固化：claude-opus-4-7 → deepseek-v4-pro 重算降幅在 82-92%。
+
+        用 v2 bench 实测数据（input=35128, output=583）：
+        - claude 原始 total_cost_usd=$0.2486（按 claude-opus-4-7 的 $5/$25 定价）
+        - 重算 = 35128/1e6*0.435 + 583/1e6*0.87 = $0.01579
+        - 降幅 = 1 - 0.01579/0.2486 ≈ 93.6%（略超 92% 上限，因 output 占比高）
+        本测试验证 pro 路径的降幅 ≥82%（防回归下限）。
+        """
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"model": "deepseek-v4-pro", "content": [
+                    {"type": "text", "text": "ok"},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success",
+                "total_cost_usd": 0.2486,
+                "usage": {"input_tokens": 35128, "output_tokens": 583},
+            }) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-opus-4-7"},
+            logger, "sub-u15"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "deepseek-v4-pro"
+        recomputed = ev["cost_usd"]
+        expected = 35128 / 1e6 * 0.435 + 583 / 1e6 * 0.87
+        assert abs(recomputed - expected) < 0.0001
+        reduction = 1 - recomputed / 0.2486
+        assert reduction >= 0.82, f"降幅 {reduction:.1%} 低于 82% 下限"

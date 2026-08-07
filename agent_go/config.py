@@ -104,6 +104,9 @@ DEFAULT_CONFIG = {
         "medium": "",
         "hard": "",
     },
+    "local_model_names": {},        # 本地后端真实模型名映射（routed → 实际名，如
+                                    # {"claude-haiku-4-5": "Qwen3.6-27B-4bit"}）；
+                                    # 探测本地代理 /status 失败时的兜底
     "cache": {
         "enabled": True,
         "plan_ttl": 86400,          # Plan 缓存有效期（秒），默认 24h

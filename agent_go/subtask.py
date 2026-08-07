@@ -442,6 +442,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     metering_path = env.get("AGENT_GO_METERING_PATH", "")
     if metering_path and (claude_usage_total["prompt_tokens"] or claude_usage_total["completion_tokens"] or claude_usage_total["cost_usd"]):
         from .config import meter_event
+        from .pricing import MODEL_PRICES
         _model = env.get("AGENT_GO_CLAUDE_MODEL", "") or "claude-code-executor"
         # 实际请求模型：优先用 claude 响应中解析出的真实模型名
         # （如 --model claude-haiku-4-5 实际请求 deepseek-v4-flash），
@@ -460,7 +461,27 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             # 兼容旧配置：模型在 local_models 列表中视为本地，成本清零
             _local_models_raw = env.get("AGENT_GO_LOCAL_MODELS", "")
             _is_local = _resolved_model in [m.strip() for m in _local_models_raw.split(",")] if _local_models_raw else False
-        _cost = 0.0 if _is_local else round(claude_usage_total["cost_usd"], 6)
+        # 成本重算：claude CLI 返回的 total_cost_usd 按 Anthropic 定价计算，
+        # 但实际后端可能是 DeepSeek 等更便宜的模型。用实际模型名 + MODEL_PRICES
+        # 定价重算，避免成本虚高（如 claude-haiku-4-5 实际是 deepseek-v4-flash，
+        # 定价 $0.14/$0.28 而非 $1/$5）。
+        _prompt_tok = claude_usage_total["prompt_tokens"]
+        _comp_tok = claude_usage_total["completion_tokens"]
+        if _is_local:
+            _cost = 0.0
+        else:
+            _price = MODEL_PRICES.get(_resolved_model) or MODEL_PRICES.get(_model)
+            if _price:
+                _cost = round(
+                    (_prompt_tok / 1_000_000 * _price["prompt"])
+                    + (_comp_tok / 1_000_000 * _price["completion"]),
+                    6,
+                )
+                # 若重算为 0（如未知模型无定价）则回退 claude 返回值
+                if _cost <= 0:
+                    _cost = round(claude_usage_total["cost_usd"], 6)
+            else:
+                _cost = round(claude_usage_total["cost_usd"], 6)
         meter_event(metering_path, {
             "role": "worker",
             "virtual_model": "agentgo-worker",

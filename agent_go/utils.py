@@ -98,13 +98,17 @@ _CMD_ARG_RULES = {
     },
     "pytest": {
         "": {"flags": r'^(-v|-vv|-q|-s|-x|--tb=\S+|--tb|-k=\S+|-k|--co|--collect-only|-m=\S+|-m|-n=\S+|-N|--maxfail=\S+|-r\w?|-l|--no-header|--no-summary|-p|--rootdir=\S+|--override-ini=\S+|--failed-first|--last-failed|--new-first|--durations=\S+|--cache-show|--cache-clear|-w|--exitfirst|--ignore=\S+)$',
-             "positionals": r'^[\w./\-_:]+$'},
+             "positionals": r'^[\w./\-_:]+$',
+             # 这些 flag 的下一个 token 是其取值（如 -k 'Q5 or query_count'），
+             # 取值按 pytest 语义可为任意表达式，不按 positionals 正则校验。
+             "value_flags": ["-k", "-m", "-p", "-n", "--maxfail", "--tb", "-w",
+                             "--rootdir", "--override-ini", "--ignore", "--durations", "--cache-show"]},
     },
     "python": {"-m pytest": "pytest",
-               "-c": {"flags": r'^$', "positionals": r'^[\s\S]*$'},
+               "-c": {"flags": r'^(--help|-h)$', "positionals": r'^[\s\S]*$'},
                "manage.py": "manage.py"},
     "python3": {"-m pytest": "pytest",
-                "-c": {"flags": r'^$', "positionals": r'^[\s\S]*$'},
+                "-c": {"flags": r'^(--help|-h)$', "positionals": r'^[\s\S]*$'},
                 "manage.py": "manage.py"},
     "npm":    {"test": {"flags": r'^(--silent|--verbose)$', "positionals": r'^$'},
                "run":  {"flags": r'^(--silent|--verbose)$', "positionals": r'^[\w:_\-]+$'}},
@@ -167,6 +171,7 @@ _CMD_ARG_RULES = {
                     "positionals": r'^[\w./\-_]+$'}},
     "rubocop":{"": {"flags": r'^(-v|--auto-correct|--format=\S+|--config=\S+|--except=\S+|--only=\S+)$',
                     "positionals": r'^[\w./\-_]+$'}},
+    "echo":   {"": {"flags": r'^$', "positionals": r'^[\s\S]*$'}},
 }
 
 
@@ -322,9 +327,14 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
     # Stage 4: 逐 token 校验
     flag_re = re.compile(matched_rules.get("flags", r"^$"))
     pos_re = re.compile(matched_rules.get("positionals", r"^$"))
+    value_flags = set(matched_rules.get("value_flags", []))
 
     positional_mode = False
+    skip_next = False
     for i, token in enumerate(remaining):
+        if skip_next:
+            skip_next = False
+            continue
         if token == "--":
             positional_mode = True
             continue
@@ -334,6 +344,8 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
         else:
             if not flag_re.match(token):
                 return False, f"参数不允许: '{token}' (标志 #{i})"
+            if token in value_flags:
+                skip_next = True
 
     return True, ""
 

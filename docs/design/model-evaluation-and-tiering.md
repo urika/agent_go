@@ -149,6 +149,25 @@ Reviewer (审查)  Gemini 2.5 Pro /    Kimi K2              —
 
 **结论**：纯国际分级难以达到 Q3 目标（PRD 承认的 K4 现状 ~$0.05-0.15）；国内分级轻松达标但需配质量门；**混合策略**（Sonnet 规划保质量 + DeepSeek 执行省成本）是 PRD §P1 line 158-160 的最优解。
 
+### 1.6 成本口径：按实际模型重算（2026-08-01 更新）
+
+**背景**：`claude-*` 路由名经 `~/.claude/settings.json` 的 `ANTHROPIC_DEFAULT_*_MODEL` 映射到实际后端模型。实测映射：
+
+| 路由名 | 实际模型 | DeepSeek 定价 ($/1M) | Anthropic 定价 ($/1M) | 虚高 |
+|--------|---------|---------------------|---------------------|------|
+| `claude-haiku-4-5` | `deepseek-v4-flash` | 0.14 / 0.28 | 1.0 / 5.0 | ~10x |
+| `claude-sonnet-4-6` | `deepseek-v4-flash` | 0.14 / 0.28 | 3.0 / 15.0 | ~16x |
+| `claude-opus-4-7` | `deepseek-v4-pro` | 0.435 / 0.87 | 5.0 / 25.0 | ~15x |
+
+**关键**：`claude-sonnet-4-6` 与 `claude-haiku-4-5` 实际都用 `deepseek-v4-flash`（settings.json 中 `ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-flash[1M]` 的 `[1M]` 后缀未生效）。
+
+**重算机制**：subtask.py 的 worker metering 不再直接采用 claude CLI 返回的 `total_cost_usd`（按 Anthropic 定价），而是：
+1. 从 claude 响应 `assistant.message.model` 解析**实际模型名**
+2. 用 `MODEL_PRICES` 定价按 token 重算 `cost_usd`
+3. 未知模型回退 claude 返回值；本地模型（`AGENT_GO_IS_LOCAL`）成本清零
+
+**效果**：2026-08-01 v2 bench 成本降幅 82-92%（haiku $0.58→$0.106/pass、sonnet $1.44→$0.111、opus $1.90→$0.296），更真实反映 DeepSeek 实际成本。
+
 ---
 
 ## 2. 本地模型的特殊决策

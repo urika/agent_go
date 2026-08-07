@@ -177,6 +177,6 @@ bench 数据明确了一个选择：**当前条件下，"Haiku 全任务"是兼�
 
 - **数据集**：`eval_suite/` 下 5 个结果文件（results.jsonl / results_v2.jsonl / baseline.jsonl / final-baseline.jsonl / kimi-baseline.jsonl），共 485 条 bench 记录
 - **覆盖**：7 模型（claude-haiku-4-5 / claude-sonnet-4-6 / claude-opus-4-7 / opus-4-7 / deepseek-v4-flash / deepseek-v4-pro / kimi-for-coding-highspeed）× 22 标准任务 × 3 难度（easy/medium/hard）
-- **成本口径**：所有 cost_usd 来自 metering.jsonl 的真实账单（非定价表估算）；dollar_per_pass = total_cost_usd / verified_passes（当次运行的精确值，非 post-hoc 折算）
+- **成本口径**：所有 cost_usd 来自 metering.jsonl 的真实账单（非定价表估算）；dollar_per_pass = total_cost_usd / verified_passes（当次运行的精确值，非 post-hoc 折算）。**2026-08-01 起按实际模型重算**：claude-* 路由名映射到 DeepSeek 后端（claude-haiku-4-5/sonnet-4-6 → deepseek-v4-flash、claude-opus-4-7 → deepseek-v4-pro），metering 用 `MODEL_PRICES` 定价按 token 重算 cost_usd（详见 [model-evaluation-and-tiering.md §1.6](model-evaluation-and-tiering.md)）。历史基准（results.jsonl 等）为 Anthropic 定价口径，新旧数据成本不可直接横向对比。
 - **分析工具**：Python stdlib + lark-cli base（飞书多维表格 + 仪表盘）
 - **关联文档**：[bench 对比仪表盘](https://my.feishu.cn/base/CObqbC6iLa00ZGs1ex7cwaWHnwc) · [KPI 达成分析](https://my.feishu.cn/docx/HFZpd6l0Wo27pJxgRpKc5pvfnzd) · [PRD v2.0.0](../prd.md) · [模型评估设计](model-evaluation-and-tiering.md)

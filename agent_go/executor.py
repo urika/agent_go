@@ -735,14 +735,11 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 
     # Phase 1 验证循环：可配置的多轮修复重试
     verification = subtask.get("verification", "")
-    # 有验证命令但无变更 = 直接失败（防止 Agent 旁路验证）
-    # 但 architect/reviewer 只读诊断不在此列
+    # 有验证命令但无变更：不再直接判失败，而是进入验证循环执行验证——
+    # 若验证通过则算成功（no_changes），失败才算失败。这修复「任务已满足、
+    # 无需变更但被误判失败」的场景（如函数已存在、claude 确认验证通过）。
     agent_type_check = subtask.get("agent_type", "developer")
-    if not has_changes and verification and agent_type_check not in ("architect", "reviewer"):
-        verify_ok = False
-        logger.warning("无文件变更且存在验证命令 — 标记为失败")
-    else:
-        verify_ok = True
+    verify_ok = True
     retry_count = 0
     verification_results = []
     verification_ms = 0
@@ -764,7 +761,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             logger.info(f"L1 auto: 验证置信度={_l1_confidence_dict['level']}，自动启用语义评估")
 
     semantic_feedback: Optional[dict] = None
-    if verification and has_changes:
+    if verification:
         cmds = [verification] if isinstance(verification, str) else verification
 
         # Phase 4: 恢复已有验证状态（resume 场景）

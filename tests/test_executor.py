@@ -1370,6 +1370,42 @@ class TestVerificationLoopE2E:
 
         return _run
 
+    @staticmethod
+    def _git_mock_no_changes():
+        """git status 返回空（无变更），验证命令通过。"""
+        def _run(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if any(g in cmd_str for g in ["git add", "git commit", "git tag"]):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "pytest" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return _run
+
+    def test_no_changes_but_verification_passes(self, temp_repo, task_dir, logger):
+        """无变更 + 验证命令通过 → verify_ok=True（不再误判失败）。
+
+        修复前：`无文件变更且存在验证命令 → 标记为失败`，
+        即使验证通过也判 failed。修复后：执行验证，通过则成功。
+        """
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_mock_no_changes()):
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": False}},
+            )
+        assert result["verify_ok"] is True, "验证通过应判定成功（no_changes）"
+        assert result["retry_count"] == 0
+
     def test_verify_fail_then_fix_then_pass(self, temp_repo, task_dir, logger):
         """验证首次失败 → 修复 → 重新验证通过 (retry_count=1, verify_ok=True)"""
         from threading import Lock
