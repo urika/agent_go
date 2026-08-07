@@ -1427,3 +1427,37 @@ class TestUsageAggregation:
         assert abs(recomputed - expected) < 0.0001
         reduction = 1 - recomputed / 0.2486
         assert reduction >= 0.82, f"降幅 {reduction:.1%} 低于 82% 下限"
+
+    @patch("subprocess.Popen")
+    def test_metering_cloud_actual_model_priced(self, mock_popen, logger, tmp_path):
+        """S12 云后端透传：AGENT_GO_ACTUAL_MODEL（如 glm-4.7，URL 本地但实际走云）
+        优先计价——成本按实际模型而非清零，is_local=False。"""
+        metering = tmp_path / "metering.jsonl"
+        events = [
+            json.dumps({
+                "type": "assistant",
+                "message": {"model": "glm-4.7", "content": [
+                    {"type": "text", "text": "ok"},
+                ]},
+            }) + "\n",
+            json.dumps({
+                "type": "result", "subtype": "success",
+                "total_cost_usd": 0.0409,
+                "usage": {"input_tokens": 40064, "output_tokens": 107},
+            }) + "\n",
+        ]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-haiku-4-5",
+             "AGENT_GO_ACTUAL_MODEL": "glm-4.7"},
+            logger, "sub-cloud"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "glm-4.7"
+        assert ev["is_local"] is False
+        # glm-4.7 定价 $0.5556/$2.2222 重算
+        expected = 40064 / 1e6 * 0.5556 + 107 / 1e6 * 2.2222
+        assert abs(ev["cost_usd"] - expected) < 0.0001
+        assert ev["cost_usd"] > 0  # 不再清零

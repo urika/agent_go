@@ -623,6 +623,11 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         # （如 --model claude-haiku-4-5 实际请求 deepseek-v4-flash），
         # 解析失败时回退路由名
         _resolved_model = claude_usage_total.get("model") or _model
+        # S12 云后端透传：executor 验证发现"URL 本地但实际走云"时注入
+        # AGENT_GO_ACTUAL_MODEL（如 glm-4.7），优先用它做真实模型计价
+        _cloud_actual = env.get("AGENT_GO_ACTUAL_MODEL", "")
+        if _cloud_actual:
+            _resolved_model = _cloud_actual
         # 本地后端判定：executor 检测到 ANTHROPIC_BASE_URL 指向本机
         # （127.0.0.1/localhost，如本地 llama-server 代理 4000→8081）时注入
         # AGENT_GO_IS_LOCAL=1。此时 claude 响应中的 model（如 deepseek-v4-flash）

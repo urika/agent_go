@@ -1825,3 +1825,51 @@ class TestProbeLocalModel:
         mock_ctx.__enter__.return_value = mock_resp
         monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=mock_ctx))
         assert _probe_local_model("http://127.0.0.1:4000") == ""
+
+
+class TestVerifyLocalBackend:
+    """S12 本地判定加固：URL 指向本机但实际走云时不清零成本。"""
+
+    def test_local_confirmed(self, monkeypatch):
+        """响应 model == /status 声明本地模型 → 真本地。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_verify_cache", {})
+        monkeypatch.setattr(executor, "_probe_local_model",
+                            lambda *a, **k: "mlx-community/Qwen3.6-27B-4bit")
+        fake_cp = MagicMock(stdout='{"type":"assistant","message":{"model":"mlx-community/Qwen3.6-27B-4bit"}}\n')
+        monkeypatch.setattr("subprocess.run", MagicMock(return_value=fake_cp))
+        is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
+        assert is_local is True
+        assert actual == "mlx-community/Qwen3.6-27B-4bit"
+
+    def test_cloud_behind_local_url(self, monkeypatch):
+        """URL 本地但实际走云（响应 glm-4.7 != 本地声明）→ 判定为云，不清零。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_verify_cache", {})
+        monkeypatch.setattr(executor, "_probe_local_model",
+                            lambda *a, **k: "mlx-community/Qwen3.6-27B-4bit")
+        fake_cp = MagicMock(stdout='{"type":"assistant","message":{"model":"glm-4.7"}}\n')
+        monkeypatch.setattr("subprocess.run", MagicMock(return_value=fake_cp))
+        is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
+        assert is_local is False
+        assert actual == "glm-4.7"
+
+    def test_probe_failure_conservative(self, monkeypatch):
+        """探测失败 → 保守不清零。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_verify_cache", {})
+        monkeypatch.setattr(executor, "_probe_local_model", lambda *a, **k: "")
+        fake_cp = MagicMock(stdout="")
+        monkeypatch.setattr("subprocess.run", MagicMock(return_value=fake_cp))
+        is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
+        assert is_local is False
+        assert actual == ""
+
+    def test_cache_reused(self, monkeypatch):
+        """结果缓存，第二次不重复探测调用。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_verify_cache",
+                            {"http://127.0.0.1:4000": (False, "glm-4.7")})
+        is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
+        assert is_local is False
+        assert actual == "glm-4.7"

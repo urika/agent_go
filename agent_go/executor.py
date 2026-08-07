@@ -80,6 +80,73 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
         _local_model_probe_cache[key] = model
     return model
 
+
+# 本地后端验证缓存：base_url → (is_really_local, actual_model)。
+# 探测调用有真实 API 成本，缓存避免每子任务重复探测（代理热切换 SIGHUP 时
+# 用 _local_model_probe_cache 的失效逻辑兜底——成功结果缓存，失败不缓存可重试）。
+_local_verify_cache: dict[str, tuple[bool, str]] = {}
+
+
+def _verify_local_backend(base_url: str, timeout: float = 45.0) -> tuple[bool, str]:
+    """验证"指向本机的后端"是否真的返回本地模型。
+
+    背景：本地代理（4000 端口）可能实际转发到云（如 glm-4.7），此时若按
+    URL 判定本地并清零成本，$/pass 会严重失真。本函数做一次轻量 claude 调用，
+    对比响应 model 与 /status 声明的本地模型：
+
+      - 响应 model == 本地模型（如 mlx-community/Qwen3.6-27B-4bit）→ 真本地 (True, model)
+      - 响应 model 是云模型（如 glm-4.7）且 != 本地声明 → 实际走云 (False, actual_model)
+      - 探测失败/无法解析 → 保守不清零 (False, "")，宁多算不乱清
+
+    Returns:
+        (is_really_local, actual_model)：actual_model 为响应解析的真实模型；
+        探测失败时 ("", 空)。
+    """
+    if not base_url:
+        return (False, "")
+    key = base_url.rstrip("/")
+    if key in _local_verify_cache:
+        return _local_verify_cache[key]
+
+    _local_declared = _probe_local_model(base_url, timeout=5.0)  # /status 声明模型
+    _actual = ""
+    try:
+        import subprocess as _sp
+        # 走代理做一次轻量调用，解析真实响应 model
+        _cmd = ["claude", "-p", "hi",
+                "--permission-mode", "bypassPermissions",
+                "--no-session-persistence",
+                "--output-format", "stream-json",
+                "--verbose",
+                "--include-partial-messages"]
+        _env = dict(os.environ)
+        _env["ANTHROPIC_BASE_URL"] = key
+        # 清掉可能使 claude 走其它后端的变量
+        _env.pop("ANTHROPIC_AUTH_TOKEN", None)
+        _cp = _sp.run(_cmd, capture_output=True, text=True, timeout=timeout, env=_env,
+                      cwd=str(Path(__file__).resolve().parent.parent))
+        for _line in (_cp.stdout or "").splitlines():
+            try:
+                _ev = json.loads(_line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(_ev, dict):
+                _msg_model = _ev.get("message", {}).get("model", "")
+                if not _msg_model:
+                    _inner = _ev.get("event", {}) if _ev.get("type") == "stream_event" else {}
+                    _msg_model = _inner.get("message", {}).get("model", "")
+                if _msg_model:
+                    _actual = str(_msg_model).strip()
+                    break
+    except Exception:
+        _actual = ""
+
+    # 判定：响应 model 是本地声明 → 真本地；否则视为走云（不清零）
+    _is_local = bool(_local_declared) and bool(_actual) and _actual == _local_declared
+    _result = (_is_local, _actual)
+    _local_verify_cache[key] = _result
+    return _result
+
 # 模块级常量：路径替换时的边界字符集（在 _build_task_md 和 run_subtask 中共享）
 _BOUNDARY_CHARS = r'\s"\'\(\):/：，。、'
 _BOUNDARY_BEFORE = rf'(?<![^{_BOUNDARY_CHARS}])'
@@ -1398,17 +1465,33 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     _worker_url_src = _backend_url or _resolve_env_value(_plan_api_cfg.get("worker_base_url", ""))
     _is_local_url = bool(_worker_url_src) and re.search(r"(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])", _worker_url_src)
     if _is_local_url:
-        env["AGENT_GO_IS_LOCAL"] = "1"
-        _local_model_name = _probe_local_model(_worker_url_src)
-        if not _local_model_name:
-            _local_names_cfg = _effective_config(config).get("local_model_names", {})
-            if isinstance(_local_names_cfg, dict) and routed_model in _local_names_cfg:
-                _local_model_name = str(_local_names_cfg[routed_model])
-        if not _local_model_name:
-            _local_model_name = routed_model
-        if _local_model_name:
-            env["AGENT_GO_LOCAL_MODEL"] = _local_model_name
-        logger.info(f"[worker_local] {routed_model} → 本地后端 {_worker_url_src} (model={_local_model_name})")
+        # S12 本地判定加固：URL 指向本机 ≠ 一定走本地模型——4000 代理可能实际转发到云
+        # （如 glm-4.7）。做一次轻量探测调用验证响应 model：
+        #   响应 == /status 声明本地模型 → 真本地（AGENT_GO_IS_LOCAL=1，成本清零）
+        #   响应是云模型             → 实际走云（不清零，按实际模型计价）
+        #   探测失败                 → 保守不清零（宁多算不乱清）
+        _really_local, _actual_model = _verify_local_backend(_worker_url_src)
+        if _really_local:
+            env["AGENT_GO_IS_LOCAL"] = "1"
+            _local_model_name = _actual_model or _probe_local_model(_worker_url_src)
+            if not _local_model_name:
+                _local_names_cfg = _effective_config(config).get("local_model_names", {})
+                if isinstance(_local_names_cfg, dict) and routed_model in _local_names_cfg:
+                    _local_model_name = str(_local_names_cfg[routed_model])
+            if not _local_model_name:
+                _local_model_name = routed_model
+            if _local_model_name:
+                env["AGENT_GO_LOCAL_MODEL"] = _local_model_name
+            logger.info(f"[worker_local] {routed_model} → 本地后端 {_worker_url_src} (model={_local_model_name})")
+        else:
+            # 实际走云：不强设 AGENT_GO_IS_LOCAL，按响应模型计价（若可解析）
+            env.pop("AGENT_GO_IS_LOCAL", None)
+            if _actual_model:
+                # 透传实际响应模型给 subtask 成本重算（覆盖 claude 报告价）
+                env["AGENT_GO_ACTUAL_MODEL"] = _actual_model
+            logger.warning(
+                f"[worker_local] {routed_model} → {_worker_url_src} 验证为云后端"
+                f"(响应 model={_actual_model or '未知'})，成本按实际模型计价（不清零）")
 
     # 5. Run Claude（含混合策略分支：简单任务 → 直接 API）
     _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)
