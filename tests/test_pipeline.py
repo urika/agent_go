@@ -761,7 +761,7 @@ class TestPipelinePreservedMarker:
             issue_ref="", meta=_default_meta(),
         )
 
-        # sub-2 保留：.preserved 标记存在且字段完整
+        # sub-2 保留：.preserved 标记存在且字段完整（S12 失败清理：含 kill_reason/degraded）
         marker = task_dir / "sub-2" / ".preserved"
         assert marker.exists()
         data = json.loads(marker.read_text(encoding="utf-8"))
@@ -769,6 +769,8 @@ class TestPipelinePreservedMarker:
             "subtask_id": "sub-2",
             "status": "failed",
             "failure_reason": "pytest 3 个用例失败",
+            "kill_reason": "",
+            "degraded": False,
             "branch": "agent_go/t1/sub-2",
         }
         # sub-1 成功：被清理，无标记
@@ -806,12 +808,14 @@ class TestPipelinePreservedMarker:
 
         # 两个 worktree 都保留（failed + blocked），均不清理
         mock_wt_remove.assert_not_called()
-        # blocked 的标记：status/failure_reason 来自级联阻断结果
+        # blocked 的标记：status/failure_reason 来自级联阻断结果（S12 失败清理：含新字段）
         data = json.loads((task_dir / "sub-2" / ".preserved").read_text(encoding="utf-8"))
         assert data == {
             "subtask_id": "sub-2",
             "status": "blocked",
             "failure_reason": "上游依赖失败，级联阻断",
+            "kill_reason": "",
+            "degraded": False,
             "branch": "agent_go/t1/sub-2",
         }
 
@@ -876,6 +880,112 @@ class TestPipelinePreservedMarker:
 
         mock_wt_remove.assert_called_once_with(repo, task_dir / "sub-1" / "work")
         assert not (task_dir / "sub-1" / ".preserved").exists()
+
+    # ── 5. S12 失败清理：cleanup_race（实际成功）不保留 ───────────────────
+    @patch("agent_go.notify.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_cleanup_race_not_preserved(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """kill_reason=cleanup_race（S12-P0 已修正为实际成功）→ 即使 status=failed 也不保留。"""
+        confirmed = [_make_subtask("sub-1")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+        (task_dir / "sub-1" / "work").mkdir(parents=True)
+
+        result = _failed_result("sub-1", reason="cleanup race")
+        result["kill_reason"] = "cleanup_race"
+        mock_run_subtask.return_value = result
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        mock_wt_remove.assert_called_once_with(repo, task_dir / "sub-1" / "work")
+        assert not (task_dir / "sub-1" / ".preserved").exists()
+
+    # ── 6. S12 失败清理：degraded 降级产物强制保留 + 标记 ─────────────────
+    @patch("agent_go.notify.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_degraded_forced_preserved(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """degraded=True（降级产物最需审查）→ 强制保留 + marker 带 degraded 标记。"""
+        confirmed = [_make_subtask("sub-1")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+        (task_dir / "sub-1" / "work").mkdir(parents=True)
+
+        result = _success_result("sub-1")
+        result["degraded"] = True
+        mock_run_subtask.return_value = result
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        mock_wt_remove.assert_not_called()
+        data = json.loads((task_dir / "sub-1" / ".preserved").read_text(encoding="utf-8"))
+        assert data["degraded"] is True
+        assert data["status"] == "completed"
+
+    # ── 7. S12 失败清理：保留现场净化（移除 .pytest_cache/__pycache__/pyc）─
+    def test_sanitize_preserved_worktree_removes_cache(self, temp_dir):
+        """_sanitize_preserved_worktree 移除 .pytest_cache / __pycache__ / *.pyc。"""
+        from agent_go.pipeline import _sanitize_preserved_worktree
+        wt = temp_dir / "work"
+        (wt / ".pytest_cache").mkdir(parents=True)
+        (wt / "src" / "__pycache__").mkdir(parents=True)
+        (wt / "src" / "mod.pyc").write_text("x")
+        (wt / "keep.py").write_text("y")
+
+        _sanitize_preserved_worktree(wt)
+
+        assert not (wt / ".pytest_cache").exists()
+        assert not (wt / "src" / "__pycache__").exists()
+        assert not (wt / "src" / "mod.pyc").exists()
+        assert (wt / "keep.py").exists()
+
+    # ── 8. S12 失败清理：clean --older-than 保留期过滤 ────────────────────
+    def test_clean_older_than_filters(self, temp_dir, monkeypatch, capsys):
+        """cmd_clean --older-than 只清理早于 N 天的任务目录。"""
+        import time as _t
+        from agent_go.cli import cmd_clean, AGENT_GO_DIR
+        from unittest.mock import patch as _patch
+
+        # 构造两个任务目录：一个旧（10 天前）、一个新（现在）
+        old_task = temp_dir / "task-old-1"
+        new_task = temp_dir / "task-new-2"
+        old_task.mkdir()
+        new_task.mkdir()
+        (old_task / "meta.json").write_text('{"task_id": "task-old-1", "repo": ""}', encoding="utf-8")
+        (new_task / "meta.json").write_text('{"task_id": "task-new-2", "repo": ""}', encoding="utf-8")
+        _old_mtime = _t.time() - 10 * 86400
+        import os as _os
+        _os.utime(str(old_task), (_old_mtime, _old_mtime))
+
+        monkeypatch.setattr("agent_go.cli.AGENT_GO_DIR", temp_dir)
+        args = type("Args", (), {"older_than": 7})()
+
+        with _patch("agent_go.cli.safe_input", return_value="y"):
+            cmd_clean(args)
+
+        assert not old_task.exists()
+        assert new_task.exists()
 
 
 # ═══════════════════════════════════════════════════════════════

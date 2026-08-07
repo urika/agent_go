@@ -152,6 +152,31 @@ def _record_subtask_result(
     return degraded_count
 
 
+def _sanitize_preserved_worktree(wt_path: Path) -> None:
+    """S12 失败清理 #2：净化保留的 worktree 现场，移除运行时缓存垃圾，
+    避免 .pytest_cache / __pycache__ / *.pyc 污染人工审查现场。
+    删除失败静默（净化是增强，不阻断保留）。
+    """
+    if not wt_path or not wt_path.exists():
+        return
+    import shutil
+    for _root, _dirs, _files in os.walk(str(wt_path)):
+        _r = Path(_root)
+        for _d in list(_dirs):
+            if _d in (".pytest_cache", "__pycache__"):
+                try:
+                    shutil.rmtree(str(_r / _d), ignore_errors=True)
+                    _dirs.remove(_d)
+                except Exception:
+                    pass
+        for _f in _files:
+            if _f.endswith(".pyc"):
+                try:
+                    (_r / _f).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
 def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
                   worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "",
                   preserve_worktrees: Optional[bool] = None, interrupted: Optional[threading.Event] = None, step_confirm: bool = False) -> None:
@@ -524,25 +549,47 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             if not wt_path.exists():
                 continue
 
-            # 判定是否保留此 worktree
+            # 判定是否保留此 worktree。
+            # S12 改进（失败清理策略）：保留判定从"只看 status"升级为结合 kill_reason 与降级标记。
+            #  - cleanup_race（S12-P0 已修正为实际成功）不再保留 → 避免浪费
+            #  - over_budget_l2/l3、stuck、hard_timeout → 保留（真失败，需审查）
+            #  - degraded=True（S12-P2 降级产物）→ 强制保留（最需重点审查）
             should_preserve = False
+            _kill_reason = r.get("kill_reason") if r else None
+            _is_degraded = bool(r.get("degraded")) if r else False
             if preserve_worktrees is True:
                 should_preserve = True
             elif preserve_worktrees is None:
                 if r and r.get("status") in ("failed", "blocked"):
+                    if _kill_reason == "cleanup_race":
+                        # 实际已成功的收尾竞态 → 不保留（结果已修正为通过）
+                        logger.info(f"[worktree] {sid} kill_reason=cleanup_race（实际成功），不保留")
+                    else:
+                        should_preserve = True
+                # degraded 降级产物无论 status 都强制保留（需重点审查）
+                if _is_degraded:
                     should_preserve = True
 
             if should_preserve:
                 preserved_ids.append(sid)
                 # 写入标记文件，供 agent_go inspect 识别
                 marker = task_dir / sid / ".preserved"
-                marker.write_text(json.dumps({
+                _marker_data: dict[str, Any] = {
                     "subtask_id": sid,
                     "status": r.get("status", "unknown") if r else "unknown",
                     "failure_reason": r.get("failure_reason", "") if r else "",
+                    "kill_reason": _kill_reason or "",
+                    "degraded": _is_degraded,
                     "branch": f"agent_go/{meta.get('task_id', '')}/{sid}",
-                }, indent=2, ensure_ascii=False), encoding="utf-8")
-                logger.info(f"[worktree] 保留 {sid} 供人工审查 ({r.get('status', '?') if r else '?'})")
+                }
+                marker.write_text(json.dumps(_marker_data, indent=2, ensure_ascii=False),
+                                  encoding="utf-8")
+                _preserve_reason = "degraded(需审查)" if _is_degraded else (r.get("status", "?") if r else "?")
+                if _kill_reason:
+                    _preserve_reason += f"/{_kill_reason}"
+                logger.info(f"[worktree] 保留 {sid} 供人工审查 ({_preserve_reason})")
+                # S12 失败清理 #2：净化保留现场（移除运行时缓存，避免污染审查现场）
+                _sanitize_preserved_worktree(wt_path)
                 continue
 
             ok, err = _worktree_remove(repo, wt_path)
@@ -686,7 +733,11 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             icon = {"failed": "❌", "blocked": "🔗"}.get(r.get("status", ""), "❓")
             wt_path = task_dir / sid / "work"
             branch = f"agent_go/{meta.get('task_id', '')}/{sid}"
-            console.print(f"  {icon} {sid}: {r.get('failure_reason', '?')}")
+            # S12 失败清理 #4：degraded 降级产物突出"需 review"标记；kill_reason 展示
+            _degraded_flag = " ⚠️ 降级产物（需重点 review）" if r.get("degraded") else ""
+            _kr = r.get("kill_reason") or ""
+            _kr_suffix = f" | kill_reason={_kr}" if _kr else ""
+            console.print(f"  {icon} {sid}: {r.get('failure_reason', '?')}{_degraded_flag}{_kr_suffix}")
             console.print(f"     📁 {wt_path}")
             console.print(f"     🔗 git branch: {branch}")
         console.print("─" * 60)

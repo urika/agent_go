@@ -53,9 +53,12 @@ _run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核�
   ── SIGINT → _interrupted → 杀子进程 → meta["status"]="paused" → sys.exit(0)
   ── 远程推送、worktree/tag 清理、gc.auto 恢复
   ── preserve_worktrees: None=保留 failed/blocked，True=全保留，False=全清理
+  ── S12 失败清理策略：保留判定接入 kill_reason（cleanup_race 实际成功不保留；
+     degraded 降级产物强制保留+标记）；保留现场净化（.pytest_cache/__pycache__/pyc）
   ── mcp_client: MCPClientPool start_all() 启动 / finally stop_all() 回收（外部 MCP 工具）
   ── S9-B 产物导出：config.artifact_dir 时清理 worktree 前调用 artifacts.export，final report 渲染清单
 notify_event(event, context, config) → 任务完成/失败通知 (M1)
+_sanitize_preserved_worktree(wt) → S12 失败清理：净化保留 worktree（移除运行时缓存）
 ```
 
 ## planning.py — 规划辅助 (M4)

@@ -63,9 +63,10 @@ agent_go mcp
 agent_go mcp --http --host 127.0.0.1 --port 8090
 
 # List / show / clean
-agent_go list
-agent_go show <task-id>
-agent_go clean
+ agent_go list
+ agent_go show <task-id>
+ agent_go clean
+ agent_go clean --older-than 7        # 只清理早于 7 天前的任务（保留期清理）
 
 # Dev: lint, type-check, and test
 pip install pytest pytest-mock ruff mypy

@@ -99,7 +99,8 @@ agent_go config
  # List / show / clean
  agent_go list
  agent_go show <task-id>
- agent_go clean
+ agent_go clean                       # 清理全部任务数据
+ agent_go clean --older-than 7        # 只清理早于 7 天前的任务（保留期，S12 失败清理）
 
 # Read-only Web observability (task list / subtask detail / logs / metering / timeline)
 agent_go web --host 127.0.0.1 --port 8091   # 打开 http://127.0.0.1:8091

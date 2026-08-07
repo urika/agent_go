@@ -141,7 +141,9 @@ def _build_parser():
     status_parser.add_argument("--verbose", "-v", action="store_true", help="Show Claude events")
 
     # clean 子命令
-    subparsers.add_parser("clean", help="Remove all task data")
+    _clean_parser = subparsers.add_parser("clean", help="Remove task data")
+    _clean_parser.add_argument("--older-than", type=int, default=None,
+                               help="只清理早于 N 天前的任务目录（保留期清理，S12 失败清理 #3）")
 
     # config 子命令
     subparsers.add_parser("config", help="View current configuration")
@@ -1845,11 +1847,25 @@ def cmd_spec(args) -> None:
         console.print("  template [repo] [--output PATH]  生成空白 Task Spec 模板")
         console.print("  validate <spec_path> [repo]       对 Spec 文件运行 L1 准入审查")
 
-def cmd_clean() -> None:
+def cmd_clean(args=None) -> None:
     import shutil as _shutil
+    import time as _time
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
     if not tasks:
         console.print("暂无任务")
+        return
+    # S12 失败清理 #3：--older-than N 天 → 只清理早于 N 天前未修改的任务目录（保留期）
+    older_than = getattr(args, "older_than", None) if args else None
+    if older_than:
+        _cutoff = _time.time() - float(older_than) * 86400
+        _before = len(tasks)
+        tasks = [t for t in tasks
+                 if (t.stat().st_mtime if t.exists() else 0) < _cutoff]
+        _filtered = _before - len(tasks)
+        if _filtered:
+            console.print(f"跳过 {_filtered} 个近期任务（--older-than {older_than} 天保留）")
+    if not tasks:
+        console.print("无符合条件的任务")
         return
     console.print(f"将清理 {len(tasks)} 个任务目录:")
     for t in tasks:
@@ -2276,7 +2292,7 @@ def main() -> None:
         elif args.command == "spec":
             cmd_spec(args)
         elif args.command == "clean":
-            cmd_clean()
+            cmd_clean(args)
         elif args.command == "pr":
             cmd_pr(args)
         elif args.command == "skills":
