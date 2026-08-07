@@ -999,8 +999,11 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     # 无运行时记录时按数据反推（方案 B 兜底）。
     _runtime_kill = [r.get("kill_reason") for r in results if r.get("kill_reason")]
     if _runtime_kill:
-        # 任务级取子任务 kill_reason 中最"严重"的一个：over_budget 优先，其次 stuck/hard_timeout
-        if any(k in ("over_budget_l2", "over_budget_l3") for k in _runtime_kill):
+        # 任务级取子任务 kill_reason 中最"严重"的一个。
+        # system_error 最严重（内部 bug 崩溃，非能力失败）→ 优先标识，供审计/告警。
+        if "system_error" in _runtime_kill:
+            kill_reason = "system_error"
+        elif any(k in ("over_budget_l2", "over_budget_l3") for k in _runtime_kill):
             kill_reason = "over_budget_l2" if "over_budget_l2" in _runtime_kill else "over_budget_l3"
         elif any(k in ("stuck", "hard_timeout", "goal_timeout", "goal_turns_exceeded") for k in _runtime_kill):
             kill_reason = next(k for k in ("stuck", "hard_timeout", "goal_timeout", "goal_turns_exceeded")
@@ -1316,7 +1319,10 @@ def _recommend_worker_models(models: dict[str, Any]) -> dict[str, Optional[dict]
     items = list(models.items())  # (name, metrics)
 
     def _pick(role: str, criterion: str) -> Optional[dict]:
-        cands = [(n, m) for n, m in items if role in (m.get("recommended_roles") or [])]
+        # CR-P1-1：排除 low_confidence（小样本 n<5），避免噪声进 worker_models 配置
+        cands = [(n, m) for n, m in items
+                 if role in (m.get("recommended_roles") or [])
+                 and not m.get("low_confidence")]
         if not cands:
             return None
         if role == "worker_hard":

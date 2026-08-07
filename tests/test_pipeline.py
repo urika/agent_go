@@ -406,6 +406,44 @@ class TestPipeline:
         assert task_dir / "sub-1" / "work" in removed_paths
         assert task_dir / "sub-2" / "work" in removed_paths
 
+    # ── 2. 串行分支异常隔离（system_error）───────────────────────────────
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_serial_exception_isolated_as_system_error(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """串行分支 run_subtask 抛异常 → 不击穿进程，记为 failed + kill_reason=system_error。"""
+        sub1 = _make_subtask("sub-1")
+        confirmed = [sub1]
+
+        repo = temp_dir / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        task_dir = temp_dir / "tasks" / "t1"
+        task_dir.mkdir(parents=True)
+        (task_dir / "sub-1" / "work").mkdir(parents=True)
+
+        mock_run_subtask.side_effect = RuntimeError("内部 bug: AttributeError")
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        # 不应抛出（异常被隔离）
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=_default_meta(),
+        )
+
+        # 结果标记为 failed + kill_reason=system_error
+        meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        r = next(r for r in meta.get("results", []) if r.get("subtask_id") == "sub-1")
+        assert r["status"] == "failed"
+        assert r.get("kill_reason") == "system_error"
+        assert "RuntimeError" in r.get("failure_reason", "")
+
 
 class TestPipelineDependencyFailure:
     """依赖循环/不可满足时的失败标记（回归 docs/ISSUES.md ISSUE-7）"""

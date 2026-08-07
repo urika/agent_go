@@ -1306,3 +1306,75 @@ class TestBenchParallel:
 
         _bench.cmd_bench(_Args())
         assert sorted(_calls) == ["tx", "tx"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-P1-1：low_confidence（样本<5 不决策，不参与自动路由）
+# ═══════════════════════════════════════════════════════════════
+
+def test_low_confidence_flag_for_small_samples(tmp_path):
+    """n<5 → low_confidence=True，reason 含 low_confidence 注记。"""
+    from agent_go.bench import analyze_model_productivity
+    out = tmp_path / "r.jsonl"
+    recs = _g1_rec("small-model", 0.85, 0.05, n=4)  # n=4 < 5
+    with open(out, "w", encoding="utf-8") as f:
+        for r in recs:
+            f.write(json.dumps(r) + "\n")
+    m = analyze_model_productivity(out)["models"]["small-model"]
+    assert m["low_confidence"] is True
+    assert "low_confidence" in m["reason"]
+
+
+def test_low_confidence_cleared_at_five_samples(tmp_path):
+    """n≥5 → low_confidence=False。"""
+    from agent_go.bench import analyze_model_productivity
+    out = tmp_path / "r.jsonl"
+    recs = _g1_rec("ok-model", 0.85, 0.05, n=5)
+    with open(out, "w", encoding="utf-8") as f:
+        for r in recs:
+            f.write(json.dumps(r) + "\n")
+    m = analyze_model_productivity(out)["models"]["ok-model"]
+    assert m["low_confidence"] is False
+
+
+def test_recommend_excludes_low_confidence_models():
+    """_recommend_worker_models 排除 low_confidence 模型（PRD：不参与自动路由）。"""
+    from agent_go.bench import _recommend_worker_models
+    models = {
+        "small-hard": {"avg_pass_rate": 0.85, "dollar_per_pass": 0.06, "recommendation": "recommended",
+                       "recommended_roles": ["worker_easy", "worker_medium", "worker_hard"],
+                       "best_value": True, "low_confidence": True},  # n<5 → 排除
+    }
+    p = _recommend_worker_models(models)
+    assert p["hard"] is None  # 唯一候选是 low_confidence → 排除 → 留空
+
+
+def test_recommend_includes_non_low_confidence():
+    """low_confidence=False 的合格候选正常入选。"""
+    from agent_go.bench import _recommend_worker_models
+    models = {
+        "solid-model": {"avg_pass_rate": 0.85, "dollar_per_pass": 0.06, "recommendation": "recommended",
+                        "recommended_roles": ["worker_easy", "worker_medium", "worker_hard"],
+                        "best_value": True, "low_confidence": False},
+    }
+    p = _recommend_worker_models(models)
+    assert p["hard"]["model"] == "solid-model"
+
+
+# ─────────────────────────────────────────────────────────────
+# system_error kill_reason 识别（内部 bug 崩溃归因）
+# ─────────────────────────────────────────────────────────────
+
+def test_kill_reason_system_error_detected(tmp_path):
+    """运行时 kill_reason=system_error（内部 bug 崩溃）→ 任务级 kill_reason 归为 system_error。"""
+    td = tmp_path / "task-syserr"
+    _write_full_meta(td, "Some task", "failed", [
+        {"subtask_id": "sub-1", "status": "failed", "verify_ok": False,
+         "kill_reason": "system_error"},
+    ])
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 100.0, 1, "",
+        exact_td=td, expected_task="Some task", timed_out=False,
+    )
+    assert result["kill_reason"] == "system_error"
+    assert not (result["pass_rate"] or 0) > 0

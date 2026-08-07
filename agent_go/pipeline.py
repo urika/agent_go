@@ -445,7 +445,18 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         if actual_workers == 1:
             for st in wave:
                 upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
+                try:
+                    result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
+                except Exception as e:
+                    # 异常隔离（与并发分支对齐）：内部 bug 崩溃不击穿整个进程，
+                    # 记为 failed + kill_reason=system_error（区别于能力失败）
+                    result = {"subtask_id": st["id"], "status": "failed",
+                              "exit_code": -1, "summary": f"system_error: {e}",
+                              "failure_reason": f"内部异常: {type(e).__name__}: {e}",
+                              "kill_reason": "system_error",
+                              "worktree": "", "sandbox_type": "headless",
+                              "verify_ok": False, "duration_sec": 0}
+                    logger.error(f"串行异常 {st['id']}: {type(e).__name__}: {e}")
                 degraded_count = _record_subtask_result(
                     st, result, task_dir, meta,
                     worktree_map, results_map, completed_ids, failed_ids,
