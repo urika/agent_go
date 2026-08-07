@@ -926,3 +926,383 @@ class TestPreflightModelPricing:
         from agent_go.bench import _probe_actual_model
         with patch("agent_go.bench.subprocess.run", side_effect=TimeoutError("x")):
             assert _probe_actual_model("claude-haiku-4-5") == ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-G6: cmd_bench 编排器（修复 ImportError + 编排正确性）
+# ═══════════════════════════════════════════════════════════════
+
+def test_cmd_bench_orchestrates_tasks_models_repeat(tmp_path):
+    """CR-G6：cmd_bench 按 tasks × models × repeat 笛卡尔积编排 _run_one_task，
+    每次结果写一行、model/repeat 注入。修复前 `from .bench import cmd_bench` ImportError。"""
+    import argparse
+    from agent_go.bench import cmd_bench
+
+    tasks_dir = tmp_path / "eval_suite"
+    (tasks_dir / "tasks").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in (1, 2):
+        (tasks_dir / "tasks" / f"t{i}.yaml").write_text(
+            f"id: t{i}\nrepo: {repo}\ntask: do task {i}\nverification: ['true']\n",
+            encoding="utf-8")
+
+    out = tmp_path / "results.jsonl"
+    calls = {"n": 0}
+
+    def _fake_run_one_task(task, _repo, model, task_id, **kw):
+        calls["n"] += 1
+        return {"task_id": task_id, "model": model, "binary_pass": True, "per_subtask": []}
+
+    args = argparse.Namespace(
+        tasks=str(tasks_dir), candidate_models="m1,m2", repeat=2,
+        output=str(out), source_batch="bench", no_skills=False,
+        yes=True, eval_all=False)
+
+    with patch("agent_go.bench._run_one_task", side_effect=_fake_run_one_task), \
+         patch("agent_go.bench._preflight_model_pricing", return_value=True):
+        cmd_bench(args)
+
+    assert calls["n"] == 8  # 2 tasks × 2 models × 2 repeat
+    lines = out.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 8
+    for ln in lines:
+        rec = json.loads(ln)
+        assert rec["model"] in ("m1", "m2")
+        assert "repeat" in rec
+
+
+def test_cmd_bench_no_models_errors(tmp_path):
+    """CR-G6：未指定 --candidate-models → 报错 sys.exit。"""
+    import argparse
+    from agent_go.bench import cmd_bench
+    args = argparse.Namespace(
+        tasks=str(tmp_path), candidate_models="", repeat=1,
+        output=str(tmp_path / "o.jsonl"), source_batch="bench", no_skills=False,
+        yes=True, eval_all=False)
+    with patch("agent_go.bench._preflight_model_pricing", return_value=True):
+        try:
+            cmd_bench(args)
+            assert False, "应 sys.exit"
+        except SystemExit:
+            pass
+
+
+def test_cmd_bench_handles_list_return(tmp_path):
+    """CR-G6：_run_one_task 历史 list[dict] 签名也逐条写入（防御）。"""
+    import argparse
+    from agent_go.bench import cmd_bench
+    tasks_dir = tmp_path / "es"
+    (tasks_dir / "tasks").mkdir(parents=True)
+    (tasks_dir / "tasks" / "t1.yaml").write_text(
+        f"id: t1\nrepo: {tmp_path}\ntask: x\nverification: ['true']\n", encoding="utf-8")
+    out = tmp_path / "r.jsonl"
+
+    def _list_ret(task, _repo, model, task_id, **kw):
+        return [{"task_id": task_id, "model": model, "sub": "a"},
+                {"task_id": task_id, "model": model, "sub": "b"}]
+
+    args = argparse.Namespace(tasks=str(tasks_dir), candidate_models="m1", repeat=1,
+                              output=str(out), source_batch="bench", no_skills=False,
+                              yes=True, eval_all=False)
+    with patch("agent_go.bench._run_one_task", side_effect=_list_ret), \
+         patch("agent_go.bench._preflight_model_pricing", return_value=True):
+        cmd_bench(args)
+    lines = out.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 2  # 1 task × 1 model × 1 repeat，但 _run_one_task 返回 2 条
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-G1: _recommend 成本维度 + best_value
+# ═══════════════════════════════════════════════════════════════
+
+def test_recommend_cost_downgrade_recommended_to_conditional():
+    """CR-G1：≥80% 通过但 $/pass > 2× 中位数 → recommended 降 conditional，roles 不变。"""
+    from agent_go.bench import _recommend
+    cat, roles, reason = _recommend("expensive-opus", 0.85, 1.0, 5,
+                                    dollar_per_pass=0.10, dpp_median=0.03)
+    assert cat == "conditional"
+    assert roles == ["worker_easy", "worker_medium", "worker_hard"]  # 能力不变
+    assert "成本过高" in reason
+
+
+def test_recommend_no_downgrade_when_cost_within_median():
+    """CR-G1：$/pass ≤ 2× 中位数 → 保持 recommended。"""
+    from agent_go.bench import _recommend
+    cat, _roles, reason = _recommend("cheap-sonnet", 0.85, 0.2, 5,
+                                     dollar_per_pass=0.03, dpp_median=0.03)
+    assert cat == "recommended"
+    assert "成本过高" not in reason
+
+
+def test_recommend_no_downgrade_for_conditional():
+    """CR-G1：成本降档只影响 recommended，conditional 不再往下压成 discouraged。"""
+    from agent_go.bench import _recommend
+    cat, roles, _reason = _recommend("m", 0.72, 1.0, 5,
+                                     dollar_per_pass=9.99, dpp_median=0.01)
+    assert cat == "conditional"
+    assert roles == ["worker_easy", "worker_medium"]
+
+
+def test_recommend_backward_compat_no_cost_args():
+    """CR-G1：不传成本参数（旧调用）行为不变。"""
+    from agent_go.bench import _recommend
+    assert _recommend("m", 0.85, 0.2, 5)[0] == "recommended"
+    assert _recommend("m", 0.55, 0.2, 5)[0] == "discouraged"
+    assert _recommend("m", 0.85, 0.2, 2)[0] == "insufficient_data"
+
+
+def test_median_helper():
+    from agent_go.bench import _median
+    assert _median([]) is None
+    assert _median([1.0]) == 1.0
+    assert _median([1.0, 2.0]) == 1.5
+    assert _median([3.0, 1.0, 2.0]) == 2.0
+
+
+def _g1_rec(model, pass_rate, cost, n=3):
+    """构造 n 条同模型 record：平均通过率 pass_rate、平均成本 cost。"""
+    return [dict(model=model, completed=int(pass_rate > 0), total_subtasks=1,
+                 total_cost_usd=cost, pass_rate=pass_rate, per_subtask=[],
+                 total_retries=0, lint_errors=0, tests_broken=0) for _ in range(n)]
+
+
+def test_analyze_best_value_and_cost_downgrade(tmp_path):
+    """CR-G1：analyze 算 best_value（≥70% 中 efficiency 最高）+ 贵模型 $/pass>2× 中位数 降档。"""
+    from agent_go.bench import analyze_model_productivity
+    out = tmp_path / "r.jsonl"
+    recs = (_g1_rec("cheap-A", 0.85, 0.05)        # dpp≈0.059, eff≈17
+            + _g1_rec("expensive-B", 0.85, 0.50)  # dpp≈0.59 > 2× 中位数 → 降档
+            + _g1_rec("low-C", 0.50, 0.05))       # <60% → discouraged
+    with open(out, "w", encoding="utf-8") as f:
+        for r in recs:
+            f.write(json.dumps(r) + "\n")
+    data = analyze_model_productivity(out)
+    mA = data["models"]["cheap-A"]
+    mB = data["models"]["expensive-B"]
+    mC = data["models"]["low-C"]
+    assert mA.get("best_value") is True      # ≥70% 且 efficiency 最高
+    assert mB.get("best_value") is False
+    assert mA["recommendation"] == "recommended"
+    assert mB["recommendation"] == "conditional"  # 贵 → 降档
+    assert mC["recommendation"] == "discouraged"
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-G5: bench → worker_models 自动衔接（recommend）
+# ═══════════════════════════════════════════════════════════════
+
+import argparse
+
+
+def _g5_model(name, pass_rate, dpp, roles, best_value=False, rec="recommended"):
+    return {name: {"avg_pass_rate": pass_rate, "dollar_per_pass": dpp,
+                   "recommendation": rec, "recommended_roles": roles,
+                   "best_value": best_value}}
+
+
+def test_recommend_worker_models_slot_assignment():
+    """CR-G5：hard=通过率最高，medium/easy=$/pass 最低（差异化分配）。"""
+    from agent_go.bench import _recommend_worker_models
+    models = {
+        **_g5_model("A", 0.85, 0.06, ["worker_easy", "worker_medium", "worker_hard"], best_value=True),
+        **_g5_model("B", 0.75, 0.04, ["worker_easy", "worker_medium", "worker_hard"]),
+        **_g5_model("C", 0.65, 0.02, ["worker_easy"], rec="conditional"),
+    }
+    p = _recommend_worker_models(models)
+    assert p["hard"]["model"] == "A"      # 通过率最高
+    assert p["medium"]["model"] == "B"    # medium-qualified 中 $/pass 最低（0.04 < 0.06）
+    assert p["easy"]["model"] == "C"      # easy-qualified 中 $/pass 最低（0.02）
+
+
+def test_recommend_worker_models_no_qualified():
+    """CR-G5：discouraged 模型（roles=[]）→ 所有槽 None。"""
+    from agent_go.bench import _recommend_worker_models
+    models = _g5_model("D", 0.50, 0.01, [], rec="discouraged")
+    p = _recommend_worker_models(models)
+    assert p["hard"] is None and p["medium"] is None and p["easy"] is None
+
+
+def _g5_analyze_return(models):
+    return {"models": models, "total_runs": 99}
+
+
+def _g5_args(apply=False, force=False, results="eval_suite/results.jsonl"):
+    return argparse.Namespace(apply=apply, force=force, results=results)
+
+
+def test_cmd_recommend_dry_run_no_write(tmp_path):
+    """CR-G5：默认 dry-run 不碰 config。"""
+    from agent_go.bench import cmd_recommend
+    cfg = tmp_path / "config.json"
+    models = {**_g5_model("claude-sonnet-5", 0.85, 0.06, ["worker_easy", "worker_medium", "worker_hard"], True),
+              **_g5_model("claude-haiku-4-5", 0.70, 0.02, ["worker_easy", "worker_medium"], rec="conditional")}
+    with patch("agent_go.bench.analyze_model_productivity", return_value=_g5_analyze_return(models)), \
+         patch("agent_go.bench.CONFIG_PATH", cfg):
+        cmd_recommend(_g5_args(apply=False))
+    assert not cfg.exists(), "dry-run 不应写 config"
+
+
+def test_cmd_recommend_apply_writes(tmp_path):
+    """CR-G5：--apply 写入 worker_models（无 tier 错配时）。"""
+    from agent_go.bench import cmd_recommend
+    cfg = tmp_path / "config.json"
+    models = {**_g5_model("claude-opus-4-8", 0.85, 0.06, ["worker_easy", "worker_medium", "worker_hard"], True),
+              **_g5_model("claude-haiku-4-5", 0.70, 0.02, ["worker_easy", "worker_medium"], rec="conditional")}
+    with patch("agent_go.bench.analyze_model_productivity", return_value=_g5_analyze_return(models)), \
+         patch("agent_go.bench.CONFIG_PATH", cfg):
+        cmd_recommend(_g5_args(apply=True))
+    import json as _j
+    saved = _j.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["worker_models"]["hard"] == "claude-opus-4-8"      # frontier, 通过率最高
+    assert saved["worker_models"]["easy"] == "claude-haiku-4-5"     # lite, $/pass 最低
+
+
+def test_cmd_recommend_apply_tier_mismatch_refuse(tmp_path):
+    """CR-G5：推荐结果 tier 错配（hard=lite）+ --apply 无 --force → 拒绝写入。"""
+    from agent_go.bench import cmd_recommend
+    cfg = tmp_path / "config.json"
+    # 让 claude-haiku-4-5（lite）成为唯一 hard-qualified → hard 槽 = lite（错配）
+    models = {**_g5_model("claude-haiku-4-5", 0.82, 0.02, ["worker_easy", "worker_medium", "worker_hard"], True)}
+    with patch("agent_go.bench.analyze_model_productivity", return_value=_g5_analyze_return(models)), \
+         patch("agent_go.bench.CONFIG_PATH", cfg):
+        try:
+            cmd_recommend(_g5_args(apply=True, force=False))
+            assert False, "tier 错配应 sys.exit"
+        except SystemExit:
+            pass
+    assert not cfg.exists(), "拒绝写入时不应创建 config"
+
+
+def test_cmd_recommend_apply_force_overrides_tier(tmp_path):
+    """CR-G5：tier 错配 + --apply --force → 强制写入。"""
+    from agent_go.bench import cmd_recommend
+    cfg = tmp_path / "config.json"
+    models = {**_g5_model("claude-haiku-4-5", 0.82, 0.02, ["worker_easy", "worker_medium", "worker_hard"], True)}
+    with patch("agent_go.bench.analyze_model_productivity", return_value=_g5_analyze_return(models)), \
+         patch("agent_go.bench.CONFIG_PATH", cfg):
+        cmd_recommend(_g5_args(apply=True, force=True))
+    import json as _j
+    saved = _j.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["worker_models"]["hard"] == "claude-haiku-4-5"  # 强制写入
+
+
+def test_kill_reason_runtime_over_budget_l3(tmp_path):
+    """覆盖补强：子任务 kill_reason=over_budget_l3（pipeline 级熔断）→ 任务级分类正确。
+    此前只测了 over_budget_l2 分支，L3 分支（bench.py 任务级 kill_reason 归因）无守护。"""
+    td = tmp_path / "task-l3-budget"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "blocked", "verify_ok": False,
+         "kill_reason": "over_budget_l3"},
+    ])
+    (td / "metering.jsonl").write_text(
+        json.dumps({"cost_usd": 0.50, "latency_ms": 1000}) + "\n", encoding="utf-8")
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 100.0, 0, "",
+        exact_td=td, expected_task="Some task", timed_out=False,
+    )
+    assert result["kill_reason"] == "over_budget_l3"
+    assert result["per_subtask"][0]["kill_reason"] == "over_budget_l3"
+
+
+def test_kill_reason_runtime_hard_timeout(tmp_path):
+    """覆盖补强：子任务 kill_reason=hard_timeout → 任务级分类为 hard_timeout
+    （而非笼统 stuck_or_hardtimeout）。"""
+    td = tmp_path / "task-hardtimeout"
+    _write_full_meta(td, "Some task", "stale_aborted", [
+        {"subtask_id": "sub-1", "status": "failed", "verify_ok": False,
+         "kill_reason": "hard_timeout"},
+    ])
+    (td / "metering.jsonl").write_text(
+        json.dumps({"cost_usd": 0.10, "latency_ms": 1000}) + "\n", encoding="utf-8")
+    result = _collect_result(
+        "task-x", "claude-haiku-4-5", 100.0, 0, "",
+        exact_td=td, expected_task="Some task", timed_out=True,
+    )
+    assert result["kill_reason"] == "hard_timeout"
+    assert result["per_subtask"][0]["kill_reason"] == "hard_timeout"
+
+
+# ─────────────────────────────────────────────────────────────
+# S12 bench 并行：--bench-parallel 线程池调度
+# ─────────────────────────────────────────────────────────────
+
+class TestBenchParallel:
+    def test_cmd_bench_parallel_collects_all(self, tmp_path, monkeypatch, capsys):
+        """并发模式下所有 (task×model×repeat) 组合都被执行并收集。"""
+        import yaml as _yaml
+        from agent_go import bench as _bench
+
+        # 构造 2 任务 × 1 模型 × 2 重复 = 4 组合
+        tasks_dir = tmp_path / "eval_suite"
+        (tasks_dir / "tasks").mkdir(parents=True)
+        for i in (1, 2):
+            (tasks_dir / "tasks" / f"task-{i}.yaml").write_text(
+                _yaml.safe_dump({
+                    "id": f"t{i}", "difficulty": "easy", "repo": "eval_suite/fixtures/task-mgr",
+                    "task": f"do {i}", "verification": ["echo ok"], "timeout": 30,
+                }), encoding="utf-8")
+
+        out = tmp_path / "results.jsonl"
+
+        # mock _run_one_task 返回固定结果，避免真实 claude 调用
+        _calls = []
+        def _fake_run_one_task(task, repo, model, task_id, **kw):
+            _calls.append((task_id, model))
+            return {"task_id": task_id, "model": model, "pass_rate": 1.0}
+        monkeypatch.setattr(_bench, "_run_one_task", _fake_run_one_task)
+        monkeypatch.setattr(_bench, "_preflight_model_pricing", lambda *a, **k: True)
+
+        class _Args:
+            tasks = str(tasks_dir)
+            candidate_models = "m1"
+            repeat = 2
+            output = str(out)
+            source_batch = "par-test"
+            no_skills = False
+            bench_parallel = 2
+            yes = False
+            eval_all = False
+
+        # 让 cmd_bench 相对路径解析正常：monkeypatch 工作区基准
+        # （tasks_dir 已绝对路径，cmd_bench 直接用）
+        _bench.cmd_bench(_Args())
+
+        # 4 个组合全部执行且结果收集
+        assert len(_calls) == 4
+        lines = [l for l in out.read_text().splitlines() if l.strip()]
+        assert len(lines) == 4
+        assert all("t" in json.loads(l)["task_id"] for l in lines)
+
+    def test_cmd_bench_serial_when_parallel_1(self, tmp_path, monkeypatch):
+        """--bench-parallel 1 → 串行执行（同样收集全部）。"""
+        import yaml as _yaml
+        from agent_go import bench as _bench
+
+        tasks_dir = tmp_path / "eval_suite2"
+        (tasks_dir / "tasks").mkdir(parents=True)
+        (tasks_dir / "tasks" / "t.yaml").write_text(
+            _yaml.safe_dump({"id": "tx", "difficulty": "easy", "repo": "eval_suite/fixtures/task-mgr",
+                             "task": "x", "verification": ["echo ok"], "timeout": 30}), encoding="utf-8")
+        out = tmp_path / "r2.jsonl"
+
+        _calls = []
+        def _fake_run_one_task(task, repo, model, task_id, **kw):
+            _calls.append(task_id)
+            return {"task_id": task_id, "model": model, "pass_rate": 1.0}
+        monkeypatch.setattr(_bench, "_run_one_task", _fake_run_one_task)
+        monkeypatch.setattr(_bench, "_preflight_model_pricing", lambda *a, **k: True)
+
+        class _Args:
+            tasks = str(tasks_dir)
+            candidate_models = "m1,m2"
+            repeat = 1
+            output = str(out)
+            source_batch = ""
+            no_skills = False
+            bench_parallel = 1
+            yes = False
+            eval_all = False
+
+        _bench.cmd_bench(_Args())
+        assert sorted(_calls) == ["tx", "tx"]

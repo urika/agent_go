@@ -210,7 +210,7 @@ def _build_parser():
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
-    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "judge", "all"],
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "recommend", "judge", "all"],
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
@@ -234,10 +234,17 @@ def _build_parser():
                              help="禁用 skill 自动发现（bench 子命令，用于 skill on/off 对比）")
     eval_parser.add_argument("--source-batch", dest="source_batch", default="",
                              help="批次标识（bench 子命令，如 baseline / results_v2 / smoke-*，写入每条 record）")
+    eval_parser.add_argument("--bench-parallel", dest="bench_parallel", type=int, default=2,
+                             help="bench 并发度：同时运行的 (任务×模型×重复) 组合数（默认 2，受 API rate-limit 与本地资源约束）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
-                             help="读取结果文件（models/cost-baseline 子命令，逗号分隔多个文件）")
+                             help="读取结果文件（models/cost-baseline/recommend 子命令，逗号分隔多个文件）")
     eval_parser.add_argument("--tolerance", dest="tolerance", type=float, default=1.5,
                              help="成本基线预算 = P90 × tolerance（cost-baseline 子命令，默认 1.5）")
+    # recommend 子命令参数（CR-G5：bench 推荐写回 worker_models）
+    eval_parser.add_argument("--apply", dest="apply", action="store_true",
+                             help="recommend 子命令：把推荐写入 config.json 的 worker_models（默认 dry-run）")
+    eval_parser.add_argument("--force", dest="force", action="store_true",
+                             help="recommend --apply 时：tier 错配仍强制写入（默认 tier 错配拒绝写入）")
     # judge 子命令参数
     eval_parser.add_argument("--judge-models", dest="judge_models",
                              help="评判模型列表，逗号分隔（judge 子命令）")
@@ -464,6 +471,15 @@ def cmd_run(args=None):
     if tool_versions:
         logger.info(f"工具版本: {tool_versions}")
 
+    # CR-G2：worker_models × MODEL_TIER 错配 advisory 校验（启动时提醒配置失误，
+    # 如 hard 槽填 lite / easy 槽填 frontier）。不阻断运行。
+    try:
+        from .pricing import validate_worker_tier
+        for _slot, _mdl, _tier, _msg in validate_worker_tier(config.get("worker_models") or {}):
+            logger.warning(f"[tier] {_msg}: worker_models.{_slot}={_mdl}（{_tier}）")
+    except Exception as _te:
+        logger.debug(f"[tier] 校验失败（忽略）: {_te}")
+
     # ── Skill 加载 ──
     skills = []
     if skill_names:
@@ -624,7 +640,8 @@ def cmd_run(args=None):
             subtasks = plan_to_subtasks(
                 confirmed_plan, logger, repo=repo,
                 default_skills=[s.name for s in skills] if skills else None,
-                disable_rule_skills=not config.get("skills", {}).get("auto_discover", False))
+                disable_rule_skills=not config.get("skills", {}).get("auto_discover", False),
+                task_type_override=(spec_obj.task_type if spec_obj else None))
             doc_paths = final_doc_paths
             (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
             _save_plan_snapshot(task_dir, confirmed_plan, iteration)
@@ -635,6 +652,13 @@ def cmd_run(args=None):
                 check_under_decomposition(subtasks, logger)
             except Exception as _ge:
                 logger.debug(f"[G5] 欠分解检测失败（忽略）: {_ge}")
+            # CR-G4：planner 主观难度交叉核对——planner 标的 difficulty 与启发式 hint
+            # 跨两档不一致（如 easy 标注实为跨文件重构）时告警，提醒可能用错档模型。
+            try:
+                from .planning import check_difficulty_mismatch
+                check_difficulty_mismatch(subtasks, logger)
+            except Exception as _de:
+                logger.debug(f"[G4] 难度交叉核对失败（忽略）: {_de}")
         elif 'subtasks' in locals() and subtasks is not None:
             # 降级路径中已通过 decompose_fallback 生成 subtasks，无需重复调用
             pass

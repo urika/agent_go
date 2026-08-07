@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -28,7 +29,7 @@ from .console import _LazyConsole
 from .config import AGENT_GO_DIR, CONFIG_PATH
 from .eval import _read_jsonl, _read_json
 from .assessment import load_all as load_all_assessments, compute_false_positive_rate
-from .pricing import MODEL_PRICES
+from .pricing import MODEL_PRICES, model_tier, validate_worker_tier
 
 __all__ = ["cmd_bench", "cmd_baseline", "analyze_model_productivity"]
 console = _LazyConsole()
@@ -208,74 +209,6 @@ def _preflight_model_pricing(models: list[str], interactive: bool = True) -> boo
             console.error("预检未通过，中止运行（请先补充定价）")
             return False
     return True
-    """对照运行编排器主函数。"""
-    if yaml is None:
-        console.warning("需要 PyYAML 以解析任务文件：pip install pyyaml")
-        sys.exit(1)
-
-    # 关键修复：用 bench.py 所在目录（agent_go workspace）作为基准解析相对路径
-    # 这样不依赖 caller cwd（修复 macOS xcrun shim + cwd 漂移导致的 "can't open file" 错误）
-    _workspace = Path(__file__).resolve().parent.parent
-
-    tasks_arg = args.tasks if args and hasattr(args, "tasks") else "eval_suite"
-    tasks_dir = Path(tasks_arg)
-    if not tasks_dir.is_absolute():
-        tasks_dir = _workspace / tasks_dir
-
-    output_arg = getattr(args, "output", None) or "eval_suite/results.jsonl"
-    output_path = Path(output_arg)
-    if not output_path.is_absolute():
-        output_path = _workspace / output_path
-
-    models = [m.strip() for m in (getattr(args, "candidate_models", None) or "").split(",") if m.strip()]
-    repeat = int(getattr(args, "repeat", 3) or 3)
-    source_batch = getattr(args, "source_batch", None) or ""
-
-    if not models:
-        console.error("至少指定一个 --candidate-models（逗号分隔）")
-        sys.exit(1)
-
-    # S12 运行前预检：探测实际后端模型 + 校验定价覆盖（缺定价询问/中止）
-    _no_confirm = bool(getattr(args, "yes", False)) or bool(getattr(args, "eval_all", False))
-    if not _preflight_model_pricing(models, interactive=not _no_confirm):
-        sys.exit(1)
-
-    task_files = sorted(tasks_dir.glob("tasks/*.yaml"))
-    if not task_files:
-        console.error(f"未找到任务文件: {tasks_dir}/tasks/*.yaml")
-        sys.exit(1)
-
-    console.print(f"🚀 bench 开始: {len(task_files)} 任务 × {len(models)} 模型 × {repeat} 重复 = {len(task_files)*len(models)*repeat} 次执行")
-    console.print(f"   模型: {', '.join(models)}")
-    console.print(f"   输出: {output_path}")
-
-    results: list[dict] = []
-    total = len(task_files) * len(models) * repeat
-    current = 0
-    no_skills = bool(getattr(args, "no_skills", False))
-
-    for tf in task_files:
-        task = yaml.safe_load(tf.read_text(encoding="utf-8"))
-        task_id = task["id"]
-        repo = Path(task["repo"])
-        if not repo.is_absolute():
-            repo = Path.cwd() / repo
-
-        for model in models:
-            for r in range(repeat):
-                current += 1
-                console.print(f"\n[{current}/{total}] {task_id} | {model} | repeat={r+1}")
-                result_entry = _run_one_task(task, repo, model, task_id, no_skills=no_skills, source_batch=source_batch, results_path=output_path)
-                result_entry["model"] = model
-                result_entry["repeat"] = r + 1
-                results.append(result_entry)
-
-                # 实时追加到输出文件
-                with open(output_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(result_entry, ensure_ascii=False) + "\n")
-
-    console.print(f"\n✅ bench 完成: {len(results)} 条结果 → {output_path}")
-    console.print(f"   下一步: agent_go eval models --results {output_path}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -393,6 +326,120 @@ def _run_baseline_one(task: dict, repo: Path, model: str, task_id: str,
         }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def cmd_bench(args=None) -> None:
+    """eval bench 编排器：tasks × candidate_models × repeat → results.jsonl。
+
+    走完整 agent_go harness（subprocess 隔离），与 cmd_baseline（claude -p 裸跑）对照，
+    量化 harness 在真实 plan→decompose→execute 流程下的通过率/成本/质量。
+    复用 _run_one_task（已含 subprocess 隔离 + _collect_result），不重写执行逻辑。
+
+    CLI: agent_go eval bench --tasks eval_suite/ --candidate-models m1,m2 --repeat 3 --output results.jsonl
+    """
+    if yaml is None:
+        console.warning("需要 PyYAML 以解析任务文件：pip install pyyaml")
+        sys.exit(1)
+
+    _workspace = Path(__file__).resolve().parent.parent
+
+    tasks_arg = args.tasks if args and hasattr(args, "tasks") else "eval_suite"
+    tasks_dir = Path(tasks_arg)
+    if not tasks_dir.is_absolute():
+        tasks_dir = _workspace / tasks_dir
+
+    output_arg = getattr(args, "output", None) or "eval_suite/results.jsonl"
+    output_path = Path(output_arg)
+    if not output_path.is_absolute():
+        output_path = _workspace / output_path
+
+    models = [m.strip() for m in (getattr(args, "candidate_models", None) or "").split(",") if m.strip()]
+    repeat = int(getattr(args, "repeat", 3) or 3)
+    source_batch = getattr(args, "source_batch", None) or "bench"
+    no_skills = bool(getattr(args, "no_skills", False))
+
+    if not models:
+        console.error("至少指定一个 --candidate-models（逗号分隔）")
+        sys.exit(1)
+
+    # S12 运行前预检：校验实际后端 + 定价覆盖
+    _no_confirm = bool(getattr(args, "yes", False)) or bool(getattr(args, "eval_all", False))
+    if not _preflight_model_pricing(models, interactive=not _no_confirm):
+        sys.exit(1)
+
+    task_files = sorted(tasks_dir.glob("tasks/*.yaml"))
+    if not task_files:
+        console.error(f"未找到任务文件: {tasks_dir}/tasks/*.yaml")
+        sys.exit(1)
+
+    total = len(task_files) * len(models) * repeat
+    console.print(f"🧪 bench 开始（走 harness）: {len(task_files)} 任务 × {len(models)} 模型 × {repeat} 重复 = {total} 次执行")
+    console.print(f"   模型: {', '.join(models)}")
+    console.print(f"   输出: {output_path}")
+
+    # S12 bench 并行：默认并发 2（--bench-parallel 可调）。
+    # 并行单元 = (task, model, repeat) 组合，每个独立 subprocess + worktree，
+    # 数据隔离（pass_rate/cost 不受影响）。受 API rate-limit 与本地验证资源约束。
+    _bench_parallel = int(getattr(args, "bench_parallel", 2) or 1)
+    _bench_parallel = max(1, _bench_parallel)
+    console.print(f"   并发度: {_bench_parallel}（--bench-parallel 可调）")
+
+    # 预加载所有任务（读取 YAML 与 repo），线程池内只执行 _run_one_task
+    _all_jobs: list[tuple[dict, Path, str, str, int]] = []
+    for tf in task_files:
+        task = yaml.safe_load(tf.read_text(encoding="utf-8"))
+        task_id = task["id"]
+        repo = Path(task["repo"])
+        if not repo.is_absolute():
+            repo = Path.cwd() / repo
+        for model in models:
+            for r in range(repeat):
+                _all_jobs.append((task, repo, model, task_id, r + 1))
+
+    results: list[dict] = []
+    _progress_lock = threading.Lock()
+    _current = [0]
+
+    def _run_one_wrapper(job: tuple[dict, Path, str, str, int]) -> dict:
+        _task, _repo, _model, _task_id, _r = job
+        with _progress_lock:
+            _current[0] += 1
+            _n = _current[0]
+            console.print(f"\n[{_n}/{total}] {_task_id} | {_model} | repeat={_r}")
+        _rec = _run_one_task(_task, _repo, _model, _task_id,
+                             no_skills=no_skills, source_batch=source_batch,
+                             results_path=output_path)
+        # _run_one_task 返回单条 record（dict）；防御历史 list[dict] 签名
+        _recs = _rec if isinstance(_rec, list) else [_rec]
+        for _r2 in _recs:
+            if not isinstance(_r2, dict):
+                continue
+            _r2["model"] = _model
+            _r2["repeat"] = _r
+            with open(output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(_r2, ensure_ascii=False) + "\n")
+        return _rec if isinstance(_rec, dict) else {}
+
+    if _bench_parallel > 1 and len(_all_jobs) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=_bench_parallel) as executor:
+            _futures = {executor.submit(_run_one_wrapper, j): j for j in _all_jobs}
+            for _fut in as_completed(_futures):
+                try:
+                    _res = _fut.result()
+                    if _res:
+                        results.append(_res)
+                except Exception as _exc:
+                    _job = _futures[_fut]
+                    console.error(f"[bench] {_job[3]} | {_job[2]} 执行异常: {_exc}")
+    else:
+        for _job in _all_jobs:
+            _res = _run_one_wrapper(_job)
+            if _res:
+                results.append(_res)
+
+    console.print(f"\n✅ bench 完成: {len(results)} 条结果 → {output_path}")
+    console.print(f"   下一步: agent_go eval models --results {output_path}")
 
 
 def cmd_baseline(args=None) -> None:
@@ -1087,9 +1134,6 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         )
         code_regression_rate = round(_regression_passed / _passed_count, 4) if _passed_count else None
 
-        # 决策规则
-        recommendation, roles, reason = _recommend(model, avg_pass_rate, avg_cost, n)
-
         efficiency_score = _model_efficiency_score(avg_pass_rate, avg_cost)
         cost_per_pass = _model_cost_per_pass(avg_cost, avg_pass_rate)
         models[model] = {
@@ -1106,9 +1150,6 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
             "code_regression_rate": code_regression_rate,
             "completed_subtasks": completed_total,
             "total_subtasks": subtask_total,
-            "recommendation": recommendation,
-            "recommended_roles": roles,
-            "reason": reason,
         }
 
         # 从 agent_go 任务目录读取评估事件计算假阳性率
@@ -1116,6 +1157,24 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         if fp_data:
             models[model]["false_positive_rate"] = fp_data["fp_rate"]
             models[model]["avg_confidence"] = fp_data["avg_confidence"]
+
+    # CR-G1 成本感知推荐（两遍）：先算跨模型 $/pass 中位数 + best_value，再带成本调 _recommend。
+    # 此前 _recommend 纯通过率门控，贵 5× 的模型与便宜的拿到相同 recommended。
+    _dpp_values = [m["dollar_per_pass"] for m in models.values() if m["dollar_per_pass"]]
+    _dpp_median = _median(_dpp_values)
+    # best_value：≥70% 通过者中 efficiency_score（passes/$）最高者，回答"性价比最优选哪个"
+    _bv_candidates = [(mdl, m) for mdl, m in models.items()
+                      if m["avg_pass_rate"] >= 0.70 and (m["efficiency_score"] or 0) > 0]
+    _best_value_model = (max(_bv_candidates, key=lambda kv: kv[1]["efficiency_score"])[0]
+                         if _bv_candidates else None)
+    for _mdl, _m in models.items():
+        _rec, _roles, _reason = _recommend(
+            _mdl, _m["avg_pass_rate"], _m["avg_cost_usd"], _m["sample_size"],
+            dollar_per_pass=_m["dollar_per_pass"], dpp_median=_dpp_median)
+        _m["recommendation"] = _rec
+        _m["recommended_roles"] = _roles
+        _m["reason"] = _reason
+        _m["best_value"] = (_mdl == _best_value_model)
 
     return {"models": models, "total_runs": len(results)}
 
@@ -1161,23 +1220,47 @@ def _model_cost_per_pass(avg_cost: float, avg_pass_rate: float) -> Optional[floa
         return None
     return round(avg_cost / avg_pass_rate, 6)
 
-def _recommend(model: str, pass_rate: float, avg_cost: float, n: int) -> tuple[str, list[str], str]:
-    """决策规则（PRD §3.7 对齐：60/70/75/80 四档阈值）"""
+def _median(values: list[float]) -> Optional[float]:
+    """中位数（None-safe）。用于跨模型 $/pass 成本基线。"""
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else round((s[mid - 1] + s[mid]) / 2, 6)
+
+
+def _recommend(model: str, pass_rate: float, avg_cost: float, n: int,
+               dollar_per_pass: Optional[float] = None,
+               dpp_median: Optional[float] = None) -> tuple[str, list[str], str]:
+    """决策规则（PRD §3.7 对齐：60/70/75/80 四档阈值）+ 成本维度（CR-G1）。
+
+    CR-G1 成本降档：$/pass > 2× 同批中位数时，recommended 降为 conditional——
+    贵模型不默认拿 ★（与便宜的同通过率模型区分），但不否定其能力（roles 不变）。
+    仅 recommended 受降档影响：conditional/discouraged 不再往下压（成本不该把
+    能力达标的模型压成"垃圾"）。
+    """
     if n < 3:
         return ("insufficient_data", [], f"仅 {n} 样本，需 ≥3 才可决策")
     if pass_rate < 0.60:
         return ("discouraged", [], f"通过率 {pass_rate:.0%} <60%，省钱产出垃圾（PRD 反指标）")
     if pass_rate >= 0.80:
-        return ("recommended", ["worker_easy", "worker_medium", "worker_hard"],
-                f"通过率 {pass_rate:.0%} ≥80%，全角色可用")
-    if pass_rate >= 0.75:
-        return ("conditional", ["worker_easy", "worker_medium", "worker_hard"],
-                f"通过率 {pass_rate:.0%} ≥75%，全角色可用（注意 hard 任务表现）")
-    if pass_rate >= 0.70:
-        return ("conditional", ["worker_easy", "worker_medium"],
-                f"通过率 {pass_rate:.0%} ≥70%，easy/medium 可用")
-    return ("conditional", ["worker_easy"],
-            f"通过率 {pass_rate:.0%} ≥60%，仅 easy 可用")
+        cat, roles, reason = ("recommended", ["worker_easy", "worker_medium", "worker_hard"],
+                              f"通过率 {pass_rate:.0%} ≥80%，全角色可用")
+    elif pass_rate >= 0.75:
+        cat, roles, reason = ("conditional", ["worker_easy", "worker_medium", "worker_hard"],
+                              f"通过率 {pass_rate:.0%} ≥75%，全角色可用（注意 hard 任务表现）")
+    elif pass_rate >= 0.70:
+        cat, roles, reason = ("conditional", ["worker_easy", "worker_medium"],
+                              f"通过率 {pass_rate:.0%} ≥70%，easy/medium 可用")
+    else:
+        cat, roles, reason = ("conditional", ["worker_easy"],
+                              f"通过率 {pass_rate:.0%} ≥60%，仅 easy 可用")
+    if (cat == "recommended" and dollar_per_pass and dpp_median
+            and dollar_per_pass > 2 * dpp_median):
+        cat = "conditional"
+        reason += f"；成本过高（$/pass ${dollar_per_pass:.4f} > 2× 批次中位数 ${dpp_median:.4f}）"
+    return (cat, roles, reason)
 
 
 def cmd_models(args=None) -> None:
@@ -1191,11 +1274,13 @@ def cmd_models(args=None) -> None:
 
     console.print(f"\n📊 模型生产力评估（{data['total_runs']} 次执行）")
     console.print("─" * 118)
-    console.print(f"{'模型':<22} {'样本':>4} {'通过率':>7} {'修正':>7} {'$/pass':>9} {'K8':>6} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
+    console.print(f"{'模型':<22} {'样本':>4} {'档':>3} {'通过率':>7} {'修正':>7} {'$/pass':>9} {'K8':>6} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
     console.print("─" * 118)
 
     for model, m in data["models"].items():
         icon = {"recommended": "★", "conditional": "⚠", "discouraged": "✗", "insufficient_data": "?"}[m["recommendation"]]
+        bv = "💰" if m.get("best_value") else "  "  # CR-G1：性价比最优标记
+        tier_str = {"frontier": "F", "value": "V", "lite": "L"}.get(model_tier(model), "-")  # CR-G2：tier 展示
         fp_str = f"{m.get('false_positive_rate', '?'):>3}%" if isinstance(m.get('false_positive_rate'), (int, float)) else "   ?"
         eff = m.get("efficiency_score", 0)
         eff_str = f"{eff:>7.1f}" if eff > 0 else "     -"
@@ -1203,7 +1288,7 @@ def cmd_models(args=None) -> None:
         k8_str = f"{k8:>5.0%}" if k8 is not None else "    -"
         corr = m.get("avg_corrected_pass_rate")
         corr_str = f"{corr:>6.0%}" if corr is not None else "     -"
-        console.print(f"{icon} {model:<20} {m['sample_size']:>4} {m['avg_pass_rate']:>6.0%} {corr_str} "
+        console.print(f"{icon}{bv}{model:<19} {m['sample_size']:>4} {tier_str:>3} {m['avg_pass_rate']:>6.0%} {corr_str} "
                       f"${(m['dollar_per_pass'] or 0):>8.4f} {k8_str} {eff_str} {fp_str:>7} "
                       f"{m['recommendation']:<12} {m['reason']}")
     console.print("─" * 118)
@@ -1211,6 +1296,116 @@ def cmd_models(args=None) -> None:
     console.print("K8   = 通过 record 中 zero-retry 占比（首次验证通过率，§3.4 修订口径）")
     console.print("$/pass = sum(cost) / sum(pass_rate)，raw 口径，跨批次可比（§3.1）")
     console.print("修正   = S12-P0 修正口径通过率（cleanup_race 计通过，历史数据按 per_subtask 重算）")
+    console.print("💰    = CR-G1 性价比最优（≥70% 通过者中 efficiency_score 最高；贵模型 $/pass>2× 中位数时 ★ 降 ⚠）")
+    console.print("档    = CR-G2 模型分级（F=frontier 旗舰 / V=value 主力 / L=lite 轻量 / -=未分级自定义）")
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-G5：bench 推荐 → worker_models 自动衔接（dry-run / --apply）
+# ═══════════════════════════════════════════════════════════════
+
+def _recommend_worker_models(models: dict[str, Any]) -> dict[str, Optional[dict]]:
+    """按 recommended_roles + 通过率/$/pass 把模型分配到 easy/medium/hard 槽。
+
+    分配规则（确定性、可审计）：
+      - hard：recommended_roles 含 worker_hard 者，取通过率最高（tie → best_value → min $/pass）。
+      - medium / easy：含对应 role 者，取 $/pass 最低（easy/medium 槽优先省钱；tie → max 通过率）。
+      - 无合格候选 → 该槽 None（留空，不退而塞弱模型）。
+    依赖 G1（成本感知推荐）+ G2（tier 校验）先落地，推荐才可信。
+    """
+    items = list(models.items())  # (name, metrics)
+
+    def _pick(role: str, criterion: str) -> Optional[dict]:
+        cands = [(n, m) for n, m in items if role in (m.get("recommended_roles") or [])]
+        if not cands:
+            return None
+        if role == "worker_hard":
+            # 能力优先：max 通过率 → best_value → min $/pass
+            cands.sort(key=lambda nm: (-nm[1]["avg_pass_rate"],
+                                       0 if nm[1].get("best_value") else 1,
+                                       nm[1].get("dollar_per_pass") or 9))
+        else:
+            # 省钱优先：min $/pass → max 通过率
+            cands.sort(key=lambda nm: ((nm[1].get("dollar_per_pass") or 9),
+                                       -nm[1]["avg_pass_rate"]))
+        n, m = cands[0]
+        return {"model": n, "criterion": criterion,
+                "avg_pass_rate": m["avg_pass_rate"],
+                "dollar_per_pass": m.get("dollar_per_pass"),
+                "recommendation": m["recommendation"],
+                "best_value": bool(m.get("best_value"))}
+
+    return {
+        "hard": _pick("worker_hard", "通过率最高"),
+        "medium": _pick("worker_medium", "$/pass 最低"),
+        "easy": _pick("worker_easy", "$/pass 最低"),
+    }
+
+
+def _apply_worker_models(proposal: dict[str, Optional[dict]]) -> None:
+    """把推荐写入 config.json 的 worker_models（原子写：tmp + rename）。"""
+    cfg: dict[str, Any] = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            cfg = {}
+    cfg["worker_models"] = {
+        "easy": (proposal.get("easy") or {}).get("model", ""),
+        "medium": (proposal.get("medium") or {}).get("model", ""),
+        "hard": (proposal.get("hard") or {}).get("model", ""),
+    }
+    _tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    _tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    _tmp.replace(CONFIG_PATH)
+
+
+def cmd_recommend(args=None) -> None:
+    """CR-G5：读 bench 结果 → 推荐 worker_models{easy,medium,hard} → dry-run / --apply 写 config。
+
+    CLI: agent_go eval recommend [--results FILE] [--apply] [--force]
+    依赖 G1（成本感知推荐）+ G2（tier 校验）落地后才可信。绝不静默改 config：
+    默认 dry-run 只展示；--apply 写入前跑 G2 校验，tier 错配时拒绝（--force 覆盖）。
+    """
+    results_path = Path(getattr(args, "results", "eval_suite/results.jsonl") or "eval_suite/results.jsonl")
+    data = analyze_model_productivity(results_path)
+    if "error" in data:
+        console.warning(f"{data['error']} → 先跑 agent_go eval bench --output {results_path}")
+        return
+
+    proposal = _recommend_worker_models(data["models"])
+
+    # dry-run 展示
+    console.print(f"\n🎯 worker_models 推荐（基于 {data['total_runs']} 次执行）")
+    console.print("─" * 90)
+    for _slot in ("hard", "medium", "easy"):
+        _p = proposal.get(_slot)
+        if not _p:
+            console.print(f"  {_slot:<7} → （无合格候选，留空）")
+            continue
+        _bv = " 💰" if _p["best_value"] else ""
+        _dpp = _p["dollar_per_pass"]
+        console.print(f"  {_slot:<7} → {_p['model']}{_bv}  "
+                      f"(通过率 {_p['avg_pass_rate']:.0%}, $/pass ${_dpp or 0:.4f}, "
+                      f"{_p['criterion']}, {_p['recommendation']})")
+    console.print("─" * 90)
+
+    # G2 tier 校验（advisory，但 --apply 时可作为拒绝条件）
+    _proposed_wm = {k: (proposal.get(k) or {}).get("model", "") for k in ("easy", "medium", "hard")}
+    _tier_issues = validate_worker_tier(_proposed_wm)
+    if _tier_issues:
+        for _slot, _mdl, _tier, _msg in _tier_issues:
+            console.warning(f"⚠ tier 错配：{_msg}")
+
+    if not getattr(args, "apply", False):
+        console.print("（dry-run，未写入。用 --apply 写入 config.json，tier 错配时加 --force 覆盖）")
+        return
+
+    if _tier_issues and not getattr(args, "force", False):
+        console.error("tier 错配，拒绝写入。复查 bench 数据或用 --force 覆盖。")
+        sys.exit(1)
+    _apply_worker_models(proposal)
+    console.print(f"✅ 已写入 {CONFIG_PATH} 的 worker_models：{_proposed_wm}")
 
 
 # ═══════════════════════════════════════════════════════════════
