@@ -43,6 +43,59 @@ cmd_run(repo, task)
   └── cmd_pr()                    → PR 描述 + 质量仪表 (通过率/验证率/合并就绪指示)
 ```
 
+## 任务状态流转
+
+数据流（上图）回答"调用谁"，状态流转（下图）回答"任务在哪种状态间怎么走、在哪里被判生死"。分两层：任务级（`meta.status`）与子任务级（`results[].status`）。
+
+### 任务级（`meta.status`）
+
+```mermaid
+stateDiagram-v2
+    [*] --> Planning: cmd_run / Spec 准入 / generate_plan
+    Planning --> Running: confirm 后 _run_pipeline / 拓扑波次并发
+    Running --> Completed: 全部子任务 completed 或 no_changes
+    Running --> Failed: 存在 failed 子任务
+    Running --> Interrupted: SIGKILL / 异常中断 / meta 停在旧状态
+    Interrupted --> Running: agent_go resume (跳过已完成, 续跑剩余)
+    Interrupted --> Recovering: agent_go recover (从 worktree 重建 meta)
+    Recovering --> Running: recover 分类后 resume
+    Completed --> [*]: notify + final report + cmd_pr
+    Failed --> [*]: notify + 保留失败 worktree (inspect)
+```
+
+> `recover` 按子任务 worktree 状态重判：commit+验证通过→completed、commit+验证失败→failed、无 commit+有改动→reset（resume 重跑）、无 commit+无改动→no_changes。**recover 永不替你 commit 孤儿改动**——commit 是唯一完成边界。
+
+### 子任务级（`results[].status`）
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Blocked: 上游 failed/blocked 或 L3 任务预算熔断 或 用户跳过
+    Pending --> Running: worktree + merge 上游 / claude -p 启动(难度路由)
+    Running --> Verifying: claude 产出完成 / 跑验证命令(4 阶段白名单)
+    Verifying --> Fixing: 验证失败 retry 未满 / 注入 stdout+stderr+diff
+    Fixing --> Verifying: 修复重跑 / retry_timeout 按难度缩放(hard×2.5)
+    Verifying --> Completed: 验证通过 / git commit + tag(完成边界)
+    Verifying --> Failed: retry 用尽 或 L2 子任务预算熔断
+    Running --> NoChanges: claude 无改动
+    Running --> Killed: timeout / IDLE 600s 静默 / goal 看门狗 / SIGKILL
+    Killed --> Completed: cleanup_race (S12-P0) 全子任务已验证 计通过
+    Killed --> Interrupted: 中途被杀 / 写 interrupted checkpoint
+    Interrupted --> Pending: resume 重跑该子任务
+    Completed --> [*]
+    Failed --> [*]: worktree 保留 (inspect)
+    Blocked --> [*]: worktree 保留 (inspect)
+    NoChanges --> [*]
+```
+
+> **`Killed` 的去向由 `kill_reason` 决定**（S12-P0 落地，`bench.py:_collect_result`）：
+> - `cleanup_race`（超时但全子任务完成已验证）→ **计 Completed**（v3 65 条假失败的修正）
+> - `stuck_or_hardtimeout`（真卡死/重试墙钟到点）→ Failed（能力不足）
+> - `over_budget_l2/l3`（预算到限）→ 单列，**不计能力失败分母**
+> - `infra`（cost=0 / API 故障）→ 单列，不计能力失败
+>
+> 这把"进程被杀"与"任务失败"解耦——是 commit 边界之外、决定通过率可信度的第二道边界。详见 [design/timeout-kill-strategy-2026-08-06.md](design/timeout-kill-strategy-2026-08-06.md)。
+
 ## 关键设计决策
 
 ### Worktree 隔离而非 clone
@@ -94,7 +147,7 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
 ## 测试
 
 ```bash
-pytest tests/ -q           # 1442 tests, ~35s
+pytest tests/ -q           # 1569 tests, ~60s
 ```
 
 测试策略：mock 所有外部依赖 (git, claude, API)，验证逻辑正确性。NFR 专项测试在 `test_nfr_*.py`。
@@ -178,7 +231,7 @@ agent_go/bench.py（编排器，不 import pipeline/executor）
     agent_go eval judge calibrate --llm-scores ... --human-scores ...
 ```
 
-### S9 办公能力扩展架构（能力 A ✅ 已实现，能力 B ⏳ 设计中）
+### S9 办公能力扩展架构（能力 A ✅ 已实现，能力 B ✅ 已实现）
 
 > 设计稿见 [design/office-capability-extension.md](design/office-capability-extension.md)。补齐两个结构性缺口，使 agent_go 从"代码 diff 导向"扩展为"可交付任意产物"的编排器。**不自建 Office 编辑器**，复用已成标准的 Office MCP 生态。
 
@@ -195,8 +248,8 @@ agent_go/bench.py（编排器，不 import pipeline/executor）
   配置：config.json 新增 mcp_servers 节（command/args/env/enabled/tool_filter/scope）
   容错：server 启动失败降级 warning 不阻断 pipeline（与 notify/skills 同级）
 
-能力 B：产物导出路径（让生成的文件交付到用户目录，不被 worktree 清理吃掉）——⏳ 设计中
-  agent_go/artifacts.py（规划新增）
+能力 B：产物导出路径（让生成的文件交付到用户目录，不被 worktree 清理吃掉）——✅ 已实现（2026-08-01）
+  agent_go/artifacts.py
     collect_from_worktree — 扫描 worktree/__artifacts__/** 收集产物
     export — 复制到 --artifact-dir/{task_id}/{sub_id}/
     render_export_summary — 生成导出清单（供 final report）

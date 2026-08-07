@@ -169,11 +169,11 @@ def _detect_runtime_info(repo: Path) -> str:
     return "\n".join(parts)
 
 
-def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging.Logger, supplement: str = "", reference_docs: str = "", iteration: int = 1, skill_context: str = "", no_cache: bool = False) -> dict[str, Any]:
+def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging.Logger, supplement: str = "", reference_docs: str = "", iteration: int = 1, skill_context: str = "", no_cache: bool = False, spec_context: str = "") -> dict[str, Any]:
     plan_start = time.time()
     logger.info("[PLAN] ═══ PLAN MODE ═══")
     logger.info(f"[PLAN]  第 {iteration} 次生成")
-    log_event(logger, "plan_generate", {"iteration": iteration, "has_supplement": bool(supplement), "has_docs": bool(reference_docs), "has_skills": bool(skill_context)})
+    log_event(logger, "plan_generate", {"iteration": iteration, "has_supplement": bool(supplement), "has_docs": bool(reference_docs), "has_skills": bool(skill_context), "has_spec": bool(spec_context)})
 
     # Plan 缓存检查
     cache_hit = False
@@ -333,6 +333,25 @@ EXAMPLE (3-step plan):
             system_prompt += f"\n## 可用领域知识（Skill）\n以下是项目/用户提供的领域知识，可在制定方案时参考：\n{skill_context}\n请在 plan 的 steps 中使用 skills 字段引用相关的 Skill 名称。"
         else:
             logger.warning(f"[PLAN] 跳过 Skill 上下文注入（system prompt 已达上限 {len(system_prompt)} 字符）")
+
+    # 如果有 Task Spec 结构化约束（S11-P0），注入为 Planner 硬约束
+    if spec_context:
+        remaining = MAX_SYSTEM_PROMPT_CHARS - len(system_prompt)
+        if remaining > 500:
+            if len(spec_context) > remaining:
+                spec_context = spec_context[:remaining-100] + "\n... [Spec 约束已截断]"
+            system_prompt += (
+                f"\n## Task Spec 硬约束（来自 --spec，必须严格遵守）\n"
+                f"用户提供了结构化 Task Spec。以下约束在分解 steps 时必须逐条遵守，"
+                f"并把相关约束写入对应 step 的 agent_prompt：\n{spec_context}\n"
+                f"关键要求：\n"
+                f"- steps[].files 必须在 Spec §3「需要改动」范围内，不得触及「明确不动」的区域\n"
+                f"- steps[].verification 应覆盖 Spec §5 的验收标准\n"
+                f"- Spec §7 的已知风险写入对应 step 的 risks 字段，高风险步骤 difficulty 标记为 hard\n"
+            )
+            logger.info(f"[PLAN] 注入 Task Spec 约束: {len(spec_context)} 字符")
+        else:
+            logger.warning(f"[PLAN] 跳过 Spec 约束注入（system prompt 已达上限 {len(system_prompt)} 字符）")
 
     system_prompt += "\n## 可用 Agent 类型\n- developer: 开发者（编写代码）\n- architect: 架构师（设计分析，只读）\n- reviewer: 审查者（代码审查）\n- tester: 测试者（编写测试）\n必须为每个步骤指定合适的 agent_type。\n\n## 允许的验证命令\nsteps[].verification 仅限以下命令前缀（安全白名单）：\n" + "\n".join(f"- `{p}`" for p in SAFE_VERIFICATION_PREFIXES) + "\n\n## 示例步骤\n以下是一个正确填写 agent_type 和 skills 的示例：\n{\n  \"id\": 2,\n  \"title\": \"编写单元测试\",\n  \"description\": \"为认证模块补充测试\",\n  \"files\": [\"tests/test_auth.py\"],\n  \"verification\": \"pytest tests/test_auth.py -v\",\n  \"risks\": [],\n  \"agent_prompt\": \"请为 src/auth.py 编写单元测试，覆盖正常和异常路径\",\n  \"agent_type\": \"tester\",\n  \"difficulty\": \"medium\",\n  \"skills\": [\"tdd-workflow\"]\n}"
 

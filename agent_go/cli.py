@@ -11,11 +11,13 @@ from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
 from .pipeline import _run_pipeline
 from .skills import load_skills, discover_skills, render_skill_for_plan, list_skills
+from .spec import parse_spec, validate_spec_l1, render_spec_template, detect_step_conflicts
 from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .replay import cmd_replay
 from .checkpoint import list_checkpoints, restore_checkpoint, SnapshotManager
 from .mcp_server import main as cmd_mcp
+from .web_server import main as cmd_web
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
 from .git_utils import init_git_repo
@@ -49,6 +51,10 @@ def _build_parser():
     run_parser.add_argument("repo", help="Path to the repository")
     run_parser.add_argument("task", nargs="?", default="请根据项目情况完成改进", help="Task description")
     run_parser.add_argument("--docs", help="Comma-separated list of reference document paths")
+    run_parser.add_argument("--spec", dest="spec_path", default=None,
+                            help="Task Spec 文件路径（结构化输入契约，SDD）。读取后按 7 章节解析注入 Plan prompt；通过 L1 准入审查后方可执行")
+    run_parser.add_argument("--force", action="store_true",
+                            help="跳过 Spec 准入审查（L1+L2 全部跳过）。仅限确信 Spec 正确的场景")
     run_parser.add_argument("--skill", help="Comma-separated list of skill names to load")
     run_parser.add_argument("--agent-type", dest="agent_type", help="Default agent type for all subtasks")
     run_parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmations (headless mode)")
@@ -86,6 +92,10 @@ def _build_parser():
                             help="每波执行前暂停确认（适用于交互式非 TUI 场景）")
     run_parser.add_argument("--auto-init", action="store_true",
                             help="目标目录非 git 仓库时自动 git init + 首次 commit（默认关闭）")
+    run_parser.add_argument("--artifact-dir", default=None,
+                            help="产物导出目录：子任务写入 worktree/__artifacts__/ 的文件在此收集导出（默认不导出）")
+    run_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
+                            help="任务级成本预算（USD）：累计 metering 成本超限即熔断剩余子任务（默认关闭）")
     run_parser.add_argument("--config", default=argparse.SUPPRESS, help="Path to config JSON file (default: ~/.agent_go/config.json)")
 
     # resume 子命令
@@ -104,6 +114,10 @@ def _build_parser():
                                help="强制清理所有 worktree")
     resume_parser.add_argument("--no-verify-block", action="store_true", dest="no_verify_block",
                                help="验证失败不阻断下游依赖（默认阻断）")
+    resume_parser.add_argument("--artifact-dir", default=None,
+                               help="产物导出目录：收集各 worktree/__artifacts__/ 的文件（覆盖 meta 中的记录）")
+    resume_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
+                               help="任务级成本预算（USD）：累计 metering 成本超限即熔断剩余子任务（默认关闭）")
 
     # list 子命令
     subparsers.add_parser("list", help="List all historical tasks")
@@ -123,6 +137,16 @@ def _build_parser():
 
     # config 子命令
     subparsers.add_parser("config", help="View current configuration")
+
+    # spec 子命令（S11-P0：Task Spec 工具）
+    spec_parser = subparsers.add_parser("spec", help="Task Spec 工具（SDD 结构化输入）")
+    spec_sub = spec_parser.add_subparsers(dest="spec_subcommand", help="Spec operation")
+    spec_template_parser = spec_sub.add_parser("template", help="生成空白 Task Spec 模板")
+    spec_template_parser.add_argument("repo", nargs="?", help="仓库路径（预填模块列表提示）")
+    spec_template_parser.add_argument("--output", "-o", default=None, help="输出文件路径（默认打印到 stdout）")
+    spec_validate_parser = spec_sub.add_parser("validate", help="对 Spec 文件运行 L1 准入审查")
+    spec_validate_parser.add_argument("spec_path", help="Task Spec 文件路径")
+    spec_validate_parser.add_argument("repo", nargs="?", help="仓库路径（用于文件路径校验）")
 
     # skills 子命令
     skills_parser = subparsers.add_parser("skills", help="List available Skills")
@@ -176,7 +200,7 @@ def _build_parser():
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
-    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "models", "judge", "all"],
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "judge", "all"],
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
@@ -198,8 +222,12 @@ def _build_parser():
                              help="结果输出文件（bench 子命令）")
     eval_parser.add_argument("--no-skills", dest="no_skills", action="store_true",
                              help="禁用 skill 自动发现（bench 子命令，用于 skill on/off 对比）")
+    eval_parser.add_argument("--source-batch", dest="source_batch", default="",
+                             help="批次标识（bench 子命令，如 baseline / results_v2 / smoke-*，写入每条 record）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
-                             help="读取结果文件（models 子命令）")
+                             help="读取结果文件（models/cost-baseline 子命令，逗号分隔多个文件）")
+    eval_parser.add_argument("--tolerance", dest="tolerance", type=float, default=1.5,
+                             help="成本基线预算 = P90 × tolerance（cost-baseline 子命令，默认 1.5）")
     # judge 子命令参数
     eval_parser.add_argument("--judge-models", dest="judge_models",
                              help="评判模型列表，逗号分隔（judge 子命令）")
@@ -252,6 +280,12 @@ def _build_parser():
     mcp_parser.add_argument("--host", default="127.0.0.1", help="HTTP 绑定地址（默认 127.0.0.1，仅本地）")
     mcp_parser.add_argument("--port", type=int, default=8090, help="HTTP 监听端口（默认 8090）")
 
+    # web 子命令
+    web_parser = subparsers.add_parser("web", help="只读 Web 观察平台（任务清单/子任务明细/日志/metering/时间线）")
+    web_parser.add_argument("--host", default="127.0.0.1", help="绑定地址（默认 127.0.0.1，仅本地）")
+    web_parser.add_argument("--port", type=int, default=8091, help="监听端口（默认 8091）")
+    web_parser.add_argument("--token", default=None, help="可选 Bearer token 鉴权（默认关闭）")
+
     # router 子命令
     router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")
     router_sub = router_parser.add_subparsers(dest="router_subcommand", help="Router operation")
@@ -271,6 +305,24 @@ def _build_parser():
     return parser
 
 
+def _build_spec_context(spec_obj) -> str:
+    """把 TaskSpec 的范围/约束/验收/风险组装成注入 Plan prompt 的结构化约束文本。
+
+    §3 范围 / §4 约束 / §5 验收 / §7 风险 → system prompt 硬约束
+    （§1 目标已在 cmd_run 中替代 task；§2 动机 / §6 参考已注入 user content）
+    """
+    parts = []
+    if spec_obj.scope:
+        parts.append(f"【范围（必须遵守）】\n{spec_obj.scope.strip()}")
+    if spec_obj.constraint:
+        parts.append(f"【设计约束（必须遵守）】\n{spec_obj.constraint.strip()}")
+    if spec_obj.acceptance:
+        parts.append(f"【验收标准（verification 命令应覆盖这些）】\n{spec_obj.acceptance.strip()}")
+    if spec_obj.risk:
+        parts.append(f"【已知风险（在 steps[].risks 和 difficulty 中体现）】\n{spec_obj.risk.strip()}")
+    return "\n\n".join(parts)
+
+
 def cmd_run(args=None):
     if args is None:
         parser = _build_parser()
@@ -284,6 +336,8 @@ def cmd_run(args=None):
     repo = Path(args.repo).resolve()
     task = args.task
     doc_paths = [p.strip() for p in args.docs.split(",")] if args.docs else []
+    spec_path = Path(args.spec_path).resolve() if getattr(args, "spec_path", None) else None
+    force_spec = getattr(args, "force", False)
     skill_names = [s.strip() for s in args.skill.split(",")] if args.skill else []
     agent_type_name = args.agent_type or ""
     issue_ref = str(args.issue_ref) if args.issue_ref else ""
@@ -344,6 +398,8 @@ def cmd_run(args=None):
         config.setdefault("goal", {})["enable_goal_hook"] = True
     if getattr(args, "agent_loop", False):
         config.setdefault("agent_loop", {})["enabled"] = True
+    if getattr(args, "artifact_dir", None):
+        config["artifact_dir"] = args.artifact_dir
 
     if auto_yes:
         config["behavior"]["auto_confirm_plan"] = True
@@ -368,6 +424,14 @@ def cmd_run(args=None):
     # Phase 1 配套：结构化计量日志路径
     config["_metering_path"] = str(task_dir / "metering.jsonl")
     config["_task_id"] = task_id
+
+    # S10 成本控制：--max-cost 开启 L3 任务级熔断（默认关闭）
+    if getattr(args, "max_cost", None):
+        _cc = dict(config.get("cost_control") or {})
+        _cc["enabled"] = True
+        _cc["max_budget_usd"] = float(args.max_cost)
+        config["cost_control"] = _cc
+        logger.info(f"[cost_control] --max-cost ${args.max_cost} 已启用 L3 任务级熔断")
 
     logger = setup_logger(task_id, task_dir)
     logger.info("=" * 60)
@@ -412,9 +476,47 @@ def cmd_run(args=None):
     if doc_paths:
         console.print(f"📎 参考文档: {', '.join(doc_paths)}")
 
+    # ── Task Spec 准入审查（S11-P0）──
+    spec_obj = None
+    spec_context = ""
+    if spec_path is not None:
+        if not spec_path.exists():
+            console.error(f"Spec 文件不存在: {spec_path}")
+            sys.exit(1)
+        spec_obj = parse_spec(spec_path)
+        if spec_obj is None:
+            console.error(f"Spec 解析失败: {spec_path}")
+            sys.exit(1)
+        console.print(f"📋 Task Spec: {spec_obj.title or spec_path.name}")
+        # --yes 模式仍跑 L1（确定性检查，0 误判，不跳过）；--force 全跳过
+        if not force_spec:
+            console.print("🔍 L1 准入审查中...")
+            violations = validate_spec_l1(spec_obj, repo)
+            if violations:
+                console.error(f"❌ L1 准入审查未通过（{len(violations)} 项违规）：")
+                for i, v in enumerate(violations, 1):
+                    sec = f" §{v.section}" if v.section else ""
+                    console.error(f"  {i}. [{v.check}{sec}] {v.message}")
+                    if v.suggestion:
+                        console.error(f"     💡 {v.suggestion}")
+                console.error("\n修正 Spec 后重试，或用 --force 跳过审查（不推荐）。")
+                sys.exit(1)
+            console.print("✅ L1 准入审查通过")
+        else:
+            console.print("⚠️ --force 已跳过 Spec 准入审查")
+        logger.info(f"Task Spec 加载: {spec_path}（完整={spec_obj.is_complete}, force={force_spec}）")
+        # Spec §1 目标作为任务描述的增强（若 Spec 完整，目标替代一句话 task 的模糊性）
+        if spec_obj.goal:
+            task = spec_obj.goal.strip()
+        # 结构化约束注入（由 generate_plan 的 spec_context 参数消费）
+        spec_context = _build_spec_context(spec_obj)
+
     # Plan Mode
     console.print("\n🤖 进入 Plan Mode...")
     initial_docs = read_reference_docs(doc_paths, repo, logger) if doc_paths else ""
+    # Spec §6 参考资料并入 initial_docs
+    if spec_obj and spec_obj.reference:
+        initial_docs = (initial_docs + "\n\n" if initial_docs else "") + f"===== Task Spec §6 参考资料 =====\n{spec_obj.reference}\n===== 结束 ====="
 
     plan = None
     max_iter = config.get("behavior", {}).get("max_plan_iterations", 5)
@@ -423,7 +525,7 @@ def cmd_run(args=None):
 
     for attempt in range(3):
         try:
-            plan = generate_plan(task, repo, config, logger, "", initial_docs, iteration, skill_plan_context, no_cache=no_cache)
+            plan = generate_plan(task, repo, config, logger, "", initial_docs, iteration, skill_plan_context, no_cache=no_cache, spec_context=spec_context)
             plan["_original_task"] = task
             break
         except Exception as e:
@@ -449,7 +551,7 @@ def cmd_run(args=None):
                     _save_plan_snapshot(task_dir, plan, iteration - 1)
                 _prev_plan = dict(plan) if plan else None  # R-4: diff 基线
                 try:
-                    plan = generate_plan(task, repo, config, logger, "", regen_docs, iteration, skill_plan_context, no_cache=no_cache)
+                    plan = generate_plan(task, repo, config, logger, "", regen_docs, iteration, skill_plan_context, no_cache=no_cache, spec_context=spec_context)
                 except Exception as e:
                     logger.error(f"重试生成 Plan 失败: {e}")
                     console.print(f"\n⚠️ 重试失败: {e}")
@@ -478,6 +580,27 @@ def cmd_run(args=None):
         if confirmed_plan is not None:
             # 正常 Plan 路径：拆解子任务并保存 PLAN.md
             # （降级路径已在上方得到 subtasks，confirmed_plan 为 None，跳过本块）
+            # L1.5 AST 冲突检测（S11，学术驱动）：Plan 确认后、执行前拦截多 step 同文件/同符号冲突
+            try:
+                step_conflicts = detect_step_conflicts(confirmed_plan.get("steps") or [], repo)
+                symbol_conflicts = [c for c in step_conflicts if c.severity == "symbol"]
+                file_conflicts = [c for c in step_conflicts if c.severity == "file"]
+                if step_conflicts:
+                    console.print(f"\n⚡ L1.5 AST 冲突检测：{len(step_conflicts)} 处")
+                    for c in step_conflicts:
+                        icon = "🔴" if c.severity == "symbol" else "🟡"
+                        console.print(f"  {icon} [{c.severity}] {c.file} (steps {'/'.join(map(str, c.steps))})")
+                        if c.symbols:
+                            console.print(f"      同名符号: {', '.join(c.symbols)}")
+                    # 符号级冲突（高置信）在交互模式询问是否继续，--yes/--force 跳过询问
+                    if symbol_conflicts and not auto_yes and not force_spec:
+                        resp = safe_input("\n⚠️ 存在符号级冲突，可能集成失败。继续执行? [y/N] ").strip().lower()
+                        if resp not in ("y", "yes"):
+                            console.error("已取消执行。建议调整 Plan：合并冲突 step 或添加依赖。")
+                            sys.exit(1)
+            except Exception as _e:
+                # 冲突检测是辅助功能，失败不阻断主流程
+                logger.warning(f"L1.5 冲突检测失败（跳过）: {_e}")
             subtasks = plan_to_subtasks(
                 confirmed_plan, logger, repo=repo,
                 default_skills=[s.name for s in skills] if skills else None,
@@ -607,11 +730,21 @@ def cmd_resume(args=None):
     config["_metering_path"] = str(task_dir / "metering.jsonl")
     config["_task_id"] = task_id
 
-    # CLI 覆盖：--max-retries / --no-verify-block（args 模式）
+    # S10 成本控制：--max-cost 开启 L3 任务级熔断（默认关闭）
+    if args and getattr(args, "max_cost", None):
+        _cc = dict(config.get("cost_control") or {})
+        _cc["enabled"] = True
+        _cc["max_budget_usd"] = float(args.max_cost)
+        config["cost_control"] = _cc
+        logger.info(f"[cost_control] --max-cost ${args.max_cost} 已启用 L3 任务级熔断")
+
+    # CLI 覆盖：--max-retries / --no-verify-block / --artifact-dir（args 模式）
     if args and getattr(args, 'max_retries', None) is not None:
         config.setdefault("verification", {})["max_retries"] = args.max_retries
     if args and getattr(args, 'no_verify_block', False):
         config.setdefault("verification", {})["block_on_failure"] = False
+    if args and getattr(args, 'artifact_dir', None):
+        config["artifact_dir"] = args.artifact_dir
 
     auto_yes = "--yes" in sys.argv or "-y" in sys.argv
     headless = auto_yes or "--headless" in sys.argv
@@ -1632,6 +1765,52 @@ def cmd_config() -> None:
     config = load_config()
     console.print(json.dumps(config, indent=2, ensure_ascii=False))
 
+def cmd_spec(args) -> None:
+    """Task Spec 工具：template（生成模板）/ validate（L1 准入审查）。"""
+    sub = getattr(args, "spec_subcommand", None)
+    if sub == "template":
+        repo = Path(args.repo).resolve() if args.repo else None
+        if repo and not repo.exists():
+            console.error(f"路径不存在: {repo}")
+            sys.exit(1)
+        content = render_spec_template(repo)
+        if args.output:
+            out = Path(args.output)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(content, encoding="utf-8")
+            console.print(f"✅ Task Spec 模板已生成: {out}")
+        else:
+            console.print(content)
+    elif sub == "validate":
+        spec_path = Path(args.spec_path)
+        if not spec_path.exists():
+            console.error(f"Spec 文件不存在: {spec_path}")
+            sys.exit(1)
+        spec = parse_spec(spec_path)
+        if spec is None:
+            console.error(f"Spec 解析失败: {spec_path}")
+            sys.exit(1)
+        repo = Path(args.repo).resolve() if args.repo else None
+        violations = validate_spec_l1(spec, repo)
+        console.print(f"\n📋 Task Spec: {spec.title or spec_path.name}")
+        console.print(f"   完整性: {'✅ 全部必填章节就绪' if spec.is_complete else '❌ 缺失必填章节'}")
+        if spec.source_path:
+            console.print(f"   来源: {spec.source_path}")
+        if not violations:
+            console.print("\n✅ L1 准入审查通过（0 项违规）")
+        else:
+            console.print(f"\n❌ L1 准入审查未通过（{len(violations)} 项违规）：")
+            for i, v in enumerate(violations, 1):
+                sec = f" §{v.section}" if v.section else ""
+                console.print(f"  {i}. [{v.check}{sec}] {v.message}")
+                if v.suggestion:
+                    console.print(f"     💡 {v.suggestion}")
+            sys.exit(1)
+    else:
+        console.print("Usage: agent_go spec <template|validate> [args]")
+        console.print("  template [repo] [--output PATH]  生成空白 Task Spec 模板")
+        console.print("  validate <spec_path> [repo]       对 Spec 文件运行 L1 准入审查")
+
 def cmd_clean() -> None:
     import shutil as _shutil
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
@@ -2060,6 +2239,8 @@ def main() -> None:
             cmd_status(args)
         elif args.command == "config":
             cmd_config()
+        elif args.command == "spec":
+            cmd_spec(args)
         elif args.command == "clean":
             cmd_clean()
         elif args.command == "pr":
@@ -2100,6 +2281,8 @@ def main() -> None:
             cmd_checkpoint(args)
         elif args.command == "mcp":
             cmd_mcp(args)
+        elif args.command == "web":
+            cmd_web(args)
     except KeyboardInterrupt:
         console.print("\n\n⏹️  用户中断（Ctrl+C）")
         sys.exit(130)

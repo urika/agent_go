@@ -98,6 +98,23 @@ class TestBuildParser:
         args = parser.parse_args(["skills"])
         assert args.command == "skills"
 
+    def test_eval_bench_source_batch_parser(self):
+        """S10-P1：eval bench 支持 --source-batch 批次标识。"""
+        parser = _build_parser()
+        args = parser.parse_args([
+            "eval", "bench", "--tasks", "eval_suite",
+            "--candidate-models", "claude-haiku-4-5",
+            "--repeat", "1", "--source-batch", "smoke-20260801",
+        ])
+        assert args.command == "eval"
+        assert args.source_batch == "smoke-20260801"
+
+    def test_eval_bench_source_batch_default_empty(self):
+        """未指定 --source-batch 时默认空串。"""
+        parser = _build_parser()
+        args = parser.parse_args(["eval", "bench"])
+        assert getattr(args, "source_batch", "") == ""
+
 
 class TestCmdList:
     """cmd_list 任务列表"""

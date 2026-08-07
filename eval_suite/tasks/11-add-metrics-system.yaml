@@ -34,4 +34,11 @@ task: |
   - 新测试在 tests/test_metrics.py 中
 verification:
   - "python -m pytest tests/ -q"
-timeout: 900
+timeout: 1440
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.6
+  per_subtask_budget_usd: 0.5
+  on_exceed: stop

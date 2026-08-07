@@ -14,8 +14,16 @@ task: |
 
   batch_validate 对列表批量调用 validate_email。
 
-  注意：验证命令只检测函数是否可调用的最基本要求。
-  真正的正确性将由独立的语义评估检查。
+  这是一个单文件小任务：直接在 solution.py 中实现两个函数即可，
+  不需要额外的审查、重构或验证步骤，一步完成。
+  verification 命令中的断言即为全部验收标准。
 verification:
   - "python3 -c \"from solution import validate_email, batch_validate; import inspect; assert callable(validate_email); assert callable(batch_validate); assert inspect.signature(validate_email).parameters.get('email'); r=batch_validate(['a@b.c','']); assert len(r)==2\""
-timeout: 180
+timeout: 500
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.25
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

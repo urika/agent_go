@@ -17,5 +17,7 @@
 |------|------|
 | [ISSUES.md](ISSUES.md) | 已知 bug 和改进项清单 |
 | [roadmap.md](roadmap.md) | 差距分析落地的迭代排期（Q3/Q4 2026，对齐 prd.md KPI） |
+| [design/software-development-lifecycle.md](design/software-development-lifecycle.md) | 软件开发全流程：五阶段模型、agent_go 分工、上下游接口契约 |
 | [design/](design/) | 设计文档：功能扩展和架构改进的设计方案 |
+| [bench-analysis-2026-08-01.md](bench-analysis-2026-08-01.md) | Bench 数据分析：KPI 达成、模型维度、成本结构（2026-08-01） |
 | [archive/](archive/) | 历史文档：旧 PRD、旧 spec、设计审查，不再维护 |

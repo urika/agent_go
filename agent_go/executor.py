@@ -3,12 +3,13 @@ from pathlib import Path
 from typing import Optional, Any
 
 from .console import _LazyConsole
-from .config import log_event, safe_input, meter_event
+from .config import log_event, safe_input, meter_event, write_censored_event
 from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
+from .artifacts import ARTIFACT_DIR_NAME
 # 解耦原则：evaluator 是可选增强，不静态 import（避免核心模块强绑增强模块的传递依赖）。
 # 改为调用点（_verify_changes 内 evaluator_enabled 守卫后）动态 import。
 from .config import get_api_key
@@ -246,6 +247,16 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     if not headless:
         exec_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
     task_md_parts.extend(exec_requirements)
+
+    # S9-B 产物导出约定：--artifact-dir 开启时注入 __artifacts__/ 目录约定
+    # 声明制——只有写入 __artifacts__/ 的文件才视为交付物，随 worktree 清理不丢失
+    if _effective_config(config).get("artifact_dir"):
+        task_md_parts.extend([
+            "",
+            "## 产物输出",
+            f"如需生成文档/表格/演示文稿等非代码交付物，写入 `{ARTIFACT_DIR_NAME}/` 目录。",
+            "该目录下的文件将在任务完成后导出到指定位置（--artifact-dir），不会随 worktree 清理丢失。",
+        ])
 
     # Phase 2: GoalInjector — 注入目标导向指令（默认关闭，--goal 开启）
     goal_enabled = _effective_config(config).get("goal", {}).get("enabled", False)
@@ -606,6 +617,32 @@ def _install_subtask_sigterm_handler(task_dir: Path, sub_id: str) -> None:
         pass
 
 
+def _meter_cost_for_sub(metering_path: str, sub_id: str) -> float:
+    """聚合 metering.jsonl 中某子任务（sub_id）的累计成本。
+
+    用于成本控制 L2：重试循环每次修复前读取该子任务已花费，
+    超预算则停止修复。metering 事件挂靠 role=worker/evaluator 且带 sub_id。
+    """
+    if not metering_path:
+        return 0.0
+    total = 0.0
+    try:
+        with open(metering_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("sub_id") == sub_id:
+                    total += ev.get("cost_usd", 0.0) or 0.0
+    except OSError:
+        return 0.0
+    return total
+
+
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
                     task_dir=None, config=None, interrupt_event=None):
@@ -917,6 +954,27 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 verify_ok = False
                 logger.warning(f"验证失败，已达最大重试次数 ({max_retries})")
                 break
+
+            # S10 成本控制 L2：子任务累计成本上限（跨重试，防修复循环烧钱）。
+            # 每次修复前读取 metering.jsonl 中该子任务累计 cost，超 per_subtask_budget×系数则
+            # 停止修复（final fail）。默认关闭（cost_control.enabled=False 不检查）。
+            _cc_cfg = _cfg.get("cost_control") or {}
+            if _cc_cfg.get("enabled"):
+                _meter_path = (_effective_config(config) or {}).get("_metering_path", "")
+                _sub_budget = _cc_cfg.get("per_subtask_budget_usd", {}).get(difficulty, 0.0)
+                _sub_mult = _cc_cfg.get("subtask_multiplier", 2.5)
+                _sub_limit = float(_sub_budget or 0) * _sub_mult
+                if _sub_limit > 0 and _meter_path:
+                    _sub_cost = _meter_cost_for_sub(_meter_path, sub_id)
+                    if _sub_cost >= _sub_limit:
+                        verify_ok = False
+                        logger.warning(
+                            f"[cost_control L2] 子任务 {sub_id} 累计成本 ${_sub_cost:.4f} "
+                            f"≥ 上限 ${_sub_limit:.4f}（{_sub_budget}×{_sub_mult}），停止修复重试")
+                        write_censored_event(_meter_path, level="L2", sub_id=sub_id,
+                                             spent=_sub_cost, budget=_sub_limit,
+                                             reason=f"子任务累计成本 ${_sub_cost:.4f} ≥ 上限 ${_sub_limit:.4f}")
+                        break
 
             # 6. 构建修复 prompt 并执行修复
             if _SUBTASK_INTERRUPTED.is_set():

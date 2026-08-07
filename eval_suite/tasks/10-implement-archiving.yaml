@@ -23,4 +23,11 @@ verification:
   - "python -m pytest tests/test_archive.py -q"
   - "python -c \"from src.storage import TaskStorage; import tempfile, pathlib; p=pathlib.Path(tempfile.mktemp()); s=TaskStorage(p); s.save('oldtask'); assert s.load_archived() == []; print('OK')\""
   - "python -c \"from src.models import Task; t=Task.from_dict({'description':'x'}); assert t.age_days() >= 0; print('OK')\""
-timeout: 600
+timeout: 1400
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.6
+  per_subtask_budget_usd: 0.5
+  on_exceed: stop

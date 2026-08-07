@@ -34,7 +34,7 @@ mcp(args)                → MCP server (stdio / --http HTTP+SSE)
 `run` 另支持 `--max-retries` / `--no-verify-block` / `--goal` / `--goal-hook` / `--semantic-eval` /
 `--agent-loop` / `--interactive` / `--step-confirm` / `--auto-init` / `--parallel N` / `--remote`。
 
-## api.py — LLM Plan 生成 + 缓存 (423 行)
+## api.py — LLM Plan 生成 + 缓存 (583 行)
 
 ```
 generate_plan(task, repo, config, logger, ...)  → 调用 LLM → 返回 plan dict
@@ -45,7 +45,7 @@ load_cached_plan(key, task, config, logger)     → 读缓存
 save_cached_plan(key, plan, task, repo, config) → 写缓存
 ```
 
-## pipeline.py — 拓扑波次调度器 (390 行)
+## pipeline.py — 拓扑波次调度器 (636 行)
 
 ```
 _run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核心调度 (内部，cli.py 调用)
@@ -54,6 +54,7 @@ _run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核�
   ── 远程推送、worktree/tag 清理、gc.auto 恢复
   ── preserve_worktrees: None=保留 failed/blocked，True=全保留，False=全清理
   ── mcp_client: MCPClientPool start_all() 启动 / finally stop_all() 回收（外部 MCP 工具）
+  ── S9-B 产物导出：config.artifact_dir 时清理 worktree 前调用 artifacts.export，final report 渲染清单
 notify_event(event, context, config) → 任务完成/失败通知 (M1)
 ```
 
@@ -63,7 +64,7 @@ notify_event(event, context, config) → 任务完成/失败通知 (M1)
 estimate_task_duration(subtasks, parallel, tasks_dir) → 历史子任务耗时中位数 × 拓扑波次
 ```
 
-## executor.py — 子任务执行器 (1300 行)
+## executor.py — 子任务执行器 (1459 行)
 
 ```
 run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None) → 单子任务端到端
@@ -79,12 +80,13 @@ run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None
         + files_hint ** 通配符 ≤1 + 上游依赖 ≤2）
   ── MCP 消费：claude --mcp-config 透传外部 MCP 工具（mcp_client 配置）
   ── 语义评估：evaluator.enabled → shell 验证过后触发；fail_closed 可阻断
+  ── S9-B: config.artifact_dir 时 TASK.md 注入 __artifacts__/ 产物目录约定
 _build_sandbox_env()        → 净化环境变量 (敏感词剔除 + AGENT_GO_API_KEY 强制删)
 _apply_resource_limits()    → setrlimit (失败不阻塞)
 _verify_changes()           → 验证循环 + 修复重试（retry_count 注入 context.md + metering）
 ```
 
-## subtask.py — Claude 调用原语 (430 行)
+## subtask.py — Claude 调用原语 (479 行)
 
 ```
 _run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) → claude -p 无头模式
@@ -96,7 +98,7 @@ _run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) 
 _git_merge_upstream(src, dst, tag, logger, ...)   → 上游产物 merge
 ```
 
-## ui.py — 终端交互 (418 行)
+## ui.py — 终端交互 (779 行)
 
 ```
 confirm_plan(plan, config, ...)    → Y/S/D/E/R/N 确认
@@ -104,7 +106,7 @@ confirm_subtasks(subtasks, ...)    → Y/N/E/A/D 确认
 plan_to_subtasks(plan, logger)     → Plan.steps → subtasks (注入 agent_prompt + 资源清单)
 ```
 
-## config.py — 配置与日志 (116 行)
+## config.py — 配置与日志 (258 行)
 
 ```
 load_config()                → ~/.agent_go/config.json，浅合并 DEFAULT_CONFIG
@@ -115,7 +117,7 @@ meter_event(path, event)     → 结构化计量事件写 metering.jsonl (role/c
 safe_input(prompt)           → input() 包装，EOF → ""
 ```
 
-## console.py — 输出抽象 (156 行)
+## console.py — 输出抽象 (216 行)
 
 ```
 Console(quiet, verbose)      → print/force/info/success/warning/error/debug
@@ -125,7 +127,7 @@ set_default_console(c)       → 替换全局实例 (cli.py cmd_run 调用)
 get_default_console()        → 获取当前实例
 ```
 
-## git_utils.py — Git 操作 (114 行)
+## git_utils.py — Git 操作 (203 行)
 
 ```
 analyze_project(repo)        → git ls-files 或 find
@@ -135,7 +137,7 @@ _worktree_create/remove/prune(repo, ...) → worktree 生命周期
 _set_gc_auto(repo, "0"|"1") → gc.auto 读写 (并发安全)
 ```
 
-## utils.py — 共享工具 (383 行)
+## utils.py — 共享工具 (464 行)
 
 ```
 read_reference_docs(paths, repo, logger)     → 参考文档读取 (路径穿越防御)
@@ -147,7 +149,7 @@ _detect_commit_prefix(title)                 → feat/fix/refactor/docs/test/cho
 _slugify(text)                               → 分支名适用短标识
 ```
 
-## agents.py — Agent 类型系统 (188 行)
+## agents.py — Agent 类型系统 (191 行)
 
 ```
 load_agent_type(name, project_root)  → 用户定义 > 内置 (developer/architect/reviewer/tester)
@@ -156,7 +158,7 @@ get_claude_command(agent, worktree)  → 构建 claude CLI 参数 (headless/交�
 get_agent_env(agent)                 → AGENT_GO_AGENT_TYPE 环境变量
 ```
 
-## skills.py — Skill 加载 (213 行)
+## skills.py — Skill 加载 (238 行)
 
 ```
 load_skill(name, project_root)      → YAML frontmatter + Markdown body
@@ -166,7 +168,7 @@ render_skill_for_execution(skill)    → TASK.md 注入格式 (完整)
 discover_skills(task)                → 关键词自动匹配 (实验性)
 ```
 
-## role_skill_map.py — 角色-Skill 匹配 (139 行)
+## role_skill_map.py — 角色-Skill 匹配 (161 行)
 
 ```
 load_role_skill_map(project_root)    → 加载匹配规则
@@ -223,7 +225,7 @@ notify_event(event, context, config)   → 唯一入口：on_complete/on_failed/
   ── ${VAR} 环境变量插值、https 校验、超时重试、故障隔离
 ```
 
-## eval.py — 离线评估 (1038 行)
+## eval.py — 离线评估 (1106 行)
 
 ```
 analyze_quality(meta)           → Q1-Q10 质量指标 + 综合评分
@@ -323,10 +325,40 @@ load_all(task_dir)             → 读取全部事件
 compute_false_positive_rate(task_dir) → 语义评估假阳性率（eval/bench 消费）
 ```
 
+## artifacts.py — 产物导出（S9-B）
+
+```
+ARTIFACT_DIR_NAME = "__artifacts__"     → worktree 内约定产物目录（声明制）
+collect_from_worktree(worktree, sub_id) → 扫描 worktree/__artifacts__/** 返回产物列表
+export(task_id, results, artifact_dir, task_dir) → 复制到 artifact_dir/{task_id}/{sub_id}/（含保留 worktree）
+render_export_summary(export_result)    → 生成导出清单（final report 展示）
+  ── pipeline 清理 worktree 前调用；导出失败降级 warning 不中断任务
+```
+
 ## lint.py — AST 静态检查
 
 ```
 lint_for_loop_truncation(path) → 检测 for 循环体被截断（循环变量在循环外使用）
+```
+
+## web_server.py — 只读 Web 观察平台（agent_go web）
+
+```
+api_tasks()             → 遍历 AGENT_GO_DIR/task-* 读 meta.json 返回任务清单（含 metering 聚合成本）
+api_task(task_id)       → 任务详情（subtasks[] + results[]，按 subtask_id 匹配，含 agent_type_source/skills/difficulty）
+api_subtask_detail(task_id, sub_id) → 子任务验证结果/改动统计/worktree/agent prompt
+_extract_subtask_log(task_id, sub_id) → 从 execution.log 提取子任务日志段（边界正则匹配，防 sub-1/sub-10 误中）
+api_metering(task_id)   → metering.jsonl 按 role 聚合（count/cost/tokens/latency）+ 明细
+api_replay(task_id)     → 复用 replay.py _build_timeline/_collect_summary
+api_plan(task_id)       → PLAN.md + plans/v{ver}.json
+api_overview/cost/models → 全局聚合视图；api_assessment/cross_judge/bench_results/baseline → 评估数据
+api_config()            → config.json 只读展示（api_key/token 递归脱敏，短 key 全遮蔽）
+api_storage()           → 磁盘占用 Top20 + 孤儿目录检测
+WebHandler(BaseHTTPRequestHandler) → GET 路由 + Bearer token / ?token= query 鉴权 + SSE /api/events（轮询 mtime 刷新）
+serve_web(host, port, token) → ThreadingHTTPServer 启动（默认 127.0.0.1:8091）
+  ── 前端：单文件内嵌 HTML SPA（任务清单→展开任务→子任务→tab: 概览/验证/日志/计量/时间线 + 总览/成本/模型/配置/运维视图）
+  ── 前端鉴权：401 时 prompt 输入 token 存 sessionStorage，fetch 带 Authorization 头，SSE 走 ?token= query
+  ── 设计：只读全 GET、不触碰 worktree/git、无框架仅 stdlib
 ```
 
 ## agent_loop.py — 自主 Agent 循环 (--agent-loop)
@@ -352,9 +384,9 @@ execute_tool(name, args, worktree, ...) → 工具分发执行（返回 ToolResu
 cmd_status_tui()  → curses 多面板实时监控（agent_go status --watch）
 ```
 
-## bench.py — 模型对照评估编排器 (300 行)
+## bench.py — 模型对照评估编排器 (585 行)
 
-> **状态**：S8 P0 已落地。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
+> **状态**：S8 P0 已落地 + S10-P1 schema 扩展 + S10-P2 P1 字段/代码质量/对照基线/动态 timeout。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
 
 ```
 cmd_bench(args)                            → 对照运行编排器
@@ -362,20 +394,52 @@ cmd_bench(args)                            → 对照运行编排器
   ── --models M1,M2,M3                     被评模型（每模型跑全部任务）
   ── --repeat N                            每任务重复 N 次（默认 3）
   ── --output results.jsonl                JSONL 落盘
-  ── 内部 subprocess 调 agent_go run（--yes --headless --preserve-worktrees）
+  ── --source-batch NAME                   批次标识（baseline / results_v2 / smoke-*）
+  ── 内部 subprocess 调 agent_go run（--yes --headless --preserve-worktrees --parallel 1）
+       --parallel 1：S10-P2 顺序执行，消除并发对 elapsed/cost 的干扰
+  ── 动态 timeout（S10-P2）：_dynamic_timeout = max(任务YAML配置, 子任务数×150s+120s)
+       _estimate_subtasks_from_history 从已有 results.jsonl 推断子任务数，避免多子任务被截断
   ── 读 AGENT_GO_DIR/task-*/meta.json + metering.jsonl
+  ── record 字段（S10-P1 扩展）：
+       timed_out     bool   任务是否因超时被强制终止（cooperative timeout SIGTERM/SIGKILL）
+       judge_model   string semantic evaluator 模型（role=evaluator 的 actual_model）
+       planner_model string plan 生成模型（role=planner 的 actual_model）
+       source_batch  string 批次标识（跨批次追溯）
+  ── record 字段（S10-P2 P1 扩展）：
+       semantic_pass Optional[bool]  全部子任务语义评估显式通过（跳过/未启用→None）
+       binary_pass   bool    all_verify_ok AND semantic_pass is not False（二元通过，K1 口径）
+       per_subtask   json[]  每子任务 {sub_id,status,retries,verify_ok,semantic_ok}
+       plan_step_count int    Planner 分解步骤数（subtasks 长度）
+  ── record 字段（S10-P2 代码质量 §4.1）：
+       lint_errors   int    _collect_quality：各保留 worktree 的 ruff(E/F/W)+mypy 错误数之和
+       tests_broken  int    worktree pytest 失败用例数之和（基线全绿→失败=回归）
+
+cmd_baseline(args)                         → 对照基线编排器（S10-P2 §2.3）
+  ── claude -p 裸跑（不走 agent_go harness），临时副本中执行
+  ── stream-json 提取 total_cost_usd；任务 YAML verification 全绿→pass
+  ── 对临时副本跑 ruff/mypy/pytest → lint_errors / tests_broken
+  ── 默认输出 eval_suite/baseline.jsonl（--output 可覆盖）
+  ── 用于量化 harness 相对裸跑的 pass_rate / 耗时 / 成本 / 代码质量 ROI
 
 cmd_models(args)                           → 决策矩阵展示
   ── --results results.jsonl               读取 bench 产出
-  ── 按模型聚合：pass_rate / dollar_per_pass / sample_size / recommendation
+  ── 按模型聚合：pass_rate / dollar_per_pass / k8 / sample_size / recommendation
+  ── $/pass 统一口径（§3.1）= sum(total_cost_usd) / sum(pass_rate)
+  ── K8 修订（§3.4）= 通过 record 中 total_retries==0 占比
+  ── 代码质量（S10-P2）：avg_lint_errors / avg_tests_broken / code_regression_rate
+       （通过 record 中 tests_broken>0 占比，§3.5 代码回归率）
   ── 决策规则：pass_rate<60%→discouraged, >=85%→recommended, <3样本→insufficient
 
 analyze_model_productivity(path) → 与 cmd_models 同逻辑，返回 dict 供编程调用
+_collect_quality(task_dir)         → 聚合保留 worktree 的 {lint_errors, tests_broken}
+_lint_errors_for_worktree(wt)     → ruff E/F/W + mypy 对变更 .py 文件的错误数（工具缺失→0）
+_tests_broken_for_worktree(wt)    → pytest 失败用例数（工具缺失→0）
+_git_diff_files(wt)               → 变更 .py 文件列表（HEAD~1..HEAD）
 ```
 
-## cross_judge.py — 交叉评判矩阵 (413 行)
+## cross_judge.py — 交叉评判矩阵 (485 行)
 
-> **状态**：S8 P1 简化版已落地。N 模型互评（禁绝自评）+ 人工校准。
+> **状态**：S8 P1 简化版已落地 + S10-P1 自评偏差量化。N 模型互评（禁绝自评）+ 人工校准。
 
 ```
 cmd_judge(args)                            → 交叉评判 + 校准 CLI
@@ -390,6 +454,12 @@ cross_judge_results(bench_results, judges) → 逐条调用 evaluate_semantic（
   ── 当前实现（P1 简化）：四维退化为单一 semantic_score（由 reason 文本启发式提取），
      false_positive = not passed。P2 计划升级 evaluator.py prompt 为结构化 rubric，
      产出独立四维分，届时 semantic_score = avg(correctness, completeness, code_quality)。
+  ── S10-P1：每条结果携带 self_judge_model（bench record 的 judge_model，即自评模型身份）
+
+_print_self_bias_report(bench_results, scores) → 自评偏差量化报告（S10-P1）
+  ── 口径：自评通过（pass_rate>0）的 record 中，
+       被 cross-judge 判 false_positive 的占比 + cross-judge 评分 <3/5 的占比
+  ── 解读：false_positive 率越高 → semantic evaluator 自评越乐观（漏检越多）
 
 calibrate_judge(llm_path, human_csv)       → 人工校准
   ── human CSV: task_id,candidate_model,correctness,... 

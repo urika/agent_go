@@ -11,6 +11,7 @@ CLI:
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -29,14 +30,14 @@ from .eval import _read_jsonl, _read_json
 from .assessment import load_all as load_all_assessments, compute_false_positive_rate
 from .pricing import MODEL_PRICES
 
-__all__ = ["cmd_bench", "analyze_model_productivity"]
+__all__ = ["cmd_bench", "cmd_baseline", "analyze_model_productivity"]
 console = _LazyConsole()
 
 
 def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 60):
     """P1 Layer 1：cooperative timeout —— 不直接 SIGKILL，先 SIGTERM 给 agent_go 写 meta 的机会。
 
-    Returns: (stdout, stderr) bytes
+    Returns: (stdout, stderr) bytes 与是否因超时被终止的标志
 
     流程：
     1. 监控子进程，最多 hard_timeout 秒
@@ -52,6 +53,7 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
     reader_threads: list[_threading.Thread] = []
+    _timed_out = False
 
     if proc.stdout:
         def _read_out():
@@ -73,12 +75,14 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
         if proc.poll() is not None:
             break
         if remaining <= 0:
+            _timed_out = True
             try:
                 proc.terminate()
             except ProcessLookupError:
                 pass
             break
         if remaining <= grace_sec and not getattr(proc, "_terminated", False):
+            _timed_out = True
             try:
                 proc.terminate()
                 proc._terminated = True
@@ -109,7 +113,9 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
             except OSError:
                 pass
         t.join(timeout=2)
-    return type("R", (), {"stdout": "".join(stdout_lines), "stderr": "".join(stderr_lines)})()
+    _r = type("R", (), {"stdout": "".join(stdout_lines), "stderr": "".join(stderr_lines)})
+    _r.timed_out = _timed_out
+    return _r
 
 # 默认 agent_go 入口：用脚本绝对路径（不依赖 pip 安装或 PYTHONPATH，
 # 避免子进程 cwd 在 fixture repo 内时找不到 agent_go 包）
@@ -142,6 +148,7 @@ def cmd_bench(args=None) -> None:
 
     models = [m.strip() for m in (getattr(args, "candidate_models", None) or "").split(",") if m.strip()]
     repeat = int(getattr(args, "repeat", 3) or 3)
+    source_batch = getattr(args, "source_batch", None) or ""
 
     if not models:
         console.error("至少指定一个 --candidate-models（逗号分隔）")
@@ -172,7 +179,7 @@ def cmd_bench(args=None) -> None:
             for r in range(repeat):
                 current += 1
                 console.print(f"\n[{current}/{total}] {task_id} | {model} | repeat={r+1}")
-                result_entry = _run_one_task(task, repo, model, task_id, no_skills=no_skills)
+                result_entry = _run_one_task(task, repo, model, task_id, no_skills=no_skills, source_batch=source_batch, results_path=output_path)
                 result_entry["model"] = model
                 result_entry["repeat"] = r + 1
                 results.append(result_entry)
@@ -185,11 +192,192 @@ def cmd_bench(args=None) -> None:
     console.print(f"   下一步: agent_go eval models --results {output_path}")
 
 
+# ═══════════════════════════════════════════════════════════════
+# S10-P2：对照基线（bench-v2-data-requirements.md §2.3）
+# ═══════════════════════════════════════════════════════════════
+
+def _run_baseline_one(task: dict, repo: Path, model: str, task_id: str,
+                      source_batch: str = "baseline") -> dict:
+    """claude -p 裸跑一个任务（不走 agent_go harness），作为对照基线。
+
+    流程：
+      1. 在临时副本中运行 `claude -p <task>`（stream-json 模式，提取 cost + elapsed）
+      2. 对该临时目录运行任务 YAML 的 verification 命令 → pass 判定
+      3. 对临时目录运行 ruff/mypy/pytest → 代码质量指标
+    返回与 _collect_result 同构的 record（task_dir=""，source_batch=baseline）。
+    """
+    import shutil
+    import tempfile as _tempfile
+
+    start = time.time()
+    tmp_dir = Path(_tempfile.mkdtemp(prefix="bench_baseline_"))
+    work = tmp_dir / "repo"
+    try:
+        # 复制 fixture 到临时目录（不复制 .git，避免污染原 repo / 依赖 git 状态）
+        shutil.copytree(repo, work, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache"))
+
+        # 1. claude -p 裸跑（stream-json 提取 total_cost_usd / elapsed）
+        claude_cmd = [
+            "claude", "-p", task["task"],
+            "--permission-mode", "bypassPermissions",
+            "--no-session-persistence",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+        ]
+        _routed_model = model
+        if _routed_model:
+            claude_cmd.extend(["--model", _routed_model])
+        timeout = int(task.get("timeout", 1800)) + 60
+        cost_usd = 0.0
+        exit_code = -1
+        try:
+            cp = subprocess.run(
+                claude_cmd, cwd=str(work), capture_output=True, text=True, timeout=timeout,
+            )
+            exit_code = cp.returncode
+            for line in (cp.stdout or "").splitlines():
+                try:
+                    ev = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(ev, dict) and ev.get("type") == "result":
+                    cost_usd = ev.get("total_cost_usd") or cost_usd
+        except subprocess.TimeoutExpired:
+            exit_code = -1
+
+        # 2. verification 命令 → pass 判定（全部退出码 0 才算通过）
+        verification_ok = True
+        for vcmd in (task.get("verification") or []):
+            try:
+                vr = subprocess.run(
+                    shlex.split(vcmd), cwd=str(work), capture_output=True, text=True, timeout=120,
+                )
+            except (subprocess.SubprocessError, OSError):
+                verification_ok = False
+                break
+            if vr.returncode != 0:
+                verification_ok = False
+                break
+
+        # 3. 代码质量（对完整临时副本运行，等价于裸跑产出）
+        quality = {
+            "lint_errors": _lint_errors_for_worktree(work),
+            "tests_broken": _tests_broken_for_worktree(work),
+        }
+        elapsed = round(time.time() - start, 2)
+        # kill_reason（baseline 单子任务路径，与 _collect_result 同口径）
+        if verification_ok:
+            _bl_kill_reason = "none"
+        elif exit_code == -1:
+            _bl_kill_reason = "stuck_or_hardtimeout"
+        elif (cost_usd or 0) == 0:
+            _bl_kill_reason = "infra"
+        else:
+            _bl_kill_reason = "interrupted_or_unknown"
+
+        return {
+            "task_id": task_id,
+            "model": model,
+            "task_dir": "",
+            "elapsed_sec": elapsed,
+            "subprocess_exit": exit_code,
+            "completed": 1 if verification_ok else 0,
+            "failed": 0 if verification_ok else 1,
+            "total_subtasks": 1,
+            "pass_rate": 1.0 if verification_ok else 0.0,
+            "all_verify_ok": verification_ok,
+            "total_retries": 0,
+            "total_cost_usd": round(cost_usd or 0.0, 6),
+            "total_latency_ms": 0,
+            "dollar_per_pass": round(cost_usd or 0.0, 6) if verification_ok and cost_usd else None,
+            "stderr_tail": "",
+            "timed_out": exit_code == -1,
+            "judge_model": "",
+            "planner_model": "",
+            "source_batch": source_batch,
+            "semantic_pass": None,
+            "binary_pass": verification_ok,
+            "kill_reason": _bl_kill_reason,
+            "per_subtask": [],
+            "plan_step_count": 0,
+            "lint_errors": quality["lint_errors"],
+            "tests_broken": quality["tests_broken"],
+            "baseline": True,
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def cmd_baseline(args=None) -> None:
+    """对照基线编排器：claude -p 裸跑代表性任务（不走 agent_go harness）。
+
+    用于量化 harness 相对裸跑的 pass_rate / 耗时 / 成本 / 代码质量 ROI。
+    复用 bench 的任务集/模型/重复参数，结果写入单独文件（默认 baseline.jsonl）。
+    """
+    if yaml is None:
+        console.warning("需要 PyYAML 以解析任务文件：pip install pyyaml")
+        sys.exit(1)
+
+    _workspace = Path(__file__).resolve().parent.parent
+
+    tasks_arg = args.tasks if args and hasattr(args, "tasks") else "eval_suite"
+    tasks_dir = Path(tasks_arg)
+    if not tasks_dir.is_absolute():
+        tasks_dir = _workspace / tasks_dir
+
+    output_arg = getattr(args, "output", None) or "eval_suite/baseline.jsonl"
+    output_path = Path(output_arg)
+    if not output_path.is_absolute():
+        output_path = _workspace / output_path
+
+    models = [m.strip() for m in (getattr(args, "candidate_models", None) or "").split(",") if m.strip()]
+    repeat = int(getattr(args, "repeat", 3) or 3)
+    source_batch = getattr(args, "source_batch", None) or "baseline"
+
+    if not models:
+        console.error("至少指定一个 --candidate-models（逗号分隔）")
+        sys.exit(1)
+
+    task_files = sorted(tasks_dir.glob("tasks/*.yaml"))
+    if not task_files:
+        console.error(f"未找到任务文件: {tasks_dir}/tasks/*.yaml")
+        sys.exit(1)
+
+    console.print(f"🧪 baseline 开始（claude -p 裸跑）: {len(task_files)} 任务 × {len(models)} 模型 × {repeat} 重复 = {len(task_files)*len(models)*repeat} 次执行")
+    console.print(f"   模型: {', '.join(models)}")
+    console.print(f"   输出: {output_path}")
+
+    total = len(task_files) * len(models) * repeat
+    current = 0
+    for tf in task_files:
+        task = yaml.safe_load(tf.read_text(encoding="utf-8"))
+        task_id = task["id"]
+        repo = Path(task["repo"])
+        if not repo.is_absolute():
+            repo = Path.cwd() / repo
+        for model in models:
+            for r in range(repeat):
+                current += 1
+                console.print(f"\n[{current}/{total}] {task_id} | {model} | repeat={r+1}")
+                entry = _run_baseline_one(task, repo, model, task_id, source_batch=source_batch)
+                entry["model"] = model
+                entry["repeat"] = r + 1
+                with open(output_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    console.print(f"\n✅ baseline 完成: {len(task_files) * len(models) * repeat} 条结果 → {output_path}")
+    console.print(f"   下一步: agent_go eval models --results {output_path}")
+
+
 def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
-                  preserve: bool = False, no_skills: bool = False) -> list[dict]:
+                  preserve: bool = False, no_skills: bool = False,
+                  source_batch: str = "", results_path: Optional[Path] = None) -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
 
     preserve=True 时传 --preserve-worktrees 给 agent_go run，保留 worktree 供交叉评判读 diff。
+    source_batch: 批次标识（如 baseline / results_v2 / smoke-*），写入每条 record。
+    results_path: 结果文件路径，用于从历史记录推断子任务数做动态 timeout。
     """
     start = time.time()
 
@@ -223,10 +411,21 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             "behavior": {"auto_confirm_plan": True, "auto_confirm_subtasks": True},
             "evaluator": {"enabled": True},
         }
-        # 继承用户的 skills / agent_loop 配置（skill 自动发现等），否则 bench 默认关闭
+        # 继承用户的 evaluator 配置（provider/base_url/model/api_key），
+        # 否则 evaluator 回落到 DEFAULT_CONFIG 的 anthropic 默认值 → 403
+        # （DEFAULT_CONFIG.evaluator.provider=anthropic + base_url=api.anthropic.com，
+        #  用户环境没有可用 Anthropic key 时语义评估必失败）
+        if user_config.get("evaluator"):
+            evaluator_cfg = dict(user_config["evaluator"])
+            evaluator_cfg["enabled"] = True  # bench 强制启用语义评估
+            config["evaluator"] = evaluator_cfg
+        # 继承用户的 skills / agent_loop / verification 配置（skill 自动发现等），否则 bench 默认关闭
         for _k in ("skills", "agent_loop", "verification"):
             if user_config.get(_k):
                 config[_k] = dict(user_config[_k])
+        # S10 成本控制：透传任务 YAML 的 cost_control（每任务开关，默认 enabled=false）
+        if task.get("cost_control"):
+            config["cost_control"] = dict(task["cost_control"])
         # --no-skills 时强制关闭 skill 自动发现（用于 skill on/off 对比）
         if no_skills:
             config.setdefault("skills", {})["auto_discover"] = False
@@ -245,18 +444,24 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     try:
         # P1 Layer 1：cooperative timeout —— 用 Popen + 监控代替硬 timeout
         # 剩余 grace_sec 秒时发 SIGTERM，让 agent_go 完成当前步骤 + save meta
-        # grace_sec 后才 SIGKILL（实在不行才硬杀）
-        hard_timeout = task.get("timeout", 1800)
+        # grace_sec 后才 SIGKILL（实在不行才硬杀）。
+        # 动态 timeout：多子任务任务按「子任务数 × 基准耗时」自动扩展，
+        # 避免任务被 timeout 截断（K1 提升）。不低于任务 YAML 配置值。
+        hard_timeout = _dynamic_timeout(task, task_id, results_path)
         grace_sec = 60
+        console.debug(f"[timeout] {task_id} → {hard_timeout}s ({_estimate_subtasks_from_history(task_id, results_path)} subtasks)")
         proc = subprocess.Popen(
             agent_go_cmd + ["run",
              str(repo), task["task"],
              "--yes", "--headless", "--preserve-worktrees",
+             "--parallel", "1",   # S10-P2：顺序执行，消除并发对 elapsed/cost 的干扰
+             "--no-cache",        # 质量校验：禁用 plan cache，确保 planner metering 完整采集（planner_model 字段）
              "--config", tmp_config],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=str(workspace_dir),
         )
         result = _run_with_grace(proc, hard_timeout=hard_timeout, grace_sec=grace_sec)
+        _timed_out = bool(getattr(result, "timed_out", False))
         result = subprocess.CompletedProcess(
             args=proc.args, returncode=proc.returncode,
             stdout=result.stdout, stderr=result.stderr,
@@ -266,6 +471,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     except subprocess.TimeoutExpired:
         exit_code = -1
         stderr_tail = "bench: subprocess timeout"
+        _timed_out = True
     finally:
         Path(tmp_config).unlink(missing_ok=True)
 
@@ -287,7 +493,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     if _resolved_td is None:
         _after_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
         _new_dirs = _after_dirs - _before_dirs
-    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected)
+    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch)
 
 
 def _dir_matches_task(td: Path, expected_task: str) -> bool:
@@ -317,16 +523,192 @@ def _dir_matches_task(td: Path, expected_task: str) -> bool:
     return meta_task[:n] == expected[:n]
 
 
+# 动态 timeout 基准参数（基于 v2 bench 实测：每子任务平均耗时 ~70-150s）
+# 基准取 150s/subtask，另加 120s 缓冲覆盖收尾（保存 meta/清理/push）与波动。
+# 公式：timeout = max(任务YAML配置值, 子任务数 × 基准 + 缓冲)
+_DYNAMIC_TIMEOUT_BASE_SEC = 150      # 每子任务基准耗时（秒）
+_DYNAMIC_TIMEOUT_BUFFER_SEC = 120    # 收尾/波动缓冲（秒）
+
+
+def _estimate_subtasks_from_history(task_id: str, results_path: Optional[Path]) -> int:
+    """从已有 bench 结果文件推断该任务的历史子任务数。
+
+    Args:
+        task_id: 任务 ID
+        results_path: bench 结果文件（results.jsonl）。读取其中该 task_id 的
+            total_subtasks。
+
+    Returns:
+        历史最大子任务数（取最大值比均值更稳妥——Plan 可能产生不同的分解，
+        用最大值避免低估导致任务仍被 timeout 截断）；无法推断时返回 0。
+    """
+    if not results_path or not results_path.exists():
+        return 0
+    try:
+        max_n = 0
+        for line in results_path.read_text(encoding="utf-8").strip().split("\n"):
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("task_id") == task_id:
+                n = rec.get("total_subtasks")
+                if isinstance(n, int) and n > 0:
+                    max_n = max(max_n, n)
+        return max_n
+    except OSError:
+        return 0
+
+
+def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = None) -> int:
+    """按子任务数动态计算任务 timeout，解决多子任务任务被 timeout 截断的问题。
+
+    优先级：
+      1. 任务 YAML 显式声明 `timeout` → 作为下限（不缩短既有配置）
+      2. 历史推断子任务数 × 基准耗时 + 缓冲 → 动态上限
+
+    公式：timeout = max(配置值, 子任务数 × 150s + 120s)
+    例：add-caching-layer 5 子任务 → max(900, 5×150+120=870) = 900s
+        （历史推断为 5 时仍用配置 900；若子任务更多则自动扩展）
+    """
+    cfg_timeout = int(task.get("timeout", 1800))
+    n = _estimate_subtasks_from_history(task_id, results_path)
+    if n <= 0:
+        return cfg_timeout
+    dynamic = n * _DYNAMIC_TIMEOUT_BASE_SEC + _DYNAMIC_TIMEOUT_BUFFER_SEC
+    return max(cfg_timeout, dynamic)
+
+
+def _subtask_semantic_ok(subtask_result: dict) -> Optional[bool]:
+    """判断单个子任务是否通过语义评估（verification_results 中 type=='semantic'）。
+
+    语义评估执行失败被跳过时视为 None（未执行），而不是 False —— 否则会错误地
+    「因 API 故障而判失败」，污染 binary_pass。识别跳过的两种信号：
+      1. evaluator_skipped=True 字段（新版本 evaluator 返回）
+      2. reason 含「API 调用失败 / 已跳过 / 失败（已跳过）」特征（旧版本 executor
+         写入 verification_results 时丢弃了 evaluator_skipped，只留 reason 特征）
+
+    Returns:
+        True/False 若有有效语义评估结果；None 若未启用、无结果或评估被跳过。
+    """
+    for vr in (subtask_result.get("verification_results") or []):
+        if isinstance(vr, dict) and vr.get("type") == "semantic":
+            # 跳过信号 1：evaluator_skipped 字段
+            if vr.get("evaluator_skipped"):
+                return None
+            # 跳过信号 2：reason 特征（API 故障 / 显式跳过）
+            reason = (vr.get("reason") or "").lower()
+            if any(k in reason for k in ("api 调用失败", "api 请求失败", "调用失败", "已跳过", "failed (skipped)", "评估失败（已跳过）")):
+                return None
+            return bool(vr.get("passed"))
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# S10-P2：代码质量维度（bench-v2-data-requirements.md §4.1）
+# ═══════════════════════════════════════════════════════════════
+
+def _git_diff_files(worktree: Path, base_ref: str = "HEAD~1") -> list[str]:
+    """获取 worktree 中相对 base 变更的 Python 文件（供 ruff/mypy 检查）。
+
+    base_ref 默认取父提交（HEAD~1）——worktree 分支上每个 subtask 一个 commit。
+    返回失败时为空列表（容错，不阻断 bench）。
+    """
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--name-only", base_ref, "HEAD"],
+            cwd=str(worktree), capture_output=True, text=True, timeout=15,
+        )
+        return [f for f in r.stdout.splitlines() if f.endswith(".py")]
+    except (subprocess.SubprocessError, OSError):
+        return []
+
+
+def _lint_errors_for_worktree(worktree: Path) -> int:
+    """对 worktree 中变更的 Python 文件运行 ruff + mypy，返回新增错误数。
+
+    仅统计存在（未删除）的 .py 变更文件；工具缺失/不可用时返回 0（容错）。
+    ruff 只查 E/F/W（与 CI lint 一致）；mypy --ignore-missing-imports 忽略缺失 stub。
+    """
+    files = _git_diff_files(worktree)
+    if not files:
+        return 0
+    errors = 0
+    for cmd in (
+        ["ruff", "check", "--select=E,F,W", "--output-format=concise"],
+        ["mypy", "--ignore-missing-imports", "--no-error-summary"],
+    ):
+        try:
+            r = subprocess.run(
+                cmd + files, cwd=str(worktree), capture_output=True, text=True, timeout=120,
+            )
+        except (subprocess.SubprocessError, OSError):
+            continue  # 工具缺失 / 超时 → 该维度不计数
+        if r.stdout:
+            errors += sum(1 for line in r.stdout.splitlines() if line.strip())
+    return errors
+
+
+def _tests_broken_for_worktree(worktree: Path) -> int:
+    """运行 repo 原有测试套件（pytest），返回新增测试失败数。
+
+    以「worktree 上 pytest 失败用例数」作为「新增失败」的代理 —— fixture repo
+    基线测试应为全绿，失败即代表 subtask 变更引入的回归。pytest 不可用时返回 0。
+    """
+    try:
+        r = subprocess.run(
+            ["python", "-m", "pytest", "-q", "--tb=no"],
+            cwd=str(worktree), capture_output=True, text=True, timeout=300,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return 0
+    if r.returncode == 0:
+        return 0
+    # 解析 "N failed" 或 "N failed, M passed" 中的失败数
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        m = re.match(r"(\d+) failed", line)
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def _collect_quality(task_dir: Path) -> dict[str, int]:
+    """聚合 task_dir 下全部保留 worktree 的代码质量指标。
+
+    Returns:
+        {"lint_errors": int, "tests_broken": int} —— 各 subtask worktree 之和。
+        worktree 不保留（已清理）或无 worktree 时返回全 0。
+    """
+    lint = 0
+    broken = 0
+    if not task_dir or not task_dir.exists():
+        return {"lint_errors": 0, "tests_broken": 0}
+    # worktree 布局：task_dir/{sub_id}/work
+    for sub_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+        worktree = sub_dir / "work"
+        if worktree.exists():
+            lint += _lint_errors_for_worktree(worktree)
+            broken += _tests_broken_for_worktree(worktree)
+    return {"lint_errors": lint, "tests_broken": broken}
+
+
 def _collect_result(task_id: str, model: str, elapsed: float,
                     exit_code: int, stderr: str,
                     new_dirs: "Optional[set[Path]]" = None,
                     exact_td: "Optional[Path]" = None,
-                    expected_task: str = "") -> dict:
+                    expected_task: str = "",
+                    timed_out: bool = False,
+                    source_batch: str = "") -> dict:
     """从 agent_go 任务目录读 metering + meta，聚合为一条结果。
 
     exact_td: 精确任务目录（从子进程输出解析，优先）。
     new_dirs: 目录差分结果（回退方案，仅当 exact_td 为 None 时使用）。
     expected_task: 期望任务描述，用于校验目录内容匹配（防止并发/残留错配）。
+    timed_out: 任务是否因超时被强制终止（cooperative timeout 触发 SIGTERM/SIGKILL）。
+    source_batch: 批次标识（如 baseline / smoke-*），用于跨批次追溯与全量对比。
     若都无法定位匹配目录则返回空数据记录（task_dir=""）。
     """
     td = exact_td if (exact_td and _dir_matches_task(exact_td, expected_task)) else None
@@ -355,28 +737,125 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     total_cost = sum(ev.get("cost_usd", 0) or 0 for ev in metering)
     total_latency = sum(ev.get("latency_ms", 0) or 0 for ev in metering)
 
+    # S10-P1：从 metering 提取 Planner / Judge 模型（跨层归因基础）
+    planner_model = ""
+    judge_model = ""
+    for ev in metering:
+        _role = ev.get("role", "")
+        _am = ev.get("actual_model", "") or ""
+        if _role == "planner" and _am:
+            planner_model = _am
+        elif _role == "evaluator" and _am:
+            judge_model = _am
+
     # 子任务结果
     results = meta.get("results", [])
     completed = sum(1 for r in results if r.get("status") == "completed")
     failed = sum(1 for r in results if r.get("status") == "failed")
     retry_total = sum(r.get("retry_count", 0) for r in results)
-    all_passed = all(r.get("verify_ok", False) for r in results if r.get("status") == "completed")
+    # S12-P0：修 all([]) 空真值陷阱——「零个 completed」时 all() 返回 True 会把全失败
+    # 误判为通过。要求至少一个 completed 才可能 all_passed。
+    _completed_results = [r for r in results if r.get("status") == "completed"]
+    all_passed = bool(_completed_results) and all(r.get("verify_ok", False) for r in _completed_results)
+
+    # S10-P2：代码质量维度（§4.1）—— 从保留 worktree 聚合 lint_errors / tests_broken
+    quality = _collect_quality(td) if td else {"lint_errors": 0, "tests_broken": 0}
+
+    # ── S10-P2：P1 字段采集 ──
+    # semantic_pass：各子任务的语义评估通过汇总（用 _subtask_semantic_ok，
+    #   evaluator_skipped/未启用 → None 不算入，避免「API 故障」误判为失败）。
+    #   仅当至少一个子任务有有效语义结果、且全部有效结果为通过 → True；
+    #   有任一有效结果为不通过 → False；无任何有效结果 → None。
+    _semantic_passed_flags = []
+    _semantic_checked = 0
+    for _r in results:
+        _so = _subtask_semantic_ok(_r)
+        if _so is not None:
+            _semantic_checked += 1
+            _semantic_passed_flags.append(_so)
+    semantic_pass: Optional[bool] = None
+    if _semantic_checked:
+        semantic_pass = all(_semantic_passed_flags)
+
+    # binary_pass 在下方 aborted 修正之后计算（S12-P0：修时序错位——
+    # 原先在 aborted 分支之前冻结，导致 completed=0 但 binary_pass=True 的矛盾）。
+
+    # per_subtask：每个子任务的简明细（供按子任务失败模式分析）
+    per_subtask = [
+        {
+            "sub_id": _r.get("subtask_id") or _r.get("id") or "",
+            "status": _r.get("status", ""),
+            "retries": _r.get("retry_count", 0),
+            "verify_ok": bool(_r.get("verify_ok", False)),
+            "semantic_ok": _subtask_semantic_ok(_r),
+        }
+        for _r in results
+    ]
+
+    # plan_step_count：执行计划步骤数（subtasks 列表长度；无则 0）
+    plan_step_count = len(meta.get("subtasks") or [])
 
     # ── 进程未自然完成判定 ──
     # bench 用 cooperative timeout：超时先 SIGTERM，grace 后 SIGKILL（-9）。
-    # 被 SIGKILL 或非零退出的任务即使子任务标记 completed/verify_ok，也说明
-    # 执行被打断，不应按"完整通过"计。stale_aborted 是 pipeline 在 SIGTERM
-    # 时写 meta 后留下的状态，同样视为未完成。
+    # 被 SIGKILL 或非零退出的任务可能有两种情况：
+    #   1. 执行中途被杀 → 任务未完成，不应计通过
+    #   2. 所有子任务已完成且验证通过，仅收尾阶段（保存 meta/清理 worktree）
+    #      被杀 → 实际已完工，应计通过（K1 提升的关键）
+    # 判定优先级：
+    #   - meta.status == completed → 任务明确成功，绝不判失败（exit_code 非零
+    #     可能是收尾命令（如 cleanup/push）的退出码，不代表任务失败）
+    #   - 否则若 aborted：区分「收尾被杀（已完工）」与「中途被杀（未完工）」
     meta_status = meta.get("status", "")
-    _aborted = exit_code != 0 or meta_status in ("stale_aborted", "aborted", "interrupted", "cancelled")
+    if meta_status == "completed":
+        _aborted = False
+    else:
+        _aborted = exit_code != 0 or meta_status in ("stale_aborted", "aborted", "interrupted", "cancelled")
+    _cleanup_race = False  # 收尾竞态：子任务全完成已验证，仅进程被杀
     if _aborted:
-        # 被中断（SIGKILL / stale_aborted）：任务未自然完成，所有子任务
-        # 一律不计通过（即使 meta 中标记 completed+verify_ok，也是中断前
-        # 的瞬时快照），只统计明确失败/阻塞。
-        completed = 0
-        failed = sum(1 for r in results
-                     if r.get("status") in ("failed", "blocked"))
-        all_passed = False
+        # 区分「收尾被杀（已完工）」与「中途被杀（未完工）」
+        _planned_ids = {st.get("id") for st in (meta.get("subtasks") or [])}
+        _result_ids = {r.get("subtask_id") or r.get("id") for r in results if r.get("subtask_id") or r.get("id")}
+        _all_resulted = bool(_planned_ids) and _planned_ids.issubset(_result_ids)
+        # _all_results_done：所有已落盘 result 都 completed+verify_ok（不要求覆盖计划全集）
+        _all_results_done = bool(results) and all(
+            r.get("status") == "completed" and r.get("verify_ok") is True
+            for r in results
+        )
+        if _all_results_done and timed_out:
+            # cleanup_race（S12-P0）：子任务全完成已验证，进程在收尾阶段被杀 → 计为通过。
+            # 不再依赖 _all_resulted（计划 id 覆盖）——SIGKILL 常导致 meta.subtasks 未完整
+            # 落盘，旧逻辑因此把已完工任务误判失败（v3 65 条假失败 / 通过率被腰斩的根因）。
+            _cleanup_race = True
+            completed = len(results)
+            failed = 0
+            all_passed = True
+            console.debug(f"[collect] {task_id} cleanup_race：全部子任务完成已验证，收尾被杀计为通过 (exit={exit_code}, status={meta_status})")
+        elif _all_results_done and _all_resulted:
+            # 已完工（非超时收尾被杀）：保持原 completed/all_passed 判定
+            console.debug(f"[collect] {task_id} aborted但全部子任务完成，视为完工 (exit={exit_code}, status={meta_status})")
+        else:
+            # 中途被杀（未完工）：所有子任务不计通过
+            completed = 0
+            failed = sum(1 for r in results
+                         if r.get("status") in ("failed", "blocked"))
+            all_passed = False
+
+    # binary_pass 在 aborted 修正之后计算（S12-P0 修时序错位）；
+    # all_passed 已要求至少一个 completed，故 all([]) 陷阱不再成立。
+    binary_pass = all_passed and (semantic_pass is not False)
+
+    # kill_reason 分类（S12-P0）：把"进程被杀"与"任务失败"解耦——
+    # cleanup_race 计通过、预算熔断单列、infra 不计能力失败。
+    if _cleanup_race:
+        kill_reason = "cleanup_race"
+    elif all_passed:
+        kill_reason = "none"
+    elif timed_out:
+        kill_reason = "stuck_or_hardtimeout"
+    elif (total_cost or 0) == 0:
+        kill_reason = "infra"
+    else:
+        kill_reason = "interrupted_or_unknown"
 
     return {
         "task_id": task_id,
@@ -394,6 +873,19 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         "total_latency_ms": round(total_latency, 2),
         "dollar_per_pass": round(total_cost / completed, 6) if completed else None,
         "stderr_tail": stderr[-200:],
+        "timed_out": timed_out,
+        "judge_model": judge_model,
+        "planner_model": planner_model,
+        "source_batch": source_batch,
+        # S10-P2：P1 字段
+        "semantic_pass": semantic_pass,
+        "binary_pass": binary_pass,
+        "kill_reason": kill_reason,
+        "per_subtask": per_subtask,
+        "plan_step_count": plan_step_count,
+        # S10-P2：代码质量维度（§4.1，从保留 worktree 聚合）
+        "lint_errors": quality["lint_errors"],
+        "tests_broken": quality["tests_broken"],
     }
 
 
@@ -431,6 +923,35 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         pass_rates = [it["pass_rate"] for it in items]
         avg_pass_rate = round(sum(pass_rates) / n, 4) if n else 0
 
+        # S10-P1 统一口径（bench-v2-data-requirements.md §3.1）：
+        #   $/pass = sum(total_cost_usd) / sum(pass_rate)
+        # 以 raw cost 和 raw pass_rate 为准，不依赖 record 级 dollar_per_pass 字段（跨批次可比）。
+        _sum_cost = sum(it.get("total_cost_usd", 0) or 0 for it in items)
+        _sum_pass = sum(pass_rates)
+        dollar_per_pass = round(_sum_cost / _sum_pass, 6) if _sum_pass > 0 else None
+
+        # S10-P1 K8 修订（§3.4）：K8 = 通过 record 中 zero-retry 占比。
+        # 分母只含通过 record（pass_rate > 0），分子是其 total_retries == 0 的子集。
+        # binary_pass（P1）落地前以 pass_rate > 0 近似"通过"。
+        _passed_records = [it for it in items if (it.get("pass_rate") or 0) > 0]
+        _passed_count = len(_passed_records)
+        _zero_retry_passed = sum(
+            1 for it in _passed_records if (it.get("total_retries") or 0) == 0
+        )
+        k8 = round(_zero_retry_passed / _passed_count, 4) if _passed_count else None
+
+        # S10-P2 代码质量维度（§3.5 / §4.1）：
+        #   - 平均 lint 错误 / 平均测试回归（跨所有 record，含未通过的）
+        #   - 代码回归率 = 通过 record（pass_rate>0）中 tests_broken>0 占比
+        _lint_all = [it.get("lint_errors") or 0 for it in items]
+        _broken_all = [it.get("tests_broken") or 0 for it in items]
+        avg_lint = round(sum(_lint_all) / n, 3) if n else 0
+        avg_tests_broken = round(sum(_broken_all) / n, 3) if n else 0
+        _regression_passed = sum(
+            1 for it in _passed_records if (it.get("tests_broken") or 0) > 0
+        )
+        code_regression_rate = round(_regression_passed / _passed_count, 4) if _passed_count else None
+
         # 决策规则
         recommendation, roles, reason = _recommend(model, avg_pass_rate, avg_cost, n)
 
@@ -440,8 +961,13 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
             "sample_size": n,
             "avg_pass_rate": avg_pass_rate,
             "avg_cost_usd": avg_cost,
-            "dollar_per_pass": cost_per_pass,
+            "dollar_per_pass": dollar_per_pass,
+            "dollar_per_pass_legacy": cost_per_pass,
+            "k8_zero_retry_pass_rate": k8,
             "efficiency_score": efficiency_score,
+            "avg_lint_errors": avg_lint,
+            "avg_tests_broken": avg_tests_broken,
+            "code_regression_rate": code_regression_rate,
             "completed_subtasks": completed_total,
             "total_subtasks": subtask_total,
             "recommendation": recommendation,
@@ -528,20 +1054,172 @@ def cmd_models(args=None) -> None:
         return
 
     console.print(f"\n📊 模型生产力评估（{data['total_runs']} 次执行）")
-    console.print("─" * 100)
-    console.print(f"{'模型':<22} {'样本':>4} {'通过率':>7} {'$/pass':>9} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
-    console.print("─" * 100)
+    console.print("─" * 118)
+    console.print(f"{'模型':<22} {'样本':>4} {'通过率':>7} {'$/pass':>9} {'K8':>6} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
+    console.print("─" * 118)
 
     for model, m in data["models"].items():
         icon = {"recommended": "★", "conditional": "⚠", "discouraged": "✗", "insufficient_data": "?"}[m["recommendation"]]
         fp_str = f"{m.get('false_positive_rate', '?'):>3}%" if isinstance(m.get('false_positive_rate'), (int, float)) else "   ?"
         eff = m.get("efficiency_score", 0)
         eff_str = f"{eff:>7.1f}" if eff > 0 else "     -"
+        k8 = m.get("k8_zero_retry_pass_rate")
+        k8_str = f"{k8:>5.0%}" if k8 is not None else "    -"
         console.print(f"{icon} {model:<20} {m['sample_size']:>4} {m['avg_pass_rate']:>6.0%} "
-                      f"${(m['dollar_per_pass'] or 0):>8.4f} {eff_str} {fp_str:>7} "
+                      f"${(m['dollar_per_pass'] or 0):>8.4f} {k8_str} {eff_str} {fp_str:>7} "
                       f"{m['recommendation']:<12} {m['reason']}")
-    console.print("─" * 100)
+    console.print("─" * 118)
     console.print("效率 = passes/dollar (每美元获得的通过率，越高越经济)")
+    console.print("K8   = 通过 record 中 zero-retry 占比（首次验证通过率，§3.4 修订口径）")
+    console.print("$/pass = sum(cost) / sum(pass_rate)，raw 口径，跨批次可比（§3.1）")
+
+
+# ═══════════════════════════════════════════════════════════════
+# S10 成本基线（测量/控制解耦 + 删失校正）
+# ═══════════════════════════════════════════════════════════════
+
+def compute_cost_baseline(results_paths: list, tasks_dir: str = "eval_suite",
+                          exclude_timed_out: bool = True,
+                          tolerance: float = 1.5) -> dict:
+    """基于 bench 结果计算删失校正的成本基线（P90 × tolerance 预算）。
+
+    测量/控制解耦原则：
+      - 基线只统计「自然成本」——排除被 timeout/熔断截断（timed_out=True）的
+        记录，避免右删失把真实成本系统性压低。
+      - 被截断记录属于「已知下限」（censored），不参与 mean/P90 计算。
+      - 预测因子：difficulty × model × plan_step_count（子任务数）。
+
+    Args:
+        results_paths: 一个或多个 results*.jsonl 路径
+        tasks_dir: eval_suite 目录（用于按 task_id 映射 difficulty）
+        exclude_timed_out: 排除 timed_out=True 记录（默认 True，删失校正）
+        tolerance: 预算 = P90 × tolerance
+
+    Returns:
+        {"per_difficulty_model": {diff: {model: {n, mean, p90, budget}}},
+         "per_difficulty": {diff: {n, mean, p90, budget}},
+         "summary": {...}}
+    """
+    from pathlib import Path
+
+    records: list[dict] = []
+    for _p in (results_paths if isinstance(results_paths, (list, tuple)) else [results_paths]):
+        for line in Path(_p).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    if not records:
+        return {"error": "无数据"}
+
+    # 按 task_id 映射 difficulty（从任务 YAML 读取）
+    task_diff: dict[str, str] = {}
+    tasks_dir_p = Path(tasks_dir)
+    if tasks_dir_p.is_dir():
+        for tf in sorted((tasks_dir_p / "tasks").glob("*.yaml")):
+            try:
+                _t = yaml.safe_load(tf.read_text(encoding="utf-8"))
+                if _t and _t.get("id"):
+                    task_diff[_t["id"]] = _t.get("difficulty", "medium")
+            except Exception:
+                continue
+
+    # 删失校正：排除被截断记录（timed_out=True → 右删失，真实成本 ≥ 记录值）
+    if exclude_timed_out:
+        _censored = [r for r in records if r.get("timed_out")]
+        records = [r for r in records if not r.get("timed_out")]
+    else:
+        _censored = []
+
+    def _p90(vals: list) -> float:
+        if not vals:
+            return 0.0
+        vals = sorted(vals)
+        _i = min(len(vals) - 1, int(round(0.9 * (len(vals) - 1))))
+        return vals[_i]
+
+    per_dm: dict[str, dict] = {}
+    per_diff: dict[str, list] = {}
+    _steps: list[int] = []
+
+    for r in records:
+        model = r.get("model", "unknown")
+        tid = r.get("task_id", "")
+        diff = task_diff.get(tid, "medium")
+        cost = r.get("total_cost_usd", 0.0) or 0.0
+        steps = r.get("plan_step_count") or r.get("total_subtasks") or 0
+        _steps.append(int(steps))
+        per_dm.setdefault(diff, {}).setdefault(model, []).append(cost)
+        per_diff.setdefault(diff, []).append(cost)
+
+    out = {"per_difficulty_model": {}, "per_difficulty": {}}
+    for diff, by_model in per_dm.items():
+        out["per_difficulty_model"][diff] = {}
+        for model, costs in by_model.items():
+            out["per_difficulty_model"][diff][model] = {
+                "n": len(costs),
+                "mean": round(sum(costs) / len(costs), 6),
+                "p90": round(_p90(costs), 6),
+                "budget": round(_p90(costs) * tolerance, 6),
+            }
+    for diff, costs in per_diff.items():
+        out["per_difficulty"][diff] = {
+            "n": len(costs),
+            "mean": round(sum(costs) / len(costs), 6),
+            "p90": round(_p90(costs), 6),
+            "budget": round(_p90(costs) * tolerance, 6),
+        }
+
+    _all = [c for diff in per_diff.values() for c in diff]
+    out["summary"] = {
+        "total_records": len(records),
+        "censored_records": len(_censored),
+        "exclude_timed_out": exclude_timed_out,
+        "tolerance": tolerance,
+        "overall_mean": round(sum(_all) / len(_all), 6) if _all else 0.0,
+        "overall_p90": round(_p90(_all), 6) if _all else 0.0,
+        "overall_budget": round(_p90(_all) * tolerance, 6) if _all else 0.0,
+        "avg_plan_step_count": round(sum(_steps) / len(_steps), 2) if _steps else 0.0,
+    }
+    return out
+
+
+def cmd_cost_baseline(args=None) -> None:
+    """输出删失校正的成本基线表（agent_go eval cost-baseline）。"""
+    _workspace = Path(__file__).resolve().parent.parent
+    paths_arg = getattr(args, "results", None) or "eval_suite/results.jsonl"
+    results_paths = [p.strip() for p in paths_arg.split(",") if p.strip()]
+    results_paths = [_workspace / p if not Path(p).is_absolute() else Path(p) for p in results_paths]
+    tasks_dir = _workspace / (getattr(args, "tasks", None) or "eval_suite")
+    tolerance = float(getattr(args, "tolerance", 1.5) or 1.5)
+
+    baseline = compute_cost_baseline(results_paths, tasks_dir=str(tasks_dir),
+                                     exclude_timed_out=True, tolerance=tolerance)
+    if "error" in baseline:
+        console.error(baseline["error"])
+        return
+
+    console.print(f"成本基线（P90×{tolerance}，排除超时删失 {baseline['summary']['censored_records']} 条）")
+    console.print(f"总计 {baseline['summary']['total_records']} 条自然成本记录")
+    console.print("")
+    console.print("┌ 按难度 × 模型 ─────────────────────────────────────┐")
+    console.print(f"{'难度':<8} {'模型':<18} {'n':>4} {'mean':>8} {'P90':>8} {'预算':>8}")
+    for diff in sorted(baseline["per_difficulty_model"]):
+        for model, m in sorted(baseline["per_difficulty_model"][diff].items()):
+            console.print(f"{diff:<8} {model:<18} {m['n']:>4} ${m['mean']:>7.4f} "
+                          f"${m['p90']:>7.4f} ${m['budget']:>7.4f}")
+    console.print("")
+    console.print("┌ 按难度（整体）────────────────────────────────────┐")
+    console.print(f"{'难度':<8} {'n':>4} {'mean':>8} {'P90':>8} {'预算':>8}")
+    for diff in sorted(baseline["per_difficulty"]):
+        m = baseline["per_difficulty"][diff]
+        console.print(f"{diff:<8} {m['n']:>4} ${m['mean']:>7.4f} ${m['p90']:>7.4f} ${m['budget']:>7.4f}")
+    console.print(f"\n总体预算（P90×{tolerance}）: ${baseline['summary']['overall_budget']:.4f}")
+    console.print(f"平均子任务数: {baseline['summary']['avg_plan_step_count']}")
+    console.print("注：预算基于自然成本（排除 timed_out 右删失）。被熔断记录会写入 "
+                  "metering.jsonl 的 cost_censored 事件继续累计（测量与控制解耦）。")
 
 
 # ═══════════════════════════════════════════════════════════════

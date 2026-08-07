@@ -314,6 +314,51 @@ class TestRunSubtask:
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
+    def test_task_md_artifact_convention_injected_when_configured(
+            self, mock_wt_create, mock_subprocess,
+            mock_headless, mock_load_agent,
+            temp_repo, task_dir, fast_logger,
+            basic_subtask):
+        """S9-B: artifact_dir 配置时 TASK.md 注入 __artifacts__/ 产物约定。"""
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+
+        run_subtask("test-task", basic_subtask, temp_repo, task_dir,
+                    fast_logger, headless=True, config={"artifact_dir": "/tmp/reports"})
+
+        task_md_path = task_dir / "sub-1" / "TASK.md"
+        assert task_md_path.exists()
+        content = task_md_path.read_text(encoding="utf-8")
+        assert "## 产物输出" in content, "TASK.md 应包含产物输出约定"
+        assert "__artifacts__/" in content, "TASK.md 应提及 __artifacts__/ 目录"
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_task_md_no_artifact_convention_without_config(
+            self, mock_wt_create, mock_subprocess,
+            mock_headless, mock_load_agent,
+            temp_repo, task_dir, fast_logger,
+            basic_subtask):
+        """S9-B: 未配置 artifact_dir 时 TASK.md 不含产物约定（向后兼容）。"""
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+
+        run_subtask("test-task", basic_subtask, temp_repo, task_dir,
+                    fast_logger, headless=True, config={})
+
+        task_md_path = task_dir / "sub-1" / "TASK.md"
+        assert task_md_path.exists()
+        content = task_md_path.read_text(encoding="utf-8")
+        assert "## 产物输出" not in content, "未配置时不应注入产物约定"
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
     def test_context_file_created(self, mock_wt_create, mock_subprocess,
                                   mock_headless, mock_load_agent,
                                   temp_repo, task_dir, fast_logger,
@@ -1334,11 +1379,14 @@ class TestVerificationLoopE2E:
              patch("agent_go.executor._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
 
+            # 显式禁用语义评估：本测试只测 shell 验证循环，避免真实环境 evaluator
+            # 配置（可能指向外部 API）污染重试计数（fail-open 语义评估会额外触发一次修复）
             result = _verify_changes(
                 "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
                 task_md="# Task", env={}, tag_name="task-1/sub-1",
                 active_pids=set(), active_pids_lock=Lock(), logger=logger,
                 task_dir=task_dir,
+                config={"evaluator": {"enabled": False}},
             )
 
         assert result["verify_ok"] is True, "修复后应验证通过"
