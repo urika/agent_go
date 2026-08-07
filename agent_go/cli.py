@@ -627,6 +627,12 @@ def cmd_run(args=None):
             (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
             _save_plan_snapshot(task_dir, confirmed_plan, iteration)
             logger.info(f"[PLAN] PLAN.md 已保存 (v{iteration})")
+            # S12-P2 G5：规划期欠分解检测——hard 子任务 + 总子任务数过少 → 提示可能撞超时
+            try:
+                from .planning import check_under_decomposition
+                check_under_decomposition(subtasks, logger)
+            except Exception as _ge:
+                logger.debug(f"[G5] 欠分解检测失败（忽略）: {_ge}")
         elif 'subtasks' in locals() and subtasks is not None:
             # 降级路径中已通过 decompose_fallback 生成 subtasks，无需重复调用
             pass

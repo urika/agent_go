@@ -62,6 +62,7 @@ notify_event(event, context, config) → 任务完成/失败通知 (M1)
 
 ```
 estimate_task_duration(subtasks, parallel, tasks_dir) → 历史子任务耗时中位数 × 拓扑波次
+check_under_decomposition(subtasks, logger) → S12-P2 G5 规划期欠分解检测（hard + 子任务数<阈值 → 告警）
 ```
 
 ## executor.py — 子任务执行器 (1459 行)

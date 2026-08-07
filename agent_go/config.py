@@ -107,6 +107,12 @@ DEFAULT_CONFIG = {
         "medium": "",
         "hard": "",
     },
+    "worker_models_degrades": {     # S12-P2：budget_mode=degrade 时的模型降级表（对称升级表）。
+                                    # 键 = 当前难度，值 = 降级目标难度；空 = 降档到 claude 默认模型
+        "easy": "",
+        "medium": "easy",
+        "hard": "medium",
+    },
     "local_model_names": {},        # 本地后端真实模型名映射（routed → 实际名，如
                                     # {"claude-haiku-4-5": "Qwen3.6-27B-4bit"}）；
                                     # 探测本地代理 /status 失败时的兜底

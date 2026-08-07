@@ -11,12 +11,52 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-__all__ = ["estimate_task_duration"]
+__all__ = ["estimate_task_duration", "check_under_decomposition"]
 
 logger = logging.getLogger(__name__)
 
 # 无历史数据时的默认子任务耗时（秒），与 eval.py 保持一致
 _DEFAULT_SUBTASK_SEC = 240
+
+# S12-P2 G5 V1：hard 任务的最小合理子任务数阈值（硬编码，V2 从 verify_state.json 历史学习）
+DIFFICULTY_BASE_SUBTASKS = {"easy": 1, "medium": 2, "hard": 3}
+
+
+def check_under_decomposition(subtasks: list[dict], logger: Optional[logging.Logger] = None) -> bool:
+    """G5 规划期欠分解检测：hard 子任务 + 总子任务数过少 → 提示可能撞超时/单子任务过长。
+
+    高难度任务被欠分解成 1-2 个长子任务 → 单子任务耗时长 → 撞 retry_timeout。
+    根因在规划期，不在执行期（见 docs/design/timeout-kill-strategy-2026-08-06.md G5）。
+
+    V1：硬编码阈值 difficulty_base_subtasks（hard=3）。仅告警提示，不强改 Plan
+    （不覆盖 LLM 的分解决定——「确需少量子任务的 hard 任务」是合法场景）。
+
+    Returns:
+        True 若检测到欠分解（触发告警）；False 正常。
+    """
+    _lg = logger or logging.getLogger(__name__)
+    if not subtasks:
+        return False
+    total = len(subtasks)
+    has_hard = any(
+        isinstance(st, dict) and st.get("difficulty") == "hard"
+        for st in subtasks
+    )
+    if not has_hard:
+        return False
+    threshold = DIFFICULTY_BASE_SUBTASKS.get("hard", 3)
+    if total < threshold:
+        _hard_ids = [
+            st.get("id", "?") for st in subtasks
+            if isinstance(st, dict) and st.get("difficulty") == "hard"
+        ]
+        _lg.warning(
+            f"[G5] 欠分解告警: hard 子任务（{', '.join(_hard_ids)}）仅 {total} 个总子任务 "
+            f"< 建议 {threshold} 个——单子任务可能过长并撞 retry_timeout。"
+            f"建议再分解或为 hard 子任务配置强模型（worker_models.hard）。"
+        )
+        return True
+    return False
 
 
 def _read_meta(task_dir: Path) -> Optional[dict[str, Any]]:

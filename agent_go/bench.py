@@ -524,10 +524,11 @@ def _dir_matches_task(td: Path, expected_task: str) -> bool:
 
 
 # 动态 timeout 基准参数（基于 v2 bench 实测：每子任务平均耗时 ~70-150s）
-# 基准取 150s/subtask，另加 120s 缓冲覆盖收尾（保存 meta/清理/push）与波动。
-# 公式：timeout = max(任务YAML配置值, 子任务数 × 基准 + 缓冲)
-_DYNAMIC_TIMEOUT_BASE_SEC = 150      # 每子任务基准耗时（秒）
+# S12-P2 G6：动态 timeout 改为按难度（此前按子任务数——耗时由难度驱动而非子任务数）。
+# mult 复用 retry_timeout 的难度倍数表（与执行侧口径一致，避免测量/执行两套逻辑分叉）。
+_DIFFICULTY_TIMEOUT_BASE_SEC = 150   # 每难度基准耗时（秒）
 _DYNAMIC_TIMEOUT_BUFFER_SEC = 120    # 收尾/波动缓冲（秒）
+_DIFFICULTY_MULT = {"easy": 1, "medium": 1.5, "hard": 2.5}  # 与 executor retry_timeout 倍数表一致
 
 
 def _estimate_subtasks_from_history(task_id: str, results_path: Optional[Path]) -> int:
@@ -563,21 +564,29 @@ def _estimate_subtasks_from_history(task_id: str, results_path: Optional[Path]) 
 
 
 def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = None) -> int:
-    """按子任务数动态计算任务 timeout，解决多子任务任务被 timeout 截断的问题。
+    """按难度动态计算任务 timeout，解决多子任务/高难度任务被 timeout 截断的问题。
+
+    S12-P2 G6：耗时由难度驱动，不再按子任务数（控制变量指错方向）。
+    mult 复用 retry_timeout 难度倍数表 {easy:1, med:1.5, hard:2.5}。
 
     优先级：
       1. 任务 YAML 显式声明 `timeout` → 作为下限（不缩短既有配置）
-      2. 历史推断子任务数 × 基准耗时 + 缓冲 → 动态上限
+      2. 难度基准 × mult + 缓冲 → 动态上限；hard 任务且历史子任务数较多时
+         按 max(子任务数 × 基准, 难度动态值) 上浮，兼容多子任务 hard 任务。
 
-    公式：timeout = max(配置值, 子任务数 × 150s + 120s)
-    例：add-caching-layer 5 子任务 → max(900, 5×150+120=870) = 900s
-        （历史推断为 5 时仍用配置 900；若子任务更多则自动扩展）
+    公式：timeout = max(配置值, 难度基准 × mult + 缓冲)
     """
     cfg_timeout = int(task.get("timeout", 1800))
+    difficulty = task.get("difficulty", "medium")
+    if difficulty not in ("easy", "medium", "hard"):
+        difficulty = "medium"
+    mult = _DIFFICULTY_MULT.get(difficulty, 1.5)
+    dynamic = _DIFFICULTY_TIMEOUT_BASE_SEC * mult + _DYNAMIC_TIMEOUT_BUFFER_SEC
+    # 多子任务 hard 任务兼容：历史子任务数多时按子任务数上浮（取大者）
     n = _estimate_subtasks_from_history(task_id, results_path)
-    if n <= 0:
-        return cfg_timeout
-    dynamic = n * _DYNAMIC_TIMEOUT_BASE_SEC + _DYNAMIC_TIMEOUT_BUFFER_SEC
+    if n > 0:
+        per_sub = _DIFFICULTY_TIMEOUT_BASE_SEC * n + _DYNAMIC_TIMEOUT_BUFFER_SEC
+        dynamic = max(dynamic, per_sub)
     return max(cfg_timeout, dynamic)
 
 

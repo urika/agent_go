@@ -513,23 +513,31 @@ def test_estimate_subtasks_missing_file(tmp_path):
     assert _estimate_subtasks_from_history("task-x", tmp_path / "nope.jsonl") == 0
 
 
-def test_dynamic_timeout_expands_for_multi_subtask(tmp_path):
-    """多子任务任务自动扩展 timeout，不低于配置值。"""
+def test_dynamic_timeout_expands_for_hard_difficulty(tmp_path):
+    """hard 任务按难度扩展 timeout（mult=2.5 → 150*2.5+120=495），不低于配置值。"""
+    # hard + 5 子任务历史 → max(495, 5*150+120=870) = 870s > 配置 300s
     p = _write_result(tmp_path, "task-x", 5)
-    # 5 子任务 → 5*150+120 = 870s > 配置 300s
-    assert _dynamic_timeout({"timeout": 300}, "task-x", p) == 870
+    assert _dynamic_timeout({"timeout": 300, "difficulty": "hard"}, "task-x", p) == 870
+
+
+def test_dynamic_timeout_uses_difficulty_when_no_history(tmp_path):
+    """无历史子任务数时按难度计算（G6：耗时由难度驱动，非子任务数）。"""
+    # hard → 150*2.5+120 = 495s；medium → 150*1.5+120 = 345s
+    assert _dynamic_timeout({"timeout": 300, "difficulty": "hard"}, "task-x", None) == 495
+    assert _dynamic_timeout({"timeout": 300, "difficulty": "medium"}, "task-x", None) == 345
 
 
 def test_dynamic_timeout_keeps_config_when_larger(tmp_path):
     """配置值更大时保持配置（不缩短既有 timeout）。"""
     p = _write_result(tmp_path, "task-x", 2)
-    # 2 子任务 → 2*150+120 = 420s < 配置 1200s
-    assert _dynamic_timeout({"timeout": 1200}, "task-x", p) == 1200
+    # easy → 150*1+120 = 270s；2 子任务 → 2*150+120 = 420s；均 < 配置 1200s
+    assert _dynamic_timeout({"timeout": 1200, "difficulty": "easy"}, "task-x", p) == 1200
 
 
 def test_dynamic_timeout_no_history_uses_config(tmp_path):
-    """无历史数据时用配置值。"""
-    assert _dynamic_timeout({"timeout": 900}, "task-x", None) == 900
+    """无历史数据且 easy 难度动态值低于配置时用配置值。"""
+    # easy → 150*1+120 = 270s < 配置 900s
+    assert _dynamic_timeout({"timeout": 900, "difficulty": "easy"}, "task-x", None) == 900
 
 
 # ═══════════════════════════════════════════════════════════════

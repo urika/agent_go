@@ -1342,8 +1342,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         logger.warning(f"Agent 类型 \"{agent_type_name}\" 未注册，降级为 developer。可用: {available}")
 
     # S4 复杂度双通道：按 difficulty 路由 claude 模型（空值 = CLI 默认模型）
-    # S12-P1 G4：budget_mode=degrade 时，剩余子任务降档模型（hard→medium→easy→空=默认）
-    # 并标 degraded=True，让最终验收人知道这部分由便宜模型产出。
+    # S12-P1 G4 + S12-P2：budget_mode=degrade 时，剩余子任务按对称降级表
+    # worker_models_degrades（config）降档模型（如 hard→medium），并标 degraded=True，
+    # 让最终验收人知道这部分由便宜模型产出。
     difficulty = subtask.get("difficulty", "medium")
     if difficulty not in ("easy", "medium", "hard"):
         difficulty = "medium"
@@ -1352,12 +1353,17 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     env["AGENT_GO_DIFFICULTY"] = difficulty
     _is_degraded = bool(config and config.get("_degraded"))
     if _is_degraded:
-        _downgrade_chain = ["hard", "medium", "easy", ""]
-        try:
-            _di = _downgrade_chain.index(difficulty)
-        except ValueError:
-            _di = 1
-        _deg_target = _downgrade_chain[_di + 1] if _di < len(_downgrade_chain) - 1 else ""
+        _degrades_cfg = _effective_config(config).get("worker_models_degrades", {}) or {}
+        # 兼容旧式数组降档链（worker_models_degrades 未配置时回退到 builtin）
+        if _degrades_cfg and isinstance(_degrades_cfg, dict):
+            _deg_target = _degrades_cfg.get(difficulty, "")
+        else:
+            _downgrade_chain = ["hard", "medium", "easy", ""]
+            try:
+                _di = _downgrade_chain.index(difficulty)
+            except ValueError:
+                _di = 1
+            _deg_target = _downgrade_chain[_di + 1] if _di < len(_downgrade_chain) - 1 else ""
         _deg_model = worker_models.get(_deg_target, "") if _deg_target else ""
         if _deg_model:
             routed_model = _deg_model

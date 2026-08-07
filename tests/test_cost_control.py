@@ -373,3 +373,38 @@ class TestS12P1G8KillReasonAwareness:
             _kr = latest[0] or ""
             assert not _kr.startswith("over_budget")
             assert _kr != "cleanup_race"
+
+
+# ─────────────────────────────────────────────────────────────
+# S12-P2：对称降级表（worker_models_degrades）
+# ─────────────────────────────────────────────────────────────
+
+class TestS12P2DegradeTable:
+    """budget_mode=degrade 时按 worker_models_degrades 表降档（对称升级表）。"""
+
+    def test_config_has_symmetric_degrade_table(self):
+        """config 默认含 worker_models_degrades（对称 worker_models_fallback）。"""
+        from agent_go.config import DEFAULT_CONFIG
+        degrades = DEFAULT_CONFIG.get("worker_models_degrades", {})
+        assert degrades.get("hard") == "medium"
+        assert degrades.get("medium") == "easy"
+        # easy 无可降档 → 空（回退 claude 默认模型）
+
+    def test_degrades_hard_to_medium(self):
+        """hard 子任务降档 → medium 档模型。"""
+        degrades = {"easy": "", "medium": "easy", "hard": "medium"}
+        assert degrades["hard"] == "medium"
+
+    def test_degrades_medium_to_easy(self):
+        degrades = {"easy": "", "medium": "easy", "hard": "medium"}
+        assert degrades["medium"] == "easy"
+
+    def test_degrades_easy_empty(self):
+        """easy 无降级目标 → 空字符串（回退 claude 默认模型）。"""
+        degrades = {"easy": "", "medium": "easy", "hard": "medium"}
+        assert degrades["easy"] == ""
+
+
+# ─────────────────────────────────────────────────────────────
+# S12-P2 G5：规划期欠分解检测（见 tests/test_planning.py）
+# ─────────────────────────────────────────────────────────────
