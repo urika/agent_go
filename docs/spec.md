@@ -116,8 +116,12 @@ get_api_key(config)          → env AGENT_GO_API_KEY > config.api_key
 setup_logger(task_id, dir)   → 双格式: INFO人类 + DEBUG JSON
 log_event(logger, event, d)  → DEBUG JSON 事件
 meter_event(path, event)     → 结构化计量事件写 metering.jsonl (role/cost/tokens)
+write_censored_event(path, level, sub_id, spent, budget, reason)
+                             → S10 熔断时写 cost_censored 事件（右删失标记，测量/控制解耦）
 safe_input(prompt)           → input() 包装，EOF → ""
 ```
+
+`cost_control` 配置块（S10/S12）：`enabled`(默认 False) + `max_budget_usd`(L3) + `per_subtask_budget_usd`(按难度，L1) + `subtask_multiplier`(L2) + `on_exceed` + `budget_mode`(S12-P1：`strict`/`degrade`/`ignore`)。
 
 ## console.py — 输出抽象 (216 行)
 

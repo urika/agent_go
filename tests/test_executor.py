@@ -1450,6 +1450,50 @@ class TestVerificationLoopE2E:
         assert result["retry_count"] == 2, "应达到 max_retries=2"
         assert mock_fix.call_count == 2, "应修复 2 次"
 
+    def test_degrade_mode_caps_max_retries_to_1(self, temp_repo, task_dir, logger):
+        """S12-P1 G4：budget_mode=degrade 时 max_retries 降为 1（不在便宜模型无限烧钱）。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 3}, "_degraded": True},
+            )
+
+        # 原始 config 给 max_retries=3，但 _degraded=True → cap 到 1
+        assert result["verify_ok"] is False
+        assert result["retry_count"] == 1, "degrade 模式应 cap max_retries=1"
+        assert mock_fix.call_count == 1
+
+    def test_over_budget_l2_skips_fix(self, temp_repo, task_dir, logger):
+        """S12-P1 G8：kill_reason=over_budget_l2 → 不进修复重试（不再烧钱）。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 3}},
+                initial_kill_reason="over_budget_l2",
+            )
+
+        # over_budget_l2 → G8 短路，不进重试（mock_fix 未被调用）
+        assert result["verify_ok"] is False
+        assert mock_fix.call_count == 0, "over_budget 不应触发修复"
+
     def test_semantic_eval_triggers_repair(self, temp_repo, task_dir, logger):
         """shell 验证通过 → 语义评估失败 → 触发修复 → 修复后通过"""
         from threading import Lock

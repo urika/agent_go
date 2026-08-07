@@ -664,6 +664,13 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     difficulty = subtask.get("difficulty", "medium")
     _difficulty_caps = {"easy": 2, "medium": 3, "hard": 5}
     max_retries = min(max_retries, _difficulty_caps.get(difficulty, 3))
+    # S12-P1 G4：budget_mode=degrade 时，降档模型子任务 max_retries 降为 1，
+    # 避免在便宜模型上无限烧钱（"延长死亡时间"而非保产出）。
+    if (config or {}).get("_degraded"):
+        _cap_deg = max_retries
+        max_retries = min(max_retries, 1)
+        if max_retries != _cap_deg:
+            logger.warning(f"[degrade] {sub_id} max_retries {_cap_deg}→{max_retries}（降级模式）")
 
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
@@ -893,6 +900,22 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 logger.info(f"验证全部通过 (attempt={attempt_label})")
                 break
 
+            # S12-P1 G8：验证循环 kill_reason 感知（不重试预算熔断 / cleanup_race 计成功）
+            # over_budget_l2/l3 → 直接 Failed，不进重试（再花更多钱在已超预算任务上违背约束）
+            # cleanup_race → 已成功，不重试
+            # stuck/hard_timeout/goal_* → 正常 verify 但重试预算已受限
+            _kill_reason_now = _latest_kill_reason[0] or ""
+            if isinstance(_kill_reason_now, str) and _kill_reason_now.startswith("over_budget"):
+                verify_ok = False
+                logger.warning(
+                    f"[G8] {sub_id} kill_reason={_kill_reason_now}：预算熔断，跳过修复重试")
+                break
+            if _kill_reason_now == "cleanup_race":
+                verify_ok = True
+                logger.info(
+                    f"[G8] {sub_id} kill_reason=cleanup_race：任务实际已完成，视为通过")
+                break
+
             # 4. 验证失败展示：交互卡片 / --yes 自动重试倒计时 / headless 静默重试
             _elapsed_sec = int(time.time() - _verify_loop_start)
             _ins = metrics_changes.get("insertions", 0)
@@ -1040,8 +1063,10 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                                         allowed_tools=allowed_tools, hard_timeout=retry_timeout,
                                         config=_cfg)
             # S12-P0 G1：捕获 fix 重试的 kill_reason（修复超时等）
-            if hasattr(_fix_result, "kill_reason") and getattr(_fix_result, "kill_reason"):
-                _latest_kill_reason[0] = getattr(_fix_result, "kill_reason")
+            # 仅接受真实字符串值（防御 MagicMock 等测试替身对象）
+            _fix_kr = getattr(_fix_result, "kill_reason", None)
+            if isinstance(_fix_kr, str) and _fix_kr:
+                _latest_kill_reason[0] = _fix_kr
 
             # git add + commit + tag
             subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
@@ -1317,12 +1342,26 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         logger.warning(f"Agent 类型 \"{agent_type_name}\" 未注册，降级为 developer。可用: {available}")
 
     # S4 复杂度双通道：按 difficulty 路由 claude 模型（空值 = CLI 默认模型）
+    # S12-P1 G4：budget_mode=degrade 时，剩余子任务降档模型（hard→medium→easy→空=默认）
+    # 并标 degraded=True，让最终验收人知道这部分由便宜模型产出。
     difficulty = subtask.get("difficulty", "medium")
     if difficulty not in ("easy", "medium", "hard"):
         difficulty = "medium"
     worker_models = _effective_config(config).get("worker_models", {})
     routed_model = worker_models.get(difficulty, "")
     env["AGENT_GO_DIFFICULTY"] = difficulty
+    _is_degraded = bool(config and config.get("_degraded"))
+    if _is_degraded:
+        _downgrade_chain = ["hard", "medium", "easy", ""]
+        try:
+            _di = _downgrade_chain.index(difficulty)
+        except ValueError:
+            _di = 1
+        _deg_target = _downgrade_chain[_di + 1] if _di < len(_downgrade_chain) - 1 else ""
+        _deg_model = worker_models.get(_deg_target, "") if _deg_target else ""
+        if _deg_model:
+            routed_model = _deg_model
+            logger.warning(f"[degrade] {sub_id} difficulty={difficulty} → 降档模型 {_deg_target}={_deg_model}")
     if routed_model:
         env["AGENT_GO_CLAUDE_MODEL"] = routed_model
         logger.info(f"[S4] {sub_id} difficulty={difficulty} → model={routed_model}")
@@ -1515,4 +1554,6 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             "merge_results": merge_results,
             "verification_results": verification_results,
             # S12-P0 G1：子任务级 kill_reason（none/stuck/hard_timeout/over_budget_l2/...）
-            "kill_reason": verify_results.get("kill_reason") if isinstance(verify_results, dict) else None}
+            "kill_reason": verify_results.get("kill_reason") if isinstance(verify_results, dict) else None,
+            # S12-P1 G4：budget_mode=degrade 降档模型产出标记
+            "degraded": bool(_is_degraded)}

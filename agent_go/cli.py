@@ -96,6 +96,10 @@ def _build_parser():
                             help="产物导出目录：子任务写入 worktree/__artifacts__/ 的文件在此收集导出（默认不导出）")
     run_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
                             help="任务级成本预算（USD）：累计 metering 成本超限即熔断剩余子任务（默认关闭）")
+    run_parser.add_argument("--budget", type=float, default=None, dest="budget",
+                            help="per-task 成本预算（USD，S12-P1 G3）：覆盖 cost_control.max_budget_usd，等价于 --max-cost")
+    run_parser.add_argument("--budget-mode", choices=["strict", "degrade", "ignore"], default=None, dest="budget_mode",
+                            help="预算策略（S12-P1 G3）：strict=超预算 block；degrade=切便宜模型继续；ignore=关 L3（默认 strict）")
     run_parser.add_argument("--config", default=argparse.SUPPRESS, help="Path to config JSON file (default: ~/.agent_go/config.json)")
 
     # resume 子命令
@@ -118,6 +122,10 @@ def _build_parser():
                                help="产物导出目录：收集各 worktree/__artifacts__/ 的文件（覆盖 meta 中的记录）")
     resume_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
                                help="任务级成本预算（USD）：累计 metering 成本超限即熔断剩余子任务（默认关闭）")
+    resume_parser.add_argument("--budget", type=float, default=None, dest="budget",
+                               help="per-task 成本预算（USD，S12-P1 G3）：覆盖 cost_control.max_budget_usd，等价于 --max-cost")
+    resume_parser.add_argument("--budget-mode", choices=["strict", "degrade", "ignore"], default=None, dest="budget_mode",
+                               help="预算策略（S12-P1 G3）：strict=超预算 block；degrade=切便宜模型继续；ignore=关 L3（默认 strict）")
 
     # list 子命令
     subparsers.add_parser("list", help="List all historical tasks")
@@ -425,13 +433,23 @@ def cmd_run(args=None):
     config["_metering_path"] = str(task_dir / "metering.jsonl")
     config["_task_id"] = task_id
 
-    # S10 成本控制：--max-cost 开启 L3 任务级熔断（默认关闭）
-    if getattr(args, "max_cost", None):
+    # S10 成本控制：--max-cost / --budget 开启 L3 任务级熔断（默认关闭）
+    # S12-P1 G3：--budget-mode 设置预算策略（strict/degrade/ignore）
+    _budget_flag = getattr(args, "budget", None) or getattr(args, "max_cost", None)
+    _budget_mode_flag = getattr(args, "budget_mode", None)
+    if _budget_flag:
         _cc = dict(config.get("cost_control") or {})
         _cc["enabled"] = True
-        _cc["max_budget_usd"] = float(args.max_cost)
+        _cc["max_budget_usd"] = float(_budget_flag)
+        if _budget_mode_flag:
+            _cc["budget_mode"] = _budget_mode_flag
         config["cost_control"] = _cc
-        logger.info(f"[cost_control] --max-cost ${args.max_cost} 已启用 L3 任务级熔断")
+        logger.info(f"[cost_control] --budget ${_budget_flag} 已启用 L3 任务级熔断 (mode={_cc.get('budget_mode', 'strict')})")
+    elif _budget_mode_flag:
+        _cc = dict(config.get("cost_control") or {})
+        _cc["budget_mode"] = _budget_mode_flag
+        config["cost_control"] = _cc
+        logger.info(f"[cost_control] --budget-mode {_budget_mode_flag}（未指定预算，仅设策略）")
 
     logger = setup_logger(task_id, task_dir)
     logger.info("=" * 60)
@@ -730,13 +748,23 @@ def cmd_resume(args=None):
     config["_metering_path"] = str(task_dir / "metering.jsonl")
     config["_task_id"] = task_id
 
-    # S10 成本控制：--max-cost 开启 L3 任务级熔断（默认关闭）
-    if args and getattr(args, "max_cost", None):
+    # S10 成本控制：--max-cost / --budget 开启 L3 任务级熔断（默认关闭）
+    # S12-P1 G3：--budget-mode 设置预算策略（strict/degrade/ignore）
+    _budget_flag = getattr(args, "budget", None) or (getattr(args, "max_cost", None) if args else None)
+    _budget_mode_flag = getattr(args, "budget_mode", None) if args else None
+    if _budget_flag:
         _cc = dict(config.get("cost_control") or {})
         _cc["enabled"] = True
-        _cc["max_budget_usd"] = float(args.max_cost)
+        _cc["max_budget_usd"] = float(_budget_flag)
+        if _budget_mode_flag:
+            _cc["budget_mode"] = _budget_mode_flag
         config["cost_control"] = _cc
-        logger.info(f"[cost_control] --max-cost ${args.max_cost} 已启用 L3 任务级熔断")
+        logger.info(f"[cost_control] --budget ${_budget_flag} 已启用 L3 任务级熔断 (mode={_cc.get('budget_mode', 'strict')})")
+    elif _budget_mode_flag:
+        _cc = dict(config.get("cost_control") or {})
+        _cc["budget_mode"] = _budget_mode_flag
+        config["cost_control"] = _cc
+        logger.info(f"[cost_control] --budget-mode {_budget_mode_flag}（未指定预算，仅设策略）")
 
     # CLI 覆盖：--max-retries / --no-verify-block / --artifact-dir（args 模式）
     if args and getattr(args, 'max_retries', None) is not None:

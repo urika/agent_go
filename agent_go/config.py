@@ -85,6 +85,9 @@ DEFAULT_CONFIG = {
         },
         "subtask_multiplier": 2.5,       # L2 子任务累计 = 单次上限 × 系数
         "on_exceed": "stop",             # 超限行为：stop（熔断）| warn（仅告警）
+        # S12-P1 G3 per-task 预算策略：strict=超预算 block；degrade=切便宜模型继续；
+        # ignore=关 L3（仅 L1/L2 生效）。与 --budget / Task Spec 字段配合。
+        "budget_mode": "strict",
     },
     "skills": {
         "auto_discover": False,     # 是否自动匹配 Skill（基于任务描述）

@@ -54,6 +54,23 @@ def _meter_total_cost(metering_path: str) -> float:
     return total
 
 
+def _dynamic_task_budget(cc_cfg: dict, subtasks: list[dict]) -> float:
+    """S12-P1 G3：动态计算任务级 L3 预算（默认值，config 未显式指定时用）。
+
+    公式：Σ(per_subtask_budget_usd[difficulty] × subtask_multiplier × 该难度子任务数)
+    避免 hard 多子任务与 easy 少子任务共用同一全局上限导致 hard 过早熔断。
+    返回 0 表示无法计算（将回退到静态 max_budget_usd 或禁用）。
+    """
+    _budgets = cc_cfg.get("per_subtask_budget_usd") or {}
+    _mult = cc_cfg.get("subtask_multiplier", 2.5) or 2.5
+    total = 0.0
+    for st in subtasks:
+        _diff = st.get("difficulty", "medium")
+        _b = _budgets.get(_diff) or _budgets.get("medium", 0.0) or 0.0
+        total += float(_b) * float(_mult)
+    return round(total, 4)
+
+
 def _estimate_wave_count(subtasks: list[dict], completed_ids: set = frozenset()) -> int:
     """估算拓扑波次总数（仅计算不执行，P1-4 波次进度卡片用）。
 
@@ -97,8 +114,13 @@ def _record_subtask_result(
     with meta_lock:
         worktree_map[st["id"]] = task_dir / st["id"] / "work"
         results_map[st["id"]] = result
-        if result.get("status") == "degraded":
+        if result.get("status") == "degraded" or result.get("degraded"):
             degraded_count += 1
+            # S12-P1 G4 安全阀：degrade 模式下统计连续失败（失败递增 / 成功清零）
+            _is_degrade_fail = result.get("status") == "failed" or not result.get("verify_ok")
+            if isinstance(config, dict) and config.get("_degraded"):
+                _cur_streak = int(config.get("_degrade_fail_streak", 0) or 0)
+                config["_degrade_fail_streak"] = _cur_streak + 1 if _is_degrade_fail else 0
         # 每个 subtask 独立写 result.json，减少全量覆写
         result_file = task_dir / st["id"] / "result.json"
         result_file.parent.mkdir(parents=True, exist_ok=True)
@@ -242,6 +264,15 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         logger.info(f"[并发] max_workers={parallel}, 拓扑调度，剩余 {len(remaining)} 个子任务")
 
     while remaining:
+        # S12-P1 G4 安全阀：degrade 模式下，降级子任务连续失败 ≥3 个 → 回退 stop，
+        # 避免在便宜模型上无限烧钱（降级模型 verify 必败时 degrade 只是"延长死亡时间"）。
+        if isinstance(config, dict) and config.get("_degraded"):
+            _streak = int(config.get("_degrade_fail_streak", 0) or 0)
+            if _streak >= 3:
+                logger.error(
+                    f"[degrade] 连续 {_streak} 个降级子任务失败，回退 stop（不再降级烧钱）")
+                config["_degraded"] = False
+                config["_degrade_fail_streak"] = 0
         # M6: 分离已阻断的子任务（上游失败 → 下游不执行）
         # block_on_failure=false（--no-verify-block）时跳过阻断，下游照常调度
         block_on_failure = config.get("verification", {}).get("block_on_failure", True)
@@ -274,32 +305,51 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         # S10 成本控制 L3：任务级熔断（跨子任务）。每次调度新 wave 前聚合 metering
         # 累计成本，超 max_budget_usd 则停止调度并将剩余子任务标记 blocked。
         # 默认关闭（cost_control.enabled=False 不检查）。
+        # S12-P1 G3：budget_mode 三态（strict=block / degrade=降级继续 / ignore=跳过 L3）
+        # + 动态默认预算（max_budget_usd 为空时用 Σ per_subtask_budget×mult×子任务数）。
         _cc_cfg = (config or {}).get("cost_control") or {}
         if _cc_cfg.get("enabled") and wave:
-            _max_budget = _cc_cfg.get("max_budget_usd", 0.0) or 0.0
+            _budget_mode = _cc_cfg.get("budget_mode", "strict")
+            _max_budget = _cc_cfg.get("max_budget_usd") or 0.0
+            if not _max_budget:
+                _max_budget = _dynamic_task_budget(_cc_cfg, remaining)
             _meter_path = (config or {}).get("_metering_path", "")
-            if _max_budget > 0 and _meter_path:
+            if _budget_mode != "ignore" and _max_budget > 0 and _meter_path:
                 _spent = _meter_total_cost(_meter_path)
                 if _spent >= _max_budget:
-                    logger.warning(
-                        f"[cost_control L3] 任务累计成本 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}，"
-                        f"停止调度剩余 {len(remaining)} 个子任务")
-                    write_censored_event(_meter_path, level="L3", sub_id="",
-                                         spent=_spent, budget=_max_budget,
-                                         reason=f"任务累计成本 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}")
-                    for st in remaining:
-                        if st["id"] not in results_map:
-                            results_map[st["id"]] = {
-                                "subtask_id": st["id"], "status": "blocked",
-                                "exit_code": -1, "summary": f"成本熔断（累计 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}）",
-                                "blocked_by": ["cost_control"],
-                                "failure_reason": "任务成本超预算熔断",
-                                "kill_reason": "over_budget_l3",
-                                "worktree": "", "sandbox_type": "headless",
-                                "verify_ok": False, "duration_sec": 0,
-                            }
-                            completed_ids.add(st["id"])
-                    break
+                    if _budget_mode == "degrade":
+                        # G4 优雅降级：不硬停，给剩余子任务打降级标记（切便宜模型继续），
+                        # 保留部分产出。run_subtask 读到 config["_degraded"] 后降档模型。
+                        logger.warning(
+                            f"[cost_control L3] 任务累计成本 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}，"
+                            f"切换降级模式（budget_mode=degrade），剩余 {len(remaining)} 个子任务降档模型")
+                        write_censored_event(_meter_path, level="L3", sub_id="",
+                                             spent=_spent, budget=_max_budget,
+                                             reason=f"成本超预算降级：${_spent:.4f} ≥ ${_max_budget:.4f}")
+                        if isinstance(config, dict):
+                            config["_degraded"] = True
+                            config["_degrade_budget"] = _max_budget
+                        # 不 break：继续调度（剩余子任务将以降级模型执行）
+                    else:
+                        logger.warning(
+                            f"[cost_control L3] 任务累计成本 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}，"
+                            f"停止调度剩余 {len(remaining)} 个子任务 (budget_mode={_budget_mode})")
+                        write_censored_event(_meter_path, level="L3", sub_id="",
+                                             spent=_spent, budget=_max_budget,
+                                             reason=f"任务累计成本 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}")
+                        for st in remaining:
+                            if st["id"] not in results_map:
+                                results_map[st["id"]] = {
+                                    "subtask_id": st["id"], "status": "blocked",
+                                    "exit_code": -1, "summary": f"成本熔断（累计 ${_spent:.4f} ≥ 预算 ${_max_budget:.4f}）",
+                                    "blocked_by": ["cost_control"],
+                                    "failure_reason": "任务成本超预算熔断",
+                                    "kill_reason": "over_budget_l3",
+                                    "worktree": "", "sandbox_type": "headless",
+                                    "verify_ok": False, "duration_sec": 0,
+                                }
+                                completed_ids.add(st["id"])
+                        break
 
         if not wave:
             logger.error("依赖循环或无法满足的依赖！")

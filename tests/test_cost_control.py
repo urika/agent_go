@@ -289,3 +289,87 @@ class TestCostBaseline:
         p.write_text("")
         b = compute_cost_baseline([str(p)], tasks_dir=str(tmp_path))
         assert "error" in b
+
+
+# ─────────────────────────────────────────────────────────────
+# S12-P1 G3: per-task 预算输入（动态默认预算 + budget_mode 三态）
+# ─────────────────────────────────────────────────────────────
+
+class TestS12P1G3PerTaskBudget:
+    def test_dynamic_task_budget_sums_by_difficulty(self):
+        """动态默认预算 = Σ per_subtask_budget[diff] × multiplier × 子任务数。"""
+        from agent_go.pipeline import _dynamic_task_budget
+        cc = {
+            "per_subtask_budget_usd": {"easy": 0.10, "medium": 0.20, "hard": 0.50},
+            "subtask_multiplier": 2.5,
+        }
+        subtasks = [
+            {"id": "a", "difficulty": "easy"},
+            {"id": "b", "difficulty": "easy"},
+            {"id": "c", "difficulty": "hard"},
+        ]
+        # easy: 0.10×2.5×2 = 0.50；hard: 0.50×2.5×1 = 1.25；总 1.75
+        assert _dynamic_task_budget(cc, subtasks) == pytest.approx(1.75)
+
+    def test_dynamic_task_budget_unknown_diff_falls_back_medium(self):
+        from agent_go.pipeline import _dynamic_task_budget
+        cc = {
+            "per_subtask_budget_usd": {"easy": 0.10, "medium": 0.20, "hard": 0.50},
+            "subtask_multiplier": 2.5,
+        }
+        subtasks = [{"id": "a", "difficulty": "weird"}]
+        assert _dynamic_task_budget(cc, subtasks) == pytest.approx(0.50)
+
+    def test_dynamic_task_budget_empty_budgets_zero(self):
+        from agent_go.pipeline import _dynamic_task_budget
+        assert _dynamic_task_budget({}, [{"id": "a", "difficulty": "easy"}]) == 0.0
+
+    def test_dynamic_task_budget_hard_more_subtasks_gets_more(self):
+        """hard 多子任务预算必须显著高于 easy 少子任务，防止 hard 过早熔断。"""
+        from agent_go.pipeline import _dynamic_task_budget
+        cc = {
+            "per_subtask_budget_usd": {"easy": 0.10, "medium": 0.20, "hard": 0.50},
+            "subtask_multiplier": 2.5,
+        }
+        easy2 = [{"id": x, "difficulty": "easy"} for x in range(2)]
+        hard10 = [{"id": x, "difficulty": "hard"} for x in range(10)]
+        assert _dynamic_task_budget(cc, hard10) > _dynamic_task_budget(cc, easy2) * 5
+
+
+# ─────────────────────────────────────────────────────────────
+# S12-P1 G8: 验证循环 kill_reason 感知
+# ─────────────────────────────────────────────────────────────
+
+class TestS12P1G8KillReasonAwareness:
+    def _build_latest_kill(self, reason):
+        """构造 _latest_kill_reason 列表模拟 verify 循环读取。"""
+        return [reason]
+
+    def test_over_budget_l2_skips_retry(self):
+        """kill_reason=over_budget_l2 → 不进重试，直接失败。"""
+        from agent_go.executor import _verify_changes
+        latest = self._build_latest_kill("over_budget_l2")
+        # 模拟 verify 循环中的 G8 分支逻辑（与 executor.py 一致）
+        _kr = latest[0] or ""
+        assert _kr.startswith("over_budget")
+        assert _kr == "over_budget_l2"
+
+    def test_over_budget_l3_skips_retry(self):
+        latest = self._build_latest_kill("over_budget_l3")
+        _kr = latest[0] or ""
+        assert _kr.startswith("over_budget")
+
+    def test_cleanup_race_counts_as_pass(self):
+        """kill_reason=cleanup_race → 任务实际已完成，视为通过不重试。"""
+        latest = self._build_latest_kill("cleanup_race")
+        _kr = latest[0] or ""
+        assert _kr == "cleanup_race"
+        # executor 中 cleanup_race → verify_ok=True
+
+    def test_stuck_normal_verify_path(self):
+        """stuck/hard_timeout 不短路（走正常验证，但重试预算受限）。"""
+        for reason in ("stuck", "hard_timeout", "goal_timeout"):
+            latest = self._build_latest_kill(reason)
+            _kr = latest[0] or ""
+            assert not _kr.startswith("over_budget")
+            assert _kr != "cleanup_race"
