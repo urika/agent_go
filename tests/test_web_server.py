@@ -26,7 +26,8 @@ def mock_tasks(tmp_path: Path, monkeypatch) -> Generator[dict, None, None]:
     task1.mkdir(parents=True)
     (task1 / "meta.json").write_text(json.dumps({
         "task": "测试任务 A",
-        "status": "completed",
+        "status": "DELIVERY_READY",
+        "status_schema_version": 1,
         "repo": "/tmp/repo-a",
         "created": "2026-08-02T10:00:00",
         "subtasks": [
@@ -73,7 +74,8 @@ def mock_tasks(tmp_path: Path, monkeypatch) -> Generator[dict, None, None]:
     task2 = agent_go_dir / "task-20260802-110000-222-bbbb"
     task2.mkdir(parents=True)
     (task2 / "meta.json").write_text(json.dumps({
-        "task": "测试任务 B", "status": "running", "repo": "/tmp/repo-b",
+        "task": "测试任务 B", "status": "EXECUTING", "status_schema_version": 1,
+        "repo": "/tmp/repo-b",
         "subtasks": [{"id": "sub-1", "title": "进行中"}],
         "results": [],
     }), encoding="utf-8")
@@ -112,8 +114,8 @@ class TestApiTasks:
         assert status == 200
         assert len(data["tasks"]) == 2
         statuses = {t["id"]: t["status"] for t in data["tasks"]}
-        assert statuses["task-20260802-100000-111-aaaa"] == "completed"
-        assert statuses["task-20260802-110000-222-bbbb"] == "running"
+        assert statuses["task-20260802-100000-111-aaaa"] == "DELIVERY_READY"
+        assert statuses["task-20260802-110000-222-bbbb"] == "EXECUTING"
 
     def test_task_summary_fields(self, base_url, mock_tasks):
         _, data = _get(f"{base_url}/api/tasks")
@@ -130,7 +132,7 @@ class TestApiTaskDetail:
 
     def test_detail(self, base_url, mock_tasks):
         _, d = _get(f"{base_url}/api/tasks/{mock_tasks['task1']}")
-        assert d["status"] == "completed"
+        assert d["status"] == "DELIVERY_READY"
         assert len(d["subtasks"]) == 2
         s1 = d["subtasks"][0]
         assert s1["id"] == "sub-1"
@@ -368,10 +370,10 @@ class TestOverview:
         import agent_go.web_server as ws
         d = ws.api_overview()
         assert "kpi" in d
-        # mock_tasks 造了 2 个任务（1 completed + 1 running）
+        # mock_tasks 造了 2 个任务（1 DELIVERY_READY + 1 EXECUTING）
         assert d["kpi"]["total"] == 2
-        assert d["kpi"]["completed"] == 1
-        assert d["kpi"]["running"] == 1
+        assert d["kpi"]["delivered"] == 1
+        assert d["kpi"]["in_progress"] == 1
         assert d["kpi"]["today_cost"] >= 0  # 不崩溃即可（ts 可能不含今日）
 
     def test_overview_cost_trend_7d(self, mock_tasks):

@@ -473,6 +473,11 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                     claude_usage_total["cost_usd"] += claude_cost if claude_cost is not None else 0.0
                     claude_usage_total["duration_ms"] += event.get("duration_ms", 0) or 0
                     claude_usage_total["num_turns"] += event.get("num_turns", 0) or 0
+                # result 事件也携带 model 字段（顶层），补解析以覆盖
+                # 无 assistant 事件的场景（早退/错误/单轮直出），避免回退路由名
+                _result_model = event.get("model", "")
+                if _result_model and not claude_usage_total["model"]:
+                    claude_usage_total["model"] = _result_model
 
             # user: 工具结果
             elif ev_type == "user":
@@ -704,6 +709,10 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             # S4：路由到具体模型时记录真实模型（claude 响应解析），否则为 CLI 默认
             "actual_model": _resolved_model,
             "routed_model": _model,
+            # 模型解析置信度：actual_model 是从 claude 响应解析出的真实后端时为 True，
+            # 回退到路由名（无 assistant/result 事件的 model 字段）时为 False。
+            # UI 据此标注"路由别名"以防与真实后端混淆。
+            "actual_model_resolved": bool(claude_usage_total.get("model")) or bool(_cloud_actual) or _is_local,
             "is_local": _is_local,
             "difficulty": env.get("AGENT_GO_DIFFICULTY", ""),
             "prompt_tokens": claude_usage_total["prompt_tokens"],

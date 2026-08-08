@@ -33,7 +33,7 @@ import logging
 import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from .status import task_status
+from .status import task_status, normalize_task_status
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
@@ -89,12 +89,23 @@ def _task_meta(task_dir: Path) -> dict:
     return _read_json(task_dir / "meta.json")
 
 
-def api_tasks() -> list[dict]:
-    """任务清单（轻量，不含 subtasks 明细）。"""
+def api_tasks(include_legacy: bool = False) -> list[dict]:
+    """任务清单（轻量，不含 subtasks 明细）。
+
+    include_legacy=False（默认）：仅展示新规范状态任务（status_schema_version 存在）。
+    include_legacy=True：仅展示历史归档任务（无 status_schema_version），状态值经
+        normalize_task_status 归一化后展示，供归档页面查询。
+    """
     out = []
     for td in _list_task_dirs():
         meta = _task_meta(td)
         if not meta:  # eval._read_json 不存在/坏文件返回 {}
+            continue
+        has_schema = bool(meta.get("status_schema_version"))
+        # 默认视图与归档视图互斥：新规范 vs legacy
+        if include_legacy and has_schema:
+            continue
+        if not include_legacy and not has_schema:
             continue
         results = meta.get("results", []) or []
         # 从 results 汇总执行指标
@@ -113,7 +124,8 @@ def api_tasks() -> list[dict]:
         out.append({
             "id": td.name,
             "task": meta.get("task", ""),
-            "status": task_status(meta),
+            # 归档视图：legacy 状态归一化展示（completed→DELIVERY_READY 等），复用筛选/颜色
+            "status": normalize_task_status(meta.get("status"), meta) if include_legacy else task_status(meta),
             "repo": meta.get("repo", ""),
             "subtask_count": len(meta.get("subtasks", []) or []),
             "completed": sum(1 for r in results if r.get("status") == "completed"),
@@ -311,6 +323,7 @@ def api_metering(task_id: str) -> Optional[dict]:
             "role": role,
             "virtual_model": rec.get("virtual_model", ""),
             "actual_model": rec.get("actual_model", ""),
+            "routed_model": rec.get("routed_model", ""),
             "difficulty": rec.get("difficulty", ""),
             "subtask_id": rec.get("subtask_id", ""),
             "prompt_tokens": prompt,
@@ -390,8 +403,17 @@ def api_overview() -> dict:
     数据源：遍历所有任务的 meta.json + metering.jsonl。
     """
     today = time.strftime("%Y-%m-%d")
-    task_counts = {"total": 0, "running": 0, "completed": 0, "failed": 0,
-                   "blocked": 0, "today_completed": 0, "today_cost": 0.0}
+    # 新规范状态分组：13 个 canonical state 按阶段聚合为大盘可读的分类
+    # DELIVERY_READY = 旧 completed（交付物就绪）；ACCEPTED_DELIVERY = 已验收
+    task_counts = {"total": 0, "in_progress": 0, "delivered": 0,
+                   "failed": 0, "blocked": 0, "today_delivered": 0, "today_cost": 0.0}
+    # canonical → 大盘分组映射
+    _IN_PROGRESS = {"DRAFT", "SPEC_REVIEW", "ARCHITECTURE_REVIEW", "PLAN_REVIEW",
+                    "EXECUTING", "VERIFYING", "COMMITTED_UNVERIFIED"}
+    _DELIVERED = {"DELIVERY_READY", "ACCEPTED_DELIVERY"}
+    _FAILED = {"VERIFICATION_FAILED", "DELIVERY_FAILED"}
+    _BLOCKED = {"BLOCKED"}
+    _CANCELLED = {"CANCELLED"}
     cost_by_day: dict[str, float] = {}  # YYYY-MM-DD -> cost
     dollar_per_pass_rate = None
     completed_with_cost = 0
@@ -401,13 +423,23 @@ def api_overview() -> dict:
         meta = _task_meta(td)
         if not meta:
             continue
+        # 历史数据归档：跳过未迁移到新规范状态的任务（与 api_tasks 一致）
+        if not meta.get("status_schema_version"):
+            continue
         task_counts["total"] += 1
         status = task_status(meta)
-        if status in task_counts:
-            task_counts[status] += 1
-        created = meta.get("created", "")
-        if created.startswith(today) and status == "completed":
-            task_counts["today_completed"] += 1
+        if status in _IN_PROGRESS:
+            task_counts["in_progress"] += 1
+        elif status in _DELIVERED:
+            task_counts["delivered"] += 1
+            created = meta.get("created", "")
+            if created.startswith(today):
+                task_counts["today_delivered"] += 1
+        elif status in _FAILED:
+            task_counts["failed"] += 1
+        elif status in _BLOCKED:
+            task_counts["blocked"] += 1
+        # CANCELLED 不计入任何正/负向 KPI（用户主动取消）
 
         results = meta.get("results", []) or []
         completed = sum(1 for r in results if r.get("status") == "completed")
@@ -462,15 +494,25 @@ def api_cost() -> dict:
             task_costs.append({"task_id": td.name, "cost": round(task_cost, 4)})
         total_cost += task_cost
         for rec in metering:
+            # 过滤验证重试占位符（非真实模型调用，cost=0/tokens=null，避免污染模型列表）
+            if rec.get("actual_model") == "verify_retry" or rec.get("result") == "retry":
+                continue
             cost = rec.get("cost_usd", 0) or 0
             model = rec.get("actual_model") or rec.get("virtual_model") or "unknown"
             role = rec.get("role", "unknown")
             m = by_model.setdefault(model, {"cost": 0.0, "calls": 0,
-                                            "prompt_tokens": 0, "completion_tokens": 0})
+                                            "prompt_tokens": 0, "completion_tokens": 0,
+                                            "routed_model": "", "resolved": True})
             m["cost"] += cost
             m["calls"] += 1
             m["prompt_tokens"] += rec.get("prompt_tokens", 0) or 0
             m["completion_tokens"] += rec.get("completion_tokens", 0) or 0
+            # 记录路由名（用于 UI 标注路由别名→真实后端）+ 解析置信度
+            rm = rec.get("routed_model", "") or ""
+            if rm and not m.get("routed_model"):
+                m["routed_model"] = rm
+            if rec.get("actual_model_resolved") is False:
+                m["resolved"] = False  # 任一记录回退则标记整组未解析
             r = by_role.setdefault(role, {"cost": 0.0, "calls": 0})
             r["cost"] += cost
             r["calls"] += 1
@@ -502,20 +544,31 @@ def api_models() -> dict:
     prod: dict[str, dict] = {}
     for td in _list_task_dirs():
         for rec in _read_jsonl(td / "metering.jsonl"):
+            # 过滤验证重试占位符（非真实模型调用）
+            if rec.get("actual_model") == "verify_retry" or rec.get("result") == "retry":
+                continue
             model = rec.get("actual_model") or rec.get("virtual_model") or "unknown"
             # 只统计 worker 角色的（代表实际执行模型）
             if rec.get("role") != "worker":
                 continue
-            m = prod.setdefault(model, {"cost": 0.0, "calls": 0, "tasks": set()})
+            m = prod.setdefault(model, {"cost": 0.0, "calls": 0, "tasks": set(),
+                                        "routed_model": "", "resolved": True})
             m["cost"] += rec.get("cost_usd", 0) or 0
             m["calls"] += 1
             m["tasks"].add(td.name)
+            rm = rec.get("routed_model", "") or ""
+            if rm and not m.get("routed_model"):
+                m["routed_model"] = rm
+            if rec.get("actual_model_resolved") is False:
+                m["resolved"] = False
     prod_rows = [{
         "model": k,
         "cost": round(v["cost"], 4),
         "calls": v["calls"],
         "task_count": len(v["tasks"]),
         "avg_cost_per_call": round(v["cost"] / v["calls"], 6) if v["calls"] else 0,
+        "routed_model": v.get("routed_model", ""),
+        "resolved": v.get("resolved", True),
     } for k, v in prod.items()]
     prod_rows.sort(key=lambda x: x["cost"], reverse=True)
 
@@ -853,6 +906,10 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[1] == "tasks":
                 self._reply_json(200, {"tasks": api_tasks()})
                 return
+            if len(parts) == 2 and parts[1] == "archive":
+                # 历史归档任务（无 status_schema_version），状态归一化展示
+                self._reply_json(200, {"tasks": api_tasks(include_legacy=True)})
+                return
             if len(parts) == 3 and parts[1] == "tasks":
                 data = api_task(parts[2])
                 if data is None:
@@ -1040,6 +1097,7 @@ _SPA_HTML = """<!DOCTYPE html>
   .st-aborted { color:var(--yellow); } .st-blocked { color:var(--red); }
   .st-pending, .st-running { color:var(--dim); }
   .st-cancelled { color:var(--dim); }
+  .dim { color:var(--dim); font-size:11px; }
   .task-detail { display:none; }
   .task-detail.open { display:table-row; }
   .detail-box { padding:16px; background:var(--panel); border:1px solid var(--border);
@@ -1114,6 +1172,7 @@ _SPA_HTML = """<!DOCTYPE html>
     <button class="nav-tab" data-view="models">🤖 模型</button>
     <button class="nav-tab" data-view="config">⚙️ 配置</button>
     <button class="nav-tab" data-view="storage">💾 运维</button>
+    <button class="nav-tab" data-view="archive">🗄️ 归档</button>
   </nav>
   <span class="badge" id="connBadge">连接中…</span>
   <div class="status" id="headerStatus"></div>
@@ -1131,9 +1190,15 @@ _SPA_HTML = """<!DOCTYPE html>
 
 <script>
 const STATUS_COLORS = {
-  completed:'st-completed', failed:'st-failed', aborted:'st-aborted',
-  blocked:'st-blocked', cancelled:'st-cancelled', running:'st-running',
-  pending:'st-pending'
+  // 新规范状态（status.py TASK_STATES）—— 按生命周期阶段着色
+  DRAFT:'st-pending', SPEC_REVIEW:'st-pending', ARCHITECTURE_REVIEW:'st-pending',
+  PLAN_REVIEW:'st-pending',
+  EXECUTING:'st-running', VERIFYING:'st-running', COMMITTED_UNVERIFIED:'st-running',
+  DELIVERY_READY:'st-completed', ACCEPTED_DELIVERY:'st-completed',
+  VERIFICATION_FAILED:'st-failed', DELIVERY_FAILED:'st-failed',
+  BLOCKED:'st-blocked', CANCELLED:'st-cancelled',
+  // 兼容：未知/legacy 状态兜底
+  unknown:'st-pending'
 };
 let tasks = [];
 let statusFilter = 'all';
@@ -1175,14 +1240,30 @@ async function api(path) {
 }
 
 function statusIcon(st) {
-  return {completed:'🟢', failed:'🔴', aborted:'🟡', blocked:'⛔',
-          running:'🔄', pending:'⚪', cancelled:'⏹️'}[st] || '⚪';
+  return {DRAFT:'📝', SPEC_REVIEW:'📋', ARCHITECTURE_REVIEW:'🏗️', PLAN_REVIEW:'📐',
+          EXECUTING:'🔄', VERIFYING:'🔍', COMMITTED_UNVERIFIED:'📦',
+          DELIVERY_READY:'🟢', ACCEPTED_DELIVERY:'✅',
+          VERIFICATION_FAILED:'🔴', DELIVERY_FAILED:'🔴',
+          BLOCKED:'⛔', CANCELLED:'⏹️',
+          unknown:'⚪'}[st] || '⚪';
+}
+
+// 子任务状态（与任务级状态不同，是执行结果维度）
+const SUBTASK_STATUS_COLORS = {
+  completed:'st-completed', no_changes:'st-completed', degraded:'st-aborted',
+  failed:'st-failed', blocked:'st-blocked', pending:'st-pending'
+};
+function subtaskStatusIcon(st) {
+  return {completed:'🟢', no_changes:'⏭️', degraded:'⚠️',
+          failed:'🔴', blocked:'⛔', pending:'⚪'}[st] || '⚪';
 }
 
 // ── 任务清单 ────────────────────────────────────────────────
-async function loadTasks() {
+async function loadTasks(endpoint) {
+  // endpoint='/api/archive' 时加载历史归档任务，其余默认 '/api/tasks'
+  // 两者共享 renderStatusFilters/renderTasks（归档状态已归一化）
   try {
-    const data = await api('/api/tasks');
+    const data = await api(endpoint || '/api/tasks');
     tasks = data.tasks || [];
     renderStatusFilters();
     renderTasks();
@@ -1194,29 +1275,53 @@ async function loadTasks() {
   }
 }
 
+// 状态分组：canonical state → 阶段组（用于聚合筛选）
+const STATUS_GROUPS = {
+  planning: ['DRAFT','SPEC_REVIEW','ARCHITECTURE_REVIEW','PLAN_REVIEW'],
+  executing: ['EXECUTING','VERIFYING','COMMITTED_UNVERIFIED'],
+  delivered: ['DELIVERY_READY','ACCEPTED_DELIVERY'],
+  failed: ['VERIFICATION_FAILED','DELIVERY_FAILED'],
+  blocked: ['BLOCKED'],
+  cancelled: ['CANCELLED']
+};
+const GROUP_LABELS = {
+  planning:'📐 规划中', executing:'🔄 执行中', delivered:'🟢 已交付',
+  failed:'🔴 失败', blocked:'⛔ 阻断', cancelled:'⏹️ 已取消'
+};
+
+function statusGroup(st) {
+  for (const [g, states] of Object.entries(STATUS_GROUPS)) {
+    if (states.includes(st)) return g;
+  }
+  return 'planning'; // unknown 兜底
+}
+
 function renderStatusFilters() {
+  // 按阶段组聚合计数
   const counts = {};
-  tasks.forEach(t => counts[t.status] = (counts[t.status]||0)+1);
-  const order = ['running','pending','completed','failed','aborted','blocked','cancelled'];
-  const html = ['<span class="filter-btn'+(statusFilter==='all'?' active':'')+'" data-s="all">全部</span>'];
-  order.forEach(s => {
-    if (counts[s]) html.push(
-      '<span class="filter-btn'+(statusFilter===s?' active':'')+'" data-s="'+s+'">'+
-      esc(s)+' ('+counts[s]+')</span>');
+  tasks.forEach(t => {
+    const g = statusGroup(t.status);
+    counts[g] = (counts[g]||0)+1;
+  });
+  const order = ['executing','planning','delivered','failed','blocked','cancelled'];
+  const html = ['<span class="filter-btn'+(statusFilter==='all'?' active':'')+'" data-s="all">全部 ('+tasks.length+')</span>'];
+  order.forEach(g => {
+    if (counts[g]) html.push(
+      '<span class="filter-btn'+(statusFilter===g?' active':'')+'" data-s="'+g+'">'+
+      GROUP_LABELS[g]+' ('+counts[g]+')</span>');
   });
   document.getElementById('statusFilters').innerHTML = html.join('');
   document.querySelectorAll('#statusFilters .filter-btn').forEach(b => {
     b.onclick = () => { statusFilter = b.dataset.s; renderStatusFilters(); renderTasks(); };
   });
-  const n = tasks.length;
   document.getElementById('headerStatus').textContent =
-    '共 '+n+' 个任务';
+    '共 '+tasks.length+' 个任务（新规范）';
 }
 
 function filteredTasks() {
   const q = document.getElementById('searchInput').value.trim().toLowerCase();
   return tasks.filter(t => {
-    if (statusFilter !== 'all' && t.status !== statusFilter) return false;
+    if (statusFilter !== 'all' && statusGroup(t.status) !== statusFilter) return false;
     if (!q) return true;
     return (t.id+' '+t.task+' '+(t.repo||'')).toLowerCase().includes(q);
   });
@@ -1273,11 +1378,11 @@ async function toggleTask(id, row) {
 
 function renderTaskDetail(d) {
   const items = (d.subtasks||[]).map((s,i) => {
-    const statusCls = STATUS_COLORS[s.status] || 'st-pending';
+    const statusCls = SUBTASK_STATUS_COLORS[s.status] || 'st-pending';
     const src = s.agent_type_source || 'default';
     return '<div class="sub-item">'+
       '<div class="sub-head" data-sub="'+esc(s.id)+'">'+
-        '<span class="icon '+statusCls+'">'+statusIcon(s.status)+'</span>'+
+        '<span class="icon '+statusCls+'">'+subtaskStatusIcon(s.status)+'</span>'+
         '<span class="title">['+esc(s.id)+'] '+esc(s.title)+'</span>'+
         '<span class="tag">'+esc(s.difficulty||'medium')+'</span>'+
         '<span class="tag">'+esc(s.agent_type||'developer')+'</span>'+
@@ -1407,11 +1512,19 @@ function renderMetering(d) {
     '<div class="val">$'+s.cost_usd+'</div>'+
     '<div>'+s.count+' 次调用 · '+s.prompt_tokens+'→'+s.completion_tokens+' tokens</div>'+
     '<div>延迟 '+s.latency_ms+'ms</div></div>').join('');
-  const rows = (d.rows||[]).map(r => '<tr><td>'+esc(r.subtask_id||'')+'</td>'+
-    '<td>'+esc(r.role)+'</td><td>'+esc(r.actual_model||r.virtual_model||'')+'</td>'+
+  const rows = (d.rows||[]).map(r => {
+    // 模型列：actual_model；若 routed_model 不同则标注路由别名→实际后端
+    let modelCell = esc(r.actual_model||r.virtual_model||'');
+    const rm = r.routed_model||'';
+    if (rm && rm !== (r.actual_model||'')) {
+      modelCell += '<br><span class="dim">'+esc(rm)+' →</span>';
+    }
+    return '<tr><td>'+esc(r.subtask_id||'')+'</td>'+
+    '<td>'+esc(r.role)+'</td><td>'+modelCell+'</td>'+
     '<td>'+r.prompt_tokens+'</td><td>'+r.completion_tokens+'</td>'+
     '<td>$'+r.cost_usd+'</td><td>'+r.latency_ms+'ms</td>'+
-    '<td>'+esc(r.result||'')+'</td></tr>').join('');
+    '<td>'+esc(r.result||'')+'</td></tr>';
+  }).join('');
   return '<div class="meter-summary">'+cards+'</div>'+
     (rows? '<table class="kv-table"><thead><tr><th>子任务</th><th>角色</th><th>模型</th>'+
     '<th>prompt</th><th>completion</th><th>成本</th><th>延迟</th><th>结果</th></tr></thead><tbody>'+rows+'</tbody></table>':'');
@@ -1434,12 +1547,14 @@ function switchView(name) {
   document.querySelectorAll('.nav-tab').forEach(t => {
     t.classList.toggle('active', t.dataset.view === name);
   });
-  // 只有任务视图显示 filters
-  document.getElementById('filtersBar').style.display = (name === 'tasks') ? '' : 'none';
+  // 任务视图和归档视图都显示 filters（归档复用任务渲染）
+  document.getElementById('filtersBar').style.display =
+    (name === 'tasks' || name === 'archive') ? '' : 'none';
   const main = document.getElementById('mainView');
   main.innerHTML = '<div class="loading">加载中…</div>';
   // 返回 loader 的 Promise，调用方可链式等待渲染完成
   if (name === 'tasks') return loadTasks();
+  if (name === 'archive') return loadTasks('/api/archive');
   if (name === 'overview') return loadOverview();
   if (name === 'cost') return loadCost();
   if (name === 'models') return loadModels();
@@ -1455,10 +1570,10 @@ async function loadOverview() {
   // KPI 卡片
   let html = '<div class="kpi-grid">'+
     kpiCard('任务总数', k.total||0, 'blue')+
-    kpiCard('运行中', k.running||0, k.running>0?'yellow':'')+
-    kpiCard('已完成', k.completed||0, 'green')+
+    kpiCard('进行中', k.in_progress||0, k.in_progress>0?'yellow':'')+
+    kpiCard('已交付', k.delivered||0, 'green')+
     kpiCard('失败', k.failed||0, k.failed>0?'red':'')+
-    kpiCard('今日完成', k.today_completed||0, 'green')+
+    kpiCard('今日交付', k.today_delivered||0, 'green')+
     kpiCard('今日成本', fmtCost(k.today_cost||0), '')+
     kpiCard('$/pass rate', dpr!=null?('$'+Number(dpr).toFixed(4)):'—',
             dpr!=null&&dpr>0.05?'red':'green')+
@@ -1501,10 +1616,22 @@ async function loadCost() {
     '</div>';
   // by_model
   html += '<div class="section-title">按模型分解</div>';
-  const modelRows = (d.by_model||[]).map(m =>
-    '<tr><td>'+esc(m.name)+'</td><td>'+fmtCost(m.cost)+'</td><td>'+m.pct+'%</td>'+
-    '<td>'+m.calls+'</td><td>'+m.prompt_tokens+'</td><td>'+m.completion_tokens+'</td></tr>'
-  ).join('');
+  const modelRows = (d.by_model||[]).map(m => {
+    // 模型名标注三态，区分「路由别名」「直连真模型」「未解析回退」
+    let nameCell = esc(m.name);
+    if (m.routed_model && m.routed_model !== m.name) {
+      // 路由别名：实际后端 ≠ 路由名（如 deepseek-v4-flash 的路由名是 claude-haiku-4-5）
+      nameCell += '<br><span class="dim">路由别名 '+esc(m.routed_model)+' →</span>';
+    } else if (!m.routed_model && m.resolved !== false) {
+      // 直连：无路由名，actual_model 是真实后端（如真调 Claude API，非别名）
+      nameCell += '<br><span class="dim">直连（非路由别名）</span>';
+    }
+    if (m.resolved === false) {
+      nameCell += ' <span title="未解析出真实后端模型，显示的是路由别名">⚠️</span>';
+    }
+    return '<tr><td>'+nameCell+'</td><td>'+fmtCost(m.cost)+'</td><td>'+m.pct+'%</td>'+
+    '<td>'+m.calls+'</td><td>'+m.prompt_tokens+'</td><td>'+m.completion_tokens+'</td></tr>';
+  }).join('');
   html += '<table><thead><tr><th>模型</th><th>成本</th><th>占比</th>'+
     '<th>调用数</th><th>prompt tokens</th><th>completion tokens</th></tr></thead><tbody>'+modelRows+'</tbody></table>';
   // by_role
@@ -1535,11 +1662,20 @@ async function loadCost() {
 async function loadModels() {
   const d = await api('/api/models');
   let html = '<div class="section-title">🏭 生产环境模型成本（实际任务 metering）</div>';
-  const prodRows = (d.production||[]).map(m =>
-    '<tr><td>'+esc(m.model)+'</td><td>'+fmtCost(m.cost)+'</td>'+
+  const prodRows = (d.production||[]).map(m => {
+    let nameCell = esc(m.model);
+    if (m.routed_model && m.routed_model !== m.model) {
+      nameCell += '<br><span class="dim">路由别名 '+esc(m.routed_model)+' →</span>';
+    } else if (!m.routed_model && m.resolved !== false) {
+      nameCell += '<br><span class="dim">直连（非路由别名）</span>';
+    }
+    if (m.resolved === false) {
+      nameCell += ' <span title="未解析出真实后端">⚠️</span>';
+    }
+    return '<tr><td>'+nameCell+'</td><td>'+fmtCost(m.cost)+'</td>'+
     '<td>'+m.calls+'</td><td>'+m.task_count+'</td>'+
-    '<td>$'+Number(m.avg_cost_per_call||0).toFixed(6)+'</td></tr>'
-  ).join('') || '<tr><td colspan="5">无数据</td></tr>';
+    '<td>$'+Number(m.avg_cost_per_call||0).toFixed(6)+'</td></tr>';
+  }).join('') || '<tr><td colspan="5">无数据</td></tr>';
   html += '<table><thead><tr><th>模型</th><th>总成本</th><th>调用数</th>'+
     '<th>任务数</th><th>avg $/call</th></tr></thead><tbody>'+prodRows+'</tbody></table>';
   // bench 对比
