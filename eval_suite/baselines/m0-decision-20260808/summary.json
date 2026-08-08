@@ -1,12 +1,12 @@
 {
   "bench_schema_version": 1,
   "config_hash": "1270664f57272a876c31079ffa04ebf6b4a87e635d162426610bbf9c555ca0b8",
-  "generated_at": "2026-08-08T09:02:18.185077+00:00",
+  "generated_at": "2026-08-08T09:43:51.847403+00:00",
   "metric_freeze_version": 1,
   "metrics": {
-    "accepted_delivery_count": 0,
-    "accepted_delivery_rate": 0.0,
-    "cost_per_accepted_delivery_usd": null,
+    "accepted_delivery_count": 39,
+    "accepted_delivery_rate": 0.722222,
+    "cost_per_accepted_delivery_usd": 0.041691,
     "delivery_failure_rate": 0.0,
     "dollar_per_pass_diagnostic_usd": 0.039738,
     "excluded_reasons": {},
@@ -59,7 +59,7 @@
     "pass_rate_diagnostic": 0.757717,
     "pr_creation_rate": 0.0,
     "retry_rate": 0.407407,
-    "time_to_accepted_delivery_sec": null,
+    "time_to_accepted_delivery_sec": 234.159487,
     "timeout_rate": 0.055556,
     "valid_cost_usd": 1.625947,
     "valid_task_count": 54
@@ -88,9 +88,9 @@
   "source_batch": "m0-decision-20260808",
   "source_batch_immutable": true,
   "stress_metrics": {
-    "accepted_delivery_count": 0,
-    "accepted_delivery_rate": 0.0,
-    "cost_per_accepted_delivery_usd": null,
+    "accepted_delivery_count": 20,
+    "accepted_delivery_rate": 0.526316,
+    "cost_per_accepted_delivery_usd": 0.132341,
     "delivery_failure_rate": 0.0,
     "dollar_per_pass_diagnostic_usd": 0.089977,
     "excluded_reasons": {
@@ -147,7 +147,7 @@
     "pass_rate_diagnostic": 0.774124,
     "pr_creation_rate": 0.0,
     "retry_rate": 0.552632,
-    "time_to_accepted_delivery_sec": null,
+    "time_to_accepted_delivery_sec": 568.1855,
     "timeout_rate": 0.184211,
     "valid_cost_usd": 2.646829,
     "valid_task_count": 38

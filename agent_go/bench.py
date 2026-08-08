@@ -982,12 +982,13 @@ def _collect_result(task_id: str, model: str, elapsed: float,
 
     # 子任务结果
     results = meta.get("results", [])
-    completed = sum(1 for r in results if r.get("status") == "completed")
+    # CR-#1：no_changes（成功态：任务本不需改动、验证通过）计为通过，不再拉低 pass_rate。
+    completed = sum(1 for r in results if r.get("status") in ("completed", "no_changes"))
     failed = sum(1 for r in results if r.get("status") == "failed")
     retry_total = sum(r.get("retry_count", 0) for r in results)
     # S12-P0：修 all([]) 空真值陷阱——「零个 completed」时 all() 返回 True 会把全失败
     # 误判为通过。要求至少一个 completed 才可能 all_passed。
-    _completed_results = [r for r in results if r.get("status") == "completed"]
+    _completed_results = [r for r in results if r.get("status") in ("completed", "no_changes")]
     all_passed = bool(_completed_results) and all(r.get("verify_ok", False) for r in _completed_results)
 
     # S10-P2：代码质量维度（§4.1）—— 从保留 worktree 聚合 lint_errors / tests_broken
@@ -1050,9 +1051,10 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         _planned_ids = {st.get("id") for st in (meta.get("subtasks") or [])}
         _result_ids = {r.get("subtask_id") or r.get("id") for r in results if r.get("subtask_id") or r.get("id")}
         _all_resulted = bool(_planned_ids) and _planned_ids.issubset(_result_ids)
-        # _all_results_done：所有已落盘 result 都 completed+verify_ok（不要求覆盖计划全集）
+        # _all_results_done：所有已落盘 result 都 completed/no_changes + verify_ok
+        # （不要求覆盖计划全集）。CR-#1：no_changes 计为完成。
         _all_results_done = bool(results) and all(
-            r.get("status") == "completed" and r.get("verify_ok") is True
+            r.get("status") in ("completed", "no_changes") and r.get("verify_ok") is True
             for r in results
         )
         if _all_results_done and timed_out:

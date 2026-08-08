@@ -1426,3 +1426,20 @@ def test_task_level_dollar_per_pass_vs_legacy(tmp_path):
     # legacy sum(cost)/sum(pass_rate) = 3/1.5 = $2.00（把 B 的部分通过也当分母 → 低估）
     assert m["dollar_per_pass"] == 2.0
     assert m["task_level_dollar_per_pass"] > m["dollar_per_pass"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-#1：no_changes（成功态）计为通过
+# ═══════════════════════════════════════════════════════════════
+
+def test_collect_result_no_changes_counts_as_pass(tmp_path):
+    """no_changes 子任务（任务本不需改动、验证通过）计为 completed → pass_rate 不因成功态被拉低。"""
+    td = tmp_path / "task-nochange"
+    _write_full_meta(td, "Some task", "completed", [
+        {"subtask_id": "sub-1", "status": "no_changes", "verify_ok": True},
+        {"subtask_id": "sub-2", "status": "completed", "verify_ok": True},
+    ])
+    result = _collect_result("t", "m", 10.0, 0, "", exact_td=td, expected_task="Some task")
+    assert result["completed"] == 2
+    assert result["pass_rate"] == 1.0
+    assert result["all_verify_ok"] is True

@@ -32,8 +32,10 @@ def test_single_task_meta_has_explicit_delivery_decision():
 
 
 def test_commit_or_verification_failure_cannot_be_accepted():
+    # 生产 run（delivery_attempted=True）缺 commit → 不 accepted（CR-#4：harness 不强制 commit）。
     missing_commit = apply_delivery_result(
-        _meta(commit_hash="", commit_hashes=[], results=[{"subtask_id": "s1", "status": "completed", "verify_ok": True}])
+        _meta(delivery_attempted=True, commit_hash="", commit_hashes=[],
+              results=[{"subtask_id": "s1", "status": "completed", "verify_ok": True}])
     )
     verification_failed = apply_delivery_result(
         _meta(results=[{"subtask_id": "s1", "status": "failed", "verify_ok": False}], commit_hash="")
