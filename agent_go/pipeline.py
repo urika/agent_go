@@ -839,11 +839,27 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
 
     # 收集所有结果并写回 meta.json（完整版本，含 results 数组）
     meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
+    # 完成边界一致性检查：commit 是唯一完成边界（architecture.md）。
+    # 标记 completed 但 commit_hash 为空且 failure_reason 非空（如"Git 提交或 tag 失败"）
+    # 的是"假 completed"——验证可能通过了但完成边界没成功，应修正为 failed。
+    for _res in results_map.values():
+        if (_res.get("status") == "completed" and not _res.get("commit_hash")
+                and _res.get("failure_reason")):
+            _res["status"] = "failed"
+            logger.warning(
+                f"[完成边界] sub-{_res.get('subtask_id')} 标记 completed 但无 commit_hash "
+                f"且 failure_reason 非空（{_res.get('failure_reason','')[:40]}），修正为 failed"
+            )
     has_failed = any(r.get("status") in ("failed", "blocked") for r in results_map.values())
     has_blocked = any(r.get("status") == "blocked" for r in results_map.values())
-    # 能力失败优先（M0 修复）：有 failed 子任务（含其级联 blocked）→ VERIFICATION_FAILED；
+    # 能力失败优先（M0 修复）：有 failed 子任务（含其级联 blocked 下游）→ VERIFICATION_FAILED；
     # BLOCKED 仅保留给纯约束阻断（cost/metering/依赖环，无 failed 子任务）。
-    has_capability_failure = any(r.get("status") == "failed" for r in results_map.values())
+    # 级联 blocked（有 blocked_by，因上游 failed 而阻断）也算能力失败——即便上游后来被
+    # 改成 completed（如假 completed），blocked 下游的存在证明执行过程有能力失败痕迹。
+    has_capability_failure = any(
+        r.get("status") == "failed" or (r.get("status") == "blocked" and r.get("blocked_by"))
+        for r in results_map.values()
+    )
     if meta.get("status_schema_version"):
         meta["status"] = "VERIFICATION_FAILED" if has_capability_failure else ("BLOCKED" if has_blocked else "DELIVERY_READY")
     else:

@@ -1278,7 +1278,7 @@ async function loadTasks(endpoint) {
 // 状态分组：canonical state → 阶段组（用于聚合筛选）
 const STATUS_GROUPS = {
   planning: ['DRAFT','SPEC_REVIEW','ARCHITECTURE_REVIEW','PLAN_REVIEW'],
-  executing: ['EXECUTING','VERIFYING','COMMITTED_UNVERIFIED'],
+  executing: ['EXECUTING','VERIFYING','COMMITTED_UNVERIFIED','PAUSED'],
   delivered: ['DELIVERY_READY','ACCEPTED_DELIVERY'],
   failed: ['VERIFICATION_FAILED','DELIVERY_FAILED'],
   blocked: ['BLOCKED'],
@@ -1293,7 +1293,7 @@ function statusGroup(st) {
   for (const [g, states] of Object.entries(STATUS_GROUPS)) {
     if (states.includes(st)) return g;
   }
-  return 'planning'; // unknown 兜底
+  return 'executing'; // unknown 兜底：未知状态多为运行中间态，归入执行中
 }
 
 function renderStatusFilters() {
