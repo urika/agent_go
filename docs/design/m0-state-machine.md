@@ -10,6 +10,7 @@ DRAFT
 SPEC_REVIEW
 ARCHITECTURE_REVIEW
 PLAN_REVIEW
+PAUSED
 EXECUTING
 VERIFYING
 COMMITTED_UNVERIFIED
@@ -24,6 +25,12 @@ CANCELLED
 任务级状态位于 `meta.json.status`，新任务同时写入 `status_schema_version: 1`。
 `results[].status` 仍是子任务执行结果，不属于本状态机。
 
+语义区分（M0 状态机修复，2026-08-08）：
+- **PLAN_REVIEW**：规划审查门（`ARCHITECTURE_REVIEW → plan accepted → PLAN_REVIEW → execution started → EXECUTING`）。仅表示"计划已获准、待执行"的短暂过渡。
+- **PAUSED**：任务被中断/暂停（SIGINT/SIGTERM）时的可恢复锚点，`resume` 从 PAUSED 回 EXECUTING。
+- **BLOCKED**：纯约束/编排阻断（cost 熔断、metering 不可用、依赖环）——**无能力失败子任务**。若任务有 `failed` 子任务（含其级联的 blocked 下游），终态为 `VERIFICATION_FAILED`（能力失败优先），而非 BLOCKED。
+- 此前运行时把中断暂停误写为 PLAN_REVIEW，已改为 PAUSED；BLOCKED 的判定优先级已修正（能力失败优先）。
+
 ## 迁移表
 
 | 当前状态 | 事件 | 下一状态 |
@@ -32,13 +39,16 @@ CANCELLED
 | SPEC_REVIEW | architecture accepted | ARCHITECTURE_REVIEW |
 | ARCHITECTURE_REVIEW | plan accepted | PLAN_REVIEW |
 | PLAN_REVIEW | execution started | EXECUTING |
+| EXECUTING / VERIFYING | interrupted (SIGINT/SIGTERM) | PAUSED |
+| PAUSED | resume | EXECUTING |
 | EXECUTING | verification started | VERIFYING |
 | VERIFYING | commit exists, verification pending | COMMITTED_UNVERIFIED |
 | VERIFYING | all verification passed, delivery pending | DELIVERY_READY |
 | DELIVERY_READY | delivery branch and PR/merge valid | ACCEPTED_DELIVERY |
 | DELIVERY_READY | delivery gate failed | DELIVERY_FAILED |
 | VERIFYING | verification failed | VERIFICATION_FAILED |
-| EXECUTING / VERIFYING | upstream failure | BLOCKED |
+| EXECUTING / VERIFYING | 约束/编排阻断（cost/metering/依赖环，无 failed 子任务）| BLOCKED |
+| EXECUTING / VERIFYING | 子任务能力失败（含级联 blocked）| VERIFICATION_FAILED |
 | any non-terminal state | user cancellation | CANCELLED |
 | interrupted legacy task | resume/recover | EXECUTING or COMMITTED_UNVERIFIED |
 
@@ -53,7 +63,7 @@ CANCELLED
 | `running`, `interrupted`, `stale_aborted` | `EXECUTING` |
 | `completed` | `DELIVERY_READY` |
 | `failed` | `VERIFICATION_FAILED` |
-| `paused` | `PLAN_REVIEW` |
+| `paused` | `PAUSED` |
 | `cancelled` | `CANCELLED` |
 
 迁移后的原值写入 `legacy_status`，不再作为跨接口展示状态。

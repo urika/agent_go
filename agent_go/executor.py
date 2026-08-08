@@ -261,6 +261,56 @@ def _create_worktree(task_id, sub_id, repo, task_dir, logger):
     return worktree, worktree_create_ms
 
 
+def _build_architecture_context(subtask, task_dir):
+    """构建架构上下文段落（SDD 设计意图传递）。
+
+    从 subtask 元数据生成以下信息：
+    - 子任务 ID
+    - 上游依赖（含 context.md 摘要）
+    - 文件修改范围约束（基于 files_hint）
+
+    返回 Markdown 字符串；无有效上下文时返回空字符串。
+    """
+    parts: list[str] = []
+
+    # 子任务标识
+    sub_id = subtask.get("id", "?")
+    parts.append(f"- **子任务**: {sub_id}")
+
+    # 上游依赖摘要
+    upstream_ids = subtask.get("depends_on", [])
+    if upstream_ids:
+        upstream_summaries = []
+        for up_id in upstream_ids:
+            ctx_file = task_dir / up_id / "context.md"
+            if ctx_file.exists():
+                ctx = ctx_file.read_text(encoding="utf-8").strip()
+                if ctx:
+                    # 取 context.md 的第一行作为摘要（通常是标题）
+                    first_line = ctx.split("\n")[0].lstrip("#").strip()
+                    upstream_summaries.append(f"{up_id}（已完成 — {first_line}）")
+                else:
+                    upstream_summaries.append(f"{up_id}（已完成）")
+            else:
+                upstream_summaries.append(f"{up_id}")
+        parts.append(f"- **依赖的上游**: {', '.join(upstream_summaries)}")
+
+    # 文件范围约束
+    files_hint = subtask.get("files_hint", "")
+    if files_hint and files_hint.strip() != "*":
+        scope_files = [f.strip() for f in files_hint.split(",") if f.strip()]
+        if scope_files:
+            parts.append("- **范围约束**: 你只能修改以下文件：")
+            for sf in scope_files:
+                parts.append(f"  - `{sf}`")
+
+    if len(parts) <= 1:
+        # 只有子任务 ID，没有有效上下文
+        return ""
+
+    return "## 架构上下文\n\n" + "\n".join(parts) + "\n"
+
+
 def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_conflicts=None, config=None):
     """Build TASK.md content. Returns (task_md, verification, skill_names, unresolved_skills)."""
     task_md_parts = [f"# 子任务: {subtask['title']}", ""]
@@ -279,6 +329,11 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
             "解决冲突后请执行: `git add . && git commit -m 'resolve merge conflicts'`",
             "",
         ])
+
+    # ── SDD 设计意图传递：架构上下文（子任务位置、上游、范围约束）──
+    arch_ctx = _build_architecture_context(subtask, task_dir)
+    if arch_ctx:
+        task_md_parts.append(arch_ctx)
 
     # 注入直接上游子任务的共享上下文（仅依赖图中的直接上游）
     upstream_ids = subtask.get("depends_on", [])
@@ -311,6 +366,7 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
         "- 变更保留在此目录",
         "- **你必须生成实际的代码变更。仅分析/阅读代码而不做修改将被视为任务失败。**",
         "- **不要仅输出想法或计划 — 直接修改代码文件。**",
+        "- **不要自行 git commit** — 修改文件后保留为未提交状态，编排层会在验证通过后统一提交（commit 是完成边界）。你只需确保验证通过。",
     ]
     if verification:
         exec_requirements.append(f"- **必须执行验证**: `{verification}`，确保通过后再完成")
@@ -494,10 +550,12 @@ def _build_repair_prompt(
     max_retries: int,
     history: list[dict],
     semantic_feedback: Optional[dict] = None,
+    scope_violation: Optional[dict] = None,
 ) -> str:
     """构建增强的修复提示词，注入完整失败上下文（Phase 1 验证循环）。
 
     包含：
+    - 范围偏差（L1 Scope Compliance）：越界改动 / 遗漏改动的文件级对比
     - 失败命令及其 stdout/stderr 输出
     - 当前 git diff（让 Claude 看到自己改了什么）
     - 历史修复尝试摘要（避免重复同样错误）
@@ -512,6 +570,32 @@ def _build_repair_prompt(
     else:
         parts.append(f"## ⚠️ 验证失败 - 第 {attempt}/{max_retries} 次修复重试")
     parts.append("")
+
+    # ── L1 范围合规：文件级偏差（SDD 设计意图验证）──
+    if scope_violation and not scope_violation.get("compliant", True):
+        parts.append("### ⚠️ 范围偏差")
+        parts.append("")
+        expected_files = scope_violation.get("expected", [])
+        if expected_files:
+            parts.append("你的任务范围只包含以下文件：")
+            for ef in expected_files:
+                parts.append(f"- `{ef}`")
+            parts.append("")
+        out_of_scope = scope_violation.get("out_of_scope", [])
+        if out_of_scope:
+            parts.append("**越界改动（请撤销这些文件的修改）：**")
+            for oos in out_of_scope:
+                parts.append(f"- `{oos}`")
+            parts.append("")
+        missing = scope_violation.get("missing", [])
+        if missing:
+            parts.append("**遗漏改动（这些文件在范围内但未被修改，请补上）：**")
+            for ms in missing:
+                parts.append(f"- `{ms}`")
+            parts.append("")
+        if out_of_scope or missing:
+            parts.append("**先撤销越界改动，再补上遗漏改动，最后重新运行验证。**")
+            parts.append("")
 
     # LLM 语义评估反馈（Phase 3）
     if semantic_feedback and not semantic_feedback.get("passed", True):
@@ -713,6 +797,59 @@ def _metering_available(metering_path: str) -> bool:
         return False
 
 
+def _check_scope_compliance(worktree, files_hint):
+    """L1 范围合规检查：比对实际改动文件 vs files_hint 预期范围（确定性，零 LLM 成本）。
+
+    files_hint 为 "*" 或空时跳过检查（全文件范围或无约束）。
+    返回 {"compliant": bool, "out_of_scope": [str], "missing": [str], "expected": [str], "actual": [str]}
+    """
+    # 跳过：无范围约束
+    if not files_hint or files_hint.strip() == "*":
+        return {"compliant": True, "out_of_scope": [], "missing": [], "expected": [], "actual": []}
+
+    # 解析预期文件范围
+    expected = {f.strip() for f in files_hint.split(",") if f.strip()}
+    if not expected:
+        return {"compliant": True, "out_of_scope": [], "missing": [], "expected": [], "actual": []}
+
+    # 获取实际改动文件：先查未提交变更，再查已提交变更
+    actual_files: set[str] = set()
+    try:
+        # 未提交变更（初始执行后、commit 前）
+        r = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"], cwd=str(worktree),
+            capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            actual_files.update(f.strip() for f in r.stdout.strip().split("\n") if f.strip())
+        # 已暂存变更（git add 后、commit 前）
+        r2 = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "HEAD"], cwd=str(worktree),
+            capture_output=True, text=True, timeout=10)
+        if r2.returncode == 0 and r2.stdout.strip():
+            actual_files.update(f.strip() for f in r2.stdout.strip().split("\n") if f.strip())
+        # 已提交变更（commit 后、验证循环中）
+        if not actual_files:
+            r3 = subprocess.run(
+                ["git", "show", "--name-only", "--format=", "HEAD"], cwd=str(worktree),
+                capture_output=True, text=True, timeout=10)
+            if r3.returncode == 0 and r3.stdout.strip():
+                actual_files.update(f.strip() for f in r3.stdout.strip().split("\n") if f.strip())
+    except Exception:
+        return {"compliant": True, "out_of_scope": [], "missing": [],
+                "expected": sorted(expected), "actual": []}
+
+    out_of_scope = sorted(actual_files - expected)
+    missing = sorted(expected - actual_files)
+
+    return {
+        "compliant": len(out_of_scope) == 0 and len(missing) == 0,
+        "out_of_scope": out_of_scope,
+        "missing": missing,
+        "expected": sorted(expected),
+        "actual": sorted(actual_files),
+    }
+
+
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
                     task_dir=None, config=None, interrupt_event=None, initial_kill_reason=None):
@@ -745,6 +882,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
     has_changes = bool(status_result.stdout.strip())
+    _self_committed = False  # worker 自行提交标记：True 时跳过重复 commit，只打 tag
     # 稳健性：worker 可能自行 commit，此时工作区干净但已有变更。
     # 优先基于本次运行记录的 base_commit 判断，避免把近期人工提交误认成 worker 产出。
     if not has_changes:
@@ -777,6 +915,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     ["git", "show", "--stat", "--format=", "HEAD"], cwd=str(worktree),
                     capture_output=True, text=True, timeout=10).stdout.strip()
                 has_changes = True
+                _self_committed = True  # worker 已自行提交，跳过重复 commit，只打 tag
                 summary = f"worker 自行提交: {_head_msg}\n{_self_commit_stat}" if _self_commit_stat else f"worker 自行提交: {_head_msg}"
                 logger.info(f"[self_commit] {subtask['id']}: 识别到 base_commit 之后的 worker commit ({_head_hash[:8]})")
         except Exception as _sc_err:
@@ -805,7 +944,10 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     # Git 提交 + tag（Conventional Commits 格式），供下游子任务 merge
     # Tag 包含 task_id 前缀，避免跨任务冲突
     git_start = time.time()
-    if has_changes:
+    if _self_committed:
+        # worker 已自行提交：工作区干净，跳过重复 commit（否则 nothing-to-commit 非零误判失败），只打 tag
+        logger.info(f"[self_commit] {sub_id}: 跳过重复 commit，直接打 tag")
+    elif has_changes:
         commit_msg = _format_commit(subtask['title'], issue_ref, subtask["id"])
         add_result = subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
         if add_result.returncode != 0:
@@ -824,6 +966,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             logger.warning(f"git tag 失败: {tag_result.stderr.strip()[:200]}")
     if git_ok and has_changes:
         logger.info(f"已提交并打 tag: {tag_name}")
+    elif git_ok and _self_committed:
+        logger.info(f"已打 tag (worker 自行提交): {tag_name}")
     elif git_ok:
         logger.info(f"已打 tag (无新增变更): {tag_name}")
     else:
@@ -1150,10 +1294,14 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             # diff --stat 在 commit 前已计算（summary）；commit 后工作区干净，git diff 必为空
             git_diff = summary
 
+            # ── L1 范围合规检查：比对实际改动文件 vs files_hint 预期范围 ──
+            scope_violation = _check_scope_compliance(worktree, subtask.get("files_hint", ""))
+
             fix_prompt = _build_repair_prompt(
                 task_md, failed_cmds, failed_outputs,
                 git_diff, retry_count, max_retries, verification_history,
-                semantic_feedback=semantic_feedback)
+                semantic_feedback=semantic_feedback,
+                scope_violation=scope_violation)
 
             # 修复执行带硬超时（verification.retry_timeout，按 difficulty 弹性缩放）
             _difficulty = subtask.get("difficulty", "medium")
@@ -1626,10 +1774,19 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                       original_verification, retry_count=retry_count,
                       verification_state=verify_results.get("verification_state"))
 
-    # 状态判定: completed(有变更) / no_changes(完成但无变更) / failed(异常)
-    if result.returncode == 0 and verify_ok and verify_results.get("git_ok", True):
-        status = "no_changes" if summary == "无文件变更" else "completed"
+    # 状态判定: completed(产出验证通过) / no_changes / failed(产出无效或任务未完成)
+    # CR-失败修复：verify_ok（产出有效性）是主信号；claude 进程崩溃(returncode≠0)但**产生了可验证
+    # 变更** → 仍计完成（交付有效），仅记 infra 异常标记。rc≠0 且无变更（如 agent_loop 撞
+    # max_turns 未产出）→ 仍 failed（任务未完成），不因 verify_ok 空真而误判成功。
+    _has_changes = summary != "无文件变更"
+    if verify_ok and verify_results.get("git_ok", True) and (result.returncode == 0 or _has_changes):
+        status = "no_changes" if not _has_changes else "completed"
         failure_reason = ""
+        if result.returncode != 0:
+            logger.warning(
+                f"[executor] {sub_id} claude 进程异常退出 (rc={result.returncode}) 但产出验证通过，"
+                f"按完成计（infra 异常，非能力失败）")
+            verify_results["crash_but_verified"] = True
     else:
         status = "failed"
         # 收集失败原因

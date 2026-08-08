@@ -329,6 +329,45 @@ class TestMultiInterruptCycle:
         # 至少 meta 被保存了
         assert meta["status"] in ("paused", "completed", "failed")
 
+    def test_interrupt_with_schema_writes_paused(self, tmp_path):
+        """M0 修复：status_schema_version 存在时，中断 → PAUSED（不再是 PLAN_REVIEW）。
+        回归守护——此前运行时把中断暂停误写为 PLAN_REVIEW，语义错位。"""
+        import threading
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        task_dir = tmp_path / "task-dir2"
+        task_dir.mkdir()
+        confirmed = [self._make_subtask("sub-1")]
+        meta = {"task_id": "task-002", "status": "EXECUTING", "status_schema_version": 1}
+        interrupt = threading.Event()
+        call_count = [0]
+
+        def mock_run_subtask(*a, **k):
+            call_count[0] += 1
+            interrupt.set()  # 第一个子任务完成后触发中断
+            return {"subtask_id": "sub-1", "status": "completed", "exit_code": 0,
+                    "summary": "ok", "worktree": "", "sandbox_type": "headless",
+                    "verify_ok": True, "duration_sec": 1.0}
+
+        try:
+            with patch("agent_go.pipeline.run_subtask", side_effect=mock_run_subtask), \
+                 patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, "")), \
+                 patch("agent_go.pipeline._worktree_remove", return_value=(True, "")), \
+                 patch("agent_go.pipeline._worktree_prune", return_value=(True, "")), \
+                 patch("subprocess.run"), \
+                 patch("agent_go.pipeline.signal.signal"), \
+                 patch("agent_go.pipeline._stop_heartbeat"):
+                _run_pipeline(
+                    confirmed, repo, task_dir, MagicMock(),
+                    {"plan_api": {"provider": "test"}},
+                    headless=True, parallel=1, issue_ref="",
+                    meta=meta, remote_url="", interrupted=interrupt)
+        except SystemExit:
+            pass
+        # 有 status_schema_version → 中断写 PAUSED（不是 PLAN_REVIEW）
+        assert meta["status"] == "PAUSED", f"中断应写 PAUSED，实际 {meta['status']}"
+
     def test_resume_with_partial_completion(self, tmp_path):
         """恢复时已完成子任务不重新执行"""
         repo = tmp_path / "repo"

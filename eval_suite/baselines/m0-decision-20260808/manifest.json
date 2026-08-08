@@ -1,0 +1,40 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "1270664f57272a876c31079ffa04ebf6b4a87e635d162426610bbf9c555ca0b8",
+  "created_at": "2026-08-08T09:02:18.306961+00:00",
+  "immutable": true,
+  "manifest_version": 1,
+  "metric_freeze_version": 1,
+  "models": [
+    "claude-haiku-4-5",
+    "claude-sonnet-4-6"
+  ],
+  "record_count": 96,
+  "repeat_values": [
+    1,
+    2,
+    3
+  ],
+  "results_sha256": "47aafd702cf66a487489d309505fd06906ccf03d0caa3f714038d5c44eeba426",
+  "source_batch": "m0-decision-20260808",
+  "suite": "decision",
+  "task_catalog_hash": "919bb4cda11406177c9efa4d712bf01ea6e23ede7cd35d6fdf1738dc2fdf3062",
+  "task_ids": [
+    "add-caching-layer",
+    "add-format-helper",
+    "add-metrics-system",
+    "add-simple-caching",
+    "add-tag-system",
+    "conditional-branching-datapipeline",
+    "db-end-to-end-optimization",
+    "db-performance-optimization",
+    "email-validator",
+    "fix-missing-default",
+    "implement-done-command",
+    "integration-tests-datapipeline",
+    "race-condition-taskmgr",
+    "refactor-to-dict",
+    "safe-file-reader",
+    "security-hardening-taskmgr"
+  ]
+}

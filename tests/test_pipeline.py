@@ -764,6 +764,32 @@ class TestPipelineNotify:
         statuses = {sid: r["status"] for sid, r in context["results_map"].items()}
         assert statuses == {"sub-1": "failed", "sub-2": "blocked"}
 
+    @patch("agent_go.notify.notify_event")
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_failed_with_blocked_writes_verification_failed(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        mock_notify, temp_dir, logger,
+    ):
+        """M0 修复：failed+blocked 并存 → 任务状态 VERIFICATION_FAILED（能力失败优先），
+        非 BLOCKED。BLOCKED 仅保留给纯约束阻断（无 failed 子任务）。"""
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2", depends_on=["sub-1"])]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-fail-block")
+        mock_run_subtask.return_value = _failed_result("sub-1")
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+        meta = _default_meta("t-fail-block")
+        meta["status_schema_version"] = 1
+        _run_pipeline(
+            confirmed, repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=meta,
+        )
+        # 修复前：BLOCKED（has_blocked 优先）；修复后：VERIFICATION_FAILED（能力失败优先）
+        assert meta["status"] == "VERIFICATION_FAILED"
+
 
 class TestPipelinePreservedMarker:
     """失败/阻断 worktree 保留与 .preserved 标记写入（pipeline.py 236-247 行）。"""

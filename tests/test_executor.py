@@ -30,6 +30,9 @@ from agent_go.executor import (
     _assess_verification_confidence,
     _is_simple_task,
     _probe_local_model,
+    _build_architecture_context,
+    _check_scope_compliance,
+    _build_repair_prompt,
 )
 
 
@@ -320,9 +323,12 @@ class TestRunSubtask:
         result = run_subtask("test-task", basic_subtask, temp_repo, task_dir,
                              fast_logger, headless=True)
 
-        assert result["status"] == "failed", (
-            f"非零退出码应为 failed，实际: {result['status']}"
+        # CR-失败修复：claude 进程崩溃(rc≠0)但产出验证通过(verify_ok=True) → completed
+        # （产出有效），不再因进程崩溃误判为能力失败。exit_code 保留崩溃信号供观测。
+        assert result["status"] == "completed", (
+            f"产出验证通过应计 completed（即使 claude 崩溃），实际: {result['status']}"
         )
+        assert result["verify_ok"] is True
         assert result["exit_code"] == 1
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
@@ -2099,3 +2105,188 @@ class TestTaskTypeRouting:
         env = mock_headless.call_args[0][2]
         # hard 经 degrades 表降档到 medium → sonnet（不是 opus）
         assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-sonnet-5"
+
+
+# ═══════════════════════════════════════════════════════════════
+# SDD 设计意图传递 + L1 范围合规
+# ═══════════════════════════════════════════════════════════════
+
+class TestBuildArchitectureContext:
+    """_build_architecture_context: TASK.md 架构上下文注入"""
+
+    def test_with_files_hint_and_upstream(self, tmp_path):
+        """有 files_hint + 上游 context.md → 完整架构上下文"""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        up_dir = task_dir / "sub-1"
+        up_dir.mkdir()
+        (up_dir / "context.md").write_text("# 完成 JWT 认证\n已实现登录和验证中间件。", encoding="utf-8")
+
+        subtask = {
+            "id": "sub-2",
+            "depends_on": ["sub-1"],
+            "files_hint": "src/cli.py, src/storage.py",
+        }
+        result = _build_architecture_context(subtask, task_dir)
+        assert "sub-2" in result
+        assert "sub-1（已完成 — 完成 JWT 认证）" in result
+        assert "src/cli.py" in result
+        assert "src/storage.py" in result
+        assert "范围约束" in result
+
+    def test_without_files_hint(self, tmp_path):
+        """无 files_hint → 不显示范围约束"""
+        task_dir = tmp_path / "task"; task_dir.mkdir()
+        subtask = {"id": "sub-1", "depends_on": [], "files_hint": ""}
+        result = _build_architecture_context(subtask, task_dir)
+        assert "范围约束" not in result
+
+    def test_with_wildcard_files_hint(self, tmp_path):
+        """files_hint = * → 不显示范围约束（全文件范围）"""
+        task_dir = tmp_path / "task"; task_dir.mkdir()
+        subtask = {"id": "sub-3", "depends_on": [], "files_hint": "*"}
+        result = _build_architecture_context(subtask, task_dir)
+        assert "范围约束" not in result
+
+    def test_without_upstream(self, tmp_path):
+        """无上游依赖 → 不显示依赖信息，仅有子任务 ID + 范围约束"""
+        task_dir = tmp_path / "task"; task_dir.mkdir()
+        subtask = {
+            "id": "sub-1",
+            "depends_on": [],
+            "files_hint": "src/models.py",
+        }
+        result = _build_architecture_context(subtask, task_dir)
+        assert "依赖的上游" not in result
+        assert "src/models.py" in result
+        assert "范围约束" in result
+
+    def test_upstream_without_context_md(self, tmp_path):
+        """上游无 context.md → 仅显示上游 ID，无摘要"""
+        task_dir = tmp_path / "task"; task_dir.mkdir()
+        subtask = {
+            "id": "sub-2",
+            "depends_on": ["sub-1"],
+            "files_hint": "src/main.py",
+        }
+        result = _build_architecture_context(subtask, task_dir)
+        assert "sub-1" in result
+        assert "已完成" not in result
+
+
+class TestCheckScopeCompliance:
+    """_check_scope_compliance: L1 范围合规检查"""
+
+    def test_wildcard_skips_check(self, tmp_path):
+        """files_hint = * → 跳过检查，返回 compliant=True"""
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        subprocess.run(["git", "init"], cwd=str(worktree), capture_output=True)
+        result = _check_scope_compliance(worktree, "*")
+        assert result["compliant"] is True
+        assert result["out_of_scope"] == []
+        assert result["missing"] == []
+
+    def test_empty_files_hint_skips(self, tmp_path):
+        """files_hint 为空 → 跳过检查"""
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        result = _check_scope_compliance(worktree, "")
+        assert result["compliant"] is True
+
+    def test_compliant_when_actual_matches_expected(self, tmp_path):
+        """实际改动文件完全在范围内 → compliant=True"""
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        subprocess.run(["git", "init"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(worktree), capture_output=True)
+        (worktree / "src").mkdir()
+        (worktree / "src" / "cli.py").write_text("# cli", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(worktree), capture_output=True)
+        (worktree / "src" / "cli.py").write_text("# cli updated", encoding="utf-8")
+        result = _check_scope_compliance(worktree, "src/cli.py")
+        assert result["compliant"] is True
+        assert result["out_of_scope"] == []
+
+    def test_out_of_scope_detected(self, tmp_path):
+        """实际改动了范围外的文件 → out_of_scope 非空"""
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        subprocess.run(["git", "init"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(worktree), capture_output=True)
+        (worktree / "src").mkdir()
+        (worktree / "src" / "cli.py").write_text("# cli", encoding="utf-8")
+        (worktree / "tests").mkdir()
+        (worktree / "tests" / "test_cli.py").write_text("# tests", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(worktree), capture_output=True)
+        (worktree / "tests" / "test_cli.py").write_text("# tests updated", encoding="utf-8")
+        result = _check_scope_compliance(worktree, "src/cli.py")
+        assert result["compliant"] is False
+        assert "tests/test_cli.py" in result["out_of_scope"]
+
+    def test_missing_detected(self, tmp_path):
+        """范围内文件未被改动 → missing 非空"""
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        subprocess.run(["git", "init"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(worktree), capture_output=True)
+        (worktree / "src").mkdir()
+        (worktree / "src" / "cli.py").write_text("# cli", encoding="utf-8")
+        (worktree / "src" / "storage.py").write_text("# storage", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(worktree), capture_output=True)
+        (worktree / "src" / "cli.py").write_text("# cli updated", encoding="utf-8")
+        result = _check_scope_compliance(worktree, "src/cli.py, src/storage.py")
+        assert result["compliant"] is False
+        assert "src/storage.py" in result["missing"]
+
+
+class TestBuildRepairPromptWithScope:
+    """_build_repair_prompt: 范围偏差注入"""
+
+    def test_scope_violation_injected(self):
+        """scope_violation 非空且非 compliant → 修复 prompt 包含范围偏差段"""
+        task_md = "# 子任务: 测试\n## 描述\n修复问题"
+        scope_violation = {
+            "compliant": False,
+            "out_of_scope": ["tests/test_cli.py"],
+            "missing": ["src/storage.py"],
+            "expected": ["src/cli.py", "src/storage.py"],
+            "actual": ["src/cli.py", "tests/test_cli.py"],
+        }
+        prompt = _build_repair_prompt(
+            task_md, ["pytest"], ["exit_code=1"],
+            "diff --stat", 1, 3, [],
+            scope_violation=scope_violation,
+        )
+        assert "范围偏差" in prompt
+        assert "tests/test_cli.py" in prompt
+        assert "src/storage.py" in prompt
+        assert "越界改动" in prompt
+        assert "遗漏改动" in prompt
+
+    def test_no_scope_violation_when_compliant(self):
+        """scope_violation.compliant=True → 不注入范围偏差段"""
+        task_md = "# 子任务: 测试\n## 描述\n修复问题"
+        scope_violation = {"compliant": True, "out_of_scope": [], "missing": []}
+        prompt = _build_repair_prompt(
+            task_md, ["pytest"], ["exit_code=1"],
+            "diff --stat", 1, 3, [],
+            scope_violation=scope_violation,
+        )
+        assert "范围偏差" not in prompt
+
+    def test_no_scope_violation_when_none(self):
+        """scope_violation=None → 不注入（向后兼容）"""
+        task_md = "# 子任务: 测试\n## 描述\n修复问题"
+        prompt = _build_repair_prompt(
+            task_md, ["pytest"], ["exit_code=1"],
+            "diff --stat", 1, 3, [],
+            scope_violation=None,
+        )
+        assert "范围偏差" not in prompt

@@ -2,6 +2,11 @@
 
 Subtask result statuses remain intentionally separate.  This module only
 normalizes the task-level ``meta.json.status`` field.
+
+语义区分（M0 状态机修复）：
+- PLAN_REVIEW：规划审查门（ARCHITECTURE_REVIEW → plan accepted → PLAN_REVIEW → execution started → EXECUTING）。
+  仅表示"计划已获准、待执行"这一短暂过渡，不用于中断暂停。
+- PAUSED：任务被中断/暂停（SIGINT/SIGTERM）时的可恢复锚点，resume 从 PAUSED 回 EXECUTING。
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from typing import Any
 
 TASK_STATES = frozenset({
     "DRAFT", "SPEC_REVIEW", "ARCHITECTURE_REVIEW", "PLAN_REVIEW",
-    "EXECUTING", "VERIFYING", "COMMITTED_UNVERIFIED", "DELIVERY_READY",
+    "PAUSED", "EXECUTING", "VERIFYING", "COMMITTED_UNVERIFIED", "DELIVERY_READY",
     "ACCEPTED_DELIVERY", "VERIFICATION_FAILED", "DELIVERY_FAILED",
     "BLOCKED", "CANCELLED",
 })
@@ -33,7 +38,7 @@ LEGACY_STATUS_MAP = {
     "blocked": "BLOCKED",
     "cancelled": "CANCELLED",
     "canceled": "CANCELLED",
-    "paused": "PLAN_REVIEW",
+    "paused": "PAUSED",
     "interrupted": "EXECUTING",
     "stale_aborted": "EXECUTING",
 }

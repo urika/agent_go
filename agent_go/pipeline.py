@@ -673,8 +673,9 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
         console.sep("─", 50)
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
+        # M0 语义修复：中断暂停写 PAUSED（可恢复锚点），不再是 PLAN_REVIEW（规划审查门）。
         if _interrupted.is_set():
-            meta["status"] = "PLAN_REVIEW" if meta.get("status_schema_version") else "paused"
+            meta["status"] = "PAUSED" if meta.get("status_schema_version") else "paused"
             (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
             _stop_heartbeat(task_dir, _heartbeat_stop)
@@ -830,8 +831,11 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
     meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
     has_failed = any(r.get("status") in ("failed", "blocked") for r in results_map.values())
     has_blocked = any(r.get("status") == "blocked" for r in results_map.values())
+    # 能力失败优先（M0 修复）：有 failed 子任务（含其级联 blocked）→ VERIFICATION_FAILED；
+    # BLOCKED 仅保留给纯约束阻断（cost/metering/依赖环，无 failed 子任务）。
+    has_capability_failure = any(r.get("status") == "failed" for r in results_map.values())
     if meta.get("status_schema_version"):
-        meta["status"] = "BLOCKED" if has_blocked else ("VERIFICATION_FAILED" if has_failed else "DELIVERY_READY")
+        meta["status"] = "VERIFICATION_FAILED" if has_capability_failure else ("BLOCKED" if has_blocked else "DELIVERY_READY")
     else:
         meta["status"] = "failed" if has_failed else "completed"
     from .delivery import apply_delivery_result

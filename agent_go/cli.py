@@ -791,7 +791,7 @@ def cmd_resume(args=None):
     # logger 需在 result.json 恢复循环之前初始化，否则损坏文件触发 UnboundLocalError
     logger = setup_logger(task_id, task_dir)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
-    if task_status(meta) not in ("EXECUTING", "PLAN_REVIEW", "COMMITTED_UNVERIFIED", "VERIFICATION_FAILED", "BLOCKED", "CANCELLED", "running", "paused", "interrupted", "cancelled", "stale_aborted"):
+    if task_status(meta) not in ("PAUSED", "EXECUTING", "PLAN_REVIEW", "COMMITTED_UNVERIFIED", "VERIFICATION_FAILED", "BLOCKED", "CANCELLED", "running", "paused", "interrupted", "cancelled", "stale_aborted"):
         console.print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused/interrupted/cancelled/stale_aborted 状态可恢复")
         sys.exit(1)
 
@@ -815,6 +815,14 @@ def cmd_resume(args=None):
         wt = task_dir / wid / "work"
         if wt.exists() and (wt / ".git").exists():
             worktree_map[wid] = wt
+        # resume 语义修复：blocked 是条件态（因上游 failed 而阻断），不是终态。
+        # 上游可能在本次 resume 中被修复（failed→completed），此时 blocked 失去依据。
+        # 清空 blocked 结果，让 pipeline 基于当前 failed_ids 重新评估级联：
+        #   - 上游已 completed → 下游进入 wave 正常执行
+        #   - 上游仍 failed → pipeline 自然重新标 blocked
+        if r.get("status") == "blocked":
+            logger.info(f"[resume] 解锁 blocked 子任务 {wid}（上游状态已变，重新评估）")
+            continue
         results_map[wid] = r
         if r.get("status") == "completed":
             completed_ids.add(wid)

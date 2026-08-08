@@ -1,0 +1,204 @@
+
+🔍 运行前模型-价格预检（探测实际后端 + 校验定价）…
+  claude-haiku-4-5 → 实际 deepseek-v4-flash [✅ 有定价 deepseek-v4-flash ($ 0.14/0.28)]
+  claude-sonnet-4-6 → 实际 deepseek-v4-flash [✅ 有定价 deepseek-v4-flash ($ 0.14/0.28)]
+  ✅ 全部模型有定价，可安全运行
+🧪 bench 开始（走 harness）: 16 任务 × 2 模型 × 3 重复 = 96 次执行
+   模型: claude-haiku-4-5, claude-sonnet-4-6
+   输出: /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/m0-decision-20260808/results.jsonl
+   并发度: 4（--bench-parallel 可调）
+
+[1/96] add-format-helper | claude-haiku-4-5 | repeat=1
+
+[2/96] add-format-helper | claude-haiku-4-5 | repeat=2
+
+[3/96] add-format-helper | claude-haiku-4-5 | repeat=3
+
+[4/96] add-format-helper | claude-sonnet-4-6 | repeat=1
+
+[5/96] add-format-helper | claude-sonnet-4-6 | repeat=2
+
+[6/96] add-format-helper | claude-sonnet-4-6 | repeat=3
+
+[7/96] fix-missing-default | claude-haiku-4-5 | repeat=1
+
+[8/96] fix-missing-default | claude-haiku-4-5 | repeat=2
+
+[9/96] fix-missing-default | claude-haiku-4-5 | repeat=3
+
+[10/96] fix-missing-default | claude-sonnet-4-6 | repeat=1
+
+[11/96] fix-missing-default | claude-sonnet-4-6 | repeat=2
+
+[12/96] fix-missing-default | claude-sonnet-4-6 | repeat=3
+
+[13/96] implement-done-command | claude-haiku-4-5 | repeat=1
+
+[14/96] implement-done-command | claude-haiku-4-5 | repeat=2
+
+[15/96] implement-done-command | claude-haiku-4-5 | repeat=3
+
+[16/96] implement-done-command | claude-sonnet-4-6 | repeat=1
+
+[17/96] implement-done-command | claude-sonnet-4-6 | repeat=2
+
+[18/96] implement-done-command | claude-sonnet-4-6 | repeat=3
+
+[19/96] refactor-to-dict | claude-haiku-4-5 | repeat=1
+
+[20/96] refactor-to-dict | claude-haiku-4-5 | repeat=2
+
+[21/96] refactor-to-dict | claude-haiku-4-5 | repeat=3
+
+[22/96] refactor-to-dict | claude-sonnet-4-6 | repeat=1
+
+[23/96] refactor-to-dict | claude-sonnet-4-6 | repeat=2
+
+[24/96] refactor-to-dict | claude-sonnet-4-6 | repeat=3
+
+[25/96] add-simple-caching | claude-haiku-4-5 | repeat=1
+
+[26/96] add-simple-caching | claude-haiku-4-5 | repeat=2
+
+[27/96] add-simple-caching | claude-haiku-4-5 | repeat=3
+
+[28/96] add-simple-caching | claude-sonnet-4-6 | repeat=1
+
+[29/96] add-simple-caching | claude-sonnet-4-6 | repeat=2
+
+[30/96] add-simple-caching | claude-sonnet-4-6 | repeat=3
+
+[31/96] add-tag-system | claude-haiku-4-5 | repeat=1
+
+[32/96] add-tag-system | claude-haiku-4-5 | repeat=2
+
+[33/96] add-tag-system | claude-haiku-4-5 | repeat=3
+
+[34/96] add-tag-system | claude-sonnet-4-6 | repeat=1
+
+[35/96] add-tag-system | claude-sonnet-4-6 | repeat=2
+
+[36/96] add-tag-system | claude-sonnet-4-6 | repeat=3
+
+[37/96] add-metrics-system | claude-haiku-4-5 | repeat=1
+
+[38/96] add-metrics-system | claude-haiku-4-5 | repeat=2
+
+[39/96] add-metrics-system | claude-haiku-4-5 | repeat=3
+
+[40/96] add-metrics-system | claude-sonnet-4-6 | repeat=1
+
+[41/96] add-metrics-system | claude-sonnet-4-6 | repeat=2
+
+[42/96] add-metrics-system | claude-sonnet-4-6 | repeat=3
+
+[43/96] add-caching-layer | claude-haiku-4-5 | repeat=1
+
+[44/96] add-caching-layer | claude-haiku-4-5 | repeat=2
+
+[45/96] add-caching-layer | claude-haiku-4-5 | repeat=3
+
+[46/96] add-caching-layer | claude-sonnet-4-6 | repeat=1
+
+[47/96] add-caching-layer | claude-sonnet-4-6 | repeat=2
+
+[48/96] add-caching-layer | claude-sonnet-4-6 | repeat=3
+
+[49/96] email-validator | claude-haiku-4-5 | repeat=1
+
+[50/96] email-validator | claude-haiku-4-5 | repeat=2
+
+[51/96] email-validator | claude-haiku-4-5 | repeat=3
+
+[52/96] email-validator | claude-sonnet-4-6 | repeat=1
+
+[53/96] email-validator | claude-sonnet-4-6 | repeat=2
+
+[54/96] email-validator | claude-sonnet-4-6 | repeat=3
+
+[55/96] security-hardening-taskmgr | claude-haiku-4-5 | repeat=1
+
+[56/96] security-hardening-taskmgr | claude-haiku-4-5 | repeat=2
+
+[57/96] security-hardening-taskmgr | claude-haiku-4-5 | repeat=3
+
+[58/96] security-hardening-taskmgr | claude-sonnet-4-6 | repeat=1
+
+[59/96] security-hardening-taskmgr | claude-sonnet-4-6 | repeat=2
+
+[60/96] security-hardening-taskmgr | claude-sonnet-4-6 | repeat=3
+
+[61/96] safe-file-reader | claude-haiku-4-5 | repeat=1
+
+[62/96] safe-file-reader | claude-haiku-4-5 | repeat=2
+
+[63/96] safe-file-reader | claude-haiku-4-5 | repeat=3
+
+[64/96] safe-file-reader | claude-sonnet-4-6 | repeat=1
+
+[65/96] safe-file-reader | claude-sonnet-4-6 | repeat=2
+
+[66/96] safe-file-reader | claude-sonnet-4-6 | repeat=3
+
+[67/96] race-condition-taskmgr | claude-haiku-4-5 | repeat=1
+
+[68/96] race-condition-taskmgr | claude-haiku-4-5 | repeat=2
+
+[69/96] race-condition-taskmgr | claude-haiku-4-5 | repeat=3
+
+[70/96] race-condition-taskmgr | claude-sonnet-4-6 | repeat=1
+
+[71/96] race-condition-taskmgr | claude-sonnet-4-6 | repeat=2
+
+[72/96] race-condition-taskmgr | claude-sonnet-4-6 | repeat=3
+
+[73/96] conditional-branching-datapipeline | claude-haiku-4-5 | repeat=1
+
+[74/96] conditional-branching-datapipeline | claude-haiku-4-5 | repeat=2
+
+[75/96] conditional-branching-datapipeline | claude-haiku-4-5 | repeat=3
+
+[76/96] conditional-branching-datapipeline | claude-sonnet-4-6 | repeat=1
+
+[77/96] conditional-branching-datapipeline | claude-sonnet-4-6 | repeat=2
+
+[78/96] conditional-branching-datapipeline | claude-sonnet-4-6 | repeat=3
+
+[79/96] integration-tests-datapipeline | claude-haiku-4-5 | repeat=1
+
+[80/96] integration-tests-datapipeline | claude-haiku-4-5 | repeat=2
+
+[81/96] integration-tests-datapipeline | claude-haiku-4-5 | repeat=3
+
+[82/96] integration-tests-datapipeline | claude-sonnet-4-6 | repeat=1
+
+[83/96] integration-tests-datapipeline | claude-sonnet-4-6 | repeat=2
+
+[84/96] integration-tests-datapipeline | claude-sonnet-4-6 | repeat=3
+
+[85/96] db-performance-optimization | claude-haiku-4-5 | repeat=1
+
+[86/96] db-performance-optimization | claude-haiku-4-5 | repeat=2
+
+[87/96] db-performance-optimization | claude-haiku-4-5 | repeat=3
+
+[88/96] db-performance-optimization | claude-sonnet-4-6 | repeat=1
+
+[89/96] db-performance-optimization | claude-sonnet-4-6 | repeat=2
+
+[90/96] db-performance-optimization | claude-sonnet-4-6 | repeat=3
+
+[91/96] db-end-to-end-optimization | claude-haiku-4-5 | repeat=1
+
+[92/96] db-end-to-end-optimization | claude-haiku-4-5 | repeat=2
+
+[93/96] db-end-to-end-optimization | claude-haiku-4-5 | repeat=3
+
+[94/96] db-end-to-end-optimization | claude-sonnet-4-6 | repeat=1
+
+[95/96] db-end-to-end-optimization | claude-sonnet-4-6 | repeat=2
+
+[96/96] db-end-to-end-optimization | claude-sonnet-4-6 | repeat=3
+
+✅ bench 完成: 96 条结果 → /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/m0-decision-20260808/results.jsonl
+   下一步: agent_go eval models --results /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/m0-decision-20260808/results.jsonl

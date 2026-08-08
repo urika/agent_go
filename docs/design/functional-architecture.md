@@ -50,7 +50,7 @@ agent_go 当前核心实现覆盖 `Plan -> Decompose -> Execute -> Verify`；Arc
 DRAFT
   -> SPEC_REVIEW
   -> ARCHITECTURE_REVIEW
-  -> PLAN_REVIEW
+  -> PLAN_REVIEW       # 规划审查门（plan accepted → 待执行）
   -> EXECUTING
   -> VERIFYING
       -> FIXING -> VERIFYING
@@ -58,6 +58,10 @@ DRAFT
       -> VERIFICATION_FAILED
   -> DELIVERY_READY
   -> PR_CREATED
+
+EXECUTING / VERIFYING
+  --中断(SIGINT/SIGTERM)--> PAUSED   # 可恢复锚点（M0 修复：不再复用 PLAN_REVIEW）
+  --resume--> EXECUTING
   -> ACCEPTED_DELIVERY
 ```
 
