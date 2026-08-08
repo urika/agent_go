@@ -474,10 +474,15 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                     try:
                         result = fut.result()
                     except Exception as e:
+                        # 异常隔离（与串行分支对齐）：内部 bug 崩溃不击穿进程，
+                        # 标 kill_reason=system_error 区别于能力失败
                         result = {"subtask_id": st["id"], "status": "failed",
-                                  "exit_code": -1, "summary": str(e), "worktree": "",
+                                  "exit_code": -1, "summary": f"system_error: {e}",
+                                  "failure_reason": f"内部异常: {type(e).__name__}: {e}",
+                                  "kill_reason": "system_error",
+                                  "worktree": "",
                                   "sandbox_type": "headless", "verify_ok": False, "duration_sec": 0}
-                        logger.error(f"并发异常 {st['id']}: {e}")
+                        logger.error(f"并发异常 {st['id']}: {type(e).__name__}: {e}")
                     degraded_count = _record_subtask_result(
                         st, result, task_dir, meta,
                         worktree_map, results_map, completed_ids, failed_ids,
