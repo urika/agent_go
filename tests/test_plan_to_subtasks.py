@@ -81,3 +81,34 @@ class TestPlanToSubtasks:
         }
         subtasks = plan_to_subtasks(plan, logger)
         assert subtasks[0]["title"] == "步骤 5"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 覆盖补强：CR-G3 task_type Spec override > 关键词检测
+# ═══════════════════════════════════════════════════════════════
+
+def test_task_type_override_wins_over_keyword_detection(tmp_path, logger):
+    """CR-G3：Spec 显式 task_type（task_type_override）优先于 role_skill_map 关键词检测。
+    标题含 security/auth → 关键词判 security；override='refactor' → 胜出为 refactor。"""
+    from agent_go.ui import plan_to_subtasks
+    plan = {"steps": [{
+        "id": 1, "title": "修复 auth 认证越权", "description": "security 漏洞修复",
+        "agent_prompt": "", "verification": "",
+    }], "dependencies": {}}
+    # 无 override：关键词检测 → security
+    subs = plan_to_subtasks(plan, logger, repo=tmp_path)
+    assert subs[0]["task_type"] == "security", "无 override 时应关键词检测为 security"
+    # 有 override：Spec 显式胜出
+    subs2 = plan_to_subtasks(plan, logger, repo=tmp_path, task_type_override="refactor")
+    assert subs2[0]["task_type"] == "refactor", "Spec override 应胜出于关键词检测"
+
+
+def test_task_type_none_when_no_match_no_override(tmp_path, logger):
+    """无 override + 无关键词匹配 → task_type=None（回退难度路由）。"""
+    from agent_go.ui import plan_to_subtasks
+    plan = {"steps": [{
+        "id": 1, "title": "实现一个普通功能", "description": "常规开发",
+        "agent_prompt": "", "verification": "",
+    }], "dependencies": {}}
+    subs = plan_to_subtasks(plan, logger, repo=tmp_path)
+    assert subs[0]["task_type"] is None

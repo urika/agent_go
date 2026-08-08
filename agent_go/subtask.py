@@ -80,6 +80,33 @@ def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger
             subprocess.run(["git", "merge", "--abort"],
                            cwd=str(dst_worktree), capture_output=True)
 
+def _parse_cpu_time(s: str) -> float:
+    """解析 ps 的 utime/stime 时间字符串为秒（float）。模块级以便单测（CR-H2 回归守护）。
+    兼容两种格式：
+      - Linux: 纯 clock ticks（如 '1234'）→ float()
+      - macOS: M:SS.cc 或 H:MM:SS 或 D-HH:MM:SS（如 '2:33.26' '11:26.55'）
+    失败抛 ValueError（调用方跳过该行）。
+    """
+    s = s.strip()
+    if not s:
+        raise ValueError("empty")
+    if ":" not in s:
+        # Linux 纯 ticks（BSD/SYSV 默认 100Hz，即 1 tick=0.01s，但 ps 已转为秒）
+        return float(s)
+    # macOS 时间格式：按 ':' 切分，各段加权求和（天/时/分/秒）
+    days = 0.0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        days = float(d)
+    parts = s.split(":")
+    secs = float(parts[-1])
+    if len(parts) >= 2:
+        secs += float(parts[-2]) * 60
+    if len(parts) >= 3:
+        secs += float(parts[-3]) * 3600
+    return days * 86400 + secs
+
+
 def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: logging.Logger, sub_id: str, active_pids: Optional[set] = None, active_pids_lock: Optional[threading.Lock] = None, allowed_tools: Optional[list] = None, hard_timeout: int = 0, shared_activity: Optional[list] = None, config: Optional[dict] = None) -> subprocess.CompletedProcess:
     """无头模式：claude -p 带 stream-json 实时监控、交互检测和超时重试。
 
@@ -137,7 +164,13 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
     # S12-P3 多维活性 + grace 复检门：stuck 判定从"单维事件静默"升级为
     # "claude 事件 ∨ worktree 文件变更 ∨ 进程树 CPU"三正交信号，任一活跃即续命。
     # 单次静默永不直接杀——先进入 STUCK_GRACE_SEC 宽限态，复检 S2/S3 仍无活性才确认。
-    STUCK_GRACE_SEC = 120          # grace 复检宽限窗
+    # CR-TD：参数化（config goal.stuck_grace_sec / env AGENT_GO_STUCK_GRACE_SEC 可覆盖，便于测试）
+    STUCK_GRACE_SEC = int(_goal_cfg.get("stuck_grace_sec", 120))
+    if "AGENT_GO_STUCK_GRACE_SEC" in env:
+        try:
+            STUCK_GRACE_SEC = int(env["AGENT_GO_STUCK_GRACE_SEC"])
+        except ValueError:
+            pass
 
     def _file_activity_snapshot(wt: Path) -> str:
         """S2 活性快照：git status --porcelain（文件集合）+ dirty 文件 mtime 快照。
@@ -175,32 +208,6 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             return _status + _mtime_part
         except (subprocess.SubprocessError, OSError, ValueError):
             return ""
-
-    def _parse_cpu_time(s: str) -> float:
-        """解析 ps 的 utime/stime 时间字符串为秒（float）。
-        兼容两种格式：
-          - Linux: 纯 clock ticks（如 '1234'）→ float()
-          - macOS: M:SS.cc 或 H:MM:SS 或 D-HH:MM:SS（如 '2:33.26' '11:26.55'）
-        失败抛 ValueError（调用方跳过该行）。
-        """
-        s = s.strip()
-        if not s:
-            raise ValueError("empty")
-        if ":" not in s:
-            # Linux 纯 ticks（BSD/SYSV 默认 100Hz，即 1 tick=0.01s，但 ps 已转为秒）
-            return float(s)
-        # macOS 时间格式：按 ':' 切分，各段加权求和（天/时/分/秒）
-        days = 0.0
-        if "-" in s:
-            d, s = s.split("-", 1)
-            days = float(d)
-        parts = s.split(":")
-        secs = float(parts[-1])
-        if len(parts) >= 2:
-            secs += float(parts[-2]) * 60
-        if len(parts) >= 3:
-            secs += float(parts[-3]) * 3600
-        return days * 86400 + secs
 
     def _process_cpu_ticks(proc_pid: int) -> int:
         """S3 活性：claude 进程树累计 CPU 时间（utime+stime 秒数总和）。
@@ -243,6 +250,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
 
     def _run_one(prompt: str, attempt: int) -> tuple[subprocess.Popen, list[str], bool]:
         """启动 claude -p (stream-json) 并实时解析事件。"""
+        mcp_config_path: Optional[str] = None
         # S12-P0 G1：记录 kill 原因（stuck / hard_timeout / goal_timeout / goal_turns）。
         # kill_reason 通过闭包写入 _kill_reason，供外层 _run_headless 上报结果。
         _kill_reason: list[Optional[str]] = [None]
@@ -278,10 +286,9 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             cmd.extend(["--allowedTools", ",".join(allowed_tools)])
         # S10/S12 成本控制 L1：单次 claude 调用硬上限（--max-budget-usd，claude >=2.1 原生支持）
         # 按 difficulty 读取 cost_control.per_subtask_budget_usd。
-        # 冷启动策略：L1 由 l1_enabled 独立控制（默认 True），与 L2/L3 的 enabled 解耦——
-        # L1 误杀风险最低（只杀单次异常调用），是冷启动唯一安全默认开启的层。
+        # 冷启动策略：L1 由 l1_enabled 独立控制（默认 False，与 L2/L3 一致），待基线校准后开启。
         _cost_cfg = (_cfg or {}).get("cost_control") or {}
-        if _cost_cfg.get("l1_enabled", True) or _cost_cfg.get("enabled"):
+        if _cost_cfg.get("l1_enabled", False) or _cost_cfg.get("enabled"):
             _diff = env.get("AGENT_GO_DIFFICULTY", "medium")
             _budgets = _cost_cfg.get("per_subtask_budget_usd", {}) or {}
             # 兼容旧格式：S10 时代 per_subtask_budget_usd 是标量（单任务统一值），
@@ -315,10 +322,26 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                         mode="w", suffix=".json", delete=False, prefix="agent_go_mcp_")
                     json.dump(_claude_mcp, _tf)
                     _tf.close()
-                    cmd.extend(["--mcp-config", _tf.name])
+                    mcp_config_path = _tf.name
+                    cmd.extend(["--mcp-config", mcp_config_path])
             except Exception as _mcp_err:
                 logger.debug(f"[{sub_id}] MCP config 透传失败（已跳过）: {_mcp_err}")
-        proc = subprocess.Popen(cmd, env=env, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(cmd, env=env, cwd=str(worktree), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+
+        def _terminate_process_group() -> None:
+            """终止 Claude 及其派生的 build/test 子进程。"""
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    proc.kill()
+                except (ProcessLookupError, OSError):
+                    pass
 
         if active_pids_lock:
             with active_pids_lock:
@@ -487,7 +510,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 log_event(logger, "headless_hard_timeout",
                           {"sub_id": sub_id, "attempt": attempt, "limit": hard_timeout})
                 _record_kill("hard_timeout")
-                proc.kill()
+                _terminate_process_group()
                 break
             idle = time.time() - last_ts[0]
             # S12-P3 grace 复检门：单次静默永不直接杀。S1 事件静默超时 → 进入宽限态，
@@ -515,8 +538,10 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                         logger.error(
                             f"claude {_alive_idle:.0f}s 无多维活性（事件/文件/CPU 全静默），"
                             f"grace 复检确认 stuck，强制终止")
+                        # stuck = grace 复检确认（设计文档 §8 的 stuck_confirmed）——
+                        # 单次静默永不直接杀，走到这里必已通过 S2/S3 复检，故统一记为 "stuck"
                         _record_kill("stuck")
-                        proc.kill()
+                        _terminate_process_group()
                         break
                     else:
                         # 复检发现活性（假警报）→ 复位计时器，继续
@@ -533,14 +558,14 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                     log_event(logger, "goal_timeout", {"sub_id": sub_id, "elapsed": elapsed, "limit": GOAL_TIMEOUT})
                     goal_watchdog_triggered[0] = True
                     _record_kill("goal_timeout")
-                    proc.kill()
+                    _terminate_process_group()
                     break
                 if goal_turn_count[0] >= MAX_GOAL_TURNS:
                     logger.error(f"claude goal 轮数超限 ({goal_turn_count[0]} >= {MAX_GOAL_TURNS})，强制终止")
                     log_event(logger, "goal_turns_exceeded", {"sub_id": sub_id, "turns": goal_turn_count[0], "limit": MAX_GOAL_TURNS})
                     goal_watchdog_triggered[0] = True
                     _record_kill("goal_turns_exceeded")
-                    proc.kill()
+                    _terminate_process_group()
                     break
             if idle > HEARTBEAT and idle - idle_logged_at > HEARTBEAT:
                 logger.info(f"{PFX} 等待中... (无事件 {idle:.0f}s, attempt={attempt})")
@@ -550,6 +575,11 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         t_out.join()
         t_err.join()
         proc.wait()
+        if mcp_config_path:
+            try:
+                Path(mcp_config_path).unlink(missing_ok=True)
+            except OSError:
+                logger.debug(f"[{sub_id}] MCP 临时配置清理失败: {mcp_config_path}")
         # 终检：poll 循环因 time.sleep(2) 可能错过最后一个事件触发的 goal 轮数超限
         # （读线程处理最后一行累加 goal_turn_count 与主线程 sleep 期间的 poll 返回存在竞争）。
         # 线程 join 后所有事件已处理完毕，此时做一次确定性检查，消除 flaky。
@@ -561,7 +591,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             goal_watchdog_triggered[0] = True
             _record_kill("goal_turns_exceeded")
             try:
-                proc.kill()
+                _terminate_process_group()
             except (ProcessLookupError, OSError):
                 pass
         if active_pids_lock:

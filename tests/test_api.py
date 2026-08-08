@@ -865,3 +865,56 @@ class TestGeneratePlanCacheWrite:
 
         assert plan["overview"] == "fresh plan"
         assert not (tmp_path / "cache" / "plans").exists()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 覆盖补强（P0-3）：planner_api 隔离（PRD 铁律：planner 不降级到弱模型）
+# ═══════════════════════════════════════════════════════════════
+
+class TestPlannerApiIsolation:
+    """planner_api 覆盖 plan_api 仅用于 plan 生成；不走 worker proxy。
+    回归会让 planner 流量走弱模型/代理 → 规划质量降、worker 成本膨胀。"""
+
+    @patch("urllib.request.urlopen")
+    def test_planner_api_overrides_plan_api(self, mock_urlopen, logger):
+        """planner_api 配置 → 请求走 planner_api 的 base_url + model（非 plan_api）。"""
+        import json as _json
+        mock_urlopen.return_value = MockResponse({"choices": [{"message": {"content": "plan"}}]})
+        config = {
+            "plan_api": {"provider": "openai", "base_url": "http://proxy:4000/v1/chat",
+                         "model": "weak-proxy-model", "api_key": "k"},
+            "planner_api": {"provider": "openai", "base_url": "http://direct-llm/v1/chat",
+                            "model": "strong-planner-model", "api_key": "k"},
+        }
+        call_api(config, [{"role": "user", "content": "hi"}], logger)
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "http://direct-llm/v1/chat"
+        assert _json.loads(req.data.decode("utf-8"))["model"] == "strong-planner-model"
+
+    @patch("urllib.request.urlopen")
+    def test_planner_api_empty_falls_back_to_plan_api(self, mock_urlopen, logger):
+        """planner_api 未配置/空 → 回退 plan_api（向后兼容）。"""
+        import json as _json
+        mock_urlopen.return_value = MockResponse({"choices": [{"message": {"content": "plan"}}]})
+        config = {
+            "plan_api": {"provider": "openai", "base_url": "http://proxy:4000/v1/chat",
+                         "model": "fallback-model", "api_key": "k"},
+            "planner_api": {},  # 空 → 回退
+        }
+        call_api(config, [{"role": "user", "content": "hi"}], logger)
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "http://proxy:4000/v1/chat"
+        assert _json.loads(req.data.decode("utf-8"))["model"] == "fallback-model"
+
+    @patch("urllib.request.urlopen")
+    def test_planner_api_absent_falls_back_to_plan_api(self, mock_urlopen, logger):
+        """config 无 planner_api 键 → 回退 plan_api。"""
+        import json as _json
+        mock_urlopen.return_value = MockResponse({"choices": [{"message": {"content": "plan"}}]})
+        config = {
+            "plan_api": {"provider": "openai", "base_url": "http://proxy:4000/v1/chat",
+                         "model": "fallback-model", "api_key": "k"},
+        }
+        call_api(config, [{"role": "user", "content": "hi"}], logger)
+        req = mock_urlopen.call_args[0][0]
+        assert _json.loads(req.data.decode("utf-8"))["model"] == "fallback-model"

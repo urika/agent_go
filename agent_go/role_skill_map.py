@@ -15,11 +15,23 @@ DEFAULT_MAP = {
     "rules": [
         {
             "match": {"agent_type": "tester"},
+            "task_type": "test",
             "skills": {"required": [], "recommended": ["tdd-workflow", "test-coverage"]}
         },
         {
-            "match": {"keywords": ["安全", "security", "auth", "认证", "权限", "加密"]},
+            "match": {"keywords": ["安全", "security", "auth", "认证", "权限", "加密", "注入", "xss", "csrf", "越权"]},
+            "task_type": "security",
             "skills": {"required": ["security-review"], "recommended": []}
+        },
+        {
+            "match": {"keywords": ["修复", "bug", "fix bug", "崩溃", "crash", "报错", "异常", "traceback", "defect"]},
+            "task_type": "bugfix",
+            "skills": {"required": [], "recommended": []}
+        },
+        {
+            "match": {"keywords": ["重构", "refactor", "迁移", "migrate", "重写", "rewrite"]},
+            "task_type": "refactor",
+            "skills": {"required": [], "recommended": []}
         },
         {
             "match": {"keywords": ["审查", "review", "audit"]},
@@ -32,7 +44,13 @@ DEFAULT_MAP = {
             "agent_type": "architect"
         },
         {
+            "match": {"keywords": ["文档", "文档化", "文档说明", "doc", "readme", "注释", "comment"]},
+            "task_type": "docs",
+            "skills": {"required": [], "recommended": []}
+        },
+        {
             "match": {"file_patterns": ["*.md", "*.rst", "*.txt"]},
+            "task_type": "docs",
             "skills": {"required": [], "recommended": []},
             "agent_type": "architect"
         }
@@ -127,6 +145,7 @@ def apply_rules(step: dict[str, Any], role_map: dict[str, Any], installed_skills
     required_skills = []
     recommended_skills = []
     matched_agent_type = None
+    matched_task_type = None  # CR-G3：任务类型（security/bugfix/refactor/test/docs/...）
 
     for rule in matched:
         skills = rule.get("skills", {})
@@ -138,6 +157,9 @@ def apply_rules(step: dict[str, Any], role_map: dict[str, Any], installed_skills
                 recommended_skills.append(sk)
         if rule.get("agent_type") and not matched_agent_type:
             matched_agent_type = rule["agent_type"]
+        # CR-G3：首个带 task_type 的匹配规则决定任务类型（与 agent_type 同风格）
+        if rule.get("task_type") and not matched_task_type:
+            matched_task_type = rule["task_type"]
 
     llm_skills = step.get("skills", [])
     merged_skills = list(llm_skills)
@@ -156,6 +178,7 @@ def apply_rules(step: dict[str, Any], role_map: dict[str, Any], installed_skills
     return {
         "skills": merged_skills,
         "agent_type": agent_type,
+        "task_type": matched_task_type,  # CR-G3：供 plan_to_subtasks + executor 路由
         "required_skills": required_skills,
         "matched_rules": [r.get("match", {}) for r in matched],
     }

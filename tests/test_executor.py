@@ -123,6 +123,44 @@ class TestRunSubtask:
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
+    def test_initial_hard_timeout_passed(self, mock_wt_create, mock_subprocess, mock_headless,
+                                         mock_load_agent, temp_repo, task_dir, fast_logger,
+                                         basic_subtask):
+        """首跑硬超时：verification.run_timeout 按难度缩放后传给 _run_headless。"""
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+
+        run_subtask("test-task", basic_subtask, temp_repo, task_dir,
+                    fast_logger, headless=True,
+                    config={"verification": {"run_timeout": 100}})
+
+        ht = mock_headless.call_args.kwargs.get("hard_timeout")
+        assert isinstance(ht, int) and ht > 0, "首跑硬超时应透传给 _run_headless"
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_initial_hard_timeout_disabled_when_zero(self, mock_wt_create, mock_subprocess, mock_headless,
+                                                     mock_load_agent, temp_repo, task_dir, fast_logger,
+                                                     basic_subtask):
+        """run_timeout=0 → hard_timeout=0（禁用首跑硬超时）。"""
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+
+        run_subtask("test-task", basic_subtask, temp_repo, task_dir,
+                    fast_logger, headless=True,
+                    config={"verification": {"run_timeout": 0}})
+
+        ht = mock_headless.call_args.kwargs.get("hard_timeout")
+        assert ht == 0
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
     def test_metering_path_propagated_to_env(self, mock_wt_create, mock_subprocess, mock_headless,
                                              mock_load_agent, temp_repo, task_dir, fast_logger,
                                              basic_subtask):
@@ -1494,6 +1532,91 @@ class TestVerificationLoopE2E:
         assert result["verify_ok"] is False
         assert mock_fix.call_count == 0, "over_budget 不应触发修复"
 
+    def test_over_budget_l3_skips_fix(self, temp_repo, task_dir, logger):
+        """覆盖补强：kill_reason=over_budget_l3（pipeline 级熔断写入）→ G8 同样短路不重试。
+        G8 读路径此前的行为测试只覆盖 L2，L3（startswith('over_budget')）路径无回归守护。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 3}},
+                initial_kill_reason="over_budget_l3",
+            )
+        assert result["verify_ok"] is False
+        assert result["kill_reason"] == "over_budget_l3"
+        assert mock_fix.call_count == 0, "over_budget_l3 不应触发修复"
+
+    def test_l2_cost_trip_sets_over_budget_l2(self, temp_repo, task_dir, logger):
+        """覆盖补强（P0-1）：L2 写路径——累计 cost ≥ per_subtask×multiplier 时
+        _verify_changes 设 kill_reason=over_budget_l2。此前只测读路径(initial_kill_reason)，
+        写路径无守护 → 回归会让预算控制静默失效（超预算子任务继续烧钱重试）。"""
+        import json as _json
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+        # metering：sub-1 累计 cost 1.5 ≥ limit(medium 0.4 × 2.5 = 1.0)
+        metering = task_dir / "metering.jsonl"
+        metering.write_text(_json.dumps({"sub_id": "sub-1", "cost_usd": 1.5}) + "\n", encoding="utf-8")
+        config = {
+            "verification": {"max_retries": 3},
+            "cost_control": {"enabled": True,
+                             "per_subtask_budget_usd": {"medium": 0.4},
+                             "subtask_multiplier": 2.5},
+            "_metering_path": str(metering),
+        }
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.executor.write_censored_event"):
+            mock_fix.return_value = MagicMock(returncode=0)
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir, config=config,
+            )
+        assert result["verify_ok"] is False
+        assert result["kill_reason"] == "over_budget_l2"
+        assert mock_fix.call_count == 0, "L2 熔断应在 fix 前触发，不调用修复"
+
+    def test_resume_continues_from_persisted_attempts(self, temp_repo, task_dir, logger):
+        """P2-2: verify_state.json 记录已尝试次数 → resume 后从已尝试轮次续跑，
+        不重跑已尝试的修复（max_retries 会计错 → 过试烧钱 / 少试过早失败）。
+        崩溃在第 3 次重试后，resume 修复次数应显著少于从头跑。"""
+        import json as _json
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        def _run():
+            with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
+                 patch("agent_go.executor._run_headless") as mock_fix:
+                mock_fix.return_value = MagicMock(returncode=0)
+                _verify_changes(
+                    "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                    task_md="# Task", env={}, tag_name="task-1/sub-1",
+                    active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                    task_dir=task_dir, config={"verification": {"max_retries": 5}})
+                return mock_fix.call_count
+
+        # 对照：无 verify_state → 从头跑满重试
+        control = _run()
+        # 预写 verify_state：已尝试 3 次（崩溃在第 3 次）
+        vpath = task_dir / "sub-1" / "verify_state.json"
+        vpath.parent.mkdir(parents=True, exist_ok=True)
+        vpath.write_text(_json.dumps({
+            "subtask_id": "sub-1", "attempts": 3, "max_retries": 5,
+            "history": [], "verification_results": [],
+        }), encoding="utf-8")
+        # resume 后修复次数应减少（跳过已尝试轮次），但仍 >0（继续尝试未完成工作）
+        resumed = _run()
+        assert resumed > 0, "resume 后仍应继续修复"
+        assert control > resumed, f"resume 应跳过已尝试轮次（control={control}, resumed={resumed}）"
+
     def test_semantic_eval_triggers_repair(self, temp_repo, task_dir, logger):
         """shell 验证通过 → 语义评估失败 → 触发修复 → 修复后通过"""
         from threading import Lock
@@ -1873,3 +1996,106 @@ class TestVerifyLocalBackend:
         is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
         assert is_local is False
         assert actual == "glm-4.7"
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-G3: task_type → 模型路由（worker_models_by_type 覆盖难度）
+# ═══════════════════════════════════════════════════════════════
+
+class TestTaskTypeRouting:
+    """task_type 路由优先级：worker_models_by_type[type] > worker_models[difficulty]。
+    未配 by_type / 无 task_type → 回退难度路由（默认行为不变）。"""
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_task_type_overrides_difficulty(self, mock_wt_create, mock_subprocess,
+                                            mock_headless, mock_load_agent,
+                                            temp_repo, task_dir, fast_logger, basic_subtask):
+        """CR-G3：task_type=security 且配了 by_type → 用 security 模型，覆盖 medium 难度模型。"""
+        from agent_go.executor import run_subtask
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+        basic_subtask["difficulty"] = "medium"
+        basic_subtask["task_type"] = "security"
+        config = {
+            "worker_models": {"easy": "", "medium": "claude-sonnet-5", "hard": ""},
+            "worker_models_by_type": {"security": "claude-opus-4-8"},
+        }
+        run_subtask("t", basic_subtask, temp_repo, task_dir, fast_logger,
+                    headless=True, config=config)
+        env = mock_headless.call_args[0][2]
+        assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-opus-4-8"  # task_type 胜出
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_task_type_falls_back_when_unconfigured(self, mock_wt_create, mock_subprocess,
+                                                    mock_headless, mock_load_agent,
+                                                    temp_repo, task_dir, fast_logger, basic_subtask):
+        """CR-G3：task_type 存在但 worker_models_by_type 未配该类型 → 回退难度路由。"""
+        from agent_go.executor import run_subtask
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+        basic_subtask["difficulty"] = "medium"
+        basic_subtask["task_type"] = "security"
+        config = {
+            "worker_models": {"easy": "", "medium": "claude-sonnet-5", "hard": ""},
+            "worker_models_by_type": {},  # 未配 security
+        }
+        run_subtask("t", basic_subtask, temp_repo, task_dir, fast_logger,
+                    headless=True, config=config)
+        env = mock_headless.call_args[0][2]
+        assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-sonnet-5"  # 回退 medium 难度
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_no_task_type_uses_difficulty(self, mock_wt_create, mock_subprocess,
+                                          mock_headless, mock_load_agent,
+                                          temp_repo, task_dir, fast_logger, basic_subtask):
+        """CR-G3：无 task_type → 纯难度路由（默认行为零变化）。"""
+        from agent_go.executor import run_subtask
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+        basic_subtask["difficulty"] = "hard"
+        # 不设 task_type
+        config = {
+            "worker_models": {"easy": "", "medium": "", "hard": "claude-opus-4-8"},
+            "worker_models_by_type": {"security": "claude-opus-4-8"},
+        }
+        run_subtask("t", basic_subtask, temp_repo, task_dir, fast_logger,
+                    headless=True, config=config)
+        env = mock_headless.call_args[0][2]
+        assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-opus-4-8"  # hard 难度模型
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_degrade_mode_downgrades_model(self, mock_wt_create, mock_subprocess,
+                                           mock_headless, mock_load_agent,
+                                           temp_repo, task_dir, fast_logger, basic_subtask):
+        """覆盖补强：config['_degraded']=True + worker_models_degrades → env 模型被降档
+        （hard→medium）。degrade 模式的核心行为（降档本身）此前未测，只测了安全阀/max_retries。"""
+        from agent_go.executor import run_subtask
+        mock_wt_create.return_value = (True, "")
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+        basic_subtask["difficulty"] = "hard"
+        config = {
+            "_degraded": True,  # pipeline 预算超限后置位
+            "worker_models": {"easy": "claude-haiku-4-5", "medium": "claude-sonnet-5", "hard": "claude-opus-4-8"},
+            "worker_models_degrades": {"hard": "medium", "medium": "easy", "easy": ""},
+        }
+        run_subtask("t", basic_subtask, temp_repo, task_dir, fast_logger,
+                    headless=True, config=config)
+        env = mock_headless.call_args[0][2]
+        # hard 经 degrades 表降档到 medium → sonnet（不是 opus）
+        assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-sonnet-5"

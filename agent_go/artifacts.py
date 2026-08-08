@@ -74,8 +74,11 @@ def export(task_id: str, results: dict[str, dict[str, Any]], artifact_dir: Any, 
     out_dir = Path(artifact_dir)
     exported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    # CR-P1-4：K13 完整率字段（无产物/无导出目录时 None = 无声明可判）
+    _empty = {"exported": exported, "skipped": skipped, "dir": str(out_dir),
+              "completeness": None, "total_found": 0, "missing": []}
     if not out_dir:
-        return {"exported": exported, "skipped": skipped, "dir": str(out_dir)}
+        return _empty
 
     # 组织方式：artifact_dir/{task_id}/{sub_id}/{filename}
     task_export_dir = out_dir / task_id
@@ -83,7 +86,7 @@ def export(task_id: str, results: dict[str, dict[str, Any]], artifact_dir: Any, 
         task_export_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         logger.warning(f"[artifacts] 无法创建导出目录 {task_export_dir}: {e}")
-        return {"exported": exported, "skipped": skipped, "dir": str(out_dir)}
+        return _empty
 
     for sub_id in results:
         worktree = _task_dir_worktree(Path(task_dir), sub_id)
@@ -108,7 +111,15 @@ def export(task_id: str, results: dict[str, dict[str, Any]], artifact_dir: Any, 
             })
             logger.info(f"[artifacts] 导出 {sub_id}: {src.name} → {dst}")
 
-    return {"exported": exported, "skipped": skipped, "dir": str(out_dir)}
+    # CR-P1-4：K13 完整率 = exported/(exported+skipped)。skipped（超限/复制失败）=
+    # 声明产物（写入 __artifacts__/）未达用户目录 → 完整率 < 100%，明示而非静默。
+    total_found = len(exported) + len(skipped)
+    completeness = round(len(exported) / total_found, 4) if total_found else None
+    return {
+        "exported": exported, "skipped": skipped, "dir": str(out_dir),
+        "completeness": completeness, "total_found": total_found,
+        "missing": [s["src"] for s in skipped],
+    }
 
 
 def render_export_summary(export_result: dict[str, Any]) -> str:
@@ -126,6 +137,11 @@ def render_export_summary(export_result: dict[str, Any]) -> str:
     if skipped:
         for s in skipped:
             lines.append(f"  ⚠️ {s['sub_id']}/{Path(s['src']).name}: {s['reason']}")
+    # CR-P1-4：K13 完整率——声明产物未全部达用户目录时明示（反"静默跳过"）
+    comp = export_result.get("completeness")
+    if comp is not None and comp < 1.0:
+        lines.append(f"  ⚠️ K13 完整率 {comp:.0%}（{len(exported)}/{export_result.get('total_found', 0)}）"
+                     f"—— 声明产物未全部达用户目录，需人工处理")
     lines.append("─" * 60)
     lines.append(f"  导出目录: {export_result.get('dir', '')}")
     return "\n".join(lines)

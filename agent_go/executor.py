@@ -15,7 +15,7 @@ from .artifacts import ARTIFACT_DIR_NAME
 from .config import get_api_key
 
 console = _LazyConsole()
-_SUBTASK_INTERRUPTED = threading.Event()
+# 中断状态由 pipeline 按 subtask 传入；不在模块级共享，避免并发任务互相影响。
 __all__ = ["run_subtask"]
 
 
@@ -404,8 +404,11 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     return task_md, verification, skill_names, unresolved_skills
 
 
-def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger, config=None):
-    """Run Claude in headless or interactive mode. Returns (result, sandbox_type, claude_time)."""
+def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger, config=None, hard_timeout=0):
+    """Run Claude in headless or interactive mode. Returns (result, sandbox_type, claude_time).
+
+    hard_timeout: 首跑硬超时（秒），0=不限制。仅 headless 模式生效，透传给 _run_headless。
+    """
     claude_start = time.time()
 
 
@@ -449,6 +452,7 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
             result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids,
                                    active_pids_lock=active_pids_lock, allowed_tools=allowed_tools,
                                    shared_activity=shared_activity,
+                                   hard_timeout=hard_timeout,
                                    config=_effective_config(config))
             # S12-P0 G1：result 自带 kill_reason 属性（_run_headless 写入），
             # 由 run_subtask 读取后传入 _verify_changes 归因。
@@ -673,23 +677,6 @@ def _persist_verify_state(
         _mod_logger.debug(f"写入 verify_state.json 失败: {e}")
 
 
-def _install_subtask_sigterm_handler(task_dir: Path, sub_id: str) -> None:
-    """P2 Layer 3：subtask SIGTERM handler — 设置全局中断标记。
-
-    handler 必须 async-signal-safe（不能做文件 I/O），所以只设置 Event 标志。
-    实际写入由 _verify_changes 循环检查 _SUBTASK_INTERRUPTED 后调用 _persist_verify_state 完成。
-    """
-    _SUBTASK_INTERRUPTED.set()
-    # 立即写一个最小化的 interrupted checkpoint（async-signal-safe write）
-    try:
-        path = _verify_state_path(task_dir, sub_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write('{"interrupted": true, "subtask_id": "' + sub_id + '"}\n')
-    except (OSError, IOError):
-        pass
-
-
 def _meter_cost_for_sub(metering_path: str, sub_id: str) -> float:
     """聚合 metering.jsonl 中某子任务（sub_id）的累计成本。
 
@@ -709,11 +696,21 @@ def _meter_cost_for_sub(metering_path: str, sub_id: str) -> float:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if ev.get("sub_id") == sub_id:
+                if ev.get("sub_id") == sub_id and ev.get("event") != "cost_censored":
                     total += ev.get("cost_usd", 0.0) or 0.0
     except OSError:
         return 0.0
     return total
+
+
+def _metering_available(metering_path: str) -> bool:
+    if not metering_path:
+        return False
+    try:
+        with open(metering_path, encoding="utf-8"):
+            return True
+    except OSError:
+        return False
 
 
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
@@ -728,8 +725,10 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     _cfg = _effective_config(config)
     max_retries = _cfg.get("verification", {}).get("max_retries", 3)
 
-    # Phase 2: 清除上一轮可能残留的中断标记（确保验证循环能正常开始）
-    _SUBTASK_INTERRUPTED.clear()
+    # 中断事件由 pipeline 创建；直接调用时使用独立事件，绝不跨 subtask 共享。
+    interrupt_event = interrupt_event or threading.Event()
+
+    git_ok = True
 
     # 按 difficulty 缩减重试预算：easy → 2, medium → 3, hard → 5
     difficulty = subtask.get("difficulty", "medium")
@@ -746,30 +745,40 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     # 记录变更摘要（使用 git status --porcelain 检测所有变更，包括新文件）
     status_result = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree), capture_output=True, text=True)
     has_changes = bool(status_result.stdout.strip())
-    # 稳健性：worker 可能自行 commit（如 deepseek 模型），此时工作区干净但已有变更。
-    # 判定：HEAD commit 为本次 subtask 新产生（author 时间在最近 10 分钟内且非 fixture 初始提交）。
+    # 稳健性：worker 可能自行 commit，此时工作区干净但已有变更。
+    # 优先基于本次运行记录的 base_commit 判断，避免把近期人工提交误认成 worker 产出。
     if not has_changes:
         try:
             _head_hash = subprocess.run(
                 ["git", "rev-parse", "HEAD"], cwd=str(worktree),
                 capture_output=True, text=True, timeout=10).stdout.strip()
-            _head_date = subprocess.run(
-                ["git", "log", "-1", "--format=%at", "HEAD"], cwd=str(worktree),
-                capture_output=True, text=True, timeout=10).stdout.strip()
             _head_msg = subprocess.run(
                 ["git", "log", "-1", "--format=%s", "HEAD"], cwd=str(worktree),
                 capture_output=True, text=True, timeout=10).stdout.strip()
-            _now = time.time()
-            _recent = False
-            if _head_date and _head_date.isdigit():
-                _recent = (_now - int(_head_date) < 600)
-            if _recent:
+            _base_commit = (_cfg.get("_base_commit", "") if isinstance(_cfg, dict) else "")
+            if _base_commit:
+                _ancestor = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", _base_commit, _head_hash],
+                    cwd=str(worktree), capture_output=True, timeout=10)
+                _parents = subprocess.run(
+                    ["git", "show", "-s", "--format=%P", "HEAD"], cwd=str(worktree),
+                    capture_output=True, text=True, timeout=10).stdout.split()
+                _is_worker_commit = (_ancestor.returncode == 0 and _head_hash != _base_commit
+                                     and len(_parents) == 1)
+            else:
+                # 兼容旧任务：没有 base_commit 时保守保留旧时间窗口逻辑。
+                _head_date = subprocess.run(
+                    ["git", "log", "-1", "--format=%at", "HEAD"], cwd=str(worktree),
+                    capture_output=True, text=True, timeout=10).stdout.strip()
+                _is_worker_commit = bool(_head_date and _head_date.isdigit()
+                                         and time.time() - int(_head_date) < 600)
+            if _is_worker_commit:
                 _self_commit_stat = subprocess.run(
                     ["git", "show", "--stat", "--format=", "HEAD"], cwd=str(worktree),
                     capture_output=True, text=True, timeout=10).stdout.strip()
                 has_changes = True
                 summary = f"worker 自行提交: {_head_msg}\n{_self_commit_stat}" if _self_commit_stat else f"worker 自行提交: {_head_msg}"
-                logger.info(f"[self_commit] {subtask['id']}: HEAD 变更于 {_now - int(_head_date):.0f}s 前 → 识别为有变更 ({_head_hash[:8]})")
+                logger.info(f"[self_commit] {subtask['id']}: 识别到 base_commit 之后的 worker commit ({_head_hash[:8]})")
         except Exception as _sc_err:
             logger.debug(f"[self_commit] 检查失败（忽略）: {_sc_err}")
     if has_changes:
@@ -800,20 +809,35 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         commit_msg = _format_commit(subtask['title'], issue_ref, subtask["id"])
         add_result = subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
         if add_result.returncode != 0:
+            git_ok = False
             logger.warning(f"git add 失败: {add_result.stderr.strip()}")
-        commit_result = subprocess.run(["git", "commit", "-m", commit_msg],
-                                       cwd=str(worktree), capture_output=True)
-        if commit_result.returncode != 0:
-            logger.warning(f"git commit 失败: {commit_result.stderr.strip()[:200]}")
-    tag_result = subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True)
-    if tag_result.returncode != 0:
-        logger.warning(f"git tag 失败: {tag_result.stderr.strip()[:200]}")
-    if has_changes:
+        if git_ok:
+            commit_result = subprocess.run(["git", "commit", "-m", commit_msg],
+                                           cwd=str(worktree), capture_output=True)
+            if commit_result.returncode != 0:
+                git_ok = False
+                logger.warning(f"git commit 失败: {commit_result.stderr.strip()[:200]}")
+    if git_ok:
+        tag_result = subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True)
+        if tag_result.returncode != 0:
+            git_ok = False
+            logger.warning(f"git tag 失败: {tag_result.stderr.strip()[:200]}")
+    if git_ok and has_changes:
         logger.info(f"已提交并打 tag: {tag_name}")
-    else:
+    elif git_ok:
         logger.info(f"已打 tag (无新增变更): {tag_name}")
+    else:
+        logger.warning(f"Git 完成边界失败，禁止将 {sub_id} 作为成功结果传递")
 
     git_commit_ms = (time.time() - git_start) * 1000
+    commit_hash = ""
+    if git_ok:
+        _hash_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(worktree),
+            capture_output=True, text=True,
+        )
+        if _hash_result.returncode == 0:
+            commit_hash = _hash_result.stdout.strip()
     if has_changes:
         console.emit("subtask_activity", {"sub_id": sub_id, "activity": "Committing changes"})
 
@@ -875,7 +899,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 
         while retry_count <= max_retries:
             # P2 Layer 3b: 中断信号→退出验证循环（由 _install_subtask_sigterm_handler 设置）
-            if _SUBTASK_INTERRUPTED.is_set():
+            if interrupt_event.is_set():
                 logger.warning(f"收到 SIGTERM 信号，退出验证循环")
                 break
             # 1. 执行所有验证命令
@@ -1059,7 +1083,14 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             _cc_cfg = _cfg.get("cost_control") or {}
             if _cc_cfg.get("enabled"):
                 _meter_path = (_effective_config(config) or {}).get("_metering_path", "")
-                _sub_budget = _cc_cfg.get("per_subtask_budget_usd", {}).get(difficulty, 0.0)
+                if _meter_path and not _metering_available(_meter_path):
+                    verify_ok = False
+                    _latest_kill_reason[0] = "metering_unavailable"
+                    logger.error("成本计量不可用，停止验证修复重试")
+                    break
+                _budgets = _cc_cfg.get("per_subtask_budget_usd", {}) or {}
+                _sub_budget = (_budgets.get(difficulty, _budgets.get("medium", 0.0))
+                               if isinstance(_budgets, dict) else _budgets)
                 _sub_mult = _cc_cfg.get("subtask_multiplier", 2.5)
                 _sub_limit = float(_sub_budget or 0) * _sub_mult
                 if _sub_limit > 0 and _meter_path:
@@ -1076,7 +1107,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         break
 
             # 6. 构建修复 prompt 并执行修复
-            if _SUBTASK_INTERRUPTED.is_set():
+            if interrupt_event.is_set():
                 logger.warning(f"收到 SIGTERM，跳过第 {retry_count + 1} 次修复")
                 break
             retry_count += 1
@@ -1141,11 +1172,18 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 _latest_kill_reason[0] = _fix_kr
 
             # git add + commit + tag
-            subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
-            subprocess.run(["git", "commit", "-m",
-                            f"{subtask['id']} (fix-{retry_count}): 验证修复"],
-                           cwd=str(worktree), capture_output=True)
-            subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True)
+            fix_add = subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+            fix_commit = subprocess.run(["git", "commit", "-m",
+                                         f"{subtask['id']} (fix-{retry_count}): 验证修复"],
+                                        cwd=str(worktree), capture_output=True) if fix_add.returncode == 0 else None
+            fix_tag = subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True) \
+                if fix_commit is not None and fix_commit.returncode == 0 else None
+            if (fix_add.returncode != 0 or fix_commit is None or fix_commit.returncode != 0 or
+                    fix_tag is None or fix_tag.returncode != 0):
+                git_ok = False
+                verify_ok = False
+                logger.warning("验证修复后的 Git 提交/tag 失败，停止重试")
+                break
 
             # 记录历史
             failed_summary = "; ".join(f"{cmd[:60]}" for cmd in failed_cmds)
@@ -1188,6 +1226,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         "verification_ms": verification_ms,
         "verification": verification,
         "verify_ok": verify_ok,
+        "git_ok": git_ok,
+        "commit_hash": commit_hash,
         "retry_count": retry_count,
         "verification_results": verification_results,
         "verification_confidence": verification_confidence,
@@ -1264,24 +1304,11 @@ def _is_simple_task(subtask: dict) -> bool:
     return True
 
 
-def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path="", config=None):
+def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=None, headless=False, issue_ref="", active_pids=None, active_pids_lock=None, metering_path="", config=None, interrupt_event=None):
     sub_id = subtask["id"]
     sub_dir = task_dir / sub_id
     sub_dir.mkdir(parents=True, exist_ok=True)
-
-    # 清除上一轮可能残留的中断标记（确保本次 subtask 能正常开始）
-    _SUBTASK_INTERRUPTED.clear()
-
-    # P2 Layer 3：注册 SIGTERM handler 写 verify_state.json interrupted 标记
-    # 当 bench 触发 cooperative timeout 时，pipeline 会 SIGTERM claude，
-    # handler 写 interrupted checkpoint，executor 后续可检测到
-    try:
-        import signal as _sig
-        _sig.signal(_sig.SIGTERM,
-                    lambda s, f: _install_subtask_sigterm_handler(task_dir, sub_id))
-    except (ValueError, OSError):
-        # SIGTERM handler 在子线程或某些环境下可能无法设置
-        pass
+    interrupt_event = interrupt_event or threading.Event()
 
     logger.info(f"─── {sub_id} START: {subtask['title']} ───")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
@@ -1422,6 +1449,16 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         difficulty = "medium"
     worker_models = _effective_config(config).get("worker_models", {})
     routed_model = worker_models.get(difficulty, "")
+    # CR-G3：task_type 路由（优先于 difficulty）。task_type 由 Spec `task_type:` 字段或
+    # role_skill_map 关键词检测得出（plan_to_subtasks 写入子任务）；配了
+    # worker_models_by_type[type] 则覆盖难度路由，未配回退难度（degrade/fallback 仍在其后生效）。
+    _task_type = subtask.get("task_type")
+    if _task_type:
+        _by_type = _effective_config(config).get("worker_models_by_type", {}) or {}
+        _type_model = _by_type.get(_task_type, "")
+        if _type_model:
+            routed_model = _type_model
+            logger.info(f"[G3] {sub_id} task_type={_task_type} → model={_type_model}（覆盖 difficulty={difficulty}）")
     env["AGENT_GO_DIFFICULTY"] = difficulty
     _is_degraded = bool(config and config.get("_degraded"))
     if _is_degraded:
@@ -1443,7 +1480,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     if routed_model:
         env["AGENT_GO_CLAUDE_MODEL"] = routed_model
         logger.info(f"[S4] {sub_id} difficulty={difficulty} → model={routed_model}")
-        log_event(logger, "model_routing", {"sub_id": sub_id, "difficulty": difficulty, "model": routed_model})
+        log_event(logger, "model_routing", {"sub_id": sub_id, "difficulty": difficulty,
+                                             "task_type": _task_type, "model": routed_model})
     # worker_backends：按模型名映射 ANTHROPIC_BASE_URL（覆盖 worker_base_url 的统一值）
     _worker_backends = _effective_config(config).get("worker_backends", {})
     _backend_url = ""
@@ -1494,6 +1532,16 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 f"(响应 model={_actual_model or '未知'})，成本按实际模型计价（不清零）")
 
     # 5. Run Claude（含混合策略分支：简单任务 → 直接 API）
+    # 首跑硬超时（verification.run_timeout × 难度系数）：父进程存活但子进程失控时的兜底。
+    # 与 stuck 检测（事件/文件/CPU 全静默）互补——即使持续活动但永不完成（如死循环），
+    # 到点即 kill，kill_reason=hard_timeout。0=禁用。
+    _initial_timeout = 0
+    _run_tcfg = _effective_config(config).get("verification", {}) or {}
+    _run_base = _run_tcfg.get("run_timeout", 0) or 0
+    if _run_base > 0:
+        _run_mult = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(difficulty, 1.5)
+        _initial_timeout = min(int(_run_base * _run_mult), 7200)
+        logger.info(f"[run_timeout] {sub_id} difficulty={difficulty} base={_run_base}s mult={_run_mult} → timeout={_initial_timeout}s")
     _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)
     _is_simple = _is_simple_task(subtask)
     if _agent_loop_enabled and _is_simple and headless:
@@ -1547,12 +1595,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 logger.warning(f"AgentLoop fallback: worktree reset 失败 ({_reset_err})，继续 fallback（claude -p 可能在脏状态上运行）")
             result, sandbox_type, claude_time = _run_claude(
                 task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger,
-                config=config,
+                config=config, hard_timeout=_initial_timeout,
             )
     else:
         result, sandbox_type, claude_time = _run_claude(
             task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger,
-            config=config,
+            config=config, hard_timeout=_initial_timeout,
         )
 
     # 6. Verify changes
@@ -1561,7 +1609,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
         active_pids, active_pids_lock, logger, issue_ref=issue_ref,
         allowed_tools=agent.claude_config.get("allowed_tools", []) if agent else None,
-        task_dir=task_dir, config=config,
+        task_dir=task_dir, config=config, interrupt_event=interrupt_event,
         initial_kill_reason=getattr(result, "kill_reason", None),
     )
     has_changes = verify_results["has_changes"]
@@ -1579,7 +1627,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                       verification_state=verify_results.get("verification_state"))
 
     # 状态判定: completed(有变更) / no_changes(完成但无变更) / failed(异常)
-    if result.returncode == 0 and verify_ok:
+    if result.returncode == 0 and verify_ok and verify_results.get("git_ok", True):
         status = "no_changes" if summary == "无文件变更" else "completed"
         failure_reason = ""
     else:
@@ -1606,6 +1654,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 reasons.append(f"LLM 语义评估未通过: {semantic_fails[-1].get('reason', '')[:80]}")
             if not failed_cmds and not rejected_cmds and not semantic_fails:
                 reasons.append("验证未通过（无变更或未知原因）")
+        if not verify_results.get("git_ok", True):
+            reasons.append("Git 提交或 tag 失败")
         if merge_conflicts:
             conflicts = list(merge_conflicts.keys())
             reasons.append(f"上游合并冲突: {', '.join(conflicts)}")
@@ -1622,6 +1672,13 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     verification_confidence = verify_results.get("verification_confidence", {})
     change_stats = verify_results.get("change_stats", {})
+    from .failure import classify_failure
+    failure_class = classify_failure({
+        "status": status,
+        "verify_ok": verify_ok,
+        "exit_code": result.returncode,
+        "kill_reason": verify_results.get("kill_reason"),
+    })
 
     console.emit("subtask_complete", {
         "sub_id": sub_id,
@@ -1638,7 +1695,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     return {"subtask_id": sub_id, "status": status, "exit_code": result.returncode,
             "summary": summary, "failure_reason": failure_reason,
             "worktree": str(worktree), "sandbox_type": sandbox_type,
-            "verify_ok": verify_ok, "duration_sec": round(claude_time, 2),
+             "verify_ok": verify_ok, "duration_sec": round(claude_time, 2),
+             "commit_hash": verify_results.get("commit_hash", ""),
+             "failure_class": failure_class,
             "agent_type_source": subtask.get("_agent_type_source", "default"),
             "skills_unresolved": unresolved_skills,
             "retry_count": retry_count,

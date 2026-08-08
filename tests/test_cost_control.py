@@ -87,14 +87,23 @@ class TestL1MaxBudget:
         captured = self._capture_cmd(cost_cfg=None)
         assert "--max-budget-usd" not in captured["cmd"]
 
-    def test_l1_enabled_default_true_cold_start(self):
-        """S12 冷启动：cost_control 无 enabled/l1_enabled 时，L1 默认开（防单次失控）。"""
+    def test_l1_disabled_by_default_cold_start(self):
+        """S12 冷启动（2026-08-08 修订）：无 l1_enabled/enabled 时 L1 默认关（不注入
+        --max-budget-usd）——Claude CLI 2.1.224 预算语义"接近上限即拒绝"会令任务无法启动。"""
         captured = self._capture_cmd(cost_cfg={
+            "per_subtask_budget_usd": {"easy": 0.2, "medium": 0.4, "hard": 1.0},
+        })
+        assert "--max-budget-usd" not in captured["cmd"], "L1 默认关，不应注入预算"
+
+    def test_l1_enabled_explicit_true_injects(self):
+        """l1_enabled=True 显式开启 → 注入 --max-budget-usd（按难度）。"""
+        captured = self._capture_cmd(cost_cfg={
+            "l1_enabled": True,
             "per_subtask_budget_usd": {"easy": 0.2, "medium": 0.4, "hard": 1.0},
         })
         assert "--max-budget-usd" in captured["cmd"]
         idx = captured["cmd"].index("--max-budget-usd")
-        assert captured["cmd"][idx + 1] == "0.4"  # medium 冷启动宽松默认
+        assert captured["cmd"][idx + 1] == "0.4"  # medium 预算
 
     def test_unknown_difficulty_falls_back_to_medium(self):
         """未知难度在 per_subtask_budget_usd 无对应键 → 回退 medium 预算。"""
@@ -242,14 +251,13 @@ class TestCensoredEvent:
         assert True
 
     def test_censored_event_does_not_break_meter_total(self, tmp_path):
-        """censored 事件也带 cost_usd，任务级聚合应继续累计（测量通道持续）。"""
+        """censored 事件的 cost_usd 是累计下限，不应重复计入实际消费。"""
         from agent_go.config import write_censored_event
         mp = tmp_path / "metering.jsonl"
         with open(mp, "w", encoding="utf-8") as f:
             f.write(json.dumps({"role": "worker", "cost_usd": 0.2}) + "\n")
         write_censored_event(str(mp), level="L3", spent=0.42, budget=0.5)
-        # 熔断后继续累计 = 0.2 + 0.42
-        assert _meter_total_cost(str(mp)) == pytest.approx(0.62)
+        assert _meter_total_cost(str(mp)) == pytest.approx(0.2)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -467,6 +475,7 @@ class TestCRL2PipelineDegradeSafetyValve:
             "_metering_path": str(tmp_path / "metering.jsonl"),
             "verification": {"block_on_failure": False},
         }
+        (tmp_path / "metering.jsonl").touch()
 
         # 所有子任务 verify 失败（驱动 streak 累积）
         def _fail_result(sid):
@@ -515,3 +524,59 @@ class TestCRL2PipelineDegradeSafetyValve:
         assert _dynamic_task_budget(cc_cfg, full) == pytest.approx(3.75)
         # 即使只传 1 个 remaining，函数本身不变（调用点已改为传 confirmed）
         assert _dynamic_task_budget(cc_cfg, full[:1]) == pytest.approx(1.25)
+
+
+# ─────────────────────────────────────────────────────────────
+# 覆盖补强：budget_mode=ignore 跳过 L3（仅 L1/L2 生效）
+# ─────────────────────────────────────────────────────────────
+
+class TestBudgetModeIgnore:
+    def test_ignore_skips_l3_subtasks_still_execute(self, tmp_path):
+        """budget_mode=ignore → 即使超预算也不 block，剩余子任务照常执行（无 L3 熔断）。
+        三态开关的 ignore 分支此前未测（只测了 strict/degrade）。"""
+        from agent_go.pipeline import _run_pipeline
+        from unittest.mock import patch, MagicMock
+        import logging
+
+        def _mk(sid, dep=None):
+            return {"id": sid, "title": f"t-{sid}", "description": "d",
+                    "difficulty": "medium", "depends_on": [dep] if dep else [],
+                    "verification": ["true"]}
+        confirmed = [_mk("s1"), _mk("s2", "s1")]
+        repo = tmp_path / "repo"; repo.mkdir(); (repo / ".git").mkdir()
+        task_dir = tmp_path / "task-ig"; task_dir.mkdir()
+        for sid in [s["id"] for s in confirmed]:
+            (task_dir / sid / "work").mkdir(parents=True)
+        config = {
+            "cost_control": {"enabled": True, "budget_mode": "ignore",
+                             "max_budget_usd": 0.01},  # 极低预算，正常会熔断
+            "_metering_path": str(tmp_path / "metering.jsonl"),
+            "verification": {"block_on_failure": False},
+        }
+        ran = []
+        def _ok_result(sid):
+            return {"subtask_id": sid, "status": "completed", "exit_code": 0,
+                    "summary": "ok", "worktree": "", "sandbox_type": "headless",
+                    "verify_ok": True, "duration_sec": 1.0}
+        logger = logging.getLogger("ig-test")
+        with patch("agent_go.pipeline._meter_total_cost", return_value=999.0), \
+             patch("agent_go.pipeline.run_subtask", side_effect=[_ok_result(s["id"]) for s in confirmed]) as mk, \
+             patch("agent_go.pipeline._worktree_remove", return_value=(True, "")), \
+             patch("agent_go.pipeline._worktree_prune", return_value=(True, "")), \
+             patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, "")), \
+             patch("agent_go.pipeline.subprocess.run", return_value=MagicMock(returncode=0)), \
+             patch("agent_go.pipeline.write_censored_event") as mk_cens, \
+             patch("agent_go.notify.notify_event"):
+            _run_pipeline(confirmed, repo, task_dir, logger, config, headless=False,
+                          parallel=1, issue_ref="", meta={"task_id": "ig", "status": "running"})
+        # ignore 模式：超预算也不 block → 两个子任务都执行了，无 L3 censored 事件
+        assert mk.call_count == 2, "ignore 模式不应 block，两子任务都应执行"
+        # write_censored_event 可能被 L2 调用，但 L3 不应触发 level="L3"
+        l3_calls = [c for c in mk_cens.call_args_list if c.kwargs.get("level") == "L3"]
+        assert not l3_calls, "ignore 模式不应触发 L3 熔断事件"
+        # 没有子任务被 cost_control block
+        import json as _j
+        for sid in ["s1", "s2"]:
+            rf = task_dir / sid / "result.json"
+            if rf.exists():
+                assert _j.loads(rf.read_text()).get("status") != "blocked"

@@ -565,12 +565,15 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
 
 def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optional[Path] = None,
                      default_skills: Optional[list[str]] = None,
-                     disable_rule_skills: bool = False) -> list[dict[str, Any]]:
+                     disable_rule_skills: bool = False,
+                     task_type_override: Optional[str] = None) -> list[dict[str, Any]]:
     """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。
     同时应用角色-Skill 映射规则进行兜底匹配。
     default_skills: 任务级自动发现的 skill 名列表，用于回填无 skill 的 subtask。
     disable_rule_skills: True 时完全禁用 role_skill_map + default_skills 的 skill 注入
-                         （仅保留 LLM 显式声明的 skills），用于获取纯净基线。"""
+                         （仅保留 LLM 显式声明的 skills），用于获取纯净基线。
+    task_type_override: CR-G3 任务级 task_type（来自 Spec `task_type:` 字段），
+                         非空时优先于关键词检测，作为所有子任务的 task_type。"""
     subtasks = []
     shared = plan.get("shared_resources", {})
     deps = plan.get("dependencies", {})
@@ -640,6 +643,10 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
             _step_difficulty = "medium"
             logger.info(f"[difficulty_bump] {subtask_id}: orm-optimizer + {len(files)} files → easy→medium")
 
+        # CR-G3：任务类型解析（优先级：Spec 显式 task_type > role_skill_map 关键词检测）。
+        # 路由侧（executor）再按 worker_models_by_type[type] 覆盖难度路由；未配则回退难度。
+        _task_type = task_type_override or rule_result.get("task_type")
+
         subtasks.append({
             "id": subtask_id,
             "title": step.get("title", f"步骤 {step['id']}"),
@@ -652,6 +659,7 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
             "skills": _merged_skills,
             "agent_type": rule_result["agent_type"],
             "difficulty": _step_difficulty,
+            "task_type": _task_type,  # CR-G3：security/bugfix/refactor/test/docs/... 或 None
             "_agent_type_source": "llm" if step.get("agent_type") else ("rule" if rule_result.get("matched_rules") else "default"),
         })
 

@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "verification": {
         "max_retries": 3,               # 验证失败后最大修复重试次数
         "retry_timeout": 300,            # 每次修复重试超时（秒）
+        "run_timeout": 1800,            # 首跑硬超时基数（秒），按难度缩放（easy×1/medium×1.5/hard×2.5），0=禁用
         "block_on_failure": True,        # 验证失败是否阻断下游依赖（--no-verify-block 可关）
     },
     "goal": {
@@ -74,12 +75,14 @@ DEFAULT_CONFIG = {
     "cost_control": {
         # S10/S12 成本控制三层。
         # 冷启动策略（无基线时）：
-        #   - L1 单次调用上限（--max-budget-usd）：l1_enabled 独立控制，默认开。
-        #     误杀风险最低（只杀单次异常调用），防"一次失控烧钱"，是冷启动唯一安全默认开启的层。
+        #   - L1 单次调用上限（--max-budget-usd）：l1_enabled 独立控制。
+        #     2026-08-08 改默认关：Claude CLI 2.1.224 的 --max-budget-usd 语义为"接近上限即拒绝"，
+        #     导致 $0.13 实际成本触发 $0.20 预算上限（error_max_budget_usd），任务无法启动。
+        #     L1 改为默认关，与 L2/L3 一致，待基线校准后显式开启。
         #   - L2 子任务累计 / L3 任务级熔断：依赖 enabled 总开关，默认关。
         #     这两层是"判死"机制，基线不可信时误杀率高，须用 eval cost-baseline 校准后才开。
         "enabled": False,              # L2/L3 总开关（依赖冻结基线，默认关）
-        "l1_enabled": True,            # L1 独立开关（冷启动默认开，防单次失控）
+        "l1_enabled": False,           # L1 独立开关（默认关：Claude CLI 预算语义会在干活前拒绝，待基线校准后开启）
         "max_budget_usd": 0.50,        # L3 任务总预算
         "per_subtask_budget_usd": {    # L1 单次调用上限（按难度）；冷启动宽松默认
             "easy": 0.20,              # 基线 P90×1.5 约 $0.10，冷启动取 2x 留余量
@@ -87,7 +90,9 @@ DEFAULT_CONFIG = {
             "hard": 1.00,              # 基线 P90×1.5 约 $0.19-0.36，冷启动取宽松上界
         },
         "subtask_multiplier": 2.5,     # L2 子任务累计 = 单次上限 × 系数
-        "on_exceed": "stop",           # 超限行为：stop（熔断）| warn（仅告警）
+        # legacy（CR-TD）：on_exceed 已不再被代码读取——实际开关是下方 budget_mode。
+        # 保留仅为兼容旧 config 文件（写入会被忽略，无副作用）。
+        "on_exceed": "stop",
         # S12-P1 G3 per-task 预算策略：strict=超预算 block；degrade=切便宜模型继续；
         # ignore=关 L3（仅 L1/L2 生效）。与 --budget / Task Spec 字段配合。
         "budget_mode": "strict",
@@ -116,6 +121,11 @@ DEFAULT_CONFIG = {
         "medium": "easy",
         "hard": "medium",
     },
+    "worker_models_by_type": {},    # CR-G3：任务类型→模型路由（优先于 difficulty）。
+                                    # 键 = task_type（security/bugfix/refactor/test/docs/...，
+                                    # 由 Spec `task_type:` 字段或 role_skill_map 关键词检测得出），
+                                    # 值 = 该类型用的模型名。默认空 = 功能关闭，纯难度路由。
+                                    # 例：{"security": "claude-opus-4-8", "docs": "claude-haiku-4-5"}
     "local_model_names": {},        # 本地后端真实模型名映射（routed → 实际名，如
                                     # {"claude-haiku-4-5": "Qwen3.6-27B-4bit"}）；
                                     # 探测本地代理 /status 失败时的兜底

@@ -8,10 +8,12 @@
 """
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
-__all__ = ["estimate_task_duration", "check_under_decomposition"]
+__all__ = ["estimate_task_duration", "check_under_decomposition",
+           "check_difficulty_mismatch", "difficulty_hint"]
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,85 @@ def check_under_decomposition(subtasks: list[dict], logger: Optional[logging.Log
         )
         return True
     return False
+
+
+# CR-G4 V1：难度启发式信号词（planner 主观难度的交叉核对）
+# hard 信号：跨模块/重构/架构/迁移等结构性改动；easy 信号：单点小改/helper/格式化。
+_DIFFICULTY_HARD_KW = (
+    "重构", "架构", "跨模块", "跨文件", "重写", "迁移", "性能优化", "并发", "线程安全",
+    "refactor", "architecture", "migrate", "rewrite", "concurrency", "thread-safe",
+)
+_DIFFICULTY_EASY_KW = (
+    "helper", "格式化", "添加一个", "单点", "小改", "typo", "重命名", "改个",
+    "format", "rename", "add a function", "add a helper", "one-liner",
+)
+# 文件路径启发式：从描述/agent_prompt 提及的源码路径数估计涉及面
+_PATH_RE = re.compile(r"[\w./\-]+\.(?:py|js|ts|tsx|go|rs|java|rb|c|cpp|h|md|yaml|yml|json|toml)")
+
+
+def difficulty_hint(subtask: dict) -> Optional[str]:
+    """CR-G4 V1：从子任务元数据（title/description/agent_prompt）启发式估一档难度。
+
+    信号：hard 关键词 +2/个；easy 关键词 -1/个；提及 ≥3 个不同源码路径 +2（多文件）。
+    返回 'easy'/'medium'/'hard'；中性（无强信号）返回 None（不与 planner 唱反调）。
+    纯启发式、warning-only——不覆盖 planner 的 difficulty（见设计稿 G4）。
+    """
+    if not isinstance(subtask, dict):
+        return None
+    text = " ".join(str(subtask.get(k, "")) for k in ("title", "description", "agent_prompt", "task")).lower()
+    if not text.strip():
+        return None
+    score = 0
+    for kw in _DIFFICULTY_HARD_KW:
+        if kw.lower() in text:
+            score += 2
+    for kw in _DIFFICULTY_EASY_KW:
+        if kw.lower() in text:
+            score -= 1
+    _paths = set(m.group(0).lower() for m in _PATH_RE.finditer(text))
+    if len(_paths) >= 3:
+        score += 2
+    if score >= 2:
+        return "hard"
+    if score <= -1:
+        return "easy"
+    return None
+
+
+# 难度档位序号（算跨档距离用）
+_DIFFICULTY_ORDER = {"easy": 0, "medium": 1, "hard": 2}
+
+
+def check_difficulty_mismatch(subtasks: list[dict], logger: Optional[logging.Logger] = None) -> int:
+    """CR-G4：planner 标的 difficulty 与启发式 hint 跨两档不一致时告警（不覆盖 LLM）。
+
+    如 planner 标 easy 但信号强烈倾向 hard（跨文件重构）→ 可能用错档模型（easy 槽能力不足）。
+    仅"跨两档"（easy↔hard）才报——单档差异（easy↔medium）噪声大不报。
+    与 check_under_decomposition 同风格：warning-only，不改 Plan。
+
+    Returns: 告警条数。
+    """
+    _lg = logger or logging.getLogger(__name__)
+    if not subtasks:
+        return 0
+    _n = 0
+    for st in subtasks:
+        if not isinstance(st, dict):
+            continue
+        _planned = st.get("difficulty", "medium")
+        if _planned not in _DIFFICULTY_ORDER:
+            continue
+        _hinted = difficulty_hint(st)
+        if _hinted is None:
+            continue
+        if abs(_DIFFICULTY_ORDER[_hinted] - _DIFFICULTY_ORDER[_planned]) >= 2:
+            _n += 1
+            _lg.warning(
+                f"[G4] 难度交叉核对告警: {st.get('id', '?')} difficulty={_planned} "
+                f"但描述信号倾向 {_hinted}（跨文件/重构/多文件启发式）——"
+                f"可能用错档模型。建议人工复核 difficulty 或 worker_models 配置。"
+            )
+    return _n
 
 
 def _read_meta(task_dir: Path) -> Optional[dict[str, Any]]:

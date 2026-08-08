@@ -435,3 +435,66 @@ class TestTaskSpecDataclass:
         assert spec.is_complete is True
         spec.acceptance = ""
         assert spec.is_complete is False
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-G3: Spec task_type 字段解析
+# ═══════════════════════════════════════════════════════════════
+
+class TestParseSpecTaskType:
+    _BASE = "# Task Spec: x\n\n## 1. 目标*\n\ng\n\n## 2. 动机*\n\nm\n\n## 3. 范围*\n\ns\n\n## 5. 验收标准*\n\na\n"
+
+    def test_explicit_task_type(self):
+        spec = parse_spec(self._BASE + "\ntask_type: security\n")
+        assert spec.task_type == "security"
+
+    def test_inline_comment_tolerated(self):
+        """行内注释（task_type: security  # ...）仍能解析。"""
+        spec = parse_spec(self._BASE + "\ntask_type: bugfix  # 修复型任务\n")
+        assert spec.task_type == "bugfix"
+
+    def test_placeholder_yields_empty(self):
+        """模板占位行（task_type:  # 可选...）因 # 非字首不匹配 → 空。"""
+        spec = parse_spec(self._BASE + "\ntask_type:  # 可选。任务类型\n")
+        assert spec.task_type == ""
+
+    def test_no_task_type_field(self):
+        """无 task_type 行 → 空（交关键词检测）。"""
+        spec = parse_spec(self._BASE)
+        assert spec.task_type == ""
+
+    def test_case_lowercased(self):
+        spec = parse_spec(self._BASE + "\ntask_type: Security\n")
+        assert spec.task_type == "security"
+
+    def test_template_includes_task_type(self):
+        """生成的 Spec 模板含 task_type 元数据行（可发现性）。"""
+        tpl = render_spec_template()
+        assert "task_type:" in tpl
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-TD：Spec budget 字段（任务级成本预算 USD）
+# ═══════════════════════════════════════════════════════════════
+
+class TestParseSpecBudget:
+    _BASE = "# Task Spec: x\n\n## 1. 目标*\n\ng\n\n## 2. 动机*\n\nm\n\n## 3. 范围*\n\ns\n\n## 5. 验收标准*\n\na\n"
+
+    def test_explicit_budget(self):
+        spec = parse_spec(self._BASE + "\nbudget: 0.30\n")
+        assert spec.budget == 0.30
+
+    def test_budget_integer(self):
+        spec = parse_spec(self._BASE + "\nbudget: 1\n")
+        assert spec.budget == 1.0
+
+    def test_budget_placeholder_yields_none(self):
+        """占位行（budget:  # 可选...）→ None（交 config/CLI）。"""
+        spec = parse_spec(self._BASE + "\nbudget:  # 可选。任务级成本预算\n")
+        assert spec.budget is None
+
+    def test_no_budget_field(self):
+        assert parse_spec(self._BASE).budget is None
+
+    def test_template_includes_budget(self):
+        assert "budget:" in render_spec_template()

@@ -207,3 +207,65 @@ class TestExtractUsage:
         result = extract_usage(api_resp, "anthropic", "test")
         assert result["prompt_tokens"] == 100
         assert result["completion_tokens"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-P1-3：K12 MCP 工具调用成功率（PRD ≥95%，排除用户配置错误）
+# ═══════════════════════════════════════════════════════════════
+
+from agent_go.metrics import compute_mcp_tool_success_rate, MCP_TOOL_SUCCESS_THRESHOLD
+
+
+def _evt(success, err=None):
+    e = {"tool": "mcp__srv__t", "success": success}
+    if err:
+        e["error_type"] = err
+    return e
+
+
+def test_k12_passes_at_95_excluding_user_config():
+    """95 成功 / 4 server_error / 1 user_config_error → 排除 user_config 后 95/99≥95%。"""
+    events = [_evt(True) for _ in range(95)]
+    events += [_evt(False, "server_error") for _ in range(4)]
+    events += [_evt(False, "user_config_error")]
+    r = compute_mcp_tool_success_rate(events)
+    assert r["excluded_user_config"] == 1
+    assert r["denominator"] == 99
+    assert r["successes"] == 95
+    assert r["success_rate"] >= MCP_TOOL_SUCCESS_THRESHOLD
+    assert r["passes_threshold"] is True
+
+
+def test_k12_below_threshold_fails():
+    """94 成功 / 6 server_error → 0.94 < 0.95 → 不过阈值。"""
+    events = [_evt(True) for _ in range(94)]
+    events += [_evt(False, "server_error") for _ in range(6)]
+    r = compute_mcp_tool_success_rate(events)
+    assert r["success_rate"] == 0.94
+    assert r["passes_threshold"] is False
+
+
+def test_k12_no_exclude_user_config():
+    """不排除 user_config_error → 计入分母：95/100 = 0.95（边界过）。"""
+    events = [_evt(True) for _ in range(95)]
+    events += [_evt(False, "server_error") for _ in range(4)]
+    events += [_evt(False, "user_config_error")]
+    r = compute_mcp_tool_success_rate(events, exclude_user_config_errors=False)
+    assert r["denominator"] == 100
+    assert r["success_rate"] == 0.95
+    assert r["passes_threshold"] is True
+
+
+def test_k12_all_user_config_errors():
+    """全 user_config_error → 排除后 denominator=0 → rate None、不过阈值（无数据可判）。"""
+    events = [_evt(False, "user_config_error") for _ in range(3)]
+    r = compute_mcp_tool_success_rate(events)
+    assert r["denominator"] == 0
+    assert r["success_rate"] is None
+    assert r["passes_threshold"] is False
+
+
+def test_k12_empty():
+    r = compute_mcp_tool_success_rate([])
+    assert r["success_rate"] is None
+    assert r["passes_threshold"] is False

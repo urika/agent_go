@@ -126,6 +126,44 @@ MODEL_TIER: dict[str, list[str]] = {
     ],
 }
 
+# CR-G2：模型名 → tier 反查表（advisory 路由校验用；MODEL_TIER 此前零消费者）
+_MODEL_TO_TIER: dict[str, str] = {m: tier for tier, mods in MODEL_TIER.items() for m in mods}
+
+
+def model_tier(name: str) -> Optional[str]:
+    """模型名 → tier（frontier/value/lite）。复用 resolve_price 的后缀剥离。
+    未分级模型（自定义/本地）返回 None——不视为错配。
+    """
+    if not name:
+        return None
+    _m = name.strip()
+    if _m in _MODEL_TO_TIER:
+        return _MODEL_TO_TIER[_m]
+    for _suf in ("-20251001", "-20250514", "-v2", "-v3"):
+        if _m.endswith(_suf) and _m[: -len(_suf)] in _MODEL_TO_TIER:
+            return _MODEL_TO_TIER[_m[: -len(_suf)]]
+    return None
+
+
+def validate_worker_tier(worker_models: dict) -> list[tuple[str, str, str, str]]:
+    """CR-G2：advisory 校验 worker_models 与 MODEL_TIER 的明显错配。
+
+    Returns [(slot, model, tier, msg), ...] 错配列表（空 = 无错配）。
+      - hard 槽用 lite 模型 → 能力不足
+      - easy 槽用 frontier 模型 → 过贵
+    未分级模型（model_tier=None）不报（自定义/本地模型合法）。advisory，不阻断。
+    """
+    _issues: list[tuple[str, str, str, str]] = []
+    if not isinstance(worker_models, dict):
+        return _issues
+    _hard = worker_models.get("hard", "") or ""
+    if model_tier(_hard) == "lite":
+        _issues.append(("hard", _hard, "lite", "hard 槽用 lite 模型，能力恐不足（hard 任务建议 value/frontier）"))
+    _easy = worker_models.get("easy", "") or ""
+    if model_tier(_easy) == "frontier":
+        _issues.append(("easy", _easy, "frontier", "easy 槽用 frontier 模型，过贵（easy 任务建议 lite/value）"))
+    return _issues
+
 # ═══════════════════════════════════════════════════════════════
 # provider → 默认模型（旧日志缺 model 字段时回退用）
 # ═══════════════════════════════════════════════════════════════

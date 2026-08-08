@@ -877,6 +877,46 @@ def cmd_eval(args=None) -> None:
         # 模型对照评估编排器（S8，subprocess 隔离核心）
         from .bench import cmd_bench
         cmd_bench(args)
+    elif sub == "validate-schema":
+        from .bench_schema import validate_results_file
+        try:
+            records = validate_results_file(getattr(args, "results", "eval_suite/results.jsonl"))
+            console.print(f"schema valid: {len(records)} records")
+        except (OSError, ValueError) as exc:
+            console.error(f"schema invalid: {exc}")
+            raise SystemExit(1)
+    elif sub == "metric-freeze":
+        from .metric_report import build_metric_freeze_report, write_metric_freeze_report
+        try:
+            report = build_metric_freeze_report(
+                getattr(args, "results", "eval_suite/results.jsonl"),
+                source_batch=getattr(args, "source_batch", ""),
+                suite=getattr(args, "bench_suite", ""),
+                catalog_path=getattr(args, "catalog", "") or None,
+                config_path=getattr(args, "config_file", "") or None,
+            )
+            output = getattr(args, "report_output", "") or "metric-freeze-report.json"
+            path = write_metric_freeze_report(report, output)
+            console.print(f"Metric Freeze report written: {path}")
+        except (OSError, ValueError) as exc:
+            console.error(f"Metric Freeze failed: {exc}")
+            raise SystemExit(1)
+    elif sub == "batch-manifest":
+        from .batch_governance import build_batch_manifest, write_batch_manifest
+        try:
+            manifest = build_batch_manifest(
+                getattr(args, "results", "eval_suite/results.jsonl"),
+                source_batch=getattr(args, "source_batch", ""),
+                suite=getattr(args, "bench_suite", ""),
+                catalog_path=getattr(args, "catalog", "") or None,
+                config_path=getattr(args, "config_file", "") or None,
+            )
+            output = getattr(args, "manifest_output", "") or "manifest.json"
+            path = write_batch_manifest(manifest, output)
+            console.print(f"Batch manifest written: {path}")
+        except (OSError, ValueError) as exc:
+            console.error(f"Batch manifest failed: {exc}")
+            raise SystemExit(1)
     elif sub == "baseline":
         # S10-P2：对照基线（claude -p 裸跑，不走 harness）
         from .bench import cmd_baseline
@@ -889,6 +929,10 @@ def cmd_eval(args=None) -> None:
        # 模型生产力决策矩阵
        from .bench import cmd_models
        cmd_models(args)
+    elif sub == "recommend":
+       # CR-G5：bench 推荐 → worker_models 自动衔接（dry-run / --apply）
+       from .bench import cmd_recommend
+       cmd_recommend(args)
     elif sub == "judge":
        # 交叉评判矩阵（S8 P1，第 2 层语义评估）
        from .cross_judge import cmd_judge

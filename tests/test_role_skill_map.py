@@ -140,7 +140,7 @@ class TestLoadRoleSkillMap:
     def test_default_map(self):
         role_map = load_role_skill_map(None)
         assert "rules" in role_map
-        assert len(role_map["rules"]) == 5
+        assert len(role_map["rules"]) == 8  # CR-G3：5 基础 + bugfix/refactor/docs-keyword 3 seed
         assert role_map["default_agent_type"] == "developer"
 
     def test_default_map_has_recommended_fields(self):
@@ -188,3 +188,49 @@ class TestLoadRoleSkillMapMerge:
             role_map = load_role_skill_map(tmp_path)
         assert role_map["rules"] == DEFAULT_MAP["rules"]
         assert role_map["default_agent_type"] == DEFAULT_MAP["default_agent_type"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-G3: apply_rules task_type 检测（security/bugfix/refactor/test/docs）
+# ═══════════════════════════════════════════════════════════════
+
+class TestApplyRulesTaskType:
+    """task_type 由首个带 task_type 的匹配规则决定（与 agent_type 同风格）。"""
+
+    def test_security_keywords(self):
+        r = apply_rules({"title": "修复 auth 认证越权漏洞", "description": ""}, load_role_skill_map(None))
+        assert r["task_type"] == "security"
+
+    def test_bugfix_keywords(self):
+        r = apply_rules({"title": "修复崩溃 bug", "description": "程序报错 crash"}, load_role_skill_map(None))
+        assert r["task_type"] == "bugfix"
+
+    def test_refactor_keywords(self):
+        r = apply_rules({"title": "重构数据层 migrate 到新架构", "description": ""}, load_role_skill_map(None))
+        assert r["task_type"] == "refactor"
+
+    def test_docs_keywords(self):
+        r = apply_rules({"title": "写 readme 文档", "description": ""}, load_role_skill_map(None))
+        assert r["task_type"] == "docs"
+
+    def test_test_agent_type(self):
+        """agent_type=tester 的子任务 → task_type=test（seed 规则）。"""
+        r = apply_rules({"title": "某操作", "description": "", "agent_type": "tester"}, load_role_skill_map(None))
+        assert r["task_type"] == "test"
+
+    def test_no_match_returns_none(self):
+        r = apply_rules({"title": "实现一个普通功能", "description": ""}, load_role_skill_map(None))
+        assert r["task_type"] is None
+
+    def test_default_map_has_seed_vocab(self):
+        """DEFAULT_MAP 含 5 类 seed task_type 规则。"""
+        types = {r.get("task_type") for r in DEFAULT_MAP["rules"] if r.get("task_type")}
+        assert {"security", "bugfix", "refactor", "test", "docs"} <= types
+
+    def test_custom_type_from_config(self):
+        """完全配置化：自定义 task_type（如 migration）经配置生效，零代码。"""
+        role_map = {"rules": [
+            {"match": {"keywords": ["数据迁移"]}, "task_type": "migration"}
+        ], "default_agent_type": "developer"}
+        r = apply_rules({"title": "执行数据迁移", "description": ""}, role_map)
+        assert r["task_type"] == "migration"

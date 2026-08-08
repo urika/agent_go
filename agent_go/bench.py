@@ -9,6 +9,7 @@ CLI:
 """
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -30,9 +31,19 @@ from .config import AGENT_GO_DIR, CONFIG_PATH
 from .eval import _read_jsonl, _read_json
 from .assessment import load_all as load_all_assessments, compute_false_positive_rate
 from .pricing import MODEL_PRICES, model_tier, validate_worker_tier
+from .failure import classify_failure
+from .bench_schema import validate_record
 
 __all__ = ["cmd_bench", "cmd_baseline", "analyze_model_productivity"]
 console = _LazyConsole()
+
+
+def _task_version(task: dict) -> str:
+    """Stable content version until M0-5 adds catalog-managed task versions."""
+    if task.get("_bench_task_version"):
+        return str(task["_bench_task_version"])
+    payload = json.dumps(task, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
 
 
 def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 60):
@@ -296,7 +307,10 @@ def _run_baseline_one(task: dict, repo: Path, model: str, task_id: str,
             _bl_kill_reason = "interrupted_or_unknown"
 
         return {
+            "bench_schema_version": 1,
             "task_id": task_id,
+            "task_version": _task_version(task),
+            "suite": task.get("_bench_suite", "canonical"),
             "model": model,
             "task_dir": "",
             "elapsed_sec": elapsed,
@@ -315,9 +329,21 @@ def _run_baseline_one(task: dict, repo: Path, model: str, task_id: str,
             "judge_model": "",
             "planner_model": "",
             "source_batch": source_batch,
+            "difficulty": task.get("difficulty", "medium"),
+            "accepted_delivery": False,
+            "delivery_branch_created": False,
+            "pr_created": False,
+            "spec_compliance": None,
+            "architecture_compliance": None,
             "semantic_pass": None,
             "binary_pass": verification_ok,
             "kill_reason": _bl_kill_reason,
+            "failure_class": classify_failure(
+                {"status": "completed" if verification_ok else "failed",
+                 "verify_ok": verification_ok, "exit_code": exit_code,
+                 "kill_reason": _bl_kill_reason},
+                timed_out=exit_code == -1,
+            ),
             "per_subtask": [],
             "plan_step_count": 0,
             "lint_errors": quality["lint_errors"],
@@ -357,6 +383,7 @@ def cmd_bench(args=None) -> None:
     repeat = int(getattr(args, "repeat", 3) or 3)
     source_batch = getattr(args, "source_batch", None) or "bench"
     no_skills = bool(getattr(args, "no_skills", False))
+    suite = getattr(args, "bench_suite", "") or ""
 
     if not models:
         console.error("至少指定一个 --candidate-models（逗号分隔）")
@@ -371,6 +398,23 @@ def cmd_bench(args=None) -> None:
     if not task_files:
         console.error(f"未找到任务文件: {tasks_dir}/tasks/*.yaml")
         sys.exit(1)
+
+    catalog_path = tasks_dir / "task_catalog.json"
+    catalog = {}
+    if catalog_path.exists():
+        try:
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            console.warning(f"任务目录 catalog 读取失败，将运行全部任务: {exc}")
+    if suite:
+        task_files = [
+            tf for tf in task_files
+            if suite in (catalog.get(tf.stem.split("-", 1)[-1], {}).get("suites", []))
+            or suite in (catalog.get(yaml.safe_load(tf.read_text(encoding="utf-8")).get("id", ""), {}).get("suites", []))
+        ]
+        if not task_files:
+            console.error(f"suite={suite} 没有匹配任务")
+            sys.exit(1)
 
     total = len(task_files) * len(models) * repeat
     console.print(f"🧪 bench 开始（走 harness）: {len(task_files)} 任务 × {len(models)} 模型 × {repeat} 重复 = {total} 次执行")
@@ -389,6 +433,11 @@ def cmd_bench(args=None) -> None:
     for tf in task_files:
         task = yaml.safe_load(tf.read_text(encoding="utf-8"))
         task_id = task["id"]
+        task_meta = catalog.get(task_id, {})
+        task["_bench_suite"] = suite or "canonical"
+        task["_bench_task_version"] = task_meta.get("task_version", _task_version(task))
+        task["_bench_risk_types"] = task_meta.get("risk_types", [])
+        task["_bench_high_variance"] = bool(task_meta.get("high_variance", False))
         repo = Path(task["repo"])
         if not repo.is_absolute():
             repo = Path.cwd() / repo
@@ -416,6 +465,29 @@ def cmd_bench(args=None) -> None:
                 continue
             _r2["model"] = _model
             _r2["repeat"] = _r
+            _r2.setdefault("bench_schema_version", 1)
+            _r2.setdefault("task_version", _task_version(_task))
+            _r2.setdefault("source_batch", source_batch)
+            _r2.setdefault("planner_model", "")
+            _r2.setdefault("judge_model", "")
+            _r2.setdefault("difficulty", _task.get("difficulty", "medium"))
+            _r2.setdefault("failure_class", None)
+            _r2.setdefault("accepted_delivery", False)
+            _r2.setdefault("delivery_branch_created", False)
+            _r2.setdefault("pr_created", False)
+            _r2.setdefault("spec_compliance", None)
+            _r2.setdefault("architecture_compliance", None)
+            _r2.setdefault("total_cost_usd", 0.0)
+            _r2.setdefault("elapsed_sec", 0.0)
+            _r2["suite"] = _task.get("_bench_suite", "canonical")
+            _r2["bench_schema_version"] = 1
+            _r2["task_version"] = _task_version(_task)
+            _r2["difficulty"] = _task.get("difficulty", "medium")
+            _r2["risk_types"] = _task.get("_bench_risk_types", [])
+            _r2["high_variance"] = bool(_task.get("_bench_high_variance", False))
+            _schema_errors = validate_record(_r2)
+            if _schema_errors:
+                raise ValueError(f"invalid Bench record for {_task_id}: {'; '.join(_schema_errors)}")
             with open(output_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(_r2, ensure_ascii=False) + "\n")
         return _rec if isinstance(_rec, dict) else {}
@@ -491,6 +563,12 @@ def cmd_baseline(args=None) -> None:
     for tf in task_files:
         task = yaml.safe_load(tf.read_text(encoding="utf-8"))
         task_id = task["id"]
+        catalog_path = tasks_dir / "task_catalog.json"
+        if catalog_path.exists():
+            try:
+                task["_bench_task_version"] = json.loads(catalog_path.read_text(encoding="utf-8")).get(task_id, {}).get("task_version", "")
+            except (OSError, json.JSONDecodeError):
+                pass
         repo = Path(task["repo"])
         if not repo.is_absolute():
             repo = Path.cwd() / repo
@@ -501,6 +579,13 @@ def cmd_baseline(args=None) -> None:
                 entry = _run_baseline_one(task, repo, model, task_id, source_batch=source_batch)
                 entry["model"] = model
                 entry["repeat"] = r + 1
+                entry["bench_schema_version"] = 1
+                entry["task_version"] = _task_version(task)
+                entry["suite"] = task.get("_bench_suite", "canonical")
+                entry["difficulty"] = task.get("difficulty", "medium")
+                _schema_errors = validate_record(entry)
+                if _schema_errors:
+                    raise ValueError(f"invalid baseline record for {task_id}: {'; '.join(_schema_errors)}")
                 with open(output_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -1025,7 +1110,20 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     else:
         kill_reason = "interrupted_or_unknown"
 
+    from .delivery import evaluate_accepted_delivery
+    from .failure import aggregate_failure_class, classify_failure
+    delivery = evaluate_accepted_delivery(meta, meta.get("repo") or None)
+    failure_class = aggregate_failure_class(
+        [classify_failure(r, meta, timed_out=timed_out) for r in results],
+        {**meta, "delivery_failed": delivery["delivery_failed"]},
+    )
+    if not failure_class and timed_out and not _cleanup_race:
+        failure_class = "timeout"
+    if not failure_class and exit_code != 0 and not results:
+        failure_class = "infrastructure_failure" if not total_cost else "system_error"
+
     return {
+        "bench_schema_version": 1,
         "task_id": task_id,
         "model": model,
         "task_dir": str(td) if td else "",
@@ -1045,6 +1143,10 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         "judge_model": judge_model,
         "planner_model": planner_model,
         "source_batch": source_batch,
+        "task_version": str(meta.get("task_version") or "unversioned"),
+        "suite": str(meta.get("suite") or "canonical"),
+        "repeat": int(meta.get("repeat") or 1),
+        "difficulty": str(meta.get("difficulty") or "medium"),
         # S10-P2：P1 字段
         "semantic_pass": semantic_pass,
         "binary_pass": binary_pass,
@@ -1054,6 +1156,15 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         # S10-P2：代码质量维度（§4.1，从保留 worktree 聚合）
         "lint_errors": quality["lint_errors"],
         "tests_broken": quality["tests_broken"],
+        # 产品交付维度：不参与旧 pass_rate 计算，仅用于 Accepted Delivery 分析。
+        "delivery_branch_created": bool(meta.get("delivery_branch")),
+        "pr_created": bool(meta.get("pr_url")),
+        "accepted_delivery": delivery["accepted_delivery"],
+        "delivery_failed": delivery["delivery_failed"],
+        "accepted_delivery_reasons": delivery["accepted_delivery_reasons"],
+        "spec_compliance": meta.get("spec_compliance"),
+        "architecture_compliance": meta.get("architecture_compliance"),
+        "failure_class": failure_class,
     }
 
 
@@ -1072,11 +1183,20 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
     results = _read_jsonl(results_path)
     if not results:
         return {"error": "无数据"}
+    from .metrics import compute_frozen_metrics
 
+    ordinary_results = [
+        r for r in results
+        if r.get("suite", "canonical") != "stress" and not r.get("high_variance", False)
+    ]
+    stress_results = [
+        r for r in results
+        if r.get("suite") == "stress" or r.get("high_variance", False)
+    ]
     by_model: dict[str, list[dict]] = {}
     by_difficulty: dict[str, list[dict]] = {}  # 注：当前任务 YAML 有 difficulty 字段
 
-    for r in results:
+    for r in ordinary_results:
         model = r.get("model", "unknown")
         by_model.setdefault(model, []).append(r)
 
@@ -1115,6 +1235,14 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         _sum_pass = sum(pass_rates)
         dollar_per_pass = round(_sum_cost / _sum_pass, 6) if _sum_pass > 0 else None
 
+        # CR-P1-2：任务级 $/pass（PRD 分母缺陷修正）——分母 = 任务级成功计数
+        # （全部子任务通过才算 1 个交付；cleanup_race 计通过、over_budget/infra 不计）。
+        # 现有 sum(pass_rate) 分母把部分通过也计入，系统性低估真实每交付成本（K4 偏乐观）。
+        _sum_delivered = sum(1 for it in items if _task_delivered(it))
+        legacy_task_level_dollar_per_pass = (
+            round(_sum_cost / _sum_delivered, 6) if _sum_delivered > 0 else None
+        )
+
         # S10-P1 K8 修订（§3.4）：K8 = 通过 record 中 zero-retry 占比。
         # 分母只含通过 record（pass_rate > 0），分子是其 total_retries == 0 的子集。
         # binary_pass（P1）落地前以 pass_rate > 0 近似"通过"。
@@ -1139,12 +1267,24 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
 
         efficiency_score = _model_efficiency_score(avg_pass_rate, avg_cost)
         cost_per_pass = _model_cost_per_pass(avg_cost, avg_pass_rate)
+        _delivery_metrics = compute_frozen_metrics(items)
+        # New schema records use the frozen Accepted Delivery denominator.
+        # Historical exploratory records lack accepted_delivery and retain the
+        # old all-subtasks fallback for backward-compatible analysis only.
+        _has_delivery_field = any("accepted_delivery" in it for it in items)
+        task_level_dollar_per_pass = (
+            _delivery_metrics["cost_per_accepted_delivery_usd"]
+            if _has_delivery_field
+            else legacy_task_level_dollar_per_pass
+        )
         models[model] = {
             "sample_size": n,
             "avg_pass_rate": avg_pass_rate,
             "avg_corrected_pass_rate": avg_corrected_pass_rate,  # S12-P0 修正口径（cleanup_race 计入）
             "avg_cost_usd": avg_cost,
             "dollar_per_pass": dollar_per_pass,
+            "task_level_dollar_per_pass": task_level_dollar_per_pass,  # CR-P1-2 任务级口径（all-or-nothing）
+            "task_level_dollar_per_pass_legacy": legacy_task_level_dollar_per_pass,
             "dollar_per_pass_legacy": cost_per_pass,
             "k8_zero_retry_pass_rate": k8,
             "efficiency_score": efficiency_score,
@@ -1154,6 +1294,14 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
             "completed_subtasks": completed_total,
             "total_subtasks": subtask_total,
         }
+        models[model].update({
+            "accepted_delivery_rate": _delivery_metrics["accepted_delivery_rate"],
+            "pr_creation_rate": _delivery_metrics["pr_creation_rate"],
+            "delivery_failure_rate": _delivery_metrics["delivery_failure_rate"],
+            "cost_per_accepted_delivery_usd": _delivery_metrics["cost_per_accepted_delivery_usd"],
+            "valid_task_count": _delivery_metrics["valid_task_count"],
+            "failure_class_summary": _delivery_metrics["failure_class_summary"],
+        })
 
         # 从 agent_go 任务目录读取评估事件计算假阳性率
         fp_data = _compute_fp_for_model(model, AGENT_GO_DIR)
@@ -1174,12 +1322,26 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         _rec, _roles, _reason = _recommend(
             _mdl, _m["avg_pass_rate"], _m["avg_cost_usd"], _m["sample_size"],
             dollar_per_pass=_m["dollar_per_pass"], dpp_median=_dpp_median)
+        # CR-P1-1：小样本 low_confidence（PRD 铁律：样本<5 不决策，不参与自动路由）。
+        # 不改 recommendation 类别（pass 仍反映能力），仅标 flag + reason 注记，
+        # 并在 _recommend_worker_models（cmd_recommend）排除，避免小样本噪声进 config。
+        _low_n = _m["sample_size"] < 5
+        _m["low_confidence"] = _low_n
+        if _low_n and _rec != "insufficient_data":
+            _reason += "（⚠ 小样本 n<5，low_confidence，不参与自动路由）"
         _m["recommendation"] = _rec
         _m["recommended_roles"] = _roles
         _m["reason"] = _reason
         _m["best_value"] = (_mdl == _best_value_model)
 
-    return {"models": models, "total_runs": len(results)}
+    return {
+        "models": models,
+        "total_runs": len(results),
+        "ordinary_runs": len(ordinary_results),
+        "stress_runs": len(stress_results),
+        "frozen_metrics": compute_frozen_metrics(ordinary_results),
+        "stress_metrics": compute_frozen_metrics(stress_results),
+    }
 
 
 def _compute_fp_for_model(model: str, base_dir: Path) -> Optional[dict]:
@@ -1222,6 +1384,23 @@ def _model_cost_per_pass(avg_cost: float, avg_pass_rate: float) -> Optional[floa
     if avg_pass_rate <= 0 or avg_cost <= 0:
         return None
     return round(avg_cost / avg_pass_rate, 6)
+
+
+def _task_delivered(it: dict) -> bool:
+    """CR-P1-2：任务级"交付"判定（PRD 分母缺陷修正）——全部子任务通过才算 1 个交付。
+
+    与 _corrected_pass 的区别：_corrected_pass 把"任何部分通过"(pass_rate>0) 记为通过，
+    偏乐观；此处要求 **全部** 子任务 completed+verify_ok（all-or-nothing）才算交付。
+    kill_reason 过滤已隐含：cleanup_race（全完成已验证）→ 交付；over_budget（有 blocked/
+    failed 子任务）→ 不交付；infra（子任务未全完成）→ 不交付。
+    """
+    _pr = it.get("pass_rate")
+    if _pr is not None and _pr >= 1.0:
+        return True  # headline 全部通过（新采集器 pass_rate 已含 cleanup_race 修正）
+    _ps = it.get("per_subtask") or []
+    if _ps:
+        return all(p.get("status") == "completed" and p.get("verify_ok") for p in _ps)
+    return False
 
 def _median(values: list[float]) -> Optional[float]:
     """中位数（None-safe）。用于跨模型 $/pass 成本基线。"""
@@ -1277,7 +1456,7 @@ def cmd_models(args=None) -> None:
 
     console.print(f"\n📊 模型生产力评估（{data['total_runs']} 次执行）")
     console.print("─" * 118)
-    console.print(f"{'模型':<22} {'样本':>4} {'档':>3} {'通过率':>7} {'修正':>7} {'$/pass':>9} {'K8':>6} {'效率':>8} {'假阳性':>7} {'建议':<12} {'原因'}")
+    console.print(f"{'模型':<22} {'样本':>4} {'档':>3} {'通过率':>7} {'Accepted':>8} {'PR':>6} {'交付失败':>8} {'交付$':>8} {'建议':<12} {'原因'}")
     console.print("─" * 118)
 
     for model, m in data["models"].items():
@@ -1291,16 +1470,26 @@ def cmd_models(args=None) -> None:
         k8_str = f"{k8:>5.0%}" if k8 is not None else "    -"
         corr = m.get("avg_corrected_pass_rate")
         corr_str = f"{corr:>6.0%}" if corr is not None else "     -"
-        console.print(f"{icon}{bv}{model:<19} {m['sample_size']:>4} {tier_str:>3} {m['avg_pass_rate']:>6.0%} {corr_str} "
-                      f"${(m['dollar_per_pass'] or 0):>8.4f} {k8_str} {eff_str} {fp_str:>7} "
+        capd = m.get("cost_per_accepted_delivery_usd")
+        capd_str = f"${capd:>7.4f}" if capd is not None else "      -"
+        adr = m.get("accepted_delivery_rate")
+        adr_str = f"{adr:>7.0%}" if adr is not None else "      -"
+        prr = m.get("pr_creation_rate")
+        prr_str = f"{prr:>5.0%}" if prr is not None else "     -"
+        dfr = m.get("delivery_failure_rate")
+        dfr_str = f"{dfr:>7.0%}" if dfr is not None else "      -"
+        console.print(f"{icon}{bv}{model:<19} {m['sample_size']:>4} {tier_str:>3} {m['avg_pass_rate']:>6.0%} "
+                      f"{adr_str} {prr_str} {dfr_str} {capd_str} "
                       f"{m['recommendation']:<12} {m['reason']}")
     console.print("─" * 118)
     console.print("效率 = passes/dollar (每美元获得的通过率，越高越经济)")
     console.print("K8   = 通过 record 中 zero-retry 占比（首次验证通过率，§3.4 修订口径）")
-    console.print("$/pass = sum(cost) / sum(pass_rate)，raw 口径，跨批次可比（§3.1）")
+    console.print("Accepted = accepted_delivery_count / valid_task_count；交付$ = Cost per Accepted Delivery")
+    console.print("$/pass = 历史诊断指标，仅限同 suite + source_batch 比较")
     console.print("修正   = S12-P0 修正口径通过率（cleanup_race 计通过，历史数据按 per_subtask 重算）")
     console.print("💰    = CR-G1 性价比最优（≥70% 通过者中 efficiency_score 最高；贵模型 $/pass>2× 中位数时 ★ 降 ⚠）")
     console.print("档    = CR-G2 模型分级（F=frontier 旗舰 / V=value 主力 / L=lite 轻量 / -=未分级自定义）")
+    console.print("交付$ = CR-P1-2 任务级口径（全部子任务通过才算 1 个交付；cleanup_race 计通过、over_budget/infra 不计）——K4 北极星口径")
 
 
 # ═══════════════════════════════════════════════════════════════

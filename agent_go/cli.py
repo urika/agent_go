@@ -21,6 +21,7 @@ from .web_server import main as cmd_web
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
 from .git_utils import init_git_repo
+from .status import task_status, set_task_status
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +211,7 @@ def _build_parser():
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
-    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "recommend", "judge", "all"],
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "recommend", "judge", "validate-schema", "metric-freeze", "batch-manifest", "all"],
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
@@ -234,12 +235,23 @@ def _build_parser():
                              help="禁用 skill 自动发现（bench 子命令，用于 skill on/off 对比）")
     eval_parser.add_argument("--source-batch", dest="source_batch", default="",
                              help="批次标识（bench 子命令，如 baseline / results_v2 / smoke-*，写入每条 record）")
+    eval_parser.add_argument("--suite", dest="bench_suite", default="",
+                             choices=["smoke", "core", "decision", "stress"],
+                             help="Bench 案例套件（默认运行全部 canonical 任务）")
     eval_parser.add_argument("--bench-parallel", dest="bench_parallel", type=int, default=2,
                              help="bench 并发度：同时运行的 (任务×模型×重复) 组合数（默认 2，受 API rate-limit 与本地资源约束）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
                              help="读取结果文件（models/cost-baseline/recommend 子命令，逗号分隔多个文件）")
     eval_parser.add_argument("--tolerance", dest="tolerance", type=float, default=1.5,
                              help="成本基线预算 = P90 × tolerance（cost-baseline 子命令，默认 1.5）")
+    eval_parser.add_argument("--report-output", dest="report_output", default="",
+                             help="Metric Freeze 报告输出路径（metric-freeze 子命令）")
+    eval_parser.add_argument("--catalog", dest="catalog", default="",
+                             help="任务 catalog 路径（metric-freeze 子命令）")
+    eval_parser.add_argument("--config-file", dest="config_file", default="",
+                             help="配置文件路径，用于计算 config hash（metric-freeze 子命令）")
+    eval_parser.add_argument("--manifest-output", dest="manifest_output", default="",
+                             help="批次 manifest 输出路径（batch-manifest 子命令）")
     # recommend 子命令参数（CR-G5：bench 推荐写回 worker_models）
     eval_parser.add_argument("--apply", dest="apply", action="store_true",
                              help="recommend 子命令：把推荐写入 config.json 的 worker_models（默认 dry-run）")
@@ -544,6 +556,14 @@ def cmd_run(args=None):
         # Spec §1 目标作为任务描述的增强（若 Spec 完整，目标替代一句话 task 的模糊性）
         if spec_obj.goal:
             task = spec_obj.goal.strip()
+        # CR-TD：Spec `budget:` 字段 → 任务级 L3 预算（覆盖 config 默认；CLI --budget 优先，不覆盖）
+        if spec_obj.budget:
+            _cc = dict(config.get("cost_control") or {})
+            if not _cc.get("max_budget_usd"):
+                _cc["max_budget_usd"] = spec_obj.budget
+                _cc["enabled"] = True  # 显式给了预算 → 开启 L3 熔断
+                config["cost_control"] = _cc
+                logger.info(f"[cost_control] Spec budget=${spec_obj.budget} 已设任务级 L3 预算")
         # 结构化约束注入（由 generate_plan 的 spec_context 参数消费）
         spec_context = _build_spec_context(spec_obj)
 
@@ -667,19 +687,48 @@ def cmd_run(args=None):
             console.print(f"\n⚠️ Plan Mode 失败: {last_error}")
             subtasks = decompose_fallback(task, repo, config, logger)
 
+    else:
+        # plan is None：3 次 generate_plan 全部失败，降级到本地规则拆解。
+        # 不加此分支会导致 subtasks 未定义 → confirm_subtasks 抛 UnboundLocalError。
+        # decompose_fallback 有三级降级（本地模型→规则→单任务），永不抛异常。
+        console.print(f"\n⚠️ Plan 生成 3 次均失败: {last_error}")
+        console.print("⚠️ 降级到本地规则拆解...")
+        subtasks = decompose_fallback(task, repo, config, logger)
+
     # 子任务确认
     confirmed = confirm_subtasks(subtasks, config, logger)
 
     meta = {
         "task_id": task_id, "task": task, "repo": str(repo),
-        "created": ts, "status": "running",
+        "created": ts, "status": "EXECUTING",
+        "status_schema_version": 1,
         "reference_docs": doc_paths, "issue": issue_ref,
         "subtasks": confirmed, "results": [],
         "tool_versions": tool_versions,
         "skills": [s.name for s in skills],
         "agent_type": agent_type.type_name if agent_type else "developer",
         "remote_url": remote_url,
+        "target_branch": "",
+        "delivery_branch": "",
+        "accepted_delivery": False,
+        "delivery_failed": False,
+        "accepted_delivery_reasons": ["delivery_not_attempted"],
+        "delivery_attempted": False,
     }
+    # recover 必须基于本次运行的确切基准提交，不能依赖默认分支名或提交时间窗口。
+    if (repo / ".git").exists():
+        try:
+            _base_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True,
+                text=True, check=True, timeout=10).stdout.strip()
+            _base_branch = subprocess.run(
+                ["git", "branch", "--show-current"], cwd=str(repo), capture_output=True,
+                text=True, check=True, timeout=10).stdout.strip()
+            meta["base_commit"] = _base_commit
+            meta["base_branch"] = _base_branch
+            meta["target_branch"] = _base_branch
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("无法记录 base_commit，recover 将降级为兼容模式")
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # M4: 时间预估（历史子任务耗时中位数 × 拓扑波次，回答「走之前能跑完吗」）
@@ -742,7 +791,7 @@ def cmd_resume(args=None):
     # logger 需在 result.json 恢复循环之前初始化，否则损坏文件触发 UnboundLocalError
     logger = setup_logger(task_id, task_dir)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
-    if meta.get("status") not in ("running", "paused", "interrupted", "cancelled", "stale_aborted"):
+    if task_status(meta) not in ("EXECUTING", "PLAN_REVIEW", "COMMITTED_UNVERIFIED", "VERIFICATION_FAILED", "BLOCKED", "CANCELLED", "running", "paused", "interrupted", "cancelled", "stale_aborted"):
         console.print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused/interrupted/cancelled/stale_aborted 状态可恢复")
         sys.exit(1)
 
@@ -857,7 +906,10 @@ def cmd_resume(args=None):
     logger.info(f"已完成: {len(completed_ids)}/{len(confirmed)}, 剩余: {len(confirmed) - len(completed_ids)}")
     if remote_url:
         logger.info(f"远程推送: {remote_url}")
-    meta["status"] = "running"
+    if meta.get("status_schema_version"):
+        set_task_status(meta, "EXECUTING")
+    else:
+        meta["status"] = "running"
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     _run_pipeline(confirmed, repo, task_dir, logger, config, headless, parallel, issue_ref, meta,
@@ -979,7 +1031,7 @@ def cmd_list() -> None:
         if not meta_path.exists():
             continue
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        status = meta.get("status", "unknown")
+        status = task_status(meta)
         icon = {"completed": "🟢", "aborted": "🟡", "failed": "🔴", "cancelled": "⏹️"}.get(status, "⚪")
         docs = ",".join(meta.get("reference_docs", []))[:15]
         console.print(f"{t.name:<25} {icon} {status:<10} {len(meta.get('subtasks',[])):<8} {docs:<12} {meta.get('task','')[:30]}")
@@ -1720,7 +1772,7 @@ def _cmd_status_text(args=None):
         if not meta_path.exists():
             return None
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        status = meta.get("status", "unknown")
+        status = task_status(meta)
         zombie = False
         log_path = task_dir / "execution.log"
         ZOMBIE_TIMEOUT = 600  # 10 分钟无日志输出视为僵尸任务
@@ -2243,6 +2295,22 @@ def _install_sigterm_handler() -> None:
     _sig.signal(_sig.SIGINT, _re_raise)
 
 
+def _stale_liveness_ts(task_dir: Path, meta_path: Path) -> float:
+    """判活时间戳：优先 heartbeat 文件 mtime，回退 meta.json mtime。
+
+    heartbeat 文件由 _run_pipeline 的心跳线程在任务运行期间周期刷新（HEARTBEAT_INTERVAL）。
+    仅靠 meta.json mtime 会在"合法长任务（>1h）仍在运行"时误判为 stale_aborted；
+    心跳冻结（进程被 SIGKILL）才是可靠的死亡信号。
+    """
+    hb_path = task_dir / "heartbeat"
+    if hb_path.exists():
+        try:
+            return hb_path.stat().st_mtime
+        except OSError:
+            pass
+    return meta_path.stat().st_mtime
+
+
 def _cleanup_stale_tasks(max_age_hours: int = 1) -> int:
     """P3 Layer 5：清理卡死的 running task。
 
@@ -2250,7 +2318,7 @@ def _cleanup_stale_tasks(max_age_hours: int = 1) -> int:
     下次启动时这些 task 会阻塞 bench/recover。
 
     策略：扫描 ~/.agent_go/task-* 中所有 meta.json：
-    - status=running 且 meta.json mtime > max_age_hours → 标记为 stale_aborted
+    - status=running 且判活时间戳（heartbeat 或 meta.json mtime）> max_age_hours → 标记为 stale_aborted
     - 保留结果列表（不删除），让 recover 能继续处理
 
     Returns: 清理的 task 数量
@@ -2266,7 +2334,7 @@ def _cleanup_stale_tasks(max_age_hours: int = 1) -> int:
         if not meta_path.exists():
             continue
         try:
-            mtime = meta_path.stat().st_mtime
+            mtime = _stale_liveness_ts(task_dir, meta_path)
             if mtime < cutoff:
                 meta = _json.loads(meta_path.read_text(encoding="utf-8"))
                 if meta.get("status") == "running":
@@ -2362,4 +2430,3 @@ def main() -> None:
         sys.exit(130)
     except BrokenPipeError:
         sys.exit(0)
-

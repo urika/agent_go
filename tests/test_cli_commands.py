@@ -524,3 +524,86 @@ class TestCmdPrOnline:
         out = capsys.readouterr().out
         assert "未安装 gh CLI" in out
         assert (task_dir / "PR.md").exists()
+
+    def test_pr_gh_body_and_title_content(self, monkeypatch, tmp_path):
+        """P0-4 补强：gh pr create 的 --title 值 = meta.task，--body-file 内容含
+        Summary/任务/子任务/Verification 段。argv 标志已由 test_pr_gh_uses_correct_args
+        覆盖，但 body 实际内容（最显眼的用户交付物）此前零验证——body 空/缺段也照过。"""
+        from agent_go.cli import cmd_pr
+        task_dir, targets = self._setup(tmp_path)
+        for mod, attr, val in targets:
+            monkeypatch.setattr(mod, attr, val)
+
+        captured = {}
+
+        def mock_run(cmd, **kw):
+            cl = list(cmd) if isinstance(cmd, (list, tuple)) else [cmd]
+            if cl[:1] == ["gh"] and "--body-file" in cl:
+                captured["title"] = cl[cl.index("--title") + 1] if "--title" in cl else None
+                bf = cl[cl.index("--body-file") + 1]
+                captured["body"] = Path(bf).read_text(encoding="utf-8")
+            return MagicMock(returncode=0, stdout="https://github.com/x/y/pull/1\n")
+
+        monkeypatch.setattr("agent_go.cli.subprocess.run", mock_run)
+        monkeypatch.setattr("agent_go.cli.shutil.which", lambda name: "/usr/bin/gh")
+
+        cmd_pr(argparse.Namespace(task_id="task-pr-online", offline=False,
+                                  push=False, remote="origin"))
+
+        # title 值 = meta.task（截断 72 字符）
+        assert captured.get("title") == "实现登录功能"
+        body = captured.get("body", "")
+        assert "## Summary" in body
+        assert "实现登录功能" in body      # 任务描述进 body
+        assert "sub-1" in body            # 子任务行
+        assert "## Subtasks" in body
+        assert "## Verification" in body
+
+
+# ═══════════════════════════════════════════════════════════════
+# P0-2：cmd_run --yes 仍跑 L1 准入（headless 信任契约）
+# ═══════════════════════════════════════════════════════════════
+
+def test_cmd_run_yes_still_runs_l1_gate(tmp_path, monkeypatch, capsys):
+    """--yes 模式仍跑 L1（确定性硬门禁），畸形 Spec（缺§5）→ 阻断、不进 plan。
+    回归（把 `if not force_spec` 改成 `if not auto_yes`）会让畸形 Spec 在 CI 静默通过。"""
+    import pytest
+    import agent_go.cli as cli
+    from agent_go.cli import _build_parser, cmd_run
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    # Spec 缺 §5（验收标准）→ L1 违规
+    spec = tmp_path / "spec.md"
+    spec.write_text(
+        "# Task Spec: t\n\n## 1. 目标*\n\ndo\n\n## 2. 动机*\n\nwhy\n\n## 3. 范围*\n\nchange x\n",
+        encoding="utf-8")
+
+    # 隔离运行时环境：AGENT_GO_DIR → tmp；mock 掉 gate 前的副作用 + plan 生成
+    import copy
+    from agent_go.config import DEFAULT_CONFIG
+    agdir = tmp_path / "agdir"
+    agdir.mkdir()
+    monkeypatch.setattr(cli, "AGENT_GO_DIR", agdir)
+    monkeypatch.setattr(cli, "load_config", lambda **k: copy.deepcopy(DEFAULT_CONFIG))
+    monkeypatch.setattr(cli, "_detect_tool_versions", lambda lg: {})
+    monkeypatch.setattr(cli, "load_agent_type", lambda *a, **k: None)
+    gen_plan = MagicMock()
+    monkeypatch.setattr(cli, "generate_plan", gen_plan)
+
+    args = _build_parser().parse_args(
+        ["run", str(repo), "do task", "--spec", str(spec), "--yes", "--headless"])
+
+    # --yes 不跳过 L1：畸形 Spec（缺§5）→ 在 plan 前阻断（SystemExit 非0 + generate_plan 未调用）。
+    # （console 在 --yes quiet 模式下不进 capsys，故不断言消息文本；以"plan 未生成"证明 L1 阻断。）
+    # 注意：cmd_run 会 set_default_console(quiet)，必须恢复，否则污染后续依赖 console 的测试。
+    from agent_go.console import get_default_console, set_default_console
+    _orig_console = get_default_console()
+    try:
+        with pytest.raises(SystemExit) as ei:
+            cmd_run(args)
+        assert ei.value.code != 0
+        gen_plan.assert_not_called()
+    finally:
+        set_default_console(_orig_console)

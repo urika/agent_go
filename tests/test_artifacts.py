@@ -187,3 +187,60 @@ class TestConstants:
 
     def test_max_artifact_bytes_default(self):
         assert MAX_ARTIFACT_BYTES == 100 * 1024 * 1024
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-P1-4：K13 产物完整率（声明产物必达用户目录，100% 契约）
+# ═══════════════════════════════════════════════════════════════
+
+class TestK13Completeness:
+    def _make_task_dir(self, tmp_path, subtasks, artifacts=None):
+        """同 TestExport._make_task_dir（构造 task_dir/{sub_id}/work/__artifacts__/ 布局）。"""
+        task_dir = tmp_path / "tasks" / "t1"
+        artifacts = artifacts or {}
+        for sub_id in subtasks:
+            work = task_dir / sub_id / "work"
+            work.mkdir(parents=True)
+            for name in artifacts.get(sub_id, []):
+                (work / ARTIFACT_DIR_NAME).mkdir(parents=True, exist_ok=True)
+                (work / ARTIFACT_DIR_NAME / name).write_text(f"content-{name}", encoding="utf-8")
+        return task_dir
+
+    def test_declared_but_missing_artifact_reports_incompleteness(self, tmp_path, monkeypatch):
+        """K13: 声明产物（写入 __artifacts__/）未达用户目录（超限跳过）→ 完整率 <100% + missing 列出。
+        此前超限跳过是静默的（只有 skipped 列表，无完整率信号），违背 K13 100% 契约。"""
+        task_dir = self._make_task_dir(tmp_path, ["sub-1"], {"sub-1": ["ok.md", "big.bin"]})
+        (task_dir / "sub-1" / "work" / ARTIFACT_DIR_NAME / "big.bin").write_bytes(b"x" * 1024)
+        artifact_dir = tmp_path / "out"
+        monkeypatch.setattr("agent_go.artifacts.MAX_ARTIFACT_BYTES", 100)
+        res = export("t", {"sub-1": {"status": "completed"}}, artifact_dir, task_dir)
+        assert len(res["exported"]) == 1          # ok.md 达用户目录
+        assert res["total_found"] == 2            # 声明 2 个
+        assert res["completeness"] == 0.5         # 完整率 50%
+        assert len(res["missing"]) == 1
+        assert "big.bin" in res["missing"][0]     # 未达用户目录的列出
+
+    def test_completeness_full_when_all_exported(self, tmp_path):
+        """K13: 全部导出 → 完整率 1.0，无 missing。"""
+        task_dir = self._make_task_dir(tmp_path, ["sub-1"], {"sub-1": ["a.md", "b.md"]})
+        res = export("t", {"sub-1": {"status": "completed"}}, tmp_path / "out", task_dir)
+        assert res["completeness"] == 1.0
+        assert res["missing"] == []
+
+    def test_completeness_none_when_no_artifacts(self, tmp_path):
+        """K13: 无声明产物 → completeness None（无声明可判），summary 不告警。"""
+        task_dir = self._make_task_dir(tmp_path, ["sub-1"])
+        res = export("t", {"sub-1": {"status": "completed"}}, tmp_path / "out", task_dir)
+        assert res["completeness"] is None
+        summary = render_export_summary(res)
+        assert "K13" not in summary
+
+    def test_summary_flags_incomplete_k13(self, tmp_path, monkeypatch):
+        """K13: 不完整导出 → summary 明示 K13 完整率（反静默跳过）。"""
+        task_dir = self._make_task_dir(tmp_path, ["sub-1"], {"sub-1": ["ok.md", "big.bin"]})
+        (task_dir / "sub-1" / "work" / ARTIFACT_DIR_NAME / "big.bin").write_bytes(b"x" * 1024)
+        monkeypatch.setattr("agent_go.artifacts.MAX_ARTIFACT_BYTES", 100)
+        res = export("t", {"sub-1": {"status": "completed"}}, tmp_path / "out", task_dir)
+        summary = render_export_summary(res)
+        assert "K13 完整率 50%" in summary
+        assert "未全部达用户目录" in summary

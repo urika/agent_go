@@ -1378,3 +1378,51 @@ def test_kill_reason_system_error_detected(tmp_path):
     )
     assert result["kill_reason"] == "system_error"
     assert not (result["pass_rate"] or 0) > 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-P1-2：任务级 $/pass（PRD 分母缺陷修正，all-or-nothing）
+# ═══════════════════════════════════════════════════════════════
+
+def test_task_delivered_all_or_nothing():
+    """_task_delivered：全部子任务通过才算交付；部分通过/全失败不算；cleanup_race 算。"""
+    from agent_go.bench import _task_delivered
+    # 全通过
+    assert _task_delivered({"pass_rate": 1.0, "per_subtask": [
+        {"status": "completed", "verify_ok": True}, {"status": "completed", "verify_ok": True}]})
+    # 部分通过（pass_rate 0.5）→ 不交付
+    assert not _task_delivered({"pass_rate": 0.5, "per_subtask": [
+        {"status": "completed", "verify_ok": True}, {"status": "failed", "verify_ok": False}]})
+    # 全失败
+    assert not _task_delivered({"pass_rate": 0.0, "per_subtask": [
+        {"status": "failed", "verify_ok": False}]})
+    # cleanup_race：headline 0 但全部子任务完成已验证 → 交付
+    assert _task_delivered({"pass_rate": 0.0, "per_subtask": [
+        {"status": "completed", "verify_ok": True}, {"status": "completed", "verify_ok": True}]})
+
+
+def _p12_rec(pass_rate, subtask_oks):
+    return {"pass_rate": pass_rate,
+            "per_subtask": [{"status": "completed" if ok else "failed", "verify_ok": ok} for ok in subtask_oks]}
+
+
+def test_task_level_dollar_per_pass_vs_legacy(tmp_path):
+    """任务级 $/pass = sum(cost)/交付数（全部通过才算 1），显著高于 legacy sum(cost)/sum(pass_rate)
+    ——证明旧口径系统性低估真实每交付成本（K4 偏乐观）。"""
+    from agent_go.bench import analyze_model_productivity
+    out = tmp_path / "r.jsonl"
+    # 3 个任务各跑 1 次：A 全交付($1)，B 部分($1)，C 全失败($1)
+    recs = [
+        {"model": "m", "completed": 2, "total_subtasks": 2, "total_cost_usd": 1.0, **_p12_rec(1.0, [True, True])},
+        {"model": "m", "completed": 1, "total_subtasks": 2, "total_cost_usd": 1.0, **_p12_rec(0.5, [True, False])},
+        {"model": "m", "completed": 0, "total_subtasks": 2, "total_cost_usd": 1.0, **_p12_rec(0.0, [False, False])},
+    ]
+    with open(out, "w", encoding="utf-8") as f:
+        for r in recs:
+            f.write(json.dumps(r) + "\n")
+    m = analyze_model_productivity(out)["models"]["m"]
+    # 交付数=1（仅 A）→ 任务级 $/pass = 3/1 = $3.00
+    assert m["task_level_dollar_per_pass"] == 3.0
+    # legacy sum(cost)/sum(pass_rate) = 3/1.5 = $2.00（把 B 的部分通过也当分母 → 低估）
+    assert m["dollar_per_pass"] == 2.0
+    assert m["task_level_dollar_per_pass"] > m["dollar_per_pass"]

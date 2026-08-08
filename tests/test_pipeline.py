@@ -1234,3 +1234,106 @@ class TestPipelineArtifactExport:
         )
         # pipeline 正常走到 meta.json 落盘，导出失败不中断
         assert (task_dir / "meta.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# 心跳（heartbeat）— pipeline 存活信号
+# ---------------------------------------------------------------------------
+
+class TestHeartbeat:
+    """心跳机制：运行期间写 {task_dir}/heartbeat，退出时清理。"""
+
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_pipeline_writes_and_cleans_heartbeat(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """子任务运行期间 heartbeat 文件存在，pipeline 结束后被清理。"""
+        sub1 = _make_subtask("sub-1")
+        confirmed = [sub1]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-heartbeat")
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        observed = {}
+
+        def _slow_run_subtask(*a, **k):
+            observed["during"] = (task_dir / "heartbeat").exists()
+            return _success_result("sub-1")
+
+        mock_run_subtask.side_effect = _slow_run_subtask
+
+        with patch("agent_go.pipeline.HEARTBEAT_INTERVAL", 0.01):
+            _run_pipeline(
+                confirmed, repo, task_dir, logger,
+                config={}, headless=False, parallel=1,
+                issue_ref="", meta=_default_meta("t-heartbeat"),
+            )
+
+        assert observed["during"] is True, "子任务运行期间应有 heartbeat 文件"
+        assert not (task_dir / "heartbeat").exists(), "pipeline 结束后应清理 heartbeat 文件"
+
+    def test_start_stop_heartbeat_touches_and_removes(self, temp_dir, logger):
+        """_start_heartbeat 立即打点 + 周期刷新；_stop_heartbeat 移除文件。"""
+        from agent_go.pipeline import _start_heartbeat, _stop_heartbeat
+        task_dir = temp_dir / "tasks" / "hb"
+        task_dir.mkdir(parents=True)
+
+        with patch("agent_go.pipeline.HEARTBEAT_INTERVAL", 0.01):
+            stop = _start_heartbeat(task_dir, logger)
+            try:
+                hb = task_dir / "heartbeat"
+                assert hb.exists()
+                # 等 2 个周期后 mtime 应被刷新（> 初始）
+                m0 = hb.stat().st_mtime
+                import time as _time
+                _time.sleep(0.05)
+                assert hb.stat().st_mtime > m0
+            finally:
+                _stop_heartbeat(task_dir, stop)
+
+        assert not (task_dir / "heartbeat").exists(), "_stop_heartbeat 应移除 heartbeat 文件"
+
+
+@patch("agent_go.notify.notify_event")
+@patch("agent_go.pipeline.subprocess.run")
+@patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+@patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+@patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+@patch("agent_go.pipeline.run_subtask")
+def test_no_lost_updates_or_cross_contamination(
+    mock_run, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+    mock_notify, temp_dir, logger,
+):
+    """P2-2: 高并发（20 子任务 × parallel 8）下，每个子任务独立的 result.json 存在、
+    subtask_id 正确、content 唯一（无丢失/覆盖/串扰）。
+    现有测试只查 meta.results 数量；此测试查 per-subtask 持久化 + 内容唯一性——
+    若结果写入落到 as_completed 循环外（CLAUDE.md 头号反模式），会缺文件/错配。"""
+    import json as _json
+    n = 20
+    confirmed = [_make_subtask(f"sub-{i}") for i in range(n)]
+    repo, task_dir = _setup_repo_and_task_dir(temp_dir, "t-race")
+
+    def _unique_result(sub_id, i):
+        r = _success_result(sub_id)
+        r["content"] = f"unique-{i}"
+        return r
+
+    mock_run.side_effect = [_unique_result(f"sub-{i}", i) for i in range(n)]
+    mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+    meta = _default_meta("t-race")
+    _run_pipeline(
+        confirmed, repo, task_dir, logger,
+        config={}, headless=True, parallel=8,
+        issue_ref="", meta=meta,
+    )
+    assert meta["status"] == "completed"
+    for i in range(n):
+        rf = task_dir / f"sub-{i}" / "result.json"
+        assert rf.exists(), f"sub-{i} 的 result.json 缺失（结果丢失）"
+        rec = _json.loads(rf.read_text(encoding="utf-8"))
+        assert rec["subtask_id"] == f"sub-{i}", f"sub-{i} result.json 被覆盖/错配"
+        assert rec.get("content") == f"unique-{i}", f"sub-{i} result.json content 串扰"

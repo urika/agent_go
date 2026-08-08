@@ -1461,3 +1461,129 @@ class TestUsageAggregation:
         expected = 40064 / 1e6 * 0.5556 + 107 / 1e6 * 2.2222
         assert abs(ev["cost_usd"] - expected) < 0.0001
         assert ev["cost_usd"] > 0  # 不再清零
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-H2 回归守护：_parse_cpu_time（模块级，ps 时间格式解析）
+# ═══════════════════════════════════════════════════════════════
+
+def test_parse_cpu_time_linux_ticks():
+    """Linux 纯 ticks → float。"""
+    from agent_go.subtask import _parse_cpu_time
+    assert _parse_cpu_time("1234") == 1234.0
+    assert _parse_cpu_time("0") == 0.0
+
+
+def test_parse_cpu_time_macos_minutes_seconds():
+    """macOS M:SS.cc 格式 → 秒。CR-H2 修复前 float() 直接解析会 ValueError。"""
+    from agent_go.subtask import _parse_cpu_time
+    assert _parse_cpu_time("2:33.26") == 153.26
+    assert _parse_cpu_time("11:26.55") == 686.55
+    assert _parse_cpu_time("0:00.02") == 0.02
+
+
+def test_parse_cpu_time_macos_hours_and_days():
+    """macOS H:MM:SS 与 D-HH:MM:SS 格式。"""
+    from agent_go.subtask import _parse_cpu_time
+    assert _parse_cpu_time("1:02:03") == 3723.0          # 1h2m3s
+    assert _parse_cpu_time("1-02:03:04") == 93784.0      # 1天2h3m4s
+
+
+def test_parse_cpu_time_invalid_raises():
+    """非法输入抛 ValueError（调用方跳过该行）。"""
+    from agent_go.subtask import _parse_cpu_time
+    import pytest
+    for bad in ("", "   ", "abc", "x:y"):
+        with pytest.raises(ValueError):
+            _parse_cpu_time(bad)
+
+
+@patch("subprocess.Popen")
+@patch("agent_go.subtask.subprocess.run", return_value=MagicMock(stdout=""))
+def test_kill_state_written_before_proc_kill(mock_run, mock_popen, logger, tmp_path):
+    """P2-2: kill_state metering 必须写在 proc.kill() 之前——SIGKILL 后事件可能丢失，
+    顺序颠倒会导致 kill_reason 分类丢失（G1 持久化时机契约）。"""
+    import agent_go.config as config_mod
+    mock_proc = MagicMock()
+    mock_proc.pid = 12349
+    call_count = [0]
+
+    def polling():
+        call_count[0] += 1
+        if call_count[0] > 30:
+            return 0
+        return None
+
+    mock_proc.poll.side_effect = polling
+    mock_proc.stdout.readline.side_effect = ["", ""]
+    mock_proc.stderr.readline.side_effect = ["", ""]
+    mock_proc.returncode = -9
+    mock_popen.return_value = mock_proc
+
+    import itertools as _it
+    time_gen = _it.count(0, 1000)
+    meter_path = tmp_path / "metering.jsonl"
+
+    order = []
+    real_meter = config_mod.meter_event
+
+    def _meter_wrapper(mp, ev, **kw):
+        order.append(("meter", ev.get("event", "?")))
+        return real_meter(mp, ev, **kw)
+
+    real_kill = mock_proc.kill
+
+    def _kill_wrapper(*a, **k):
+        order.append(("kill", None))
+        return real_kill(*a, **k)
+
+    mock_proc.kill = _kill_wrapper
+    with patch("time.time", side_effect=lambda: next(time_gen)), \
+         patch("time.sleep"), \
+         patch.object(config_mod, "meter_event", side_effect=_meter_wrapper):
+        from agent_go.subtask import _run_headless
+        _run_headless("task", Path("/tmp/work"),
+                      {"AGENT_GO_METERING_PATH": str(meter_path), "AGENT_GO_TASK_ID": "t",
+                       "AGENT_GO_DIFFICULTY": "hard"},
+                      logger, "sub-ord")
+
+    kill_idx = next((i for i, (kind, _e) in enumerate(order) if kind == "kill"), None)
+    meter_kill_idxs = [i for i, (kind, ev) in enumerate(order) if kind == "meter" and ev == "kill_state"]
+    assert meter_kill_idxs, "kill_state 事件应已写入"
+    assert kill_idx is not None, "proc.kill 应被调用"
+    assert meter_kill_idxs[0] < kill_idx, "kill_state 必须先于 proc.kill() 落盘"
+
+
+@patch("subprocess.Popen")
+@patch("agent_go.subtask.subprocess.run", return_value=MagicMock(stdout=""))
+def test_stuck_grace_env_override_accepted(mock_run, mock_popen, logger, tmp_path):
+    """CR-TD：AGENT_GO_STUCK_GRACE_SEC 环境变量可覆盖 grace 窗（参数化后默认 120s 行为不变，
+    env 覆盖被接受、kill_reason=stuck 仍正确）。"""
+    mock_proc = MagicMock()
+    mock_proc.pid = 12377
+    call_count = [0]
+
+    def polling():
+        call_count[0] += 1
+        if call_count[0] > 30:
+            return 0
+        return None
+
+    mock_proc.poll.side_effect = polling
+    mock_proc.stdout.readline.side_effect = ["", ""]
+    mock_proc.stderr.readline.side_effect = ["", ""]
+    mock_proc.returncode = -9
+    mock_popen.return_value = mock_proc
+    import itertools as _it
+    time_gen = _it.count(0, 1000)
+    meter_path = tmp_path / "metering.jsonl"
+    with patch("time.time", side_effect=lambda: next(time_gen)), \
+         patch("time.sleep"):
+        from agent_go.subtask import _run_headless
+        result = _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(meter_path), "AGENT_GO_TASK_ID": "t",
+             "AGENT_GO_DIFFICULTY": "hard", "AGENT_GO_STUCK_GRACE_SEC": "30"},
+            logger, "sub-grace")
+    mock_proc.kill.assert_called_once()
+    assert getattr(result, "kill_reason", None) == "stuck"

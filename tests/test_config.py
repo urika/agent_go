@@ -233,3 +233,27 @@ class TestMeterEvent:
         path = tmp_path / "no_such_dir" / "metering.jsonl"
         meter_event(path, {"role": "worker"})  # 不抛异常
         assert not path.exists()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 覆盖补强：cost_control 冷启动默认值 pin 到 PRD 契约（防静默误杀）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCostControlDefaults:
+    def test_l1_default_budgets_match_cold_start_contract(self):
+        """PRD 冷启动契约：per_subtask_budget_usd = easy $0.20 / medium $0.40 / hard $1.00。
+        若被改小（如 $0.01），L1 会误杀所有 medium/hard 子任务——此测试守护。"""
+        cc = DEFAULT_CONFIG["cost_control"]
+        assert cc["per_subtask_budget_usd"] == {"easy": 0.20, "medium": 0.40, "hard": 1.00}
+
+    def test_l1_disabled_by_default_consistent_with_l2l3(self):
+        """冷启动（2026-08-08 修订）：L1/L2/L3 全部默认关。L1 曾默认开，但 Claude CLI
+        2.1.224 的 --max-budget-usd 语义改为"接近上限即拒绝"，导致实际 $0.13 成本触发
+        $0.20 预算上限、任务无法启动 → L1 改为默认关，待基线校准后显式开启。"""
+        cc = DEFAULT_CONFIG["cost_control"]
+        assert cc.get("l1_enabled") is False  # L1 默认关（防 CLI 干活前拒绝）
+        assert cc.get("enabled") is False  # L2/L3 总开关默认关
+
+    def test_subtask_multiplier_default(self):
+        """L2 累计上限 = per_subtask × subtask_multiplier（默认 2.5）。"""
+        assert DEFAULT_CONFIG["cost_control"]["subtask_multiplier"] == 2.5

@@ -93,6 +93,13 @@ class TaskSpec:
     reference: str = ""      # §6 参考资料
     risk: str = ""           # §7 已知风险
     source_path: Optional[Path] = None
+    # CR-G3：任务类型（security/bugfix/refactor/test/docs/...），从 spec 顶部
+    # `task_type: xxx` 元数据行解析。非空时作为任务级 task_type 默认，优先于
+    # role_skill_map 关键词检测，并经 worker_models_by_type[type] 覆盖难度路由。
+    task_type: str = ""
+    # CR-TD：任务级成本预算（USD），从 spec 顶部 `budget: X.XX` 元数据行解析。
+    # 非空时注入该任务的 cost_control.max_budget_usd（L3 上限），覆盖 config 默认。
+    budget: Optional[float] = None
 
     @property
     def is_complete(self) -> bool:
@@ -197,6 +204,15 @@ def parse_spec(text_or_path) -> Optional[TaskSpec]:
     sections = _split_sections(text)
     title = sections.pop("__title__", "")
 
+    # CR-G3：解析顶部元数据行 `task_type: xxx`（任务类型，优先于关键词检测）。
+    # 不尾锚 `$`：允许行内注释（task_type: security  # ...）；占位行 `task_type:  # 可选`
+    # 因 # 非字首而自然不匹配 → task_type 保持空（交关键词检测）。
+    _tt_match = re.search(r"^task_type:\s*([A-Za-z_][\w-]*)", text, re.MULTILINE)
+    task_type = _tt_match.group(1).lower() if _tt_match else ""
+    # CR-TD：解析顶部元数据行 `budget: X.XX`（任务级成本预算 USD）。仅数字；占位/注释行不匹配。
+    _budget_match = re.search(r"^budget:\s*(\d+(?:\.\d+)?)", text, re.MULTILINE)
+    budget = float(_budget_match.group(1)) if _budget_match else None
+
     spec = TaskSpec(
         title=title,
         goal=sections.get("1", ""),
@@ -207,6 +223,8 @@ def parse_spec(text_or_path) -> Optional[TaskSpec]:
         reference=sections.get("6", ""),
         risk=sections.get("7", ""),
         source_path=source_path,
+        task_type=task_type,
+        budget=budget,
     )
     return spec
 
@@ -415,6 +433,11 @@ _SPEC_TEMPLATE = """# Task Spec: <任务名称>
 
 > 生成于 {timestamp} | 仓库: {repo}
 > agent_go 输入契约（SDD）。带 * 的章节为必填（L1 准入审查）。
+
+task_type:  # 可选。任务类型，优先于关键词检测，经 worker_models_by_type[type] 覆盖难度路由。
+            # 常用值：security / bugfix / refactor / test / docs；留空 = 关键词自动检测。
+budget:     # 可选。任务级成本预算（USD），如 0.30；注入 cost_control.max_budget_usd（L3 上限），
+            # 覆盖 config 默认。留空 = 用 config / CLI --budget 值。
 
 ## 1. 目标（做什么）*
 

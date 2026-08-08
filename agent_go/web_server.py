@@ -33,6 +33,7 @@ import logging
 import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from .status import task_status
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
@@ -112,7 +113,7 @@ def api_tasks() -> list[dict]:
         out.append({
             "id": td.name,
             "task": meta.get("task", ""),
-            "status": meta.get("status", "unknown"),
+            "status": task_status(meta),
             "repo": meta.get("repo", ""),
             "subtask_count": len(meta.get("subtasks", []) or []),
             "completed": sum(1 for r in results if r.get("status") == "completed"),
@@ -147,6 +148,7 @@ def api_task(task_id: str) -> Optional[dict]:
             "id": st.get("id", f"sub-{i+1}"),
             "title": st.get("title", ""),
             "difficulty": st.get("difficulty", ""),
+            "task_type": st.get("task_type", ""),  # CR-G3：任务类型（security/bugfix/...）
             "depends_on": st.get("depends_on", []) or [],
             "skills": st.get("skills", []) or [],
             "agent_type": st.get("agent_type", ""),
@@ -165,7 +167,7 @@ def api_task(task_id: str) -> Optional[dict]:
     return {
         "id": td.name,
         "task": meta.get("task", ""),
-        "status": meta.get("status", "unknown"),
+            "status": task_status(meta),
         "repo": meta.get("repo", ""),
         "created_at": meta.get("created", ""),
         "subtasks": items,
@@ -201,6 +203,7 @@ def api_subtask_detail(task_id: str, sub_id: str) -> Optional[dict]:
         "title": st.get("title", ""),
         "description": st.get("description", ""),
         "difficulty": st.get("difficulty", ""),
+        "task_type": st.get("task_type", ""),  # CR-G3：任务类型（security/bugfix/...）
         "depends_on": st.get("depends_on", []) or [],
         "files_hint": st.get("files_hint", []) or [],
         "risks": st.get("risks", []) or [],
@@ -399,7 +402,7 @@ def api_overview() -> dict:
         if not meta:
             continue
         task_counts["total"] += 1
-        status = meta.get("status", "")
+        status = task_status(meta)
         if status in task_counts:
             task_counts[status] += 1
         created = meta.get("created", "")

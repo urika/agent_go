@@ -59,7 +59,8 @@ class SnapshotManager:
         target_files = self._resolve_files(worktree, files_hint)
         if not target_files:
             logger.debug(f"[checkpoint] {sub_id}: no matching files, skipping snapshot")
-            snap_dir.rmdir()
+            # snap_dir 内已创建 files/ 子目录，rmdir() 对非空目录会抛 OSError → 用 rmtree
+            shutil.rmtree(snap_dir, ignore_errors=True)
             return None
 
         snapshot: dict[str, Any] = {

@@ -43,3 +43,87 @@ def test_empty_subtasks():
 def test_threshold_hard_three():
     """hard 阈值 = 3（V1 硬编码）。"""
     assert DIFFICULTY_BASE_SUBTASKS["hard"] == 3
+
+
+# ═══════════════════════════════════════════════════════════════
+# CR-G4: 难度启发式 hint + planner 主观难度交叉核对
+# ═══════════════════════════════════════════════════════════════
+
+import logging
+
+from agent_go.planning import difficulty_hint, check_difficulty_mismatch
+
+
+def _capture_warnings(fn):
+    """跑 fn(logger) 并返回触发的 warning 文本列表。"""
+    log = logging.getLogger("g4-test")
+    log.setLevel(logging.WARNING)
+    records = []
+
+    class _H(logging.Handler):
+        def emit(self, r):
+            records.append(r.getMessage())
+    log.addHandler(_H())
+    try:
+        fn(log)
+    finally:
+        log.removeHandler(_H())
+    return records
+
+
+def test_difficulty_hint_hard_keywords():
+    """跨模块/重构/架构等结构性关键词 → hard。"""
+    assert difficulty_hint({"description": "跨模块重构认证架构"}) == "hard"
+    assert difficulty_hint({"agent_prompt": "refactor the data pipeline across modules"}) == "hard"
+
+
+def test_difficulty_hint_easy_keywords():
+    """helper/格式化/单点小改 → easy。"""
+    assert difficulty_hint({"description": "add a format helper in utils.py"}) == "easy"
+
+
+def test_difficulty_hint_multi_file_signals_hard():
+    """提及 ≥3 个不同源码路径 → 倾向 hard（多文件改动）。"""
+    desc = "修改 a.py, b.py, c.py 三个模块"
+    assert difficulty_hint({"description": desc}) == "hard"
+
+
+def test_difficulty_hint_neutral_returns_none():
+    """中性描述（无强信号）→ None，不与 planner 唱反调。"""
+    assert difficulty_hint({"description": "实现一个功能"}) is None
+
+
+def test_difficulty_hint_empty_returns_none():
+    assert difficulty_hint({}) is None
+    assert difficulty_hint({"description": ""}) is None
+
+
+def test_check_difficulty_mismatch_cross_two_tiers_warns():
+    """planner 标 easy 但信号强烈倾向 hard（跨两档）→ 告警。"""
+    subtasks = [{"id": "s1", "difficulty": "easy",
+                 "description": "跨模块重构整个架构，涉及 a.py b.py c.py"}]
+    warns = _capture_warnings(lambda lg: check_difficulty_mismatch(subtasks, lg))
+    assert len(warns) == 1
+    assert "G4" in warns[0] and "easy" in warns[0] and "hard" in warns[0]
+
+
+def test_check_difficulty_mismatch_single_tier_no_warn():
+    """单档差异（medium vs hard）不报（噪声大）。"""
+    subtasks = [{"id": "s1", "difficulty": "medium",
+                 "description": "跨模块重构架构 a.py b.py c.py"}]  # hint=hard, planned=medium → 1档差不报
+    warns = _capture_warnings(lambda lg: check_difficulty_mismatch(subtasks, lg))
+    assert warns == []
+
+
+def test_check_difficulty_mismatch_agrees_no_warn():
+    """planner 标的与 hint 一致（都 easy）→ 不告警。"""
+    subtasks = [{"id": "s1", "difficulty": "easy", "description": "add a format helper"}]
+    warns = _capture_warnings(lambda lg: check_difficulty_mismatch(subtasks, lg))
+    assert warns == []
+
+
+def test_check_difficulty_mismatch_neutral_hint_no_warn():
+    """hint=None（中性）→ 不告警。"""
+    subtasks = [{"id": "s1", "difficulty": "hard", "description": "实现功能"}]
+    warns = _capture_warnings(lambda lg: check_difficulty_mismatch(subtasks, lg))
+    assert warns == []
