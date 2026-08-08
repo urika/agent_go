@@ -69,6 +69,21 @@ stateDiagram-v2
 
 > `recover` 按子任务 worktree 状态重判：commit+验证通过→completed、commit+验证失败→failed、无 commit+有改动→reset（resume 重跑）、无 commit+无改动→no_changes。**recover 永不替你 commit 孤儿改动**——commit 是唯一完成边界。
 
+**M0 canonical 状态映射**（`agent_go/status.py`，`status_schema_version` 存在时）：
+
+| M0 状态 | 对应 legacy | 语义 |
+|----------|------------|------|
+| `PLAN_REVIEW` | planning | 规划审查门（plan accepted → 待执行）|
+| `PAUSED` | paused / interrupted | 中断/暂停**可恢复锚点**（`resume` 从 PAUSED 回 EXECUTING）|
+| `EXECUTING` / `VERIFYING` | running | 执行中 |
+| `VERIFICATION_FAILED` | failed | **能力失败优先**——有 failed 子任务（含其级联 blocked）→ 终态 VERIFICATION_FAILED，而非 BLOCKED |
+| `BLOCKED` | failed | **仅纯约束/编排阻断**（cost/metering/依赖环，无 failed 子任务）|
+| `DELIVERY_READY` / `ACCEPTED_DELIVERY` | completed | 全部子任务通过 / 交付验收 |
+| `COMMITTED_UNVERIFIED` | committed | 已提交待验证 |
+
+> 语义修复（2026-08-08）：中断暂停写 `PAUSED`（不再误写 PLAN_REVIEW）；能力失败优先于 BLOCKED。
+> 状态是"为什么停"（原因），`failure_class` 是"根因是什么"（归因）——M0 会计以 failure_class 为准。
+
 ### 子任务级（`results[].status`）
 
 ```mermaid

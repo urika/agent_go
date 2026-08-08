@@ -438,6 +438,11 @@ cmd_bench(args)                            → 对照运行编排器
    ── record 产品交付字段：suite / risk_types / high_variance
         delivery_branch_created / pr_created / accepted_delivery
         spec_compliance / architecture_compliance / failure_class
+        accepted_delivery 语义（CR-#4，2026-08-08）：
+          - 生产 run（delivery_attempted=True）：须交付产物（commit + delivery 分支 + PR/merge）
+          - harness/bench run（无 delivery_attempted）：由代码正确性判定——全部子任务
+            completed/no_changes + verify_ok 即 accepted（harness 从不 push 分支/PR）
+        no_changes 子任务计为通过（CR-#1）；claude 崩溃但产出验证通过 → completed（CR-失败修复）
 
 cmd_baseline(args)                         → 对照基线编排器（S10-P2 §2.3）
   ── claude -p 裸跑（不走 agent_go harness），临时副本中执行
