@@ -246,7 +246,8 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
     eval_config.pop("_metering_path", None)
 
     diff = _get_worktree_diff(worktree)
-    prompt = _build_eval_prompt(subtask, verification, diff, previous_attempts)
+    no_truncation = bool(config.get("_no_diff_truncation"))
+    prompt = _build_eval_prompt(subtask, verification, diff, previous_attempts, no_truncation)
     messages = [{"role": "user", "content": prompt}]
 
     try:
@@ -313,8 +314,10 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
 # 辅助函数
 # ═══════════════════════════════════════════════════════════════
 
-def _build_eval_prompt(subtask, verification, diff, previous_attempts):
-    """构建语义评估 prompt（含 confidence 要求）。"""
+def _build_eval_prompt(subtask, verification, diff, previous_attempts, no_diff_truncation=False):
+    """构建语义评估 prompt（含 confidence 要求）。
+    
+    no_diff_truncation=True 时禁用 diff 长度截断，用于截断兜底重试。"""
     title = subtask.get("title", "")
     description = subtask.get("description", "")[:2000]
     agent_prompt = subtask.get("agent_prompt", "")[:1000]
@@ -331,8 +334,9 @@ def _build_eval_prompt(subtask, verification, diff, previous_attempts):
 
     if not diff.strip():
         diff = "（未检测到文件变更）"
-    elif len(diff) > 4000:
-        diff = diff[:4000] + "\n... (diff 过长，已截断)"
+    else:
+        max_chars = None if no_diff_truncation else 12000
+        diff = _format_diff_for_eval(diff, max_chars)
 
     return _EVAL_TEMPLATE.format(
         title=title, description=description, agent_prompt=agent_prompt,
@@ -407,6 +411,101 @@ def _get_worktree_diff(worktree: Path) -> str:
         )
         diff = result.stdout
     return diff if result.returncode == 0 else ""
+
+
+def _format_diff_for_eval(diff: str, max_chars: int = 12000) -> str:
+    """将 git diff 格式化为 evaluator 可消费的文本。
+
+    替代硬截断 4000 字符（导致 evaluator 反馈"diff 截断，无法确认"）：
+    - max_chars=None：不截断，返回完整 diff（截断兜底重试用）
+    - ≤ max_chars：直接返回完整 diff
+    - > max_chars：保留文件级 hunk 头部 + 每个文件的关键片段，尾部标注截断
+    """
+    if max_chars is None or len(diff) <= max_chars:
+        return diff
+
+    lines = diff.split("\n")
+    result: list[str] = []
+    # 使用 diff 的内部结构：以 "diff --git" 和 "---" / "+++" 为文件边界
+    files = _split_diff_by_file(lines)
+
+    budget = max_chars - 200  # 为尾部摘注留空间
+    for fname, file_lines in files:
+        # 每个文件最少保留：diff --git 行 + hunk 头部
+        header_block = _extract_diff_header(file_lines)
+        result.extend(header_block)
+        budget -= sum(len(l) + 1 for l in header_block)  # +1 for newline
+
+        if budget <= 0:
+            break
+
+        # 在剩余预算内尽可能多地保留 hunk 内容
+        # 策略：保留前 N 个 hunk 直到预算耗尽；至少保一个完整 hunk
+        hunks = _split_diff_hunks(file_lines)
+        added_any = False
+        for hunk in hunks:
+            hunk_size = sum(len(l) + 1 for l in hunk)
+            if budget >= hunk_size or not added_any:
+                result.extend(hunk)
+                budget -= hunk_size
+                added_any = True
+            else:
+                result.append(f"... ({fname}: 省略 {len(hunks) - len([h for h in hunks if h[0] in result])} 个 hunk)")
+                budget = 0
+                break
+
+    if budget > 0:
+        result.append(f"\n(完整 diff 共 {len(diff)} 字符，以上为文件摘要 + 关键 hunks)")
+    else:
+        result.append(f"\n(完整 diff 共 {len(diff)} 字符，以上为预算内截断)")
+
+    return "\n".join(result)
+
+
+def _split_diff_by_file(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """将 diff 按文件分组。返回 [(文件名, 该文件的diff行)]。"""
+    files: list[tuple[str, list[str]]] = []
+    current_file = "<unknown>"
+    current_lines: list[str] = []
+    for line in lines:
+        if line.startswith("diff --git "):
+            if current_lines:
+                files.append((current_file, current_lines))
+            current_file = line  # "diff --git a/... b/..."
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_lines:
+        files.append((current_file, current_lines))
+    return files
+
+
+def _extract_diff_header(file_lines: list[str]) -> list[str]:
+    """提取 diff 头部行（diff --git / --- / +++ / hunk 的第一行 @@）。"""
+    header = []
+    for line in file_lines:
+        if line.startswith("diff --git") or line.startswith("--- ") or line.startswith("+++ "):
+            header.append(line)
+        elif line.startswith("@@ "):
+            header.append(line)
+            break  # 第一个 @@ 后是 hunk 内容
+    return header
+
+
+def _split_diff_hunks(file_lines: list[str]) -> list[list[str]]:
+    """将单个文件的 diff 行按 hunk 拆分。每个 hunk 以 @@ 行开头。"""
+    hunks = []
+    current: list[str] = []
+    for line in file_lines:
+        if line.startswith("@@ "):
+            if current:
+                hunks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        hunks.append(current)
+    return hunks
 
 
 # 注册默认策略

@@ -187,15 +187,31 @@ def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, lo
     # ── 执行命令 ──
     try:
         v_start = time.time()
-        vr = subprocess.run(shlex.split(vcmd), cwd=str(worktree),
-                            capture_output=True, text=True, timeout=120,
-                            preexec_fn=_apply_resource_limits,
-                            env=_build_sandbox_env())
-        result_entry["exit_code"] = vr.returncode
+        # 支持 && 链：拆分为多个子命令逐个执行（与 _is_safe_verification_command 的
+        # && 拆分校验一致）。LLM 常生成 "cmd1 && cmd2" 格式验证命令；若整条 shlex.split
+        # 后直接执行，&& 会变成前一个命令的普通参数（如 ruff 报 unexpected argument），
+        # 导致合法命令误判失败。短路语义：任一子命令非 0 则整体失败。
+        _parts = [p.strip() for p in vcmd.split("&&")]
+        _exit_code = 0
+        _out = ""
+        _err = ""
+        for _part in _parts:
+            if not _part:
+                continue
+            vr = subprocess.run(shlex.split(_part), cwd=str(worktree),
+                                capture_output=True, text=True, timeout=120,
+                                preexec_fn=_apply_resource_limits,
+                                env=_build_sandbox_env())
+            _exit_code = vr.returncode
+            _out += vr.stdout or ""
+            _err += vr.stderr or ""
+            if _exit_code != 0:
+                break  # && 短路：前一个失败则整体失败
+        result_entry["exit_code"] = _exit_code
         result_entry["duration_ms"] = round((time.time() - v_start) * 1000)
         # S2 全量失败反馈：保留输出尾部供修复 prompt 注入
-        result_entry["stdout_tail"] = (vr.stdout or "")[-3000:]
-        result_entry["stderr_tail"] = (vr.stderr or "")[-3000:]
+        result_entry["stdout_tail"] = _out[-3000:]
+        result_entry["stderr_tail"] = _err[-3000:]
     except (FileNotFoundError, OSError, ValueError):
         logger.warning(f"验证命令无法解析为 argv (跳过): {vcmd[:100]}")
         # 不降级到 shell=True（安全策略）
@@ -1113,6 +1129,42 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     "cost_usd": semantic_feedback.get("cost_usd", 0.0),
                     "latency_ms": semantic_feedback.get("latency_ms", 0.0),
                 })
+                # 截断兜底：若 evaluator 因 diff 截断导致无法判断（reason 含关键词，
+                # 或置信度极低），用完整 diff 无截断重跑一次 evaluator，避免浪费修复重试。
+                _reason = semantic_feedback.get("reason", "") or ""
+                _conf = semantic_feedback.get("confidence", 1.0)
+                _inconclusive = any(kw in _reason for kw in ["截断", "无法确认", "inconclusive"])
+                _low_confidence = _conf is not None and _conf <= 0.3
+                if (_inconclusive or _low_confidence) and not semantic_feedback.get("passed", True):
+                    logger.warning(
+                        f"语义评估可能因信息不足误判: confidence={_conf} inconclusive={_inconclusive}，"
+                        f"用完整 diff 重试 evaluator"
+                    )
+                    try:
+                        _retry_cfg = dict(_full_cfg)
+                        _retry_cfg["_no_diff_truncation"] = True  # evaluator 内部禁用 diff 截断
+                        _retry_feedback = _safe_optional_call(
+                            ".evaluator", "evaluate_semantic", logger,
+                            subtask, worktree, verification,
+                            verification_history, _retry_cfg, logger,
+                            fallback=semantic_feedback,
+                            label="evaluator.evaluate_semantic_retry",
+                            assessment_path=str(task_dir) if task_dir else "",
+                            verification_confidence=_l1_confidence_dict if auto_triggered else None,
+                        )
+                        if _retry_feedback is not semantic_feedback:
+                            # 替换 verification_results 中上次的记录
+                            verification_results[-1] = {
+                                "type": "semantic",
+                                "passed": _retry_feedback.get("passed", True),
+                                "reason": _retry_feedback.get("reason", "")[:200],
+                                "cost_usd": _retry_feedback.get("cost_usd", 0.0),
+                                "latency_ms": _retry_feedback.get("latency_ms", 0.0),
+                            }
+                            semantic_feedback = _retry_feedback
+                            logger.info(f"重试 evaluator 完成: passed={semantic_feedback.get('passed')} conf={semantic_feedback.get('confidence')}")
+                    except Exception as _retry_err:
+                        logger.debug(f"语义评估截断重试失败（已忽略）: {_retry_err}")
                 if semantic_feedback.get("evaluator_skipped"):
                     logger.warning(f"语义评估 API 调用失败（已跳过，结果视为通过）")
                     if _cfg.get("evaluator", {}).get("fail_closed", False):
@@ -1307,7 +1359,11 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             _difficulty = subtask.get("difficulty", "medium")
             _base_timeout = _cfg.get("verification", {}).get("retry_timeout", 300)
             _difficulty_mult = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(_difficulty, 1.5)
-            retry_timeout = min(int(_base_timeout * _difficulty_mult), 900)
+            # CR-建议#2：retry_timeout 封顶按难度缩放——hard 任务（db-*/可观测性）修复重试
+            # 900s 偏紧（撞墙钟→假 timeout）。easy/medium 保持，hard 放宽到 1500s。
+            _retry_caps = {"easy": 600, "medium": 900, "hard": 1500}
+            _cap = _retry_caps.get(_difficulty, 900)
+            retry_timeout = min(int(_base_timeout * _difficulty_mult), _cap)
             logger.info(f"[retry_timeout] difficulty={_difficulty} base={_base_timeout}s mult={_difficulty_mult} → timeout={retry_timeout}s")
             _fix_result = _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
                                         active_pids=active_pids, active_pids_lock=active_pids_lock,
@@ -1835,6 +1891,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         "verify_ok": verify_ok,
         "exit_code": result.returncode,
         "kill_reason": verify_results.get("kill_reason"),
+        "crash_but_verified": verify_results.get("crash_but_verified", False),
+        "verification_results": verification_results,
     })
 
     console.emit("subtask_complete", {

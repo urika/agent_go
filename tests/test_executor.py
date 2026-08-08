@@ -1097,6 +1097,29 @@ class TestRunVerificationCmd:
         )
         assert result["exit_code"] == 0
 
+    def test_amp_chain_executes_each_part_and_short_circuits(self, tmp_path, fast_logger):
+        """&& 链应拆分逐个执行（真实 subprocess）：前段失败则短路，前段通过则执行后段"""
+        # 场景 1：前段失败 → 后段不执行（短路）
+        r1 = _run_verification_cmd(
+            "python3 -c 'import sys; sys.exit(1)' && echo SECOND_RAN",
+            tmp_path, 1, {}, fast_logger)
+        assert r1["exit_code"] == 1, f"前段失败应整体 exit=1，实际 {r1['exit_code']}"
+        assert "SECOND_RAN" not in r1["stdout_tail"], "前段失败时后段不应执行（短路）"
+
+        # 场景 2：前段通过 → 后段执行
+        r2 = _run_verification_cmd(
+            "python3 -c 'print(1)' && echo SECOND_RAN",
+            tmp_path, 1, {}, fast_logger)
+        assert r2["exit_code"] == 0, f"全链通过应 exit=0，实际 {r2['exit_code']}"
+        assert "SECOND_RAN" in r2["stdout_tail"], "前段通过时后段应执行"
+
+        # 场景 3：三段链，中段失败 → 末段不执行
+        r3 = _run_verification_cmd(
+            "python3 -c 'print(1)' && python3 -c 'import sys; sys.exit(2)' && echo THIRD_RAN",
+            tmp_path, 1, {}, fast_logger)
+        assert r3["exit_code"] == 2, f"中段失败应整体 exit=2，实际 {r3['exit_code']}"
+        assert "THIRD_RAN" not in r3["stdout_tail"], "中段失败时末段不应执行"
+
     @patch("subprocess.run")
     def test_cd_prefix_stripped(self, mock_subprocess, tmp_path, fast_logger):
         """冗余的 cd <dir> && 前缀应被剥离后再执行"""
