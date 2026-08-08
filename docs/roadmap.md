@@ -56,6 +56,19 @@ agent_go 当前不追求成为完整的 Agent 平台、项目管理系统或 IDE
 
 后续验收关注这些能力是否共同形成可靠交付，而不是继续单独增加模块数量。
 
+### 1.4 SDD 能力分层
+
+SDD 能力按产品关键路径分三层建设，不把所有治理能力一次性前置：
+
+| 能力 | 当前基础 | 固定落地阶段 | 验收证据 |
+|---|---|---|---|
+| 规范可追踪 | Task Spec、Plan、Subtask、Verification 已有 | M1.4 基础追踪；M3 真实验证；后置持久化/L2 | requirement/acceptance criterion 到 Plan、测试和 PR 的追踪矩阵 |
+| 架构可审查 | 架构文档、architect agent、合规字段已有 | M1.4 基础架构审查；M3 验证价值 | Architecture Decision、Review decision、architecture compliance report |
+| 交付可验证 | Accepted Delivery 判定已有 | M1.1-M1.3 | delivery branch、commit 汇总、PR head/base、mergeability |
+| 偏差可反馈 | failure class、retry、review、recover 已有 | M2.1-M2.4；M3 评估 | spec/architecture deviation、failure pattern、effective strategy、人工介入时间 |
+
+M1.4 只建设最小可追踪和可审查闭环，不建设完整 KnowledgeStore、活文档或自动架构决策；这些能力必须经过 M3 真实任务验证后再决定。
+
 ## 2. Roadmap 管理规则
 
 ### 2.1 统一状态
@@ -194,7 +207,7 @@ system_error
 - 能区分模型失败、基础设施失败、timeout、预算中止和交付失败。
 - 输出 Accepted Delivery Rate 和 Cost per Accepted Delivery。
 
-状态：`accepted`（M0-1 至 M0-11 已实现；固定 baseline 重跑和文档收口由 M0-12/M1 继续推进）。
+状态：`implemented/tested`（M0-1 至 M0-12 已实现；正式固定 baseline 尚未生成，因此暂不标记为产品 `accepted`）。
 
 ## 5. 阶段一：M1 交付闭环
 
@@ -244,6 +257,26 @@ system_error
 - SIGTERM、SIGKILL、PR 创建失败、merge 冲突等场景均可区分。
 - recover 不会破坏运行中的 task。
 - resume 不会重复提交或混入旧 worktree 改动。
+
+### M1.4 SDD 最小治理闭环
+
+目标：在交付闭环中建立最小的“规范可追踪、架构可审查”能力，避免 SDD 只停留在输入格式和 Prompt 注入层。
+
+交付物：
+
+- 为 Spec requirement 和 acceptance criterion 分配稳定 ID。
+- Plan step、subtask、verification 和 delivery record 支持引用 requirement ID。
+- 执行前生成最小 Architecture Decision，记录边界、依赖方向和关键约束。
+- Architecture Review 产生 `approved`、`rejected` 或 `changes_requested` 决策。
+- 生成任务级 `traceability_matrix` 和 `architecture_compliance` 摘要。
+- 未通过的架构审查不得进入执行，除非用户明确覆盖并留下审计记录。
+
+验收：
+
+- 一个真实任务可以从 requirement 追踪到 Plan、测试和 PR。
+- 架构审查结果持久化到任务产物，并在 CLI、MCP 和报告中可见。
+- 缺少 requirement/acceptance criterion 映射的任务被标记为追踪不完整，而不是静默通过。
+- 该能力不自动替代人工做复杂架构决策。
 
 ## 6. 阶段二：M2 核心可靠性
 
@@ -313,6 +346,25 @@ system_error
 - 用户无需阅读完整日志即可判断下一步动作。
 - 失败任务的人工恢复时间可以测量。
 
+### M2.5 Spec/Architecture 偏差反馈
+
+目标：把失败从一次性错误升级为可定位、可修复、可复用的偏差记录，但不在 M2 自动修改全局知识或 Spec。
+
+交付物：
+
+- `spec_deviation`：需求、范围或验收标准与实现的偏差。
+- `architecture_deviation`：模块边界、依赖方向或架构约束偏差。
+- `acceptance_gap`：未满足的验收标准及其验证证据。
+- 偏差根因分类：Spec 不完整、Plan 误解、拆解错误、实现错误、验证不足、交付汇总错误。
+- 偏差修复状态、人工决策和是否需要回写 Spec 的记录。
+- 偏差数据与 `failure_pattern`、`effective_strategy` 关联。
+
+验收：
+
+- 每个未通过的真实任务都能区分执行失败、Spec 偏差、架构偏差和交付失败。
+- 偏差记录能进入下一次 repair prompt，但不会未经批准修改全局 Plan 或知识库。
+- 偏差的人工处理时间和重复发生率可统计。
+
 ## 7. 阶段三：M3 真实任务验证
 
 目标：验证产品主线，而不是继续用单元测试数量替代产品证据。
@@ -338,6 +390,9 @@ system_error
 - 重试次数
 - 人工介入分钟数
 - 失败分类
+- requirement/acceptance criterion 追踪完整性
+- architecture review 结果和偏差数量
+- spec/architecture deviation 及其修复状态
 
 ### M3.2 产品验收门禁
 
@@ -348,6 +403,8 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 - 0 个交付成功但找不到目标分支或 PR 的任务。
 - infrastructure failure 与 model failure 分开统计。
 - 所有失败任务都有可执行恢复路径。
+- 关键 requirement 都能追踪到测试和最终交付物。
+- 架构审查结果与最终变更一致，或有明确的人工覆盖记录。
 
 完成 M3 后，基于真实数据设定下一阶段目标，而不是继续沿用未经验证的 `$0.05` 或 `K1 ≥97%` 目标。
 
@@ -363,7 +420,7 @@ M2 产生的 `failure_pattern`、`effective_strategy` 和 `no_progress` 只是�
 
 ### Spec 闭环
 
-先验证用户是否愿意使用 Spec。通过模板和 5 个真实任务观察填写成本、Plan 编辑次数和交付成功率，再决定是否建设持久化和 L2 审查。
+M1.4 先提供最小 requirement/acceptance criterion 追踪和架构审查；M3 再通过 5 个以上真实任务观察填写成本、Plan 编辑次数、追踪完整率和交付成功率，决定是否建设 Spec 持久化、双向同步和 L2 语义审查。
 
 ### Reviewer 灰度
 
