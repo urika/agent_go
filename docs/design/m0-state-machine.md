@@ -27,9 +27,9 @@ CANCELLED
 
 语义区分（M0 状态机修复，2026-08-08）：
 - **PLAN_REVIEW**：规划审查门（`ARCHITECTURE_REVIEW → plan accepted → PLAN_REVIEW → execution started → EXECUTING`）。仅表示"计划已获准、待执行"的短暂过渡。
-- **PAUSED**：任务被中断/暂停（SIGINT/SIGTERM）时的可恢复锚点，`resume` 从 PAUSED 回 EXECUTING。
+- **PAUSED**：任务被中断/暂停（SIGINT/SIGTERM）时的可恢复锚点，`resume` 从 PAUSED 回 EXECUTING。**仅当中断时无确定性能力失败子任务**才标 PAUSED——若中断时已有 `failed` 子任务（retry 耗尽/验证未通过），终态优先标 `VERIFICATION_FAILED`（能力失败优先），因为 PAUSED 暗示"恢复后能继续"，但能力失败恢复后大概率仍失败。
 - **BLOCKED**：纯约束/编排阻断（cost 熔断、metering 不可用、依赖环）——**无能力失败子任务**。若任务有 `failed` 子任务（含其级联的 blocked 下游），终态为 `VERIFICATION_FAILED`（能力失败优先），而非 BLOCKED。
-- 此前运行时把中断暂停误写为 PLAN_REVIEW，已改为 PAUSED；BLOCKED 的判定优先级已修正（能力失败优先）。
+- 此前运行时把中断暂停误写为 PLAN_REVIEW，已改为 PAUSED；BLOCKED 的判定优先级已修正（能力失败优先）；**PAUSED 同样遵循能力失败优先**——中断时若有 failed 子任务，标 VERIFICATION_FAILED 而非 PAUSED（2026-08-08 修复）。
 
 ## 迁移表
 
@@ -39,7 +39,8 @@ CANCELLED
 | SPEC_REVIEW | architecture accepted | ARCHITECTURE_REVIEW |
 | ARCHITECTURE_REVIEW | plan accepted | PLAN_REVIEW |
 | PLAN_REVIEW | execution started | EXECUTING |
-| EXECUTING / VERIFYING | interrupted (SIGINT/SIGTERM) | PAUSED |
+| EXECUTING / VERIFYING | interrupted (SIGINT/SIGTERM), 无 failed 子任务 | PAUSED |
+| EXECUTING / VERIFYING | interrupted (SIGINT/SIGTERM), 有 failed 子任务 | VERIFICATION_FAILED（能力失败优先）|
 | PAUSED | resume | EXECUTING |
 | EXECUTING | verification started | VERIFYING |
 | VERIFYING | commit exists, verification pending | COMMITTED_UNVERIFIED |

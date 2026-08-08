@@ -674,10 +674,20 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
         # M0 语义修复：中断暂停写 PAUSED（可恢复锚点），不再是 PLAN_REVIEW（规划审查门）。
+        # 能力失败优先（m0-state-machine.md §状态定义）：中断时若已有 failed 子任务（确定性
+        # 能力失败，非被中断打断），终态为 VERIFICATION_FAILED 而非 PAUSED——PAUSED 暗示
+        # "恢复后能继续"，但能力失败恢复后大概率仍失败，PAUSED 会误导用户。
         if _interrupted.is_set():
-            meta["status"] = "PAUSED" if meta.get("status_schema_version") else "paused"
+            _has_failed = bool(failed_ids)
+            if meta.get("status_schema_version"):
+                meta["status"] = "VERIFICATION_FAILED" if _has_failed else "PAUSED"
+            else:
+                meta["status"] = "failed" if _has_failed else "paused"
             (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-            logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
+            if _has_failed:
+                logger.info(f"任务中断且已有失败子任务 ({len(completed_ids)}/{total})，终态 VERIFICATION_FAILED（能力失败优先）")
+            else:
+                logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
             _stop_heartbeat(task_dir, _heartbeat_stop)
             if signals_installed:
                 signal.signal(signal.SIGINT, prev_sigint)

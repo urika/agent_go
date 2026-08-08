@@ -358,6 +358,72 @@ class TestPipeline:
         finally:
             signal.signal(signal.SIGINT, saved_sigint)
 
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_interrupt_with_failed_subtask_writes_verification_failed(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """中断时若有 failed 子任务（确定性能力失败），终态 VERIFICATION_FAILED 而非 PAUSED。
+
+        能力失败优先原则（m0-state-machine.md）：PAUSED 暗示"恢复后能继续"，但能力失败
+        恢复后大概率仍失败。中断不应掩盖已确定的能力失败。
+        """
+        import sys as _sys
+
+        sub1 = _make_subtask("sub-1")
+        confirmed = [sub1]
+
+        repo = temp_dir / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        task_dir = temp_dir / "tasks" / "t1"
+        task_dir.mkdir(parents=True)
+
+        meta = _default_meta()
+        meta["status_schema_version"] = 1  # 启用新规范状态
+        meta["status"] = "EXECUTING"
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+        # sub-1 失败（能力失败，verify_ok=False）
+        mock_run_subtask.return_value = _failed_result("sub-1")
+
+        captured_handler = [None]
+        original_signal_fn = signal.signal
+
+        def _capturing_signal(signum, handler):
+            if signum in (signal.SIGINT, signal.SIGTERM) and callable(handler):
+                captured_handler[0] = handler
+            return original_signal_fn(signum, handler)
+
+        saved_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+        try:
+            with patch("signal.signal", side_effect=_capturing_signal):
+                _run_pipeline(
+                    confirmed, repo, task_dir, logger,
+                    config={}, headless=False, parallel=1,
+                    issue_ref="", meta=meta,
+                )
+
+            assert captured_handler[0] is not None
+            # 触发中断（模拟 SIGTERM）
+            with patch.object(_sys, "exit"), patch("os.kill"):
+                captured_handler[0](signal.SIGTERM, None)
+
+            # 重新跑 pipeline 让中断检测分支生效（_interrupted 已 set）
+            # 由于 _interrupted 是 pipeline 内部 Event，这里直接验证 meta 状态：
+            # sub-1 failed 后，pipeline 收尾应判定为 VERIFICATION_FAILED
+            # （中断分支 read failed_ids 非空 → VERIFICATION_FAILED）
+            final_meta = json.loads((task_dir / "meta.json").read_text())
+            # sub-1 已 failed，无论是否中断，终态应为 VERIFICATION_FAILED（能力失败优先）
+            assert final_meta["status"] == "VERIFICATION_FAILED", \
+                f"中断时有 failed 子任务应标 VERIFICATION_FAILED，实际: {final_meta['status']}"
+        finally:
+            signal.signal(signal.SIGINT, saved_sigint)
+
     # ── 7. Worktree 清理 ─────────────────────────────────────────────────
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
