@@ -1,3 +1,8 @@
+"""Config-driven 规则匹配：keywords / file patterns / agent type → required/recommended skills。
+
+加载 ~/.agent_go/role_skill_map.json，按匹配条件（关键词、文件模式、agent 类型）
+为子任务注入必需和推荐 Skill。规则同时注入到 Plan prompt 和 post-LLM fallback。
+"""
 import json
 import logging
 from pathlib import Path

@@ -1,3 +1,8 @@
+"""Curses 状态仪表盘：实时显示并发子任务进度、日志尾随和成本累计。
+
+通过 `agent_go status --watch` 启动，轮询 ~/.agent_go/ 下活跃任务的
+meta.json / metering.jsonl / execution.log，渲染 TUI 界面。
+"""
 import json
 import logging
 import time

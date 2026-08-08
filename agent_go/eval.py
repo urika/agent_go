@@ -1,3 +1,8 @@
+"""质量/性能/成本/可靠性/UX 评估分析 + eval gate（$/pass 基线 + 回归检测）。
+
+聚合 bench 结果，按 per-role 成本、模型能力、任务难度分析质量，
+维护成本基线并执行 gate 检查（绝对阈值 + 回归检测）。
+"""
 import json
 import logging
 import re

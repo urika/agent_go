@@ -1,6 +1,7 @@
 {
   "_comment": "agent_go 配置示例。将本文件复制为 ~/.agent_go/config.json 后编辑。",
   "_presets": "底部提供三套 router + worker_models 预设（国际/国内/混合），按需选用。",
+  "_schema_ref": "完整字段说明见 docs/design/config-schema.md",
 
   "plan_api": {
     "provider": "anthropic",
@@ -11,19 +12,63 @@
     "max_tokens": 4096,
     "temperature": 0.2
   },
+
+  "planner_api": {
+    "_comment": "Plan 生成专用 API。非空时完全覆盖 plan_api（Planner 与 Worker 使用不同 provider）。留空 = 使用 plan_api"
+  },
+
   "behavior": {
     "auto_confirm_plan": false,
     "auto_confirm_subtasks": false,
+    "auto_verify_subtask": false,
     "show_agent_prompt": true,
     "show_resource_map": true,
-    "max_plan_iterations": 5
+    "max_plan_iterations": 5,
+    "notify_on_complete": true,
+    "notify_command": ""
   },
+
+  "verification": {
+    "max_retries": 3,
+    "retry_timeout": 300,
+    "run_timeout": 1800,
+    "block_on_failure": true
+  },
+
+  "goal": {
+    "enabled": false,
+    "max_turns": 20,
+    "timeout_seconds": 600,
+    "enable_goal_hook": false
+  },
+
+  "agent_loop": {
+    "_comment": "自主 agent 循环模式（--agent-loop），不经过 Claude Code CLI",
+    "enabled": false,
+    "max_turns": 20,
+    "max_duration": 600,
+    "api_timeout": 120
+  },
+
+  "evaluator": {
+    "_comment": "LLM 语义评估器。验证命令通过后对 Claude 输出做语义判断",
+    "enabled": false,
+    "fail_closed": false,
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "base_url": "https://api.anthropic.com/v1/messages",
+    "api_key": "",
+    "prompt_template": "default"
+  },
+
   "fallback": {
     "local_model_url": "http://localhost:8000/v1/chat/completions",
     "local_model_name": "qwen",
     "enable_rules": true
   },
+
   "notify": {
+    "_comment": "多通道事件通知。channels 支持 desktop / webhook / command 类型",
     "enabled": true,
     "timeout_sec": 5,
     "retry": 1,
@@ -41,18 +86,66 @@
       }
     ]
   },
-  "goal": {
+
+  "cost_control": {
+    "_comment": "三层成本控制。enabled 默认关闭——基线不可信时误杀率高，须 eval cost-baseline 校准后才开。详见 docs/design/adr/ADR-005",
     "enabled": false,
-    "max_turns": 20,
-    "timeout_seconds": 600,
-    "enable_goal_hook": false
+    "l1_enabled": false,
+    "max_budget_usd": 0.50,
+    "per_subtask_budget_usd": {
+      "easy": 0.20,
+      "medium": 0.40,
+      "hard": 1.00
+    },
+    "subtask_multiplier": 2.5,
+    "on_exceed": "stop",
+    "budget_mode": "strict"
   },
+
+  "skills": {
+    "auto_discover": false,
+    "max_auto_skills": 3
+  },
+
+  "agents": {
+    "default": "developer"
+  },
+
   "artifact_dir": null,
   "_artifact_note": "S9-B 产物导出目录（如 \"/Users/me/reports\"）。子任务写入 worktree/__artifacts__/ 的文件在任务完成后导出到该目录；null = 不导出（向后兼容）",
+
   "worker_models": {
     "easy":   "",
     "medium": "",
     "hard":   "claude-opus-4-8"
+  },
+
+  "worker_models_fallback": {
+    "_comment": "主模型不可用时的降级备选。结构同 worker_models",
+    "easy":   "",
+    "medium": "",
+    "hard":   ""
+  },
+
+  "worker_models_degrades": {
+    "_comment": "预算降级（degrade 模式）时的难度下移映射",
+    "easy":   "",
+    "medium": "easy",
+    "hard":   "medium"
+  },
+
+  "worker_models_by_type": {
+    "_comment": "按 agent_type 指定模型，覆盖难度路由。如 {\"reviewer\": \"gemini-3.1-pro\"}"
+  },
+
+  "local_model_names": {
+    "_comment": "路由名→本地真实模型名映射。如 {\"claude-haiku-4-5\": \"Qwen3.6-27B-4bit\"}。/status 探测失败时 fallback"
+  },
+
+  "cache": {
+    "enabled": true,
+    "plan_ttl": 86400,
+    "max_entries": 100
   },
 
   "router": {
@@ -63,6 +156,25 @@
       "architect": "planner",
       "reviewer": "reviewer",
       "tester": "worker"
+    },
+    "circuit_breaker": {
+      "failure_threshold": 5,
+      "cooldown_seconds": 60,
+      "half_open_requests": 2
+    }
+  },
+
+  "mcp_servers": {
+    "_comment": "外部 MCP server 配置。子任务调用外部 MCP 工具，命名空间 mcp__{server}__{tool}。每个 server: command/args/env/enabled/tool_filter/scope",
+    "_example": {
+      "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@anthropic-ai/mcp-filesystem"],
+        "env": {},
+        "enabled": true,
+        "tool_filter": [],
+        "scope": "subtask"
+      }
     }
   },
 
