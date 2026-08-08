@@ -3,7 +3,7 @@
 > **类型**：调研分析（research），非设计文档
 > **日期**：2026-08-08
 > **用途**：作为后续概念设计/SDD 的输入材料。本文档不包含实现方案，仅记录现状分析、业界趋势、差距识别和方向性启发。
-> **关联**：[prd.md](prd.md) 验证循环 §、H2/H3 演进路线；[design/verification-agent-goal-spec.md](design/verification-agent-goal-spec.md)（现有 goal/验证设计）
+> **关联**：[prd.md](../../prd.md) 验证循环 §、H2/H3 演进路线；[design/verification-agent-goal-spec.md](../../design/verification-agent-goal-spec.md)（现有 goal/验证设计）
 >
 > **口径说明（2026-08-08 更新）**：本文中的 K1/K4/K8 数值为旧 Bench exploratory 基线，不再作为当前产品 KPI。当前优先级遵循 `roadmap.md` 的 M0-M3；无进展检测和循环状态埋点进入 M2，Reflexion、语义 Goal 和局部重规划属于后置实验能力。
 

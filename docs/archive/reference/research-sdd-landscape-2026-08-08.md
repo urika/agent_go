@@ -3,7 +3,7 @@
 > **类型**：调研分析（research），非设计文档
 > **日期**：2026-08-08
 > **用途**：作为后续概念设计/SDD 增强的输入材料。记录业界 SDD（Spec-Driven Development，规约驱动开发）现状、与 agent_go 现有能力对比、差距与启发。
-> **关联**：[design/agent-go-input-spec.md](design/agent-go-input-spec.md)（agent_go Task Spec）；[prd.md](prd.md) Spec Gate §；[research-goal-loop-mechanism-2026-08-08.md](research-goal-loop-mechanism-2026-08-08.md)（前序调研）
+> **关联**：[design/agent-go-input-spec.md](../../design/agent-go-input-spec.md)（agent_go Task Spec）；[prd.md](../../prd.md) Spec Gate §；[research-goal-loop-mechanism-2026-08-08.md](research-goal-loop-mechanism-2026-08-08.md)（前序调研，同目录）
 >
 > **产品口径说明（2026-08-08 更新）**：本文是方向性研究，不改变当前产品主线。当前先完成 M0-M1 的指标冻结和交付闭环；Spec 合规审查、Spec 偏差记录和循环状态埋点进入 M2，活文档、互操作和自改进能力进入 M4 后置决策。
 

@@ -4,7 +4,7 @@
 > 更新日期：2026-08-08
 > 当前阶段：P0 产品契约与交付闭环收敛
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
-> Goal/Loop 调研输入：[research-goal-loop-mechanism-2026-08-08.md](research-goal-loop-mechanism-2026-08-08.md)
+> Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
 > 当前执行清单：[m0-task-list.md](m0-task-list.md)
 
 ## 1. 产品目标

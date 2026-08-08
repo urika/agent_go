@@ -2,7 +2,7 @@
 
 > **文档类型**：产品需求输入（PRD Input）
 >
-> **来源**：Bench v1 数据分析（[bench-analysis-2026-08-01.md](../bench-analysis-2026-08-01.md)）暴露的数据缺口与方法论缺陷
+> **来源**：Bench v1 数据分析（[bench-analysis-2026-08-01.md](../archive/reference/bench-analysis-2026-08-01.md)）暴露的数据缺口与方法论缺陷
 >
 > **目标**：定义下一轮 Bench 测试的数据采集标准、实验设计规范和指标体系，支撑 Q3 KPI 的准确度量和产品决策
 >
@@ -374,4 +374,4 @@ pytest <existing_tests>  # repo 原有测试套件
 
 ---
 
-*关联文档：[bench-analysis-2026-08-01.md](../bench-analysis-2026-08-01.md) — v1 数据分析报告，本文档的需求来源。*
+*关联文档：[bench-analysis-2026-08-01.md](../archive/reference/bench-analysis-2026-08-01.md) — v1 数据分析报告，本文档的需求来源。*

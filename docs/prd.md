@@ -4,7 +4,7 @@
 > 更新日期：2026-08-08
 > 配套路线图：[roadmap.md](roadmap.md)
 > 当前阶段：M0 产品契约与指标冻结
-> Goal/Loop 调研输入：[research-goal-loop-mechanism-2026-08-08.md](research-goal-loop-mechanism-2026-08-08.md)
+> Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
 > 当前执行清单：[m0-task-list.md](m0-task-list.md)
 
 ## 1. 产品概述

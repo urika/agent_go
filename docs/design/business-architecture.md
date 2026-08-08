@@ -61,14 +61,14 @@
 | # | 待决策问题 | 当前倾向 | 需要拍板的关键点 | 状态 |
 |---|----------|---------|----------------|------|
 | B1 | **M1 交付的 merge 策略**：自动 merge-to-base 遇 main 分叉时怎么办 | A+B 都做（自动 merge + `agent_go merge` 手动命令），分叉时 ff-only 失败提示 | 分叉时是 fast-forward 失败提示（保守，让人处理），还是建 merge commit（自动合并，可能引入冲突）？ | ⏳ 待讨论 |
-| B2 | **缺口优先级**：交付（M1）vs spec 闭环（M2-M4）vs 循环智能（M7-M9，见 B5）谁先 | 倾向先 M1（产物出不去其他白搭） | 取决于 agent_go 定位：走向真实交付（M1 优先），还是继续做实验/bench 工具（循环智能/成本优化优先）？调研 [research-goal-loop-mechanism](../research-goal-loop-mechanism-2026-08-08.md) 基于成本 ROI 主张无进展检测优先，与本判断有分歧 | ⏳ 待讨论 |
+| B2 | **缺口优先级**：交付（M1）vs spec 闭环（M2-M4）vs 循环智能（后置候选）谁先 | 倾向先 M1（产物出不去其他白搭） | 取决于 agent_go 定位；调研 [research-goal-loop-mechanism](../archive/reference/research-goal-loop-mechanism-2026-08-08.md) 仅作参考 | ⏳ 待讨论 |
 | B3 | **spec 闭环 ROI**：0 次使用的功能值得做 4 天闭环吗 | 先 M3 冒烟验证，跑通了再做 M2/M4 | 如果冒烟发现一堆 bug，M2/M4 是否要重新设计？还是干脆砍掉 spec 闭环，把资源投到循环学习（B5 的 c 选项）？ | ⏳ 待讨论 |
 | B4 | **问题跟踪的定位**：GitHub issue 式状态机，还是分析聚合数据，还是 Reflexion 记忆源 | 取决于场景定位 | 真实场景是 bench（问题跟踪=分析模型弱点，只需聚合）还是交付（问题跟踪=跟踪 bug 修复，需状态机+issue 联动）？若选 B5 的 b/c（反思式），Problem 还要服务 Reflexion/KnowledgeStore，需 failure_pattern 分类 | ⏳ 待讨论 |
-| B5 | **循环智能层级**：agent_go 要不要从"反应式"升级到"反思式"？（来自 [research-goal-loop-mechanism](../research-goal-loop-mechanism-2026-08-08.md) 调研） | 倾向先做最小止血（建议 2 无进展检测 + 建议 5 数据埋点） | a) 保持反应式（现状，省成本但暴露 plan brittleness）；b) 补全 6 项 guardrails（Reflexion+无进展检测+重规划，K8 +2-4pp、K4 -20-40%，需 6-9 天）；c) 只补无进展检测+数据埋点（P0 止血，先积累数据再决定） | ⏳ 待讨论 |
+| B5 | **循环智能层级**：agent_go 要不要从"反应式"升级到"反思式"？（来自 [research-goal-loop-mechanism](../archive/reference/research-goal-loop-mechanism-2026-08-08.md) 调研） | 倾向先做最小止血（无进展检测 + 数据埋点） | a) 保持反应式；b) 补全 guardrails；c) 先做无进展检测和埋点，后续依据 M3 数据决定 | ⏳ 待讨论 |
 
 **B 类讨论顺序建议**：B2（定位）→ B5（循环智能层级）→ B4（问题跟踪定位）→ B1（merge 策略）→ B3（spec ROI）。B2 的答案直接决定 B3/B4/B5 的取舍；B5 的答案影响 B4（Problem 实体是否要承载 Reflexion 记忆）。
 
-**B5 选项与调研建议的对应**（[research-goal-loop-mechanism](../research-goal-loop-mechanism-2026-08-08.md) §五·五章）：
+**B5 选项与调研建议的对应**（[research-goal-loop-mechanism](../archive/reference/research-goal-loop-mechanism-2026-08-08.md) §五·五章）：
 - B5-a（保持反应式）= 现状
 - B5-c（最小止血）= 调研建议 2（无进展检测，1-2 天）+ 建议 5（数据埋点，1 天）
 - B5-b（补全 guardrails）= 调研建议 1（Reflexion）+ 建议 2 + 建议 3（局部重规划）+ 建议 5
@@ -77,7 +77,7 @@
 
 ## 闭环缺口速查
 
-基于代码事实核查（2026-08-08）+ [research-goal-loop-mechanism](../research-goal-loop-mechanism-2026-08-08.md) 调研，agent_go 有 5 个闭环缺口——4 个工程闭环缺口 + 1 个智能闭环缺口。
+基于代码事实核查（2026-08-08）+ [research-goal-loop-mechanism](../archive/reference/research-goal-loop-mechanism-2026-08-08.md) 调研，agent_go 有 5 个闭环缺口——4 个工程闭环缺口 + 1 个智能闭环缺口。
 
 | 缺口 | 名称 | 类型 | 紧急度 | 代码事实证据 | 对应 Milestone/决策 |
 |------|------|------|--------|------------|------------------|
@@ -139,7 +139,7 @@
 
 本方案的决策受以下调研文档直接影响，讨论 B 类问题时须参照：
 
-### [research-goal-loop-mechanism-2026-08-08.md](../research-goal-loop-mechanism-2026-08-08.md)
+### [research-goal-loop-mechanism-2026-08-08.md](../archive/reference/research-goal-loop-mechanism-2026-08-08.md)
 
 **核心结论**：agent_go 的 goal/loop 机制有扎实"骨架"但缺关键"神经"——能"执行到验证通过"，但不能"从失败中学习"和"自适应调整"。处于 ReAct 裸循环与 Loop Engineering 最佳实践之间的中间位置。
 
@@ -171,4 +171,4 @@
 | 日期 | 版本 | 变更 |
 |------|------|------|
 | 2026-08-08 | v0.1 决策登记版 | 初始版本：登记 A 类 6 项已决策 + B 类 4 项待决策 + 四大缺口 + 6 个 Milestone + 5 个不变量。完整业务架构章节待 B 类讨论完后补充 |
-| 2026-08-08 | v0.2 补充循环智能缺口 | 纳入 [research-goal-loop-mechanism](../research-goal-loop-mechanism-2026-08-08.md) 调研输入：新增第 5 个缺口（循环智能断裂）、新增 B5 待决策（循环智能层级）、缺口表区分工程/智能两类、新增"关联调研"章节（含调研建议与 Milestone 对照）、B2/B3/B4 更新调研输入引用 |
+| 2026-08-08 | v0.2 补充循环智能缺口 | 纳入 [research-goal-loop-mechanism](../archive/reference/research-goal-loop-mechanism-2026-08-08.md) 调研输入：新增第 5 个缺口（循环智能断裂）、新增 B5 待决策（循环智能层级）、缺口表区分工程/智能两类、新增"关联调研"章节（含调研建议与 Milestone 对照）、B2/B3/B4 更新调研输入引用 |

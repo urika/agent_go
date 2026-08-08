@@ -7,6 +7,8 @@
 > **适用对象**：PM、工程师、以及任何需要理解「需求怎么变成代码」的人。
 >
 > **日期**：2026-08-01
+>
+> **当前基线（2026-08-08）**：实际流程和验收状态以 `functional-architecture.md`、`delivery-design.md`、`verification-design.md` 及 M0 清单为准；本文保留为上下游生命周期说明。
 
 ---
 
@@ -430,6 +432,6 @@ agent_go 不做什么：
 *关联文档：*
 - [agent-go-input-spec.md](agent-go-input-spec.md) — agent_go 输入准则（Task Spec 规范 + Spec Gate 设计）
 - [bench-v2-data-requirements.md](bench-v2-data-requirements.md) — Bench 数据需求规格
-- [bench-analysis-2026-08-01.md](../bench-analysis-2026-08-01.md) — Bench v1 数据分析报告
+- [bench-analysis-2026-08-01.md](../archive/reference/bench-analysis-2026-08-01.md) — Bench v1 数据分析报告（历史参考）
 - [prd.md](../prd.md) — 产品定位、KPI、设计原则
 - [roadmap.md](../roadmap.md) — 迭代排期

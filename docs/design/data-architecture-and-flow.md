@@ -525,3 +525,55 @@ Q4 2026      3-6 月      5,000    125 MB   纯文件系统 ✅
 | 流 C 事件总线 | ⏳ 待建（events.jsonl + Webhook） | P1 | 实时集成 |
 | 跨项目趋势 | ⏳ 待建（`query_project_trend`） | P1 | 管理视角 |
 | 外部集成查询 | ⏳ 待建（Python API 结构化返回） | P0 | 基础设施化入口 |
+
+## 10. 当前数据契约（As-Built / M0）
+
+### 10.1 运行事实
+
+`meta.json` 是单任务生命周期事实，核心字段包括：
+
+- `task_id`、`repo`、`task`、`status`。
+- `base_commit`、`base_branch`、`delivery_branch`、`target_branch`。
+- `subtasks[]`、`results[]`。
+- `recovered_at`、`schema_version`。
+- `accepted_delivery`、`failure_class`（M0 计算契约）。
+
+`results[]` 是子任务事实，核心字段包括：
+
+- `subtask_id`、`status`、`verify_ok`、`retry_count`。
+- `commit_hash`、`branch`、`worktree`。
+- `failure_reason`、`kill_reason`、`failure_class`。
+- `verification_results`、`verification_state`。
+
+### 10.2 计量事实
+
+`metering.jsonl` 每行代表一次 API/模型/验证计量事件，至少区分：
+
+- `role`、`actual_provider`、`actual_model`。
+- `task_id`、`sub_id`、`difficulty`。
+- `prompt_tokens`、`completion_tokens`、`cost_usd`、`latency_ms`。
+- `result`、`fallback_reason`、`event`。
+- `cost_censored` 不作为新的实际成本重复累计。
+
+### 10.3 评估事实
+
+Bench record 必须携带：
+
+- `bench_schema_version`。
+- `task_id`、`task_version`、`suite`、`source_batch`、`repeat`。
+- `model`、`planner_model`、`judge_model`、`difficulty`。
+- `failure_class`、`accepted_delivery`、`pr_created`。
+- `spec_compliance`、`architecture_compliance`。
+
+旧 `pass_rate` 和 `$ / pass` 只能用于同 suite、同 source batch 的诊断，不替代产品级 Accepted Delivery 指标。
+
+### 10.4 数据所有权
+
+| 数据 | 写入者 | 消费者 | 事实类型 |
+|---|---|---|---|
+| `meta.json` | pipeline/recover | CLI/Web/MCP/eval | 任务状态事实 |
+| `result.json` | executor/pipeline | inspect/review/eval | 子任务事实 |
+| `metering.jsonl` | config/api/executor | eval/metric report | 成本计量事实 |
+| `verify_state.json` | executor | resume/未来 KnowledgeStore | 验证过程事实 |
+| Bench JSONL | bench | models/report | 评估事实 |
+| `review.json` | review | CLI/Web/PR | 人工/模型审查事实 |

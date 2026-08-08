@@ -1,6 +1,10 @@
 # agent_go 架构设计
 
 > 一人维护，写下来是为了 6 个月后做决策时不重新考古
+>
+> **文档分层**：本文是 As-Built 技术架构；功能流程见 [design/functional-architecture.md](design/functional-architecture.md)，交付边界见 [design/delivery-design.md](design/delivery-design.md)，验证见 [design/verification-design.md](design/verification-design.md)，模块目录见 [design/module-catalog.md](design/module-catalog.md)，系统 ADR 见 [design/adr/](design/adr/)。
+
+> **当前基线（2026-08-08）**：产品成功以 Accepted Delivery 为边界；commit、verification、delivery 三层状态分离；Bench 按 suite 和 source batch 治理。本文中的历史 S 编号仅用于代码演进追溯，不代表当前 roadmap 阶段。
 
 ## 一句话
 
