@@ -1,0 +1,18 @@
+{
+  "exploratory": true,
+  "description": "Historical Bench files retained for audit; not a product KPI baseline.",
+  "files": [
+    "baseline.jsonl",
+    "final-baseline.jsonl",
+    "kimi-baseline.jsonl",
+    "results.jsonl",
+    "results_v2.jsonl",
+    "results_v2.orig.jsonl",
+    "results_v2.fixed.jsonl",
+    "results_v3.jsonl",
+    "results_v4_calib.jsonl",
+    "results_v4_medhaiku.jsonl",
+    "results_v4_medhaiku2.jsonl",
+    "results_v5_smoke.jsonl"
+  ]
+}

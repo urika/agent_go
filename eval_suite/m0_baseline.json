@@ -1,0 +1,17 @@
+{
+  "baseline_id": "m0-canonical-v1",
+  "suite": "canonical",
+  "tasks": [
+    "add-format-helper", "fix-missing-default", "add-task-priority", "add-error-handling", "write-storage-test",
+    "implement-done-command", "refactor-to-dict", "add-simple-caching", "email-validator", "safe-file-reader",
+    "add-tag-system", "implement-archiving", "add-metrics-system", "add-caching-layer", "security-hardening-taskmgr",
+    "storage-optimization-taskmgr", "race-condition-taskmgr", "stage-validation-refactor-datapipeline",
+    "conditional-branching-datapipeline", "integration-tests-datapipeline", "db-performance-optimization",
+    "db-end-to-end-optimization"
+  ],
+  "stress_excluded_from_ordinary_average": [
+    "add-caching-layer", "security-hardening-taskmgr", "storage-optimization-taskmgr", "race-condition-taskmgr",
+    "conditional-branching-datapipeline", "integration-tests-datapipeline", "db-performance-optimization",
+    "db-end-to-end-optimization"
+  ]
+}

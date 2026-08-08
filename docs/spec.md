@@ -250,7 +250,7 @@ analyze_cost(tasks_dir)         → API 费用 + per-model/per-role 拆分
                                   + cost_source_breakdown {metering, rebuilt}
                                   + unknown_model_events（价目表覆盖度监控）
                                   + fallback_events（降级事件计数，PRD 铁律留痕字段）
-                                  + $/pass rate（北极星）
+                                   + $/pass rate（历史诊断指标；产品主指标见 compute_frozen_metrics）
 gate_cost(baseline, tasks_dir)  → 绝对阈值门禁：actual > baseline → 不通过
                                   无数据（actual=None）→ passed=True（不阻挡 CI）
 gate_cost_regression(tasks_dir) → 回归门禁（PRD "不劣化"语义）：
@@ -407,10 +407,11 @@ cmd_bench(args)                            → 对照运行编排器
   ── 启动前 S12 预检：_preflight_model_pricing 探测实际后端模型 + 校验定价覆盖
        （缺定价交互询问/--yes 仅告警；路由名有定价则沿用）
   ── --tasks eval_suite/                   标准任务集（YAML，带 ground-truth 验证）
-  ── --models M1,M2,M3                     被评模型（每模型跑全部任务）
+   ── --models M1,M2,M3                     被评模型（每模型跑所选 suite 任务）
   ── --repeat N                            每任务重复 N 次（默认 3）
   ── --output results.jsonl                JSONL 落盘
-  ── --source-batch NAME                   批次标识（baseline / results_v2 / smoke-*）
+   ── --source-batch NAME                   批次标识（baseline / results_v2 / smoke-*）
+   ── --suite smoke|core|decision|stress    按任务套件筛选（默认全部 canonical 任务）
   ── 内部 subprocess 调 agent_go run（--yes --headless --preserve-worktrees --parallel 1）
        --parallel 1：S10-P2 顺序执行，消除并发对 elapsed/cost 的干扰
   ── 动态 timeout（S10-P2）：_dynamic_timeout = max(任务YAML配置, 子任务数×150s+120s)
@@ -420,15 +421,23 @@ cmd_bench(args)                            → 对照运行编排器
        timed_out     bool   任务是否因超时被强制终止（cooperative timeout SIGTERM/SIGKILL）
        judge_model   string semantic evaluator 模型（role=evaluator 的 actual_model）
        planner_model string plan 生成模型（role=planner 的 actual_model）
-       source_batch  string 批次标识（跨批次追溯）
+        source_batch  string 批次标识（跨批次追溯）
+        bench_schema_version int 当前固定为 1
+        task_version  string 任务 YAML 内容版本
+        suite         string smoke/core/decision/stress/canonical
+        repeat        int 从 1 开始的重复编号
+        difficulty    string easy/medium/hard
   ── record 字段（S10-P2 P1 扩展）：
        semantic_pass Optional[bool]  全部子任务语义评估显式通过（跳过/未启用→None）
        binary_pass   bool    all_verify_ok AND semantic_pass is not False（二元通过，K1 口径）
        per_subtask   json[]  每子任务 {sub_id,status,retries,verify_ok,semantic_ok}
        plan_step_count int    Planner 分解步骤数（subtasks 长度）
-  ── record 字段（S10-P2 代码质量 §4.1）：
+   ── record 字段（S10-P2 代码质量 §4.1）：
        lint_errors   int    _collect_quality：各保留 worktree 的 ruff(E/F/W)+mypy 错误数之和
-       tests_broken  int    worktree pytest 失败用例数之和（基线全绿→失败=回归）
+        tests_broken  int    worktree pytest 失败用例数之和（基线全绿→失败=回归）
+   ── record 产品交付字段：suite / risk_types / high_variance
+        delivery_branch_created / pr_created / accepted_delivery
+        spec_compliance / architecture_compliance / failure_class
 
 cmd_baseline(args)                         → 对照基线编排器（S10-P2 §2.3）
   ── claude -p 裸跑（不走 agent_go harness），临时副本中执行
@@ -440,8 +449,11 @@ cmd_baseline(args)                         → 对照基线编排器（S10-P2 §
 cmd_models(args)                           → 决策矩阵展示
   ── --results results.jsonl               读取 bench 产出
   ── 按模型聚合：pass_rate / dollar_per_pass / k8 / sample_size / recommendation
-  ── $/pass 统一口径（§3.1）= sum(total_cost_usd) / sum(pass_rate)
-  ── K8 修订（§3.4）= 通过 record 中 total_retries==0 占比
+   ── $/pass 仅作同 suite、同 source_batch 内的诊断指标
+   ── 产品主指标：Cost per Accepted Delivery = valid_cost / accepted_delivery_count
+   ── Metric Freeze：agent_go eval metric-freeze --results <path> --source-batch <batch>
+   ── Batch manifest：agent_go eval batch-manifest --results <path> --source-batch <batch>
+   ── K8 修订（§3.4）= 通过 record 中 total_retries==0 占比；仅作诊断指标
   ── 代码质量（S10-P2）：avg_lint_errors / avg_tests_broken / code_regression_rate
        （通过 record 中 tests_broken>0 占比，§3.5 代码回归率）
   ── 决策规则：pass_rate<60%→discouraged, >=85%→recommended, <3样本→insufficient

@@ -169,7 +169,7 @@ Task Spec 是一个 Markdown 文件，包含以下章节。带 `*` 的为必填�
 - [ ] TokenManager 原有 token 类型（password_reset）功能不受影响
 
 ## 6. 参考资料
-- 设计文档：[docs/design/email-verification.md](docs/design/email-verification.md)
+- 设计文档：[产品需求文档](../prd.md)
 - 类似实现参考：commit `a1b2c3d`（密码重置 token，TokenManager 扩展模式）
 - 相关 Issue：#142, #167
 

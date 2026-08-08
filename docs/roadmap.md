@@ -1,313 +1,432 @@
-# agent_go Roadmap：从现状到「周五派发、周一 merge」
+# agent_go Roadmap：可靠地产出可合并交付物
 
-> 基线：2026-07-24，v2.0.0，684 测试全绿，14 项已知缺陷清零。
-> 目标对齐 [prd.md](prd.md) 的 Q3 / 年度 KPI；差距分析依据见 prd.md「P0 缺失功能」「P1 重点」章节。
+> 版本：v3.0
+> 更新日期：2026-08-08
+> 当前阶段：P0 产品契约与交付闭环收敛
+> 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
+> Goal/Loop 调研输入：[research-goal-loop-mechanism-2026-08-08.md](research-goal-loop-mechanism-2026-08-08.md)
+> 当前执行清单：[m0-task-list.md](m0-task-list.md)
 
-## 进度快照（2026-08-01 更新，1554 测试全绿）
+## 1. 产品目标
 
-| 迭代 | 状态 | 说明 |
-|------|------|------|
-| **S11 L1.5 AST 冲突检测** | ✅ 完成（2026-08-01） | `detect_step_conflicts()` 用 ast 提取 Python 顶层符号，Plan 确认后拦截多 step 同文件/同符号冲突；符号级（交互确认）与文件级（提示）分级；零 LLM 成本（[arXiv:2603.24284](design/sdd-references-and-frameworks.md) 97% 精度）。1521 测试全绿（+15） |
-| **S10-P2 全因子 Bench Tier 1 编排** | ✅ 完成（2026-08-01） | P1 字段采集（`per_subtask`/`binary_pass`/`semantic_pass`/`plan_step_count`，`751ec10`）；语义评估 API 故障跳过信号（`a72d4bf`）；`--parallel 1` 顺序执行消除并发干扰；**代码质量维度**（`_collect_quality`：ruff E/F/W + mypy + pytest → `lint_errors`/`tests_broken`，含代码回归率分析）；**对照基线** `eval baseline`（claude -p 裸跑，stream-json 提 cost + verification 判定 + 质量检查）；动态 timeout（子任务数 × 150s + 120s）。1554 测试全绿（+14 自 1521） |
-| **S10-P1 Bench v2 Schema 扩展 + Cross-Judge** | ✅ 完成（2026-08-01） | bench record 新增 `timed_out`/`judge_model`/`planner_model`/`source_batch` 字段（P0）；`eval bench --source-batch`；$/pass 统一口径 = sum(cost)/sum(pass_rate)（§3.1）+ K8 修订 = 通过 record 中 zero-retry 占比（§3.4）；cross_judge 输出 `self_judge_model` + 自评偏差量化报告。1521 测试全绿（+11） |
-| **S11-P0 结构化输入 + 准入审查** | ✅ 完成（2026-08-01） | `spec.py`（Task Spec 7 章节解析 + L1 硬门禁 4 项检查）；`--spec`/`--force` CLI 参数；`spec template`/`spec validate` 子命令；generate_plan 接受 `spec_context` 注入 system prompt 硬约束。1521 测试全绿（+31 spec 测试）。设计稿：[design/agent-go-input-spec.md](design/agent-go-input-spec.md) |
-| **Bench v1 数据分析** | ✅ 完成（2026-08-01） | 7 模型 × 22 任务 × 5 批次，490 条有效记录。KPI 基线校准（K1 83.9%/K8 88.9%/$pass $0.39）、模型维度（Haiku > Sonnet）、DeepSeek 不可用验证、difficulty 标签偏差识别。4 处数值修正。报告：[bench-analysis-2026-08-01.md](bench-analysis-2026-08-01.md)；数据需求：[design/bench-v2-data-requirements.md](design/bench-v2-data-requirements.md) |
-| **输入准则 + 准入审查设计** | ✅ 完成（2026-08-01） | Task Spec 7 章节规范 + Plan prompt 注入映射；Spec Gate L1 硬门禁（4 项）+ L2 软警告（4 项 LLM 辅助）；`--spec` / `spec template` / `scope` 命令设计。设计稿：[design/agent-go-input-spec.md](design/agent-go-input-spec.md)；PRD 已更新结构化输入章节。待落地实施 |
-| **CLI/MCP 交互层** | ✅ 完成（2026-08-01） | MCP 6 tools（新增 `list_tasks` / `cancel_task`）+ Resources 原语（6 个）+ Prompts 原语（3 个 SOP 模板）+ **HTTP/SSE Transport**（`agent_go mcp --http`，Bearer token 鉴权）；错误响应 `fix` 字段（ERROR_TEMPLATES 7 种类型）；ActivityTracker 并行活动追踪（异步任务后台监控）；CLI 失败恢复闭环引导 + 后续操作卡片；任务生命周期 `cancelled` 状态可恢复。设计稿：[design/cli-mcp-design-analysis.md](design/cli-mcp-design-analysis.md) + [design/cli-mcp-interaction-analysis.md](design/cli-mcp-interaction-analysis.md) |
-| **CLI/MCP 保留项落地** | ✅ 完成（2026-08-01） | 波次进度卡片（`_estimate_wave_count` + wave N/M 卡片）；`skills show <name>` SKILL.md 自描述；多 profile（`--profile` / `AGENT_GO_PROFILE` → `~/.agent_go/profiles/`）；增量 Plan 迭代 + 实时 Diff（`show_plan_diff` + 菜单 [V] 版本历史）；Sampling 原语（`request_sampling` stdio 双向 + cancel_task `confirm`）。改进清单全部闭环 |
-| **S9-A MCP 消费层** | ✅ 完成（2026-08-01） | `mcp_client.py`（MCPClientPool + MCPServerConnection）；`mcp_servers` config 节（command/args/env/enabled/tool_filter/scope）；pipeline 启动/收尾连接池管理；外部工具命名空间 `mcp__{server}__{tool}`（agent_loop tools 合并 + claude `--mcp-config` 透传）；故障隔离降级 warning。设计稿：[design/office-capability-extension.md](design/office-capability-extension.md) |
-| **S9-B 产物导出** | ✅ 完成（2026-08-01） | `artifacts.py`（collect_from_worktree + export + render_export_summary）；`__artifacts__/` 约定目录（声明制）；`--artifact-dir` CLI + `artifact_dir` config；pipeline 清理 worktree 前收集；TASK.md 注入产物约定；final report 列出导出清单。B1/B2/B3 验收通过 |
-| **测试加固** | ✅ 完成（2026-08-01） | 1464 测试全绿（+22 自 1442 基线） |
-| S1 计量日志 | ✅ 完成 | planner/worker 双角色 metering.jsonl 全链路（run + resume）；eval cost per-role 拆分；修复 executor 计量路径死代码、api.py router 路径 NameError || S1 M2 失败摘要 | ✅ 完成 | `failure_reason`（验证命令 + exit code + stderr 尾部）写入结果，`show` 展示 |
-| S2 验证循环 | ✅ 完成（2026-07-25） | 全链路验收修复 8 项缺口（含 wave 调度排除 blocked 的关键 bug、CLI 配置贯通）+ 剩余项落地：Stop Hook GoalInjector（`--goal-hook`）、retry_timeout 硬超时、goal.enabled 默认对齐 false、`--goal` 开关 |
-| M1 完成通知 | ✅ 完成 | `notify.py` 多通道（desktop/webhook/command）+ 事件订阅 + IM 适配器，设计稿：[design/notification-webhook-spec.md](design/notification-webhook-spec.md) |
-| S4 模型路由 | 🔶 部分推进 | `router.py`（角色路由 + 熔断 + 降级留痕）已落地，设计稿：[design/router-multi-provider-extension.md](design/router-multi-provider-extension.md)；**复杂度双通道已完成**（2026-07-25：Planner 打 difficulty 标签 → `worker_models` 映射 → claude `--model`，计量记录 difficulty/真实模型） |
-| M3 PR 质量仪表 | ✅ 完成 | `_build_quality_dashboard`：通过率/验证率/合并就绪指示 + 子任务明细 + M5 启发式验证警告（2026-07-25 补 blocked 图标与置信度警告） |
-| M4 时间预估 | ✅ 完成 | `estimate_task_duration`：历史子任务耗时中位数 × 拓扑波次（考虑并行度），执行前展示 + `time_estimate` 事件 |
-| **PRD 分析改进** | ✅ 完成 | OpenChamber 竞品对比分析、四阶段开发流程模型（含 M7 审查阶段缺口识别）、用户介入点设计；已写入 `prd.md` + 排入 `roadmap.md` S5-S7 |
-| **测试加固** | ✅ 完成（2026-07-25） | 1130 测试 5 连绿。修复 ISSUE-24（goal watchdog flaky 根治）、ISSUE-25（3 处测试漂移）；新增 72 测试覆盖 agent_loop 集成、5 个未测 CLI 命令、TUI 辅助函数、subtask 超时分支 |
-| **$/pass 门禁** | ✅ 完成（2026-07-25） | `eval gate`（绝对阈值 + `--check-regression` 回归对比 + `--update-baseline`）；CI 接入 `eval gate --baseline 0.05`；K5 `resume_success_rate` 派生；修复 ISSUE-26/27/28（计价失真 + evaluator 重复记账 + PRD 语义断裂）。详见 [ISSUES.md](ISSUES.md) |
-| **模型分级 + 评估机制设计** | ✅ 完成（2026-07-25） | 三角色 × 三档位分级矩阵 + 三层评估体系（确定性/交叉评判/决策汇总）；完整设计稿 [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md)；**P0 已落地（48 模型定价表 + bench 编排器 + eval models）** |
-| **S8 P0 模型评估机制** | ✅ 完成（2026-07-25） | `pricing.py`（48 模型定价表 + MODEL_TIER + 7 provider 默认）；`bench.py`（subprocess 隔离编排器 + `eval bench/models`）；`cross_judge.py`（交叉评判矩阵 P1 简化版：禁绝自评 + 启发式评分 + 人工校准；P2 升级结构化 rubric）；`eval_suite/`（22 任务 + 4 fixtures）；`config.example.json` 三套预设（国际/国内/混合） |
-| **核心解耦** | ✅ 完成（2026-07-25） | evaluator/notify/goal/skills/agent_loop 全部动态 import + try/except；`estimate_task_duration` 迁 planning.py；`MODEL_PRICES` 迁 pricing.py；解耦原则固化在 [architecture.md](architecture.md) |
-| **M7 结果审查阶段** | ✅ 完成（2026-07-25 核实） | `cmd_review --task <id>`：按文件分组聚合 diff 摘要 + approve/reject/changes-requested 人工审批；`--deep` 独立模型逐子任务分析。PRD Phase 3 缺口关闭 |
-| **Plan 版本管理** | ✅ 完成（2026-07-25 核实） | `plan-history <id>` / `plan-diff <id> --v1 --v2` 命令已存在 |
-| **PR 自动推送** | ✅ 完成（2026-07-25 核实） | `cmd_pr --push` 通过 gh CLI 自动创建 PR |
-| **S6 失败通知增强** | ✅ 完成（2026-07-25 核实） | notify.py 事件已含 `subtask_failed` / `on_blocked`，子任务失败即推送，无需等整体任务结束 |
+agent_go 当前不追求成为完整的 Agent 平台、项目管理系统或 IDE。当前唯一产品目标是：
 
-## 总体节奏
-
-```
-Q3 2026（信任层 + 成本层 + Bench v2）     Q4 2026（体验层 + 规模化）
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━       ━━━━━━━━━━━━━━━━━━━━━━━━━━
-验证循环 → 计量日志 → 模型路由               PR 仪表 → 时间预估 → 审查流水线
-Bench v2 → 交叉评判 → KPI 真实基线          KnowledgeStore → Reviewer 灰度
-K1≥92% K8≥80% K4≤$0.05                     K1≥97% K4≤$0.03 K3≤1.5min
-⚠️ Bench v1: K1 83.9% K8 ✅ 88.9% K4 🔴 $0.34-0.69
+```text
+需求输入
+  -> Plan
+  -> 子任务执行
+  -> 验证与修复
+  -> 变更汇总
+  -> 正确目标分支
+  -> 可审查 PR
+  -> 用户可合并
 ```
 
-> **2026-08-01**：Bench v1 实测 KPI 基线（K1 83.9%、K8 88.9%、K4 $0.34-0.69、$/pass $0.39）。K8 已超额完成 Q3 目标，K1 差距 8.1pp，K4/$/pass 差距 7-14x。Q3 $0.05 成本目标在当前技术栈下极其激进，S10 完成后以 bench 实测数据做最终判定。
+### 1.1 Accepted Delivery 定义
 
-> **⚠️ 2026-08-06 度量审计更正**：上表 KPI 基线（K1/K4/K8/$/pass）经 [bench-metric-validity-2026-08-06.md](design/bench-metric-validity-2026-08-06.md) 审计发现**不可直接采信**——`binary_pass` 缺陷（55% v3 记录自相矛盾）、`pass_rate` 假失败（v3 34% 实为 ~67%）、四套采集器不可比、infra 故障混入分母。**S10「可信 KPI 基线」目标在度量修复前不算达成**：v2/v3/v4 的 bench 数字须先经 S12-P0 修复口径、重算后才可信。K8"🟢达标"/K1"🔴"/K4"7-14x"均为临时状态。
+一次任务只有同时满足以下条件，才算 Accepted Delivery：
 
-## Q3 2026（7–9 月）：补上信任与成本两根支柱
+- 所有必要子任务完成，或明确标记为无需执行。
+- 所有必要验证通过，且没有未处理的高风险告警。
+- 代码变更已提交到明确的 delivery branch。
+- delivery branch 与目标 base branch、PR head/base 关系正确。
+- 用户可以通过 PR 或显式 merge 命令取得完整变更。
+- `meta.json` 持久化 `commit_hash`、`target_branch`、`delivery_branch` 和 `pr_url`（如已创建）。
+- 失败任务保留可审查现场，并提供 inspect/review/resume 指引。
 
-| 迭代 | 交付物 | 对应缺口 | 预估 | 验收门禁 |
-|------|--------|---------|------|---------|
-| **S1**（7 月底–8 月初） | 结构化计量日志落地：`role / actual_provider / cost_usd / fallback_reason` 每请求一条；接通 `metrics.extract_usage` | 差距 3/4 的数据源 | ~2 天 | eval cost 报表能看到 per-role 拆分 |
-| **S1** | M2 失败原因摘要：meta.json 增加 `failure_summary`（验证命令 + exit code + stderr 尾部），`show`/`status` 直接展示 | M2，K6 7/9→8/9 | ~1 天 | 失败任务不看日志能定位原因 |
-| **S2**（8 月上中旬） | 验证循环 Phase 1：VerificationAgent + RepairAgent（fix prompt 注入 stdout/stderr/git diff）+ `max_retries` 可配（默认 3）+ **blocked 阻断下游** | M5/M6，K8 | 2–3 天（设计稿已定，见 [design/verification-agent-goal-spec.md](design/verification-agent-goal-spec.md)） | 注入故障的端到端用例：下游被阻断、worktree 保留待审 |
-| **S3**（8 月下旬） | 验证循环 Phase 2：`/goal` 注入 + Stop Hook + watchdog；Phase 4：eval 新指标（首次通过率、重试成功率、阻断率） | K8 度量闭环 | 3–4 天 | K8 首次通过率有可追溯数据源 |
-| **S3** | M1 完成通知：任务结束触发 webhook / 系统通知（最小实现，配置驱动） | M1 | ~1 天 | `--yes` 无头跑完能收到通知 |
-| **S4**（9 月） | 角色感知模型路由：planner/worker/reviewer 三通道配置 + 降级留痕（`fallback_reason` 必填）+ 本地模型并发上限显式化 | 差距 3，K4 | 3–5 天 | **发布门禁：$/pass rate 不劣化**（对比 S1 基线） |
-| **S11-P0**（8 月第 1-2 周）✅ | **结构化输入 + 准入审查**：`--spec` 参数（Task Spec 解析注入 Plan prompt）；`agent_go spec template`（模板生成）；`spec validate`（L1 审查）；Spec Gate L1 硬门禁（必填章节/文件路径/白名单/长度下限，确定性检查）；`--force`/`--yes` 行为定义 | 输入质量 → Plan 质量 → 成本控制 | ✅ 完成（1495 测试，+31 spec 测试） |
-| **S11 L1.5**（8 月第 3-4 周）✅ | **Spec Gate L1.5 AST 冲突检测**（学术驱动新增）：`detect_step_conflicts()` 用 ast 提取 Python 顶层符号，Plan 确认后、执行前检测多 step 同文件/同符号冲突。符号级（高置信，交互确认）与文件级（提示）分级。零 LLM 成本。学术支撑 [arXiv:2603.24284](design/sdd-references-and-frameworks.md#26-多-agent-协调与规范鸿沟serper-补充关键) 实测 97% 精度 | 多子任务集成冲突前置拦截 | ✅ 完成（1521 测试，+15 L1.5 测试） |
-| **S11**（9 月，依赖 S10-P1） | Spec Gate L2 软警告（LLM 辅助：范围完整性/约束一致性/验收可自动化度/历史风险匹配） | 输入质量 → 降低方向偏离和无效重试 | P1 ~1d | L2 警告准确率 >80%（人工抽检 20 条 Spec） |
-| **S11**（9 月，依赖 S10-P1） | `agent_go scope`（轻量 Scoping：读代码库 + 追问澄清 → 输出 Task Spec 草稿） | 上游工具链完整性 | P1 ~2d | 端到端：`agent_go scope "需求" → Task Spec → agent_go run --spec → PR` |
-| **S10**（8-9 月） | **Bench v2：可信 KPI 基线 + 模型选型决策依据**（详见 [prd.md §Bench v2 计划](prd.md) 和 [design/bench-v2-data-requirements.md](design/bench-v2-data-requirements.md)） | — | — | — |
+### 1.2 产品不承诺
 
-**S10 分阶段详情：**
+当前阶段不承诺以下能力：
 
-| 阶段 | 交付物 | 预估 | 验收门禁 |
-|------|--------|------|---------|
-| **S10-P1**（8 月第 1-2 周）✅ | **Schema 扩展 + Cross-Judge**：新增 `timed_out`/`judge_model`/`planner_model`/`source_batch` 字段（P0）；统一 $/pass 计算口径 + K8 定义修订为「通过 record 中 zero-retry 占比」；对 v1 已有 output 运行 cross_judge（3-4 judge 模型交叉评判，量化自评偏差） | ✅ 完成（2026-08-01，`551b713`；数据 `929bd58`） | **S10-P2**（8 月第 3-4 周）✅ | **全因子 Bench Tier 1**：Claude 三模型 × 22 任务 × 3 重复 = 198 次运行（`--parallel 1` 顺序执行，消除并发干扰）；新增 `per_subtask`/`binary_pass`/`semantic_pass`/`plan_step_count` 字段（P1）；代码质量维度（lint + test regression 自动检测）；对照基线（`claude -p` 裸跑 5-6 代表性任务） | ✅ 代码完成（2026-08-01，见进度快照 S10-P2 行）；198 次全因子运行待执行 | ✅ 198 条记录完整无缺失字段；对照基线数据到位 |
-| **S10-P2b**（与 P2 并行，学术驱动） | **spec 细节梯度对照实验**（[prd.md §Spec Gate 增强](prd.md)）：对 6-8 个多子任务任务，用 4 级 spec 细节（L0 完整 Spec / L1 去约束 / L2 仅目标 / L3 裸 prompt）跑，测 pass_rate 与集成成功率随 spec 细节的变化。**填补「SDD 无对照实验」学术空白**。学术支撑 [arXiv:2603.24284](design/sdd-references-and-frameworks.md)（恢复完整 spec 即恢复 89% 上限） | ~1d（复用 P2 管道） | 输出 spec 细节 → pass_rate 回归曲线；反哺 Spec Gate 阈值校准 |
-| **S10-P3**（9 月第 1-2 周） | **分析 + 决策更新**：全量指标计算（含 95% CI + 效应量）；per-task 难度系数发布；模型分级矩阵 bench 实测校准；`router recommend` 基于 bench 数据自动生成路由配置；PRD KPI 基线更新；**semantic evaluator 职责边界明确化**（[prd.md §Spec Gate 增强](prd.md)）：界定为「只查结构残差」，不重复 shell/lint 能确定的验证。学术支撑 [arXiv:2603.25773](design/sdd-references-and-frameworks.md)（AI 审 AI 是结构性循环） | ~2d 分析 + ~1d 文档 | K1/K4/K8/$/pass 四个指标汇报 CI；分级矩阵标注数据来源（bench 实测 vs 厂商声称）；router recommend 输出可复现；semantic evaluator 职责边界文档化 |
-| **S10-P4**（9 月第 3-4 周，可选） | **扩展 + 稳定性**：Tier 2+3 模型扩展（DeepSeek/Kimi 补齐全部 22 任务 + ≥3 重复）；高方差任务增加到 5-10 次重复；Plan 质量维度抽样评估；级联效应专项测试 | ~1d 代码 + 按 bench 耗时 | Kimi hard 任务首次有数据；稳定性 CV 报告发布 |
+- 自动替代需求管理、排期和人员协作系统。
+- 自动决定所有复杂任务的最佳架构方案。
+- 通过 KnowledgeStore 或自进化机制保证成功率必然提升。
+- 通过单一模型 benchmark 结果保证生产质量。
+- 同时维护 Office、IDE、CI、多个 Agent Runtime 等所有产品表面。
 
-**S10 出关口径**：cross_judge 自评偏差量化完成、KPI 四个指标有 CI、模型分级矩阵以 bench 实测为唯一依据、$pass 计算口径统一且文档化。
+### 1.3 现有能力底座
 
-**依赖关系**：S10-P1 无前置依赖，可立即启动。S10-P2 依赖 P1 schema 稳定。S10-P3 依赖 P2 数据到位。S10-P4 不阻塞 P3 出关，可并行或延期。**S10 整体不阻塞 S9-B（产物导出）**——两者改动点不重叠。
+以下能力已经存在于代码库，可作为 M0-M3 的实现基础，但不自动代表 Accepted Delivery：
 
-**S11 依赖链（新增）**：
-```
-S11-P0 (--spec + spec template + L1 gate) ← 独立，立即启动，~2d
-S10-P1 (schema + cross_judge)              ← 独立，立即启动，~3d
-    ↓
-S11-P1 (L2 gate + agent_go scope)          ← 依赖 S10-P1（需 judge 质量可信）
-    +
-S10-P2 (全因子 bench)                       ← 依赖 S10-P1
-    ↓
-S10-P3 (分析 + 分级校准)
-    ↓
-S6 (Reviewer 灰度 + KnowledgeStore) → S7 (router recommend)
-```
-S11-P0 和 S10-P1 可并行启动，改动点不重叠（S11 改 CLI + api.py prompt 注入，S10 改 eval 数据采集 schema）。
+- Plan -> Decompose -> Execute 主流程。
+- Git worktree 隔离、DAG wave 调度和上游 artifact 传递。
+- 验证、修复重试、blocked 阻断和失败 worktree 保留。
+- 结构化 metering、模型路由、成本控制和恢复命令。
+- `review`、MCP Server、MCP Client、产物导出和 CLI JSON 输出。
 
-**数据需求**：完整 schema 扩展、实验设计、指标体系、统计规范见 [design/bench-v2-data-requirements.md](design/bench-v2-data-requirements.md)。
+后续验收关注这些能力是否共同形成可靠交付，而不是继续单独增加模块数量。
 
-**Q3 出关口径（2026-08-01 重评估）**：K1 ≥92%、K8 ≥80%、K4 ≤$0.05、$/pass ≤$0.05、K6 8/9。
+## 2. Roadmap 管理规则
 
-> **Bench v1 实测显示**：K1 83.9%（距目标 -8.1pp）、K8 88.9%（✅ 已达标）、K4 $0.34-0.69（距目标 7-14x）、$/pass $0.39（距目标 8x）。K1 差距可通过 KnowledgeStore（H2-1）+ Plan 优化缩小；K4/$/pass 差距在当前技术栈下极其激进，**$0.05 目标可能需要下调或延期到 Q4**。S10 完成后以 bench 实测数据为唯一依据做最终判定。
+### 2.1 统一状态
 
-## Q4 2026（10–12 月）：兑现及格线，再扩规模
+路线图只使用以下状态，不再使用“代码完成”直接代表产品完成：
 
-> **2026-08-01 重排**：S5 全部（M7/M3/M4/Plan 版本管理）、S6 的复杂度双通道与失败通知增强、S7 的 PR 自动推送均已提前落地（见进度快照）。**原有 S6「KPI 基线采集」已升级为 S10 Bench v2（提前至 Q3 执行）**。剩余项重新编排如下。
+| 状态 | 含义 |
+|---|---|
+| `proposed` | 已提出，尚未确认价值 |
+| `designed` | 方案已确定，尚未实现 |
+| `implemented` | 代码已实现 |
+| `tested` | 自动化测试覆盖完成 |
+| `dogfooded` | 已在真实任务中使用 |
+| `measured` | 指标数据已采集并可复现 |
+| `accepted` | 满足产品验收门禁 |
+| `deferred` | 暂缓，不进入当前关键路径 |
 
-| 迭代 | 交付物 | 对应缺口 | 状态 |
-|------|--------|---------|------|
-| ~~S5~~ | ~~M7 结果审查 / M3 PR 质量仪表 / M4 时间预估 / Plan 版本管理~~ | — | ✅ 已提前落地 |
-| ~~S6~~ | ~~复杂度双通道 / 失败通知增强~~ | — | ✅ 已提前落地 |
-| **S10** | **Bench v2**（提前至 Q3 8-9 月执行，见上方 S10 详情） | KPI 基线 + 模型选型决策依据 | 🔶 待启动 |
-| **S6**（11 月） | **Reviewer 角色灰度**：基于 S10 bench 数据确定 Reviewer 模型池；仅高风险子任务开启审查，审查预算 ≤ 被审查工作的 20% | K4 → ≤$0.03 | 待 S10-P3 模型分级校准 |
-| **S6**（11 月） | **KnowledgeStore 加速落地（H2-1）**：Bench v1 分析表明这是缩小 K1 差距（83%→92%）成本最低的杠杆。Factual Memory（项目规则自动维护）+ Experiential Memory（验证命令成功率 / 分解策略有效性） | K1 提升 | 待 S10-P1 cross_judge 确保 pass 数字可信 |
-| **S7**（12 月） | 叠加式审查流水线补完：`review --deep` 已具备独立模型评审能力，待补「打回自动回流」；全局决策日志治「脑裂」 | 规模化质量 | 部分 |
-| **S7**（12 月） | `router recommend`：基于 S10 bench 评估结果自动生成 + 验证路由配置 | [design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md) §3.5-3.7 | 待 S10-P3 |
+只有 `accepted` 才能从当前路线图移入“已完成”。
 
-**年度出关**：K1 ≥97%、K3 ≤1.5min、K8 ≥90%、K5 ≥99.9%（S1 起恢复成功率埋点已积累一个季度数据）。
+### 2.2 变更门禁
 
-## Q4 2026 扩展：办公能力（S9）
+任何新增功能必须回答：
 
-> **状态**：S9-A（MCP 消费层）✅ 已实现（2026-08-01）；S9-B（产物导出）✅ 已实现（2026-08-01）；S9-C（端到端验证+文档）待启动
-> **决策**：不自建 Office 编辑器，补齐 MCP 消费 + 产物导出两个架构能力，复用已成标准的 Office MCP 生态
-> **前提**：依赖 S4 路由机制稳定（外部 MCP server 也是模型路由的对象）+ $/pass 门禁不劣化
+- 它是否直接提高 Accepted Delivery Rate？
+- 它是否直接降低 Cost per Accepted Delivery？
+- 它是否直接降低人工介入时间或交付失败率？
+- 是否有真实用户场景和可执行验收？
+- 是否会增加主交付链路的复杂度和故障面？
 
-| 迭代 | 交付物 | 对应缺口 | 预估 | 验收门禁 |
-|------|--------|---------|------|---------|
-| **S9-A** | **MCP 消费层**：`mcp_client.py`（MCPClientPool + MCPServerConnection，stdlib 实现 JSON-RPC over stdio）；`config.json` 新增 `mcp_servers` 节（command/args/env/enabled/tool_filter/scope）；`pipeline.py` 启动时拉起连接池、结束时 finally 回收；外部工具命名空间 `mcp__{server}__{tool}` 合并进 AgentLoop `tools` 字段 + claude CLI `--mcp-config` 透传；故障隔离（启动失败降级 warning 不阻断 pipeline，与 notify/skills 同级） | 缺口 A：无外部工具消费 | ✅ 已实现（2026-08-01） | ✅ 已通过：配置 excel/ppt MCP server 后子任务可调用 `mcp__excel__read_sheet`；server 启动失败任务正常完成 |
-| **S9-B** | **产物导出路径**：新增 `artifacts.py`（collect_from_worktree + export + render_export_summary）；`__artifacts__/` 约定目录（声明制）；`--artifact-dir` CLI 参数 + `artifact_dir` config；`pipeline.py` 清理 worktree 前扫描收集；TASK.md prompt 注入产物目录约定；final report 列出导出清单 | 缺口 B：无产物导出 | ✅ 已实现（2026-08-01） | ✅ 已通过：B1 子任务写 `__artifacts__/report.md` + `--artifact-dir` → 文件出现在目标目录；B2 不指定时向后兼容无导出；B3 失败保留 worktree 产物可收集 |
-| **S9-C**（次年 1 月） | **端到端场景验证 + 文档**：Office MCP 集成指南（excel/ppt/ms365 三套配置示例 + openpyxl 公式陷阱说明）；eval_suite 新增"文档生成"类任务（验证产物完整率）；`tool_filter`/`scope` 调优指南 | 闭环验证 | ~3 天 | 端到端：`agent_go run ... --artifact-dir` 生成完整 PPT 报告并导出成功 |
+如果以上问题无法回答，该功能进入 `proposed/deferred`，不进入当前实施计划。
 
-**S9 出关口径**：K12（MCP 工具调用成功率）≥95%、K13（产物导出完整率）=100%、$/pass 不劣化（外部工具调用的 token 计入 metering，受门禁约束）。
+## 3. 指标契约
 
-依赖关系：S9-A 与 S9-B 可并行（A 改 pipeline 启动/收尾的连接管理，B 改 worktree 清理前的产物收集，两者改动点不重叠）；S9-C 依赖 A+B 完成。**S9 整体不阻塞年度出关口径**——它是能力扩展，K1/K8/K4 核心指标不依赖它。
+旧版 bench v1/v2/v3/v4 数据存在采集器漂移、timeout 误判、基础设施失败混入和 `$/pass` 分母偏差。旧数据只能作为 exploratory 数据，不用于季度达标判定。
 
-## 2027 Q1 展望：基础设施化（评估中）
+### 3.1 唯一产品指标
 
-> **状态**：设计草案完成（[design/infrastructure-api-design.md](design/infrastructure-api-design.md)），待论证必要性和可行性后决定是否投入。
-> 以下排期为假设通过后的预估。若否决，Q4 末方向保持不变。
+#### Accepted Delivery Rate
 
-| 迭代 | 交付物 | 预估 | 验收门禁 |
-|------|--------|------|---------|
-| **I9**（1 月） | Python API 增强：`run_task()` 返回 `TaskResult` + CLI `--json`（所有子命令） | ~3d | 外部 Python 脚本 `from agent_go import run_task; result = run_task(...)` 能拿到结构化结果（CLI `--json` 全局标志 ✅ 已落地，MCP 已提供结构化 tool 接口） |
-| **I10**（1 月） | 事件总线：`emit_event` / `subscribe_event` + `events.jsonl` + Webhook 生命周期事件 | ~2d | 全生命周期事件（plan.generated → subtask.started → subtask.completed → pipeline.completed）可订阅、可落盘 |
-| **I10** | 状态查询 API：`query_task()` / `query_project_trend()` | ~1d | `query_task("task-xxx").status` 返回 "completed"或"failed" |
-| **I11**（2 月） | 知识存储：`KnowledgeStore` 数据模型 + 文件读写 + `_extract_patterns` 增量更新 + Plan 注入 | ~3d | 连续跑 3 个同类 task，第 4 个的 Plan prompt 包含历史验证命令 |
-| **I11** | `agent-go-action` GitHub Action（独立仓库） | ~2d | CI 中 `uses: agent-go/action@v1` 能跑通完整 pipeline |
-| **I12**（3 月） | `pre-commit-agent-go` hook（独立仓库） | ~1d | `git commit` 前自动跑验证命令，失败阻止提交 |
-| **I12** | `vscode-agent-go` extension（独立仓库，薄壳） | ~3d | 面板展示当前任务进度 + 历史列表 + 一键运行 |
-
-**I9-I12 出关口径**：K9 集成接入数 ≥10（含 CI + IDE + Webhook 三类），知识注入采纳率 K10 ≥60%。
-
-依赖关系：I9 是 I10 的前置（`TaskResult` 数据结构被后续所有模块依赖）；I10/I11 可并行；I12 依赖 I9（CLI `--json`）+ I10（事件进度）。
-
-## 长程 Agent 演进路线（论文对照，2026 Q3–2027+）
-
-> 基于综述论文 *Towards Long-Horizon Agents: A Survey* 的统一框架（`Agent = πθ ⊕ H`），将 agent_go 的能力建设映射到 H1→H2→H3 递进路线。详见 [prd.md](prd.md)「长程 Agent 演进路线（论文对照）」完整分析。
-
-### 阶段一：补齐 H2 能力 — 让单次任务更可靠（2026 Q3–Q4）
-
-目标：从 H1（单任务可靠）跨越到 H2（跨上下文记忆 + 自适应策略）。
-
-| 迭代 | 交付物 | 论文对应 | 预估 | 验收门禁 |
-|------|--------|---------|------|---------|
-| **H2-1**（10–11 月） | **KnowledgeStore 落地**：Factual Memory（项目规则自动维护）+ Experiential Memory（验证命令成功率 / 分解策略有效性）+ Memory Maintenance（合并/去重/过期） | §4.2.2 Persistent Memory | ~3d | 同类任务第 3 次执行时 Plan prompt 自动包含历史验证命令模式 |
-| **H2-1** | **成本预算硬约束**：`--max-cost $X` 任务级上限 + 事前预估→事中监控→超限熔断 + $/pass 标度律数据积累 | §7.3.1 Cost-aware Agency | ✅ 已提前实现（S10） | ✅ L1 `--max-budget-usd`（冷启动默认开 `l1_enabled=True`）+ L2 子任务累计 + L3 `--max-cost` 任务级熔断（L2/L3 待基线后开）；`eval cost-baseline` 删失校正基线校准预算 |
-| **H2-2**（11–12 月） | **分支式工作流（Branching）**：Plan 阶段对 `difficulty=hard` 步骤生成备选路径 + 验证失败时回退到分叉点尝试替代策略 + 轻量评估选最优 | §4.1.3 Branching Workflows | ~3d | 注入故障的端到端用例：验证失败→自动切换备选方案→第二路径成功 |
-| **H2-2** | **Runtime-adaptive Hooks**：Hook 根据执行状态动态调整（如「连续 3 次验证失败→自动降低 difficulty 并换模型」） | §4.5.3 Runtime-adaptive Hooks | ~2d | 配置可切换的动态 Hook 规则，日志记录触发原因 |
-
-**H2 出关口径**：K1 ≥93%、同一项目第 3 次执行 Plan 注入历史经验、超 $0.50 任务自动熔断、hard 任务至少尝试 2 条路径。
-
-### 阶段二：开启 H3 能力 — 让 Agent 随时间变强（2027 Q1–Q2）
-
-目标：从 H2（跨上下文记忆）跨越到 H3（跨任务经验积累 + Harness 自进化）。
-
-| 迭代 | 交付物 | 论文对应 | 预估 | 验收门禁 |
-|------|--------|---------|------|---------|
-| **H3-1**（1–3 月） | **Harness 参数自动调优**：基于 metering.jsonl + meta.json 历史数据，自动优化并发度、max_retries、验证策略选择 | §7.1.1 Self-evolving Harness (Level 1) | ~3d | 同项目 10 次执行后自动参数 vs 默认参数的 $/pass 降低 ≥15% |
-| **H3-1** | **分解模式库**：对「重构/新增功能/Bug 修复/迁移」四类任务的 Plan 分解策略沉淀 + Plan 阶段自动注入最佳分解模板 | §4.2.2 Experiential Memory | ~2d | 同类任务 Plan 首次通过率（用户直接确认，无需 edit）提升 ≥20% |
-| **H3-2**（3–5 月） | **编排拓扑自演化**：Agent 自主决定子任务数量、分组方式、Reviewer 范围、验证步骤剪枝 | §7.1.1 Self-evolving Harness (Level 2) + §4.4.3 Orchestration Optimization | ~4d | 自动编排 vs 人工编排的 $/pass 不劣化且耗时 ≤ 人工的 80% |
-| **H3-2** | **失败模式识别**：提前预警「此任务特征历史上成功率 < 40%」→ 建议人工介入或切换策略 | §7.4.1 Error Robustness | ~2d | 高风险任务执行前展示风险评分 + 历史相似任务成功率 |
-| **H3-3**（5–6 月） | **Skill 自主蒸馏**：从成功执行轨迹中自动提取可复用 Skill（验证命令组合 / 代码模式 / 修复策略），写入 Skill 库 | §7.1.1 Self-evolving Harness (Level 3) + §4.3.3 Skill Libraries | ~4d | 蒸馏出的 Skill 被后续任务自动匹配使用，人工审核通过率 ≥80% |
-
-**H3 出关口径**：K1 ≥95%、自进化 Harness 使 $/pass 再降 20%、跨项目经验可迁移、失败预警准确率 ≥70%。
-
-### 阶段三：基础设施化与开放性（2027 Q3+）
-
-| 迭代 | 交付物 | 论文对应 | 预估 |
-|------|--------|---------|------|
-| **F-1** | **Harness 协议标准化**：Plan/Execute/Verify 接口抽象为开放协议（类似 MCP 对 Tool 的标准化） | §7.1.2 Harness Generalization + §4.4.4 Agent Protocols | ~5d |
-| **F-1** | **多 Runtime Worker 支持**：除 Claude Code 外，兼容 OpenCode / aider / Codex CLI 作为 Worker | §7.1.2 多 Harness 训练 | ~4d |
-| **F-2** | **独立安全验证**：安全评分与成功率并列的第一类指标 + 独立 Verifier（不由执行 Agent 自审） | §7.4.2 Safety & Governance | ~4d |
-| **F-2** | **可移植 Skill 格式**：Skills 产出符合 Agent Skills 标准的跨 Runtime 可复用制品 | §7.1.2 Portable Skills | ~2d |
-
-### 演进总览
-
-```
-2026 Q3-Q4          2027 Q1-Q2           2027 Q3+
-H2 补齐              H3 开启              Frontier
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-记忆 + 分支 + 预算    自进化 + 经验积累     开放协议 + 安全 + 多Runtime
-K1≥93%              K1≥95%              生态可移植
-K4≤$0.04            K4≤$0.02            K9≥10
+```text
+Accepted Delivery Rate
+= Accepted Delivery 数 / 有效任务数
 ```
 
-### 论文关键启示（约束设计决策）
+任务级依赖链中，部分子任务完成但无法形成可交付 PR，只计为失败或未完成，不计为部分成功。
 
-| 启示 | agent_go 的设计约束 |
-|------|-------------------|
-| Harness 是长期护城河，不是模型 | 编排层投入优先级 > 模型适配；架构保持 model-agnostic |
-| 自进化需防过拟合 | 自进化目标函数 = 真实任务成功率（非 benchmark 分）；需人工抽检验证 |
-| 安全是 Harness 层问题 | 安全机制必须独立于执行 Agent；后续所有自进化特性配独立安全验证 |
-| 持久化记忆的维护比存储更难 | KnowledgeStore 重点投入合并/去重/过期策略，而非存储容量 |
-| 分支探索成本需显式控制 | Branching 仅对 hard 子任务开启；单次分支 token 预算 ≤ 主路径 30% |
-| $/pass 是系统级指标 | 所有新功能必须以 $/pass 不劣化为前置门禁 |
+#### Cost per Accepted Delivery
 
-## 关键风险与对策
+```text
+Cost per Accepted Delivery
+= 有效成本总额 / Accepted Delivery 数
+```
 
-- **验证循环 token 爆炸**（PRD 已识别）：`max_retries` 硬上限 + 每迭代超时；用计量日志盯 `cost_usd` 分布，超 P95 告警
-- **模型路由拉低通过率**：Worker 走便宜模型必须配质量门 + 抽样回测；Planner 铁律不降级
-- **范围蔓延**：H3 自进化特性必须分阶段验收，每阶段以 $/pass 不劣化为门禁；未经 bench 验证不进入下一阶段
-- **自进化过拟合风险**（论文警告）：优化目标 = 真实任务成功率，非 benchmark 分；每 50 次执行人工抽检 10%
-- **持久化记忆质量退化**（论文警告）：KnowledgeStore 必须有自动去重/合并/过期策略，防止噪声积累
-- **安全问题**：后续每个自进化特性必须配独立安全验证（不由执行 Agent 自审）
+成本必须区分：
 
-## 立即可做的三件事（本周）
+- `model_cost`
+- `verification_cost`
+- `review_cost`
+- `infrastructure_failure`
+- `budget_abort`
 
-1. ~~S1 计量日志开工~~ ✅ 已完成（2026-07-25）
-2. ~~M2 失败摘要~~ ✅ 已完成（2026-07-25）
-3. ~~刷新文档数据漂移~~ ✅ 已完成（README/architecture.md/spec.md 同步至 698 测试）
-4. ~~测试加固 + $/pass 门禁~~ ✅ 已完成（2026-07-25，1130 测试 5 连绿，ISSUE-24~28 修复）
-5. ~~模型分级 + 评估机制设计稿~~ ✅ 已完成（2026-07-25，[design/model-evaluation-and-tiering.md](design/model-evaluation-and-tiering.md)）
-6. ~~S8 P0 模型评估机制落地~~ ✅ 已完成（2026-07-25，pricing.py + bench.py + eval_suite + cross_judge.py P1）
-7. ~~核心解耦~~ ✅ 已完成（2026-07-25，evaluator/notify/goal/skills/agent_loop 全部动态 import + try/except）
-8. ~~CLI/MCP 交互层改进~~ ✅ 已完成（2026-08-01，MCP 6 tools + Resources/Prompts 原语 + HTTP/SSE transport + 错误 fix 字段 + CLI 恢复引导，1362 测试全绿）
-9. ~~PRD/Roadmap 文档同步~~ ✅ 已完成（2026-08-01，prd.md 新增「CLI 与 MCP 交互层」章节，roadmap 快照更新）
-10. ~~办公能力扩展设计稿~~ ✅ 已完成（2026-08-01，[design/office-capability-extension.md](design/office-capability-extension.md)；prd.md 新增「办公能力扩展」章节 + K12/K13；roadmap 排入 S9）
-11. ~~CLI/MCP 保留项落地~~ ✅ 已完成（2026-08-01，波次进度卡片 / skills show / 多 profile / 增量 Plan Diff / Sampling 原语，1387 测试全绿，改进清单全部闭环）
-12. ~~S9-B 产物导出~~ ✅ 已完成（2026-08-01，`artifacts.py` + `__artifacts__/` 声明制 + `--artifact-dir`，B1/B2/B3 验收通过，1464 测试全绿）
+#### First-pass Rate
 
-**下一批**：
-1. ~~S11-P0~~ ✅ 完成（`cd5361c`，`--spec` + `spec template` + L1 硬门禁）
-2. ~~S10-P1~~ ✅ 完成（`551b713` + `929bd58`，Bench v2 Schema + Cross-Judge）
-3. ~~S11 L1.5~~ ✅ 完成（`216882b`，AST 冲突检测）
-4. ~~S10-P2 全因子 Bench Tier 1 编排~~ ✅ 代码完成（2026-08-01：P1 字段 + `--parallel 1` + 代码质量维度 + `eval baseline` 对照基线 + 动态 timeout）。**198 次全因子运行 + 对照基线运行待执行**（hard 任务 timeout 达 30min，预估全量 ~15-20h 墙钟）。⚠️ **但其结果在 S12-P0 修度量前不可信**——v2/v3/v4 已暴露 `binary_pass`/`pass_rate`/假失败缺陷，重跑前应先修采集口径
-5. **S10-P2b spec 细节梯度实验**（与 S10-P2 并行，复刻 [arXiv:2603.24284](design/sdd-references-and-frameworks.md) L0-L3 梯度）— 填补 SDD 无对照实验空白
-6. **KnowledgeStore 设计细化（H2-1）**— 在 cross_judge 结果完备后启动数据模型和接口设计
+```text
+First-pass Rate
+= 首次执行即完成验证的完整任务数 / 有效任务数
+```
 
----
+#### Time to Accepted Delivery
 
-### S12：度量修复 + 成本控制启用 + stuck-kill 重设计（2026-08-06 立项，**当前最高优先**）
+从任务启动到产生可审查交付分支或 PR 的总时间，而不是只统计某个 Claude 子进程的耗时。
 
-> 触发：[bench-metric-validity-2026-08-06.md](design/bench-metric-validity-2026-08-06.md) + [timeout-kill-strategy-2026-08-06.md](design/timeout-kill-strategy-2026-08-06.md)。bench 暴露的通过率崩塌有一半是测量假象，且 cost_control 三层代码就绪却因度量不可信而不敢开。本迭代破局 chicken-egg，让 S10 的"可信基线"真正达成。
+#### Human Intervention Minutes
 
-| 阶段 | 交付物 | 预估 | 验收门禁 |
-|------|--------|------|---------|
-| **S12-P0（前置，必须最先）** | **修度量**：① `kill_reason ∈ {none,stuck,hard_timeout,over_budget_l2/l3,cleanup_race,interrupted}` 贯穿运行时→度量；② 修 `_collect_result`（`binary_pass` 移到 aborted 分支后算、`all([])` 判 False、`pass_rate` 分母用计划子任务数、`cleanup_race` 计为通过）；③ 用新口径重算 v2/v3/v4，立**冻结基线** | ~2-3 天 | ✅ **代码完成**（2026-08-07）：G1 运行时 kill_reason 贯穿（subtask IDLE/hard_timeout/goal 决策点写 `kill_state` 事件 + executor L2 熔断 `over_budget_l2` + pipeline L3 `over_budget_l3`）；G2 `_collect_result` 修正已随 `4f9d428` 落地；`eval models` 新增修正通过率列（cleanup_race 计入）。**验证：v3 通过率 34%→67%（recompute + eval models 双确认），1640 测试全绿**。剩余：权威基线需用修复后采集器重跑全因子冻结 |
-| **S12-P1** | **启用 cost_control**：在 P0 冻结基线上小范围开 L1/L2/L3（`enabled=True`）+ per-task `--budget`（Spec 字段/CLI）→ KPI 分母按 `kill_reason` 拆分（预算熔断不进能力失败分母） | ~2 天 | ✅ **代码完成**（2026-08-07）：G3 per-task `--budget`/`--budget-mode`（CLI + config，动态默认预算 `Σ per_subtask_budget×mult×子任务数` 防 hard 过早熔断，三态 strict/degrade/ignore）；G4 L3 降级（`degrade` 模式切便宜模型继续 + `degraded=True` 标记 + max_retries 降 1 + 连续 3 失败回退 stop）；G8 验证循环 kill_reason 感知（`over_budget_l2/l3` 不进重试、`cleanup_race` 计成功）。1650 测试全绿 |
-| **S12-P2** | **降级 + 规划守卫**：L3 `on_exceed=degrade`（切便宜模型继续，标 `degraded=True`，对称 `worker_models_fallback`）；Plan 期欠分解检测（高难度 + 低子任务数 → 再分解或升模型）；bench `_dynamic_timeout` 改按难度 | ~3 天 | L3 降级路径保部分产出；硬任务欠分解被前置拦截 | ✅ 代码完成（2026-08-07，`worker_models_degrades` 对称降级表 + planning.check_under_decomposition + bench `_dynamic_timeout` 按难度 mult={1,1.5,2.5}，1661 测试全绿） |
-| **S12-P3** | **stuck 误杀规避**：`IDLE_TIMEOUT` 从纯静默升级为多维活性（claude 事件 ∨ worktree 文件变更 ∨ 进程树 CPU）+ grace 复检门；收窄 stuck-kill 职责（让 budget + 轮数上限管常见情况） | ~3 天 | 慢工具（build/test >600s）不再被误杀；仅"无事件 ∧ 无文件变更 ∧ 无 CPU"经 grace 复检才记 `kill_reason=stuck_confirmed` | ✅ 代码完成（2026-08-07：subtask.py `_file_activity_snapshot` S2 + `_process_cpu_ticks` S3 + `STUCK_GRACE_SEC=120` grace 复检门，惰性采样不干扰正常执行，1663 测试全绿）。**+ 失败清理策略**（2026-08-07，1667 测试全绿）：保留判定接入 `kill_reason`（cleanup_race 实际成功不保留 / degraded 强制保留+标记）；保留现场净化（.pytest_cache/__pycache__/pyc）；`clean --older-than` 保留期清理；final report 降级产物突出"需 review"标记。**+ 冷启动 L1 默认开 + 运行前模型-价格预检**（2026-08-07，1688 测试全绿）：L1 `l1_enabled` 独立开关默认 True（防单次失控，误杀风险最低）；`bench/baseline` 启动前 `_probe_actual_model` 探测实际后端 + `resolve_price` 校验定价覆盖（缺定价告警/中止）；智谱后端定价补全（glm-4.7/5.1/5.2/4.5-air）|
+用户在 Plan 修改、失败审查、手动合并和恢复操作上实际花费的时间。
 
-**S12 出关口径**：KPI 基线以冻结口径重测并锁定；cost_control 三层可安全默认开启（L1 冷启动已默认开 `l1_enabled=True`，L2/L3 待基线后 `enabled=True`）且 `over_budget` 不污染能力失败分母；stuck 误杀率（在干活的任务被杀）降至接近 0。**S12-P0 是 S10 重跑、S6 Reviewer 灰度、KnowledgeStore 的共同前置**——度量不可信前这些都不该推进。
+### 3.2 故障分类
 
----
+所有任务必须使用稳定的 failure class：
 
-### S13：闭环治理与业务架构（2026-08-08 立项，**规划阶段，未实施**）
+```text
+model_failure
+verification_failure
+timeout
+budget_abort
+infrastructure_failure
+delivery_failure
+user_cancelled
+system_error
+```
 
-> 触发：2026-08 多轮业务架构讨论（SDD / goal-process-task 三层 / 交付断点 / 问题跟踪 / 外部衔接 / 循环智能）。基于代码事实核查识别出 **5 个闭环缺口**（4 工程 + 1 智能），需统一治理而非散落修复。
->
-> 设计文档：[design/business-architecture.md](design/business-architecture.md)（决策登记版 v0.2）。关联调研：[research-goal-loop-mechanism-2026-08-08.md](research-goal-loop-mechanism-2026-08-08.md)（循环智能缺口来源）。
->
-> **当前状态**：📋 规划中。已落盘 A 类 6 项已决策 + B 类 5 项待决策（B1-B5），未写任何代码。B 类讨论完成后进入实施。
+基础设施失败不得伪装成模型失败；预算中止不得伪装成能力失败；交付失败必须独立计数。
 
-#### 五大闭环缺口
+### 3.3 Metric Freeze Gate
 
-| 缺口 | 类型 | 紧急度 | 代码事实 | 拟对应工作 |
-|------|------|--------|---------|----------|
-| 1 交付闭环断裂 | 工程 | 🔴 最高 | fixture main 仅 1 commit，堆积 811 个孤立分支；cmd_pr 推 `HEAD:main`（bug） | M1 交付修复 |
-| 2 goal 回溯断裂 | 工程 | 🟡 中 | "无失败=completed"否定式，不回看 goal/acceptance | M4 goal 回溯 |
-| 3 问题跟踪断裂 | 工程 | 🟡 中 | 单任务内完整，跨任务"跑完即丢" | M5-M6 问题跟踪 + issue 联动 |
-| 4 spec 闭环断裂 | 工程 | 🟢 低 | --spec 历史 0 次使用，spec 不持久化 | M2-M4 spec 闭环（ROI 待 B3 决策） |
-| 5 循环智能断裂 | 智能 | 🟡 中 | 反应式重试，无无进展检测/根因分析/重规划 | B5 决策（a 保持/b 补全/c 最小止血） |
+在进入真实 KPI 考核前，必须冻结：
 
-#### 6 个候选 Milestone（待 B 类决策后启动）
+- 固定任务集和版本。
+- 固定采集器和 schema 版本。
+- 固定模型、配置、timeout 和 retry 策略。
+- 固定失败分类和分母规则。
+- 每条记录包含 `source_batch`、`schema_version` 和运行配置摘要。
+- Bench 案例按 `smoke`、`core`、`decision`、`stress` 分 suite 管理；canonical 案例保留，日常运行按 suite 精简。
+- 旧数据与新基线禁止直接混比。
 
-| M | 名称 | 缺口 | 预估 | 依赖 |
-|---|------|------|------|------|
-| M1 | 交付修复（merge-to-base + cmd_pr 修分支 + `agent_go merge`） | 1 | ~2 天 | 无（优先级最高候选） |
-| M2 | spec 持久化（SPEC.md + meta 加字段 + §5 结构化） | 4 | ~1 天 | 无 |
-| M3 | spec 端到端验证（真实 spec 跑通 + 修冒烟 bug） | 4 | ~1 天 | M2 |
-| M4 | goal 回溯（converge + ComplianceReport，纯观测不改 status） | 2 | ~2 天 | M3 |
-| M5 | 问题跟踪（Problem 实体 + problems.jsonl + 命令/dashboard） | 3 | ~2 天 | 无 |
-| M6 | issue 联动（`--track-issues` + problem sync） | 3 | ~1.5 天 | M5 |
+## 4. 当前阶段：M0 产品契约与指标冻结
 
-> 另有 M7-M10 候选来自循环智能调研（无进展检测/Reflexion/数据埋点/局部重规划），**未纳入**，待 B5 决策。
+目标：让团队能够可信回答“什么算成功、多少钱、多久、为什么失败”。
 
-#### 关键约束（不变量）
+### M0.1 产品契约
 
-- **IV-1** 产物必须能到达 main，不允许烂在 worktree
-- **IV-2** converge 纯观测，不改 task.status（合规度是正交维度）
-- **IV-3** 向后兼容，99.5% 无 spec 任务不受影响
-- **IV-4** Problem 是一等实体（有 id/状态/生命周期）
-- **IV-5** 边界克制，不做需求管理/排期/分工
+交付物：
 
-#### 待决策问题（B 类，阻塞实施）
+- Accepted Delivery 状态定义。
+- delivery branch、target branch、PR head/base 规则。
+- `completed`、`completed_unverified`、`verification_failed`、`delivery_failed`、`blocked`、`cancelled` 状态语义。
+- 失败恢复和人工介入路径。
 
-B2（缺口优先级）→ B5（循环智能层级）→ B4（问题跟踪定位）→ B1（merge 策略）→ B3（spec ROI）。详见 [design/business-architecture.md](design/business-architecture.md)。
+验收：
 
-#### S13 与其他迭代的关系
+- 文档、CLI、MCP 响应和 `meta.json` 使用同一套状态语义。
+- 不存在“Claude 退出码为 0 就等于交付成功”的隐含判断。
 
-- **不阻塞 S12**（S12 是度量修复，独立推进）
-- **M1 交付修复**是 S13 内最高 ROI 候选，但优先级受 B2（agent_go 定位：交付工具 vs bench 工具）约束
-- **M4 goal 回溯**与 H2-1 KnowledgeStore 正交（goal 是单任务内回溯，KnowledgeStore 是跨任务记忆）
-- **B5 循环智能**若选 b/c，与 H2-2 Branching、H3-1 自调优存在能力重叠，需对齐避免重复建设
+### M0.2 指标冻结
+
+交付物：
+
+- 新 bench schema。
+- 任务级成功和成本公式。
+- failure class 分类。
+- Metric Freeze Gate 检查命令和报告。
+
+验收：
+
+- 同一批数据重复计算结果一致。
+- 能区分模型失败、基础设施失败、timeout、预算中止和交付失败。
+- 输出 Accepted Delivery Rate 和 Cost per Accepted Delivery。
+
+状态：`accepted`（M0-1 至 M0-11 已实现；固定 baseline 重跑和文档收口由 M0-12/M1 继续推进）。
+
+## 5. 阶段一：M1 交付闭环
+
+目标：解决“代码做出来但没有可靠到达用户目标分支”的最高优先级问题。
+
+### M1.1 交付分支模型
+
+交付物：
+
+- 每个 task 明确记录 `base_commit`、`base_branch`、`delivery_branch`。
+- 所有成功子任务的 commit hash 可追溯。
+- 多子任务结果汇总到一个明确的 delivery branch。
+- 上游 artifact merge 和最终交付 merge 语义分离。
+
+验收：
+
+- 单子任务真实 Git 仓库端到端通过。
+- 多子任务依赖链真实 Git 仓库端到端通过。
+- 非 `main` 默认分支（如 `master`、`develop`）可以正确执行。
+- 不依赖提交时间窗口判断 worker 是否产生了 commit。
+
+### M1.2 PR 交付
+
+交付物：
+
+- `cmd_pr` 使用明确的 `head` 和 `base`，禁止把当前工作目录 HEAD 误推到 `main`。
+- `pr_url`、head branch、base branch 写入任务结果。
+- PR 创建失败归类为 `delivery_failure`，不能报告为 completed。
+- 提供显式 `agent_go merge` 或等价的人工交付命令。
+
+验收：
+
+- 生成的 PR head/base 正确。
+- PR 包含全部已接受子任务变更。
+- 交付失败时可以从 delivery branch 重试，不需要重新执行 Claude。
+
+### M1.3 交付状态与恢复
+
+交付物：
+
+- commit、verification、delivery 三种状态分离。
+- `recover` 和 `resume` 使用 task lock、base commit 和 commit hash。
+- 已提交但未验证的任务进入 `committed_unverified`，不得直接进入下游。
+
+验收：
+
+- SIGTERM、SIGKILL、PR 创建失败、merge 冲突等场景均可区分。
+- recover 不会破坏运行中的 task。
+- resume 不会重复提交或混入旧 worktree 改动。
+
+## 6. 阶段二：M2 核心可靠性
+
+目标：在交付闭环成立后，降低失败和人工恢复成本。
+
+### M2.1 验证与失败阻断
+
+交付物：
+
+- shell、lint/type/test、semantic evaluator 的职责边界。
+- 验证失败上下文和 repair retry 记录。
+- 上游失败时下游明确 blocked。
+- 无进展检测，避免重复 retry 消耗预算。
+- 循环状态埋点：`diff_stat_hash`、`failure_pattern`、`effective_strategy`、`no_progress`。
+- 有界 Reflexion：仅在 retry 达到阈值后分析根因，不改变默认成功语义。
+
+验收：
+
+- 注入验证失败后，系统能自动修复或明确阻断。
+- 重试次数、成本、失败原因可查询。
+- 连续无进展不会无限消耗 token。
+- 循环状态可供后续 KnowledgeStore 消费，但不会在 M2 自动修改历史知识。
+
+### M2.2 Goal/Loop 受控增强
+
+调研结论表明，当前系统已有硬迭代上限、资源预算和程序化验证，但缺少无进展检测、根因分析和策略升级。M2 只实现低风险、可观测的部分：
+
+- retry 间记录 diff/stat 哈希。
+- 连续两次无实质变化时提前终止，标记 `no_progress`。
+- retry 达到阈值后，可调用独立 evaluator 生成 `failure_analysis`。
+- Reflexion 结果只用于下一次 repair prompt，不直接改变任务状态。
+- 每次额外分析必须受 token、次数和任务预算约束。
+- `/goal` 继续默认关闭，直到语义 goal 通过独立实验验证。
+
+验收：
+
+- 无进展任务不会跑满全部 retry 上限。
+- `failure_analysis` 和 `effective_strategy` 写入 `verify_state.json`。
+- Reflexion 失败或超时会降级为普通 repair，不阻塞主流程。
+- 额外 Reflexion 成本可单独计量。
+
+### M2.3 成本与进程边界
+
+交付物：
+
+- 单次调用、子任务、任务级预算的统一语义。
+- 并发启动前 reservation。
+- metering 不可用时 fail-safe。
+- Claude 及其子进程整体回收。
+
+验收：
+
+- 并发任务不会在预算检查竞态下无限超支。
+- `cost_censored` 不重复计费。
+- timeout、budget abort 和 infrastructure failure 可区分。
+
+### M2.4 人工审查与恢复体验
+
+交付物：
+
+- 失败摘要、保留 worktree、review、resume 指引统一。
+- `inspect -> review -> resume -> delivery` 形成闭环。
+- CLI 和 MCP 返回同样的核心状态和修复建议。
+
+验收：
+
+- 用户无需阅读完整日志即可判断下一步动作。
+- 失败任务的人工恢复时间可以测量。
+
+## 7. 阶段三：M3 真实任务验证
+
+目标：验证产品主线，而不是继续用单元测试数量替代产品证据。
+
+### M3.1 Dogfood 任务集
+
+使用 10-20 个真实工程任务，覆盖：
+
+- 新增功能
+- bug 修复
+- 跨文件重构
+- 测试补充
+- 依赖或配置迁移
+- 一个明确的失败恢复场景
+
+每个任务必须记录：
+
+- 是否产生 Accepted Delivery
+- 是否需要人工改 Plan
+- 是否需要人工修复代码
+- 总耗时
+- 总成本
+- 重试次数
+- 人工介入分钟数
+- 失败分类
+
+### M3.2 产品验收门禁
+
+M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
+
+- 100% 任务有完整结果记录。
+- 100% 任务有明确最终状态。
+- 0 个交付成功但找不到目标分支或 PR 的任务。
+- infrastructure failure 与 model failure 分开统计。
+- 所有失败任务都有可执行恢复路径。
+
+完成 M3 后，基于真实数据设定下一阶段目标，而不是继续沿用未经验证的 `$0.05` 或 `K1 ≥97%` 目标。
+
+## 8. 扩展能力决策门
+
+以下能力暂不排入固定实施日期，只在 M3 完成后按实验结果决定。
+
+### KnowledgeStore
+
+先做 A/B 实验：无历史经验 vs 注入历史验证命令和失败模式。只有在 Accepted Delivery Rate 提升、成本不劣化且错误知识可淘汰时，才进入产品化。
+
+M2 产生的 `failure_pattern`、`effective_strategy` 和 `no_progress` 只是候选数据，不代表已经建立 KnowledgeStore。
+
+### Spec 闭环
+
+先验证用户是否愿意使用 Spec。通过模板和 5 个真实任务观察填写成本、Plan 编辑次数和交付成功率，再决定是否建设持久化和 L2 审查。
+
+### Reviewer 灰度
+
+只对高风险任务开启，必须证明人工审查时间下降或 Accepted Delivery Rate 提升，且 review cost 不超过主任务成本的 20%。
+
+### Branching Workflow
+
+仅在 hard 任务存在可识别的策略分叉、且主路径失败有明确替代方案时启用。分支预算必须独立计量。
+
+局部重规划是 Branching 的前置能力，但最多允许一次，且必须继承父任务预算，不允许递归扩张任务图。
+
+### 语义 Goal
+
+当前 `/goal` 主要由验证命令的 `exit_code == 0` 机械派生。只有在自然语言 `goal_description`、独立 evaluator 和 shell 验证形成 AND 关系，并通过真实任务验证后，才考虑开启默认 goal。
+
+### 局部重规划与策略重置
+
+当出现无进展、错误模式重复或变更规模异常但验证持续失败时，可以提出一次局部重规划建议。默认先请求人工确认，不自动改变全局 Plan；自动策略重置属于后续实验能力。
+
+### MCP/Office/IDE/CI 扩展
+
+只有存在真实用户场景、端到端验收和独立成功率指标时进入 roadmap。功能接入不等于产品成功，必须能证明对 Accepted Delivery 或人工成本有贡献。
+
+### H3 自进化
+
+在 KnowledgeStore、失败分类和指标冻结之前不启动。没有可信历史数据，自进化只会放大测量错误和错误经验。
+
+## 9. 暂缓清单
+
+在 M0-M3 通过前，以下事项不进入关键路径：
+
+- 多 Runtime Worker
+- IDE 插件
+- 完整项目管理和 issue 生命周期
+- 自动 Skill 蒸馏
+- 自动编排拓扑自演化
+- 多方案探索模式
+- 大规模 Office 能力扩展
+- 以 benchmark 排名为目标的模型扩展
+
+已有功能的安全修复、正确性修复和必要测试不受此限制。
+
+## 10. 关键风险
+
+| 风险 | 影响 | 对策 |
+|---|---|---|
+| 交付分支语义错误 | 用户拿不到可合并代码 | M1 真实 Git 端到端门禁 |
+| KPI 口径再次漂移 | 错误模型和成本决策 | Metric Freeze Gate + schema version |
+| 成本控制误杀 | 用户不再信任自动执行 | L1/L2/L3 分层，预算基线校准后启用 |
+| 自动修复无进展 | token 和时间失控 | diff/验证结果无进展检测 |
+| 扩展能力分散资源 | 核心交付链路延期 | 新功能必须通过产品价值评审 |
+| 历史知识污染 | 后续 Plan 质量下降 | 来源、置信度、过期和人工回滚机制 |
+
+## 11. 当前决策
+
+当前唯一关键路径为：
+
+```text
+M0 产品契约与指标冻结
+  -> M1 交付闭环
+  -> M2 核心可靠性
+  -> M3 真实任务验证
+  -> 扩展能力逐项决策
+```
+
+在 M3 结束前，不对“年度 K1 ≥97%”“$/pass ≤$0.03”等绝对目标做硬承诺；先建立可信 Accepted Delivery 基线，再根据真实数据制定下一版目标。

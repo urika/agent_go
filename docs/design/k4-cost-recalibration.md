@@ -1,5 +1,7 @@
 # K4 单任务成本指标重新校准
 
+> **数据状态**：历史 exploratory 研究。K4/`$ / pass` 目标不再作为当前产品主 KPI；当前产品成本指标为 Cost per Accepted Delivery。
+
 > 基线：2026-08-01 bench 实测（7 模型 × 22 标准任务 × 485 条记录）
 > 对照：PRD v2.0.0 §产品 KPI + model-evaluation-and-tiering.md §1.5 成本估算
 
@@ -180,3 +182,5 @@ bench 数据明确了一个选择：**当前条件下，"Haiku 全任务"是兼�
 - **成本口径**：所有 cost_usd 来自 metering.jsonl 的真实账单（非定价表估算）；dollar_per_pass = total_cost_usd / verified_passes（当次运行的精确值，非 post-hoc 折算）。**2026-08-01 起按实际模型重算**：claude-* 路由名映射到 DeepSeek 后端（claude-haiku-4-5/sonnet-4-6 → deepseek-v4-flash、claude-opus-4-7 → deepseek-v4-pro），metering 用 `MODEL_PRICES` 定价按 token 重算 cost_usd（详见 [model-evaluation-and-tiering.md §1.6](model-evaluation-and-tiering.md)）。历史基准（results.jsonl 等）为 Anthropic 定价口径，新旧数据成本不可直接横向对比。
 - **分析工具**：Python stdlib + lark-cli base（飞书多维表格 + 仪表盘）
 - **关联文档**：[bench 对比仪表盘](https://my.feishu.cn/base/CObqbC6iLa00ZGs1ex7cwaWHnwc) · [KPI 达成分析](https://my.feishu.cn/docx/HFZpd6l0Wo27pJxgRpKc5pvfnzd) · [PRD v2.0.0](../prd.md) · [模型评估设计](model-evaluation-and-tiering.md)
+
+> **当前状态（2026-08-08）**：本文保留为历史成本校准材料。`$0.05`/`$0.03` 不再作为当前阶段硬承诺，当前以 Metric Freeze 和 Cost per Accepted Delivery 为准。

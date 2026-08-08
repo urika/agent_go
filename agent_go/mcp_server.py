@@ -17,6 +17,7 @@ import sys, json, os, subprocess, time, threading, fnmatch, logging
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
+from .status import task_status, set_task_status
 
 logger = logging.getLogger("agent_go.mcp")
 
@@ -571,12 +572,12 @@ class MCPServer:
             if meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    status = meta.get("status", "running")
+                    status = task_status(meta)
                     results = meta.get("results", [])
                     n_done = sum(1 for r in results
                                  if r.get("status") in ("completed", "no_changes"))
 
-                    if status in ("completed", "failed", "paused", "stale_aborted"):
+                    if status in ("ACCEPTED_DELIVERY", "DELIVERY_READY", "VERIFICATION_FAILED", "DELIVERY_FAILED", "PLAN_REVIEW", "BLOCKED", "CANCELLED"):
                         time.sleep(0.3)
                         break
 
@@ -629,7 +630,9 @@ class MCPServer:
         n_done = sum(1 for r in results if r.get("status") in ("completed", "no_changes"))
         n_fail = sum(1 for r in results if r.get("status") in ("failed", "blocked"))
         cost = self._aggregate_cost(AGENT_GO_DIR / task_id)
-        status = "running" if timed_out else meta.get("status", "unknown")
+        status = (
+            "EXECUTING" if meta.get("status_schema_version") else "running"
+        ) if timed_out else task_status(meta)
         rv = {
             "task_id": task_id,
             "status": status,
@@ -844,7 +847,7 @@ class MCPServer:
         meta_path = td / "meta.json"
         if meta_path.exists():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            status = meta.get("status", "")
+            status = task_status(meta)
             if status == "completed":
                 return self._build_completed(task_id, meta)
             if status == "running":
@@ -894,7 +897,7 @@ class MCPServer:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
-            status = meta.get("status", "unknown")
+            status = task_status(meta)
             if status_filter != "all" and status != status_filter:
                 continue
             results = meta.get("results", [])
@@ -961,7 +964,7 @@ class MCPServer:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        status = meta.get("status", "unknown")
+        status = task_status(meta)
         if status not in ("running", "paused"):
             return {"task_id": task_id, "status": status,
                     "cancelled": False,
@@ -981,7 +984,11 @@ class MCPServer:
                     pass
 
         # 标记状态（保留已完成结果与 metering，便于后续审计/恢复）
-        meta["status"] = "cancelled"
+        if meta.get("status_schema_version"):
+            set_task_status(meta, "CANCELLED")
+        else:
+            meta["status"] = "cancelled"
+        meta["failure_class"] = "user_cancelled"
         meta["cancelled_at"] = datetime.now().isoformat()
         if meta_path.exists():
             meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1014,7 +1021,7 @@ class MCPServer:
         pending = total - len(results)
 
         rv = {
-            "task_id": task_id, "status": meta.get("status", "unknown"),
+            "task_id": task_id, "status": task_status(meta),
             "task": meta.get("task", ""), "repo": meta.get("repo", ""),
             "elapsed_sec": sum(r.get("duration_sec", 0) for r in results),
             "progress": {"completed": n_done, "failed": n_fail, "blocked": n_fail,
@@ -1142,7 +1149,7 @@ class MCPServer:
                 n_done = sum(1 for r in results if r.get("status") in ("completed", "no_changes"))
                 n_fail = sum(1 for r in results if r.get("status") in ("failed", "blocked"))
                 summary = {
-                    "task_id": task_id, "status": meta.get("status", "unknown"),
+                    "task_id": task_id, "status": task_status(meta),
                     "task": meta.get("task", ""), "repo": meta.get("repo", ""),
                     "progress": {"completed": n_done, "failed": n_fail, "total": total},
                     "duration_sec": sum(r.get("duration_sec", 0) for r in results),

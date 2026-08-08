@@ -1,4 +1,4 @@
-import sys, os, subprocess, json, threading, signal, logging
+import sys, os, subprocess, json, threading, signal, logging, inspect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
@@ -16,6 +16,66 @@ logger = logging.getLogger(__name__)
 console = _LazyConsole()
 
 __all__: list[str] = []
+
+# 心跳周期（秒）：pipeline 运行期间周期 touch {task_dir}/heartbeat。
+# meta.json 只在子任务完成时写，长时间运行的合法任务会被 _cleanup_stale_tasks
+# 的"meta.json mtime > 1h"判活误杀；heartbeat 文件是"父进程存活"的外部信号。
+HEARTBEAT_INTERVAL = 30
+
+
+def _start_heartbeat(task_dir: Path, logger: logging.Logger) -> threading.Event:
+    """启动心跳线程：任务运行期间周期刷新 {task_dir}/heartbeat 的 mtime。
+
+    进程在跑 → 每 HEARTBEAT_INTERVAL 秒 touch 一次；SIGKILL 后文件冻结，
+    下一次 stale 清理可用其 mtime 准确区分"长任务运行中"与"进程已死"。
+    返回 stop Event；调用方在所有退出路径调用 _stop_heartbeat 收尾。
+    """
+    hb_path = task_dir / "heartbeat"
+    stop_event = threading.Event()
+
+    def _beat() -> None:
+        while not stop_event.wait(HEARTBEAT_INTERVAL):
+            try:
+                hb_path.touch()
+            except OSError as _e:
+                logger.warning(f"[heartbeat] 写入失败（心跳停止）: {_e}")
+                break
+
+    _t = threading.Thread(target=_beat, daemon=True, name=f"heartbeat-{task_dir.name}")
+    _t.start()
+    try:
+        hb_path.touch()
+    except OSError as _e:
+        logger.warning(f"[heartbeat] 初始写入失败: {_e}")
+    logger.debug(f"[heartbeat] 已启动（interval={HEARTBEAT_INTERVAL}s）")
+    return stop_event
+
+
+def _stop_heartbeat(task_dir: Path, stop_event: Optional[threading.Event]) -> None:
+    """停止心跳线程并清理 heartbeat 文件（正常/中断退出路径调用）。"""
+    if stop_event is not None:
+        stop_event.set()
+    try:
+        (task_dir / "heartbeat").unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _invoke_run_subtask(task_id, st, repo, task_dir, logger, upstream, headless,
+                        issue_ref, active_pids, active_pids_lock, metering_path, config,
+                        interrupt_event):
+    """调用 worker；兼容外部集成方仍使用旧版 run_subtask mock/signature。"""
+    kwargs = {
+        "headless": headless, "issue_ref": issue_ref,
+        "active_pids": active_pids, "active_pids_lock": active_pids_lock,
+        "metering_path": metering_path, "config": config,
+    }
+    try:
+        if "interrupt_event" in inspect.signature(run_subtask).parameters:
+            kwargs["interrupt_event"] = interrupt_event
+    except (TypeError, ValueError):
+        kwargs["interrupt_event"] = interrupt_event
+    return run_subtask(task_id, st, repo, task_dir, logger, upstream, **kwargs)
 
 
 def _save_meta_atomic(meta: dict, task_dir: Path) -> None:
@@ -48,10 +108,22 @@ def _meter_total_cost(metering_path: str) -> float:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                total += ev.get("cost_usd", 0.0) or 0.0
+                # cost_censored 是控制审计事件，cost_usd 表示累计下限，不是新的消费。
+                if ev.get("event") != "cost_censored":
+                    total += ev.get("cost_usd", 0.0) or 0.0
     except OSError:
         return 0.0
     return total
+
+
+def _metering_available(metering_path: str) -> bool:
+    if not metering_path:
+        return False
+    try:
+        with open(metering_path, encoding="utf-8"):
+            return True
+    except OSError:
+        return False
 
 
 def _dynamic_task_budget(cc_cfg: dict, subtasks: list[dict]) -> float:
@@ -69,6 +141,20 @@ def _dynamic_task_budget(cc_cfg: dict, subtasks: list[dict]) -> float:
         _b = _budgets.get(_diff) or _budgets.get("medium", 0.0) or 0.0
         total += float(_b) * float(_mult)
     return round(total, 4)
+
+
+def _subtask_budget_reservation(cc_cfg: dict, subtask: dict) -> float:
+    """返回单个子任务的预算 reservation；未知配置返回 0（不做错误阻断）。"""
+    budgets = cc_cfg.get("per_subtask_budget_usd") or {}
+    difficulty = subtask.get("difficulty", "medium")
+    if isinstance(budgets, dict):
+        value = budgets.get(difficulty) or budgets.get("medium", 0.0)
+    else:
+        value = budgets
+    try:
+        return max(0.0, float(value or 0.0) * float(cc_cfg.get("subtask_multiplier", 2.5) or 2.5))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _estimate_wave_count(subtasks: list[dict], completed_ids: set = frozenset()) -> int:
@@ -111,6 +197,8 @@ def _record_subtask_result(
     关键改进（P0 Layer 4）：每个 subtask 完成立即原子写 meta.json。
     即使后续被 SIGKILL，已完成的 subtask 状态也不会丢失，recover 不再需要。
     """
+    from .failure import classify_failure
+    result.setdefault("failure_class", classify_failure(result, meta))
     with meta_lock:
         worktree_map[st["id"]] = task_dir / st["id"] / "work"
         results_map[st["id"]] = result
@@ -177,7 +265,7 @@ def _sanitize_preserved_worktree(wt_path: Path) -> None:
                     pass
 
 
-def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
+def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, logger: logging.Logger, config: dict[str, Any], headless: bool, parallel: int, issue_ref: str, meta: dict[str, Any],
                   worktree_map: Optional[dict[str, Path]] = None, results_map: Optional[dict[str, dict[str, Any]]] = None, completed_ids: Optional[set] = None, remote_url: str = "",
                   preserve_worktrees: Optional[bool] = None, interrupted: Optional[threading.Event] = None, step_confirm: bool = False) -> None:
     """执行管线：拓扑排序 + 并发/串行执行。恢复模式下传入已有状态。
@@ -198,6 +286,28 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     failed_ids: set = {r["subtask_id"] for r in results_map.values() if r.get("status") == "failed"}
     blocked_ids: set = {r["subtask_id"] for r in results_map.values() if r.get("status") == "blocked"}
     task_id = meta["task_id"]
+    task_dir.mkdir(parents=True, exist_ok=True)
+    if meta.get("base_commit"):
+        config["_base_commit"] = meta["base_commit"]
+    # 同一 task 不允许 run/resume/recover 交叉修改 worktree 和 meta。
+    _task_lock_file = None
+    try:
+        import fcntl
+        _task_lock_file = (task_dir / ".task.lock").open("a+", encoding="utf-8")
+        fcntl.flock(_task_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, BlockingIOError, OSError):
+        if _task_lock_file is not None:
+            _task_lock_file.close()
+        raise RuntimeError(f"task {task_id} is already running")
+
+    def _release_task_lock() -> None:
+        if _task_lock_file is not None:
+            try:
+                fcntl.flock(_task_lock_file.fileno(), fcntl.LOCK_UN)
+            except (NameError, OSError):
+                pass
+            _task_lock_file.close()
+
     meta_lock = threading.Lock()
     active_pids = set()
     active_pids_lock = threading.Lock()
@@ -235,22 +345,32 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                 os.kill(pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
-    prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
-    prev_sigterm = signal.signal(signal.SIGTERM, _on_interrupt)
+    signals_installed = False
+    prev_sigint = prev_sigterm = None
+    if threading.current_thread() is threading.main_thread():
+        prev_sigint = signal.signal(signal.SIGINT, _on_interrupt)
+        prev_sigterm = signal.signal(signal.SIGTERM, _on_interrupt)
+        signals_installed = True
+    config["_pipeline_signal_state"] = (signals_installed, prev_sigint, prev_sigterm)
+    config["_pipeline_gc_state"] = (repo, gc_disabled, original_gc_value)
 
     # 跳过已完成的子任务
     remaining = [st for st in confirmed if st["id"] not in completed_ids]
     if not remaining:
         console.print("所有子任务已完成，无需恢复执行")
-        meta["status"] = "completed"
+        meta["status"] = "DELIVERY_READY" if meta.get("status_schema_version") else "completed"
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         # 恢复信号处理器（仅 CLI 模式自有）与 gc.auto
-        if _own_signal:
+        if signals_installed:
             signal.signal(signal.SIGINT, prev_sigint)
             signal.signal(signal.SIGTERM, prev_sigterm)
         if gc_disabled and original_gc_value is not None:
             _, _, _ = _set_gc_auto(repo, original_gc_value)
+        _release_task_lock()
         return
+
+    # ── 心跳：pipeline 存活信号（供 stale 清理判活，防误杀长任务）──
+    _heartbeat_stop = _start_heartbeat(task_dir, logger)
 
     # ── MCP 消费层（S9-A）：启动外部 MCP server 连接池 ──
     # 解耦：可选增强，启动失败降级 warning 不阻断 pipeline（与 notify/skills 同级）
@@ -345,6 +465,19 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                 _max_budget = _dynamic_task_budget(_cc_cfg, confirmed)
             _meter_path = (config or {}).get("_metering_path", "")
             if _budget_mode != "ignore" and _max_budget > 0 and _meter_path:
+                if not _metering_available(_meter_path):
+                    logger.error("成本计量不可用，strict/degrade 模式停止调度以避免无上限消费")
+                    for st in remaining:
+                        if st["id"] not in results_map:
+                            results_map[st["id"]] = {
+                                "subtask_id": st["id"], "status": "blocked", "exit_code": -1,
+                                "summary": "成本计量不可用，已停止调度", "blocked_by": ["metering"],
+                                "failure_reason": "metering.jsonl 不可读", "kill_reason": "metering_unavailable",
+                                "worktree": "", "sandbox_type": "headless", "verify_ok": False,
+                                "duration_sec": 0,
+                            }
+                            completed_ids.add(st["id"])
+                    break
                 _spent = _meter_total_cost(_meter_path)
                 if _spent >= _max_budget:
                     # CR-H1 修复：_degrade_aborted 哨兵置位后，降级已回退 stop，
@@ -385,6 +518,33 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                                 }
                                 completed_ids.add(st["id"])
                         break
+
+        # 并发预算 reservation：strict 模式下先预留每个 worker 的 L2 上限，
+        # 避免同一 wave 在一次检查后同时启动并超过任务预算。实际成本仍由 L3
+        # 在下一 wave 复核，reservation 只针对有明确 per-subtask 预算的任务。
+        if _cc_cfg.get("enabled") and _cc_cfg.get("budget_mode", "strict") == "strict" and wave:
+            _reservation_budget = _cc_cfg.get("max_budget_usd") or _dynamic_task_budget(_cc_cfg, confirmed)
+            _reserved_available = max(0.0, float(_reservation_budget or 0.0) - _meter_total_cost(config.get("_metering_path", "")))
+            _reserved_wave = []
+            _reservation_blocked = []
+            for _st in wave:
+                _need = _subtask_budget_reservation(_cc_cfg, _st)
+                if _need <= 0 or _need <= _reserved_available:
+                    _reserved_wave.append(_st)
+                    _reserved_available -= _need
+                else:
+                    _reservation_blocked.append(_st)
+            for _st in _reservation_blocked:
+                blocked_ids.add(_st["id"])
+                completed_ids.add(_st["id"])
+                results_map[_st["id"]] = {
+                    "subtask_id": _st["id"], "status": "blocked", "exit_code": -1,
+                    "summary": "预算 reservation 不足，未启动子任务",
+                    "blocked_by": ["cost_control"], "failure_reason": "并发启动前预算不足",
+                    "kill_reason": "over_budget_l3", "worktree": "", "sandbox_type": "headless",
+                    "verify_ok": False, "duration_sec": 0,
+                }
+            wave = _reserved_wave
 
         if not wave:
             logger.error("依赖循环或无法满足的依赖！")
@@ -446,7 +606,9 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
             for st in wave:
                 upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
                 try:
-                    result = run_subtask(task_id, st, repo, task_dir, logger, upstream, headless=headless, issue_ref=issue_ref, active_pids=active_pids, active_pids_lock=active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
+                    result = _invoke_run_subtask(task_id, st, repo, task_dir, logger, upstream, headless,
+                                                 issue_ref, active_pids, active_pids_lock,
+                                                 config.get("_metering_path", ""), config, _interrupted)
                 except Exception as e:
                     # 异常隔离（与并发分支对齐）：内部 bug 崩溃不击穿整个进程，
                     # 记为 failed + kill_reason=system_error（区别于能力失败）
@@ -467,7 +629,9 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
                 futures = {}
                 for st in wave:
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                    fut = executor.submit(run_subtask, task_id, st, repo, task_dir, logger, upstream, headless, issue_ref, active_pids, active_pids_lock, metering_path=config.get("_metering_path", ""), config=config)
+                    fut = executor.submit(_invoke_run_subtask, task_id, st, repo, task_dir, logger, upstream,
+                                          headless, issue_ref, active_pids, active_pids_lock,
+                                          config.get("_metering_path", ""), config, _interrupted)
                     futures[fut] = st
                 for fut in as_completed(futures):
                     st = futures[fut]
@@ -510,22 +674,24 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
         if _interrupted.is_set():
-            meta["status"] = "paused"
+            meta["status"] = "PLAN_REVIEW" if meta.get("status_schema_version") else "paused"
             (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             logger.info(f"任务已暂停 ({len(completed_ids)}/{total})，可通过 agent_go resume {task_id} 恢复")
-            if _own_signal:
+            _stop_heartbeat(task_dir, _heartbeat_stop)
+            if signals_installed:
                 signal.signal(signal.SIGINT, prev_sigint)
                 signal.signal(signal.SIGTERM, prev_sigterm)
             # 恢复 gc.auto
             if gc_disabled and original_gc_value is not None:
                 _, _, _ = _set_gc_auto(repo, original_gc_value)
             _stop_mcp_pool()
+            _release_task_lock()
             sys.exit(0)
 
         remaining = [st for st in remaining if st["id"] not in completed_ids]
         wave_num += 1
 
-    if _own_signal:
+    if signals_installed:
         signal.signal(signal.SIGINT, prev_sigint)
         signal.signal(signal.SIGTERM, prev_sigterm)
 
@@ -656,11 +822,28 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
     # 正常结束：回收 MCP 池（中断退出已在上面 sys.exit 前处理）
     _stop_mcp_pool()
 
+    # 心跳收尾：清除存活信号（状态将改为 completed/failed，不再需要判活）
+    _stop_heartbeat(task_dir, _heartbeat_stop)
+    _release_task_lock()
+
     # 收集所有结果并写回 meta.json（完整版本，含 results 数组）
     meta["results"] = [results_map.get(s["id"]) for s in confirmed if s["id"] in results_map]
     has_failed = any(r.get("status") in ("failed", "blocked") for r in results_map.values())
     has_blocked = any(r.get("status") == "blocked" for r in results_map.values())
-    meta["status"] = "failed" if has_failed else "completed"
+    if meta.get("status_schema_version"):
+        meta["status"] = "BLOCKED" if has_blocked else ("VERIFICATION_FAILED" if has_failed else "DELIVERY_READY")
+    else:
+        meta["status"] = "failed" if has_failed else "completed"
+    from .delivery import apply_delivery_result
+    from .failure import aggregate_failure_class
+    delivery = apply_delivery_result(meta, repo)
+    meta["failure_class"] = aggregate_failure_class(
+        [r.get("failure_class") for r in results_map.values()], meta
+    )
+    if meta.get("status_schema_version") and not has_failed and delivery["accepted_delivery"]:
+        meta["status"] = "ACCEPTED_DELIVERY"
+    elif meta.get("status_schema_version") and not has_failed and delivery["delivery_failed"]:
+        meta["status"] = "DELIVERY_FAILED"
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     _total_time = sum(r.get("duration_sec", 0) for r in results_map.values())
@@ -814,3 +997,29 @@ def _run_pipeline(confirmed: list[dict[str, Any]], repo: Path, task_dir: Path, l
         notify_event(event, {"meta": meta, "results_map": results_map, "task_dir": task_dir}, config)
     except Exception as e:
         logger.warning(f"notify 加载/调用失败，跳过任务完成通知（不中断）: {e}")
+
+
+def _run_pipeline(*args, **kwargs) -> None:
+    """运行 pipeline，并为非预期异常提供最后一道资源清理兜底。"""
+    config = args[4] if len(args) > 4 else kwargs.get("config", {})
+    task_dir = args[2] if len(args) > 2 else kwargs.get("task_dir")
+    logger = args[3] if len(args) > 3 else kwargs.get("logger", logging.getLogger(__name__))
+    try:
+        return _run_pipeline_impl(*args, **kwargs)
+    except BaseException:
+        try:
+            state = config.get("_pipeline_signal_state", (False, None, None))
+            if state[0] and threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGINT, state[1])
+                signal.signal(signal.SIGTERM, state[2])
+            gc_state = config.get("_pipeline_gc_state")
+            if gc_state and gc_state[1] and gc_state[2] is not None:
+                _set_gc_auto(gc_state[0], gc_state[2])
+            pool = config.get("_mcp_pool")
+            if pool is not None:
+                pool.stop_all()
+            if task_dir is not None:
+                (Path(task_dir) / "heartbeat").unlink(missing_ok=True)
+        except Exception:
+            logger.debug("pipeline 异常兜底清理失败", exc_info=True)
+        raise

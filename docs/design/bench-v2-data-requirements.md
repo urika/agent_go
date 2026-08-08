@@ -8,7 +8,7 @@
 >
 > **日期**：2026-08-01
 >
-> **实施状态**：P0（§1.2 P0 四字段 + §三 $/pass 统一口径 + §3.4 K8 修订）✅ 已落地（2026-08-01，`bench.py` `_collect_result` + `analyze_model_productivity` + `eval bench --source-batch`）；cross_judge 自评偏差量化报告已落地（`cross_judge.py` `_print_self_bias_report`）。P1 schema（§1.2 P1 四字段 `per_subtask`/`binary_pass`/`semantic_pass`/`plan_step_count`）✅ 已落地（`751ec10`/`a72d4bf`）。代码质量维度（§4.1 `lint_errors`/`tests_broken` + 代码回归率）✅ 已落地（`_collect_quality`）。对照基线（§2.3 `eval baseline` claude -p 裸跑）✅ 已落地。全因子 198 次运行 + 对照基线运行待执行。
+> **实施状态**：schema、cross_judge、代码质量维度和对照基线已落地；全因子实验和产品交付维度仍需按新版 suite 方案执行。旧批次只作 exploratory 数据，不作为当前产品 KPI 基线。
 
 ---
 
@@ -58,6 +58,19 @@ total_latency_ms, dollar_per_pass, stderr_tail
 
 ## 二、实验设计规范
 
+### 1.3 M0 冻结 Schema
+
+当前 Bench record 必须带 `bench_schema_version=1`，并包含：
+
+```text
+task_id, task_version, suite, source_batch, model,
+planner_model, judge_model, repeat, difficulty, failure_class,
+accepted_delivery, delivery_branch_created, pr_created,
+spec_compliance, architecture_compliance, total_cost_usd, elapsed_sec
+```
+
+字段类型和空值语义以 [M0-4 Bench Schema](m0-bench-schema.md) 为准；结果写入前必须通过 `agent_go eval validate-schema`。
+
 ### 2.1 任务-模型覆盖矩阵
 
 **要求**：全因子设计（Full Factorial）。每个模型 × 每个任务 ≥ 3 次重复。
@@ -85,7 +98,24 @@ total_latency_ms, dollar_per_pass, stderr_tail
               db-performance-optimization, db-end-to-end-optimization
 ```
 
-**不跑子集**：如果确需快速 smoke（如验证 pipeline 未挂），标注 `source_batch=smoke-*`，不参与全量对比。
+**Suite 分层**：22 个 canonical 任务保留为历史资产，但按 `eval_suite/task_catalog.json` 分成：
+
+| Suite | 用途 | 规模建议 | 是否用于模型排名 |
+|---|---|---:|---|
+| `smoke` | 每次代码变更快速回归 | 6-8 | 否 |
+| `core` | 日常 Harness 回归 | 10-12 | 否，做趋势 |
+| `decision` | 模型/路由决策 | 12-16 | 是 |
+| `stress` | hard、高方差、长耗时专项 | 4-8 | 单独报告 |
+
+运行示例：
+
+```bash
+agent_go eval bench --suite smoke --candidate-models claude-haiku-4-5 --repeat 1
+agent_go eval bench --suite decision --candidate-models M1,M2,M3 --repeat 3
+agent_go eval bench --suite stress --candidate-models M1,M2 --repeat 5
+```
+
+不跑子集时，默认运行全部 canonical 任务；快速 suite 必须写入 `suite` 和 `source_batch`，不得与全量结果混合比较。
 
 ### 2.2 重复次数说明
 
@@ -121,15 +151,21 @@ total_latency_ms, dollar_per_pass, stderr_tail
 
 ## 三、指标体系标准化
 
-### 3.1 北极星指标：$/pass
+### 3.1 诊断指标：$/pass
 
-**统一定义**：
+**兼容旧 Bench 的诊断定义**：
 
 ```
 $/pass = sum(total_cost_usd) / sum(pass_rate)
 ```
 
-含义：「获得一个等效完全通过所需的美元成本」。
+该指标只用于同一 suite、同一 source_batch 内的相对诊断，不再作为产品主 KPI。
+
+产品主 KPI 使用任务级：
+
+```text
+Cost per Accepted Delivery = valid_cost / accepted_delivery_count
+```
 
 - `pass_rate = 0` 的 record：贡献 cost 但不贡献 pass，自动纳入计算
 - `pass_rate = 0.5` 的 record：贡献 cost，贡献 0.5 个 pass
@@ -174,6 +210,10 @@ K8 = count(total_retries == 0 AND binary_pass == true) / count(binary_pass == tr
 | 级联阻断率 | `blocked_by_upstream == true` 的 record 占比（仅计未通过的 record） | 衡量 pipeline 中的浪费：有多少失败不是自己造成的 |
 | 超时率 | `timed_out == true` 的 record 占比（按 difficulty） | 识别超时配置不当的任务 |
 | 方差系数 | per-task-model 的 `std(pass_rate) / mean(pass_rate)` | 识别高方差任务（CV > 0.3），标注为「结果不稳定」 |
+| Accepted Delivery | `accepted_delivery` | 验证代码是否真正形成可交付 branch/PR |
+| PR 创建率 | `pr_created` / 有效任务数 | 验证交付闭环，而非仅验证代码修改 |
+| Spec 合规率 | `spec_compliance` | 验证实现是否满足需求契约 |
+| 架构合规率 | `architecture_compliance` | 验证实现是否遵守架构约束 |
 
 ---
 

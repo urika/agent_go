@@ -47,7 +47,7 @@ def _save_meta_atomic(meta: dict, task_dir: Path) -> None:
     os.replace(tmp_path, meta_path)
 
 
-def _branch_has_commits(worktree: Path, expected_branch_prefix: str) -> tuple[bool, int, str]:
+def _branch_has_commits(worktree: Path, expected_branch_prefix: str, base_commit: str = "") -> tuple[bool, int, str]:
     """检查 worktree 分支是否在 expected_branch_prefix（agent_go/task-XXX/sub-Y）上 + 是否有 commits。"""
     rc, stdout, _ = _run_git(worktree, "branch", "--show-current")
     if rc != 0:
@@ -56,7 +56,8 @@ def _branch_has_commits(worktree: Path, expected_branch_prefix: str) -> tuple[bo
 
     on_correct_branch = current_branch.startswith(expected_branch_prefix)
 
-    rc, stdout, _ = _run_git(worktree, "rev-list", "--count", "main..HEAD")
+    revision = f"{base_commit}..HEAD" if base_commit else "main..HEAD"
+    rc, stdout, _ = _run_git(worktree, "rev-list", "--count", revision)
     if rc != 0:
         rc2, stdout2, _ = _run_git(worktree, "rev-list", "--count", "HEAD")
         if rc2 != 0:
@@ -171,7 +172,14 @@ def scan_subtask_state(
         result["status"] = "no_git_link"
         return result
 
-    on_branch, commit_count, current_branch = _branch_has_commits(worktree, branch_prefix)
+    meta_path = task_dir / "meta.json"
+    base_commit = ""
+    try:
+        if meta_path.exists():
+            base_commit = json.loads(meta_path.read_text(encoding="utf-8")).get("base_commit", "")
+    except (OSError, json.JSONDecodeError):
+        pass
+    on_branch, commit_count, current_branch = _branch_has_commits(worktree, branch_prefix, base_commit)
     result["branch"] = current_branch
     result["commits"] = commit_count
 
@@ -193,7 +201,9 @@ def scan_subtask_state(
     result["verify_ok"] = _has_verify_pass(log_path, sub_id)
 
     # 综合判断 status（核心规则：commit 是完成边界）
-    if commit_count == 0:
+    if not result.get("orphan_reset", True) and has_orphan:
+        result["status"] = "reset_failed"
+    elif commit_count == 0:
         # 无 commit = 未完成（不论有没有 orphan 都被 reset 掉了）
         result["status"] = "no_changes"
     elif result["verify_ok"] is False:
@@ -201,8 +211,8 @@ def scan_subtask_state(
     elif result["verify_ok"] is True:
         result["status"] = "completed"
     else:
-        # 有 commit + verify 未知（execution.log 没记录明确 success/failure）
-        result["status"] = "completed"
+        # 有 commit + verify 未知：代码已保存但尚未完成验证，必须重新验证。
+        result["status"] = "committed_unverified"
 
     return result
 
@@ -225,13 +235,26 @@ def recover_task(
         return {"error": f"task {task_id} not found at {task_dir}"}
 
     meta_path = task_dir / "meta.json"
+    # 与 pipeline 共用同一 task lock，禁止 recover 与 run/resume 并发。
+    lock_path = task_dir / ".task.lock"
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - POSIX is the supported runtime
+        fcntl = None
+    lock_file = lock_path.open("a+", encoding="utf-8")
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_file.close()
+            return {"error": f"task {task_id} is already being recovered or resumed"}
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            meta = {"status": "running", "task_id": task_id, "results": []}
+            meta = {"status": "EXECUTING", "status_schema_version": 1, "task_id": task_id, "results": []}
     else:
-        meta = {"status": "running", "task_id": task_id, "results": []}
+        meta = {"status": "EXECUTING", "status_schema_version": 1, "task_id": task_id, "results": []}
 
     # 找 subtasks
     subtasks = meta.get("subtasks", [])
@@ -247,7 +270,7 @@ def recover_task(
         sub_id = st["id"]
         existing = existing_results.get(sub_id, {})
         # 已有真实（不是 recovered 标记的）结果 → 保留
-        if existing.get("status") in ("completed", "failed", "blocked", "no_changes") and not existing.get("recovered"):
+        if existing.get("status") in ("completed", "failed", "blocked", "no_changes", "committed_unverified") and not existing.get("recovered"):
             recovered_results.append(existing)
             continue
         # 否则扫描 worktree
@@ -261,32 +284,55 @@ def recover_task(
     # - 任何 dirty/error 状态 → interrupted
     statuses = [r.get("status") for r in recovered_results]
     if not statuses:
-        overall_status = "no_subtasks"
-    elif any(s in ("dirty", "wrong_branch", "no_git_link", "no_worktree", "unknown") for s in statuses):
-        overall_status = "interrupted"
+        overall_status = "DRAFT"
+    elif any(s in ("dirty", "reset_failed", "wrong_branch", "no_git_link", "no_worktree", "unknown") for s in statuses):
+        overall_status = "EXECUTING"
     elif any(s == "no_changes" for s in statuses):
         # 至少一个 subtask 没 commit → 任务未完成，resume 接力
-        overall_status = "interrupted"
+        overall_status = "EXECUTING"
     elif all(s == "completed" for s in statuses):
-        overall_status = "completed"
+        overall_status = "COMMITTED_UNVERIFIED"
     elif any(s == "failed" for s in statuses):
-        overall_status = "failed"
+        overall_status = "VERIFICATION_FAILED"
     else:
-        overall_status = "interrupted"
+        overall_status = "EXECUTING"
 
     meta_updated = False
+    from .failure import aggregate_failure_class, classify_failure
+    recovered_failure_class = aggregate_failure_class(
+        [classify_failure(r) for r in recovered_results], meta
+    )
     if update_meta:
         meta["results"] = recovered_results
-        meta["status"] = overall_status
+        meta["failure_class"] = recovered_failure_class
+        if meta.get("status_schema_version"):
+            meta["status"] = overall_status
+        else:
+            meta["status"] = {
+                "DRAFT": "no_subtasks",
+                "COMMITTED_UNVERIFIED": "completed",
+                "VERIFICATION_FAILED": "failed",
+                "EXECUTING": "interrupted",
+            }.get(overall_status, overall_status)
         meta["recovered_at"] = datetime.now().isoformat()
         _save_meta_atomic(meta, task_dir)
         meta_updated = True
 
-    return {
+    response_status = overall_status if meta.get("status_schema_version") else {
+        "DRAFT": "no_subtasks",
+        "COMMITTED_UNVERIFIED": "completed",
+        "VERIFICATION_FAILED": "failed",
+        "EXECUTING": "interrupted",
+    }.get(overall_status, overall_status)
+    response = {
         "task_id": task_id,
         "task_dir": str(task_dir),
         "previous_status": meta.get("status", "unknown") if not update_meta else None,
         "recovered": recovered_results,
-        "overall_status": overall_status,
+        "overall_status": response_status,
         "meta_updated": meta_updated,
     }
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    lock_file.close()
+    return response

@@ -1,7 +1,7 @@
 # agent_go
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-1569%20passed-green)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1864%20passed-green)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stdlib Only](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)]()
 
@@ -24,8 +24,8 @@ Give Claude Code a complex task — refactoring auth, upgrading dependencies, ad
 - **MCP server & client** — expose agent_go as an MCP server (stdio or HTTP/SSE, 6 tools); subtasks can consume tools from external MCP servers (`mcp__{server}__{tool}`)
 - **Artifact export** — subtasks write deliverables to `__artifacts__/` in their worktree; with `--artifact-dir`, files are exported to your directory before worktree cleanup
 - **Evaluation** — `eval quality/perf/cost/reliability/ux` built-in analytics
-- **Release gate** — `eval gate --baseline 0.05` enforces $/pass rate budget (北极星指标); CI step fails on regression
-- **Model benchmark** — `eval bench --models M1,M2` compares N models on standard task suite (pre-flight model-price check probes actual backend, sequential `--parallel 1`, dynamic timeout, per-subtask `binary_pass`/`semantic_pass`/`plan_step_count`); `eval baseline` runs `claude -p` bare-line control; `eval models` outputs decision matrix ($/pass unified, K8, lint/test regression); records `timed_out`/`judge_model`/`planner_model`/`source_batch` per run (S10-P1/P2); `eval judge` runs cross-model judgment with self-bias quantification
+- **Release gate** — `eval gate` keeps legacy `$ / pass` as a diagnostic/regression gate; product KPI is Accepted Delivery and Cost per Accepted Delivery
+- **Model benchmark** — `eval bench --candidate-models M1,M2` compares N models on the versioned suite; `eval baseline` runs `claude -p` bare-line control; `eval models` reports Accepted Delivery, delivery failures, PR rate, cost and diagnostic `$ / pass`; `eval metric-freeze` creates an immutable KPI report
 - **Cost control (3-layer)** — L1 `claude --max-budget-usd` single-call cap (cold-start default ON via `l1_enabled`, prevents runaway calls with lowest false-kill risk), L2 subtask cumulative cap across retries, L3 task-level circuit break (`--max-cost` / `--budget`); L2/L3 gated by `cost_control.enabled` (default OFF — requires calibrated baseline); `--budget-mode` chooses strict/degrade/ignore; censored-adjusted baseline via `eval cost-baseline` (excludes timed_out records, P90×tolerance)
 - **Cross-judgment** — `eval judge --judge-models M1,M2` runs N-model mutual review with self-bias prevention; `eval judge calibrate` for human calibration
 
@@ -80,7 +80,7 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 | `ci` | Generate GitHub Actions workflow |
 | `cache` | Plan cache management (`list`/`clean`/`clear`/`stats`) |
 | `eval` | Quality/performance/cost evaluation |
-| `eval gate` | **Release gate** — fail CI if $/pass rate exceeds baseline (北极星指标) |
+| `eval gate` | **Diagnostic release gate** — compare legacy `$ / pass` within a controlled batch |
 | `eval gate --check-regression` | **Regression gate** — fail if $/pass rate regressed >10% vs stored baseline (PRD "不劣化") |
 | `eval gate --update-baseline` | Reset stored baseline to current rate (use after model upgrades) |
 | `eval bench` | **Model benchmark** — compare N models on standard task suite, output decision matrix; `--source-batch` records batch identity; pre-flight model-price probe (S12) + sequential `--parallel 1` + dynamic timeout + code quality (lint/tests) collection (S10-P2) |
@@ -89,6 +89,9 @@ agent_go --config /path/to/config.json run ~/my-project "<task>"
 | `eval cost-baseline` | **Censored-adjusted cost baseline** — per-difficulty×model P90×tolerance budgets, excludes timed_out right-censored records (S10) |
 | `eval judge` | **Cross-judgment** — N-model mutual review with self-bias prevention + self-bias quantification |
 | `eval judge calibrate` | **Human calibration** — compare LLM vs human scores, detect unreliable judges |
+| `eval validate-schema` | Validate every Bench record against schema version 1 |
+| `eval metric-freeze` | Generate a versioned Metric Freeze report with hashes and KPI metrics |
+| `eval batch-manifest` | Generate an immutable source-batch manifest |
 | `web` | **Read-only Web observability** — task list / subtask detail / logs / metering / timeline at `127.0.0.1:8091` (`--host`/`--port`/`--token` optional) |
 
 ### Options
