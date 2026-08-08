@@ -457,7 +457,8 @@ def cmd_bench(args=None) -> None:
             console.print(f"\n[{_n}/{total}] {_task_id} | {_model} | repeat={_r}")
         _rec = _run_one_task(_task, _repo, _model, _task_id,
                              no_skills=no_skills, source_batch=source_batch,
-                             results_path=output_path)
+                             results_path=output_path,
+                             hard_model=getattr(args, "hard_model", "") or "")
         # _run_one_task 返回单条 record（dict）；防御历史 list[dict] 签名
         _recs = _rec if isinstance(_rec, list) else [_rec]
         for _r2 in _recs:
@@ -595,8 +596,11 @@ def cmd_baseline(args=None) -> None:
 
 def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
                   preserve: bool = False, no_skills: bool = False,
-                  source_batch: str = "", results_path: Optional[Path] = None) -> list[dict]:
+                  source_batch: str = "", results_path: Optional[Path] = None,
+                  hard_model: str = "") -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
+
+    hard_model: CR-建议#5——hard 难度子任务使用的更强模型（留空 = 与候选 model 相同）。
 
     preserve=True 时传 --preserve-worktrees 给 agent_go run，保留 worktree 供交叉评判读 diff。
     source_batch: 批次标识（如 baseline / results_v2 / smoke-*），写入每条 record。
@@ -630,7 +634,9 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
         config = {
             "plan_api": plan_api,
-            "worker_models": {"easy": model, "medium": model, "hard": model},
+            # CR-建议#5：hard 难度可用更强模型（--hard-model），easy/medium 用候选模型
+            "worker_models": {"easy": model, "medium": model,
+                               "hard": hard_model or model},
             "behavior": {"auto_confirm_plan": True, "auto_confirm_subtasks": True},
             "evaluator": {"enabled": True},
         }
@@ -1155,6 +1161,11 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         "kill_reason": kill_reason,
         "per_subtask": per_subtask,
         "plan_step_count": plan_step_count,
+        "plan_quality_status": meta.get("plan_quality_status"),
+        "plan_requirement_coverage": meta.get("plan_requirement_coverage"),
+        "plan_acceptance_coverage": meta.get("plan_acceptance_coverage"),
+        "plan_conflict_count": meta.get("plan_conflict_count", 0),
+        "plan_warning_count": meta.get("plan_warning_count", 0),
         # S10-P2：代码质量维度（§4.1，从保留 worktree 聚合）
         "lint_errors": quality["lint_errors"],
         "tests_broken": quality["tests_broken"],
