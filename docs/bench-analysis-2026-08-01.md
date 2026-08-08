@@ -8,6 +8,8 @@
 >
 > **版本**：v1.1（修订版）— 基于原始数据独立复算，修正了 v1.0 中的 4 处数值偏差，补充了 PM 方法论评估
 >
+> **当前口径声明（2026-08-08）**：本文属于历史 exploratory 分析。由于旧 Bench 批次存在采集器漂移、timeout 误判和 `$/pass` 分母问题，本文数值不作为当前产品 KPI 或模型自动路由依据。当前运行请使用 `eval_suite/task_catalog.json` 的 suite 分类和新版 Metric Freeze 规则。
+>
 > **对照基准**：[PRD v2.0.0](https://my.feishu.cn/docx/FiaudrQ6CohcEVx6a6UcGGfqnef)
 
 ---

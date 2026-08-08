@@ -5,6 +5,8 @@
 > 代码来源：`agent_go/bench.py`（`analyze_model_productivity` + 单任务记录采集）
 > 关联文档：[k4-cost-recalibration.md](k4-cost-recalibration.md)、[model-evaluation-and-tiering.md](model-evaluation-and-tiering.md)、`docs/prd.md` §产品 KPI
 > 上游分析：飞书文档《agent_go Bench 数据分析：质量 / 成本 / 效率》——本文是其**勘误与方法论附件**。
+>
+> **当前状态（2026-08-08）**：本文是历史度量审计。结论用于解释旧批次为何不可直接比较；当前 Bench 使用 task suite 分层和 Metric Freeze，产品主指标改为 Cost per Accepted Delivery。
 
 ## 结论先行
 
@@ -96,7 +98,7 @@ PRD（§产品 KPI，533-536 行）把 $/pass 定义为 `Σcost / Σpass_rate`�
 - v2：无 per_subtask、无语义判官、无 aborted 分支（旧采集器）
 - v3：引入语义判官 + K1"收尾被杀"处理（新采集器）
 - v4：在 v3 基础上调 timeout
-- **PRD 的 KPI 基线（K8=88.9% 🟢达标）钉在 Bench v1**（332 条，又一个采集器）
+- **旧 PRD 的 KPI 基线（K8=88.9% 🟢达标）曾钉在 Bench v1**（332 条，又一个采集器）；该结论现已降级为历史 exploratory 结果。
 
 直接后果：PRD 写"K8 首次通过率 88.9%🟢达标"，但同一指标在 v3 上用当前代码复算是 **58.8%**。"达标"与否取决于用哪把尺子。KPI 看板是绿的，但绿得很脆弱。
 

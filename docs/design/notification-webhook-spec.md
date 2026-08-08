@@ -2,7 +2,7 @@
 
 > 版本: v1.0
 > 状态: ✅ 已实现（`notify.py` 多通道：desktop/webhook/command + IM 适配器；`notify` 配置块解析见 `notify.py:_resolve_notify_config`；注意 `DEFAULT_CONFIG` 未含 `notify` 顶层块，未配置时走 `behavior.notify_on_complete`/`notify_command` 兼容层）
-> 关联: PRD P0 缺失 M1（任务完成通知）、roadmap.md「下一批」
+> 关联: PRD F-RECOVER/F-DELIVERY（异步状态和交付通知）、roadmap.md M2.4 人工审查与恢复体验
 > 设计目标: 将现有 `_notify_complete`（macOS 桌面通知 + 自定义命令）升级为可配置的多通道通知体系，首发支持 Webhook，让「关电脑走人」后能在手机/IM 上收到任务结果。
 
 ---

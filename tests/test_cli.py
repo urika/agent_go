@@ -9,6 +9,7 @@ import sys
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -377,6 +378,26 @@ class TestCmdRunFallback:
         )
         mock_fb.assert_called_once()
         mock_p2s.assert_not_called()
+        mock_pipe.assert_called_once()
+
+    def test_all_plan_attempts_fail_fallback(self, tmp_path):
+        """3 次 generate_plan 全部失败（plan=None）：降级到 decompose_fallback，不抛 UnboundLocalError。
+
+        回归测试：修复前 cmd_run 在 plan=None 时缺少 else 分支，subtasks 未定义，
+        confirm_subtasks 抛 UnboundLocalError（cli.py:682）。
+        """
+        mock_fb, mock_p2s, mock_pipe = self._run_with_mocks(
+            tmp_path,
+            confirm_side_effect=None,  # plan=None 时不会走到 confirm_plan
+            plan_side_effect=[RuntimeError("api down"),
+                              RuntimeError("api down"),
+                              RuntimeError("api down")],
+        )
+        # plan=None → 走新加的 else 分支 → decompose_fallback 被调用
+        mock_fb.assert_called_once()
+        # plan_to_subtasks 不该被调用（plan 是 None，走不到）
+        mock_p2s.assert_not_called()
+        # pipeline 正常执行（降级 subtasks 也能跑）
         mock_pipe.assert_called_once()
 
     def test_normal_confirm_still_works(self, tmp_path):
@@ -986,3 +1007,82 @@ class TestCmdRunAutoInit:
         self._run_cmd_run(self._make_args(repo, auto_init=False), tmp_path)
 
         assert not (repo / ".git").exists()
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_stale_tasks — 心跳判活
+# ---------------------------------------------------------------------------
+
+class TestCleanupStaleTasks:
+    """stale 清理改用心跳判活：心跳新鲜 → 不误杀；心跳冻结 → 判 stale_aborted。"""
+
+    def _running_task(self, tmp_path, task_id, hours_old=3):
+        td = tmp_path / task_id
+        td.mkdir()
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": task_id, "status": "running",
+        }), encoding="utf-8")
+        old = time.time() - hours_old * 3600
+        os.utime(td / "meta.json", (old, old))
+        return td
+
+    def test_fresh_heartbeat_keeps_running(self, tmp_path):
+        """meta.json 很旧但 heartbeat 新鲜（30s 前）→ 任务仍在运行，不判 stale。"""
+        from agent_go.cli import _cleanup_stale_tasks
+        td = self._running_task(tmp_path, "task-fresh")
+        hb = td / "heartbeat"
+        hb.touch()
+        fresh = time.time() - 30
+        os.utime(hb, (fresh, fresh))
+
+        with patch("agent_go.cli.AGENT_GO_DIR", tmp_path):
+            cleaned = _cleanup_stale_tasks(max_age_hours=1)
+
+        assert cleaned == 0
+        assert json.loads((td / "meta.json").read_text(encoding="utf-8"))["status"] == "running"
+
+    def test_frozen_heartbeat_marks_stale(self, tmp_path):
+        """heartbeat 冻结（进程死亡，mtime 3h 前）→ 判 stale_aborted。"""
+        from agent_go.cli import _cleanup_stale_tasks
+        td = self._running_task(tmp_path, "task-dead")
+        hb = td / "heartbeat"
+        hb.touch()
+        old = time.time() - 3 * 3600
+        os.utime(hb, (old, old))
+
+        with patch("agent_go.cli.AGENT_GO_DIR", tmp_path):
+            cleaned = _cleanup_stale_tasks(max_age_hours=1)
+
+        assert cleaned == 1
+        meta = json.loads((td / "meta.json").read_text(encoding="utf-8"))
+        assert meta["status"] == "stale_aborted"
+        assert "stale_aborted_at" in meta
+
+    def test_no_heartbeat_falls_back_to_meta_mtime(self, tmp_path):
+        """无 heartbeat 文件 → 回退 meta.json mtime（兼容旧任务目录）。"""
+        from agent_go.cli import _cleanup_stale_tasks
+        self._running_task(tmp_path, "task-nohb")
+
+        with patch("agent_go.cli.AGENT_GO_DIR", tmp_path):
+            cleaned = _cleanup_stale_tasks(max_age_hours=1)
+
+        assert cleaned == 1
+
+    def test_completed_task_never_aborted(self, tmp_path):
+        """status=completed 的任务即使心跳很旧也不判 stale。"""
+        from agent_go.cli import _cleanup_stale_tasks
+        td = tmp_path / "task-done"
+        td.mkdir()
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": "task-done", "status": "completed",
+        }), encoding="utf-8")
+        old = time.time() - 24 * 3600
+        os.utime(td / "meta.json", (old, old))
+        (td / "heartbeat").touch()
+        os.utime(td / "heartbeat", (old, old))
+
+        with patch("agent_go.cli.AGENT_GO_DIR", tmp_path):
+            cleaned = _cleanup_stale_tasks(max_age_hours=1)
+
+        assert cleaned == 0
+        assert json.loads((td / "meta.json").read_text(encoding="utf-8"))["status"] == "completed"

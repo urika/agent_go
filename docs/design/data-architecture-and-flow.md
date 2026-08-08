@@ -3,6 +3,8 @@
 > 状态：设计草案（2026-07-25）
 > 视角：从数据驱动过程优化的角度，刻画整个系统中的数据架构、流向和反馈闭环。
 > 这是与「功能架构」正交的「数据架构」视图，两部分互补。
+>
+> **当前口径说明（2026-08-08）**：本文中的 K4/K8 数值目标属于旧版规划示例。当前产品以 Accepted Delivery、Cost per Accepted Delivery 和真实任务验证为准；Bench 按 suite 分层运行。
 
 ---
 
@@ -265,7 +267,7 @@ RepairAgent: 注入完整失败上下文 → Claude 修复
 
 **数据驱动点**：`verify_state.json` 记录每次重试的输出和 diff
 
-**优化目标**：K8 首次验证通过率（当前 ~60% → 目标 ≥80%）
+**当前验证目标**：减少无进展 retry，记录 failure_pattern/effective_strategy，并验证其对 Accepted Delivery 的影响。
 
 ### 4.2 中环：运行 → 门禁优化（分钟级）
 
@@ -289,9 +291,9 @@ eval gate(baseline=0.05)
                    下次运行成本下降
 ```
 
-**数据驱动点**：`$/pass rate` 对比 S1 基线
+**数据驱动点**：`Cost per Accepted Delivery` 对比冻结基线；旧 `$/pass rate` 仅作同 suite 内诊断。
 
-**优化目标**：K4 单任务成本（目标 ≤$0.05）
+**当前优化目标**：成本不失控且不损害 Accepted Delivery；绝对成本目标待 M3 真实任务验证后重新制定。
 
 ### 4.3 长环：跨运行知识优化（跨任务）
 

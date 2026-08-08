@@ -343,8 +343,8 @@ class TestScanSubtaskState:
         assert result["commits"] == 0
         assert result["orphan_reset"] is False
 
-    def test_commits_no_verify_log_completed(self, tmp_path):
-        """Has commits but no execution.log → completed (default to optimistic)."""
+    def test_commits_no_verify_log_unverified(self, tmp_path):
+        """Has commits but no execution.log → committed_unverified."""
         main = tmp_path / "main"
         _init_repo(main, {"f.txt": "base"})
         subprocess.run(["git", "checkout", "-b", "agent_go/task-t1/sub-1"], cwd=str(main), capture_output=True)
@@ -360,7 +360,7 @@ class TestScanSubtaskState:
                        cwd=str(main), capture_output=True)
 
         result = scan_subtask_state("task-t1", task_dir, "sub-1")
-        assert result["status"] == "completed"
+        assert result["status"] == "committed_unverified"
         assert result["commits"] >= 1
 
     def test_commits_verify_fail_failed(self, tmp_path):
