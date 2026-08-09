@@ -3,7 +3,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-__all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES", "_safe_optional_call"]
+__all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES", "_safe_optional_call", "slugify_branch_name"]
 
 
 def _safe_optional_call(
@@ -441,6 +441,20 @@ def _safe_append_to_file(filepath: Path, text: str, logger: logging.Logger, max_
 def _slugify(text: str, max_len: int = 30) -> str:
     """将任务标题转为分支名适用的短标识。"""
     slug = re.sub(r'[^a-zA-Z0-9一-鿿]+', '-', text).strip('-')
+    return slug[:max_len] if len(slug) > max_len else slug
+
+def slugify_branch_name(title: str, max_len: int = 40) -> str:
+    """将标题转为合法 git 分支名。
+
+    规则：转小写 → 空白/下划线替换为 - → 仅保留字母数字、点(.)、横杠(-) → 去除首尾横杠；
+    结果为空返回 'unnamed'；超长按 max_len 截断。
+    """
+    slug = title.lower()
+    slug = re.sub(r'[\s_]+', '-', slug)
+    slug = re.sub(r'[^a-z0-9.\-]', '', slug)
+    slug = slug.strip('-')
+    if not slug:
+        return 'unnamed'
     return slug[:max_len] if len(slug) > max_len else slug
 
 def _detect_commit_prefix(title: str) -> str:
