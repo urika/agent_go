@@ -1753,6 +1753,35 @@ class TestVerificationLoopE2E:
                          if isinstance(v, dict) and v.get("type") == "scope_compliance"]
         assert scope_records == [], "范围合规时不应记录审计"
 
+    def test_rejected_verification_short_circuits(self, temp_repo, task_dir, logger):
+        """S12-P1 G8：验证命令被安全门禁拒绝 → 短路，不重试、不修复、verify_ok=False。
+
+        修复只改代码，不会让被拒绝的命令变得可执行；拒绝应直接判定失败，
+        retry_count 不增加、mock_fix 不被调用（resume 亦不重复修复）。
+        """
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        subtask = dict(self._SUBTASK_TPL)
+        subtask["verification"] = "rm -rf /"  # 安全门禁必然拒绝的命令（不实际执行）
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.executor._log_rejected_command"):
+            mock_fix.return_value = MagicMock(returncode=0)
+
+            result = _verify_changes(
+                "task-1", "sub-1", subtask, temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": False}},
+            )
+
+        assert result["verify_ok"] is False, "被拒绝的命令应直接判定失败"
+        assert result["retry_count"] == 0, "被拒绝不应触发重试（retry_count 与初始值相同）"
+        assert mock_fix.call_count == 0, "被拒绝不应调用修复逻辑"
+
 
 # ═══════════════════════════════════════════════════════════════
 # 修复 prompt 内容验证
