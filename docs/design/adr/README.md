@@ -11,3 +11,4 @@
 - [ADR-005 分层成本控制](ADR-005-cost-control-layers.md)
 - [ADR-006 Bench 进程隔离与批次治理](ADR-006-bench-isolation-and-batches.md)
 - [ADR-007 Accepted Delivery](ADR-007-accepted-delivery.md)
+- [ADR-008 数据驱动 timeout 设置模型（实测 P95 × 余量）](ADR-008-timeout-setting-model.md)
