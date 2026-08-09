@@ -519,3 +519,35 @@ def test_no_verification_no_dependents_not_blocked():
     full = validate_plan_quality(subtasks)
     assert not any(i["type"] == "unverifiable_upstream" for i in full["blocking_issues"])
     assert any(w["type"] == "missing_verification" for w in full["warnings"])
+
+
+# ── G8 扩展: verification 与自身改动文件匹配校验 ─────────────
+
+def test_verification_mismatch_warns_other_step_file():
+    """G8 扩展: 验证命令引用其他 step 专属文件 → warning。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/cli.py"], "verification": "pytest tests/test_storage.py"},
+        {"id": "sub-2", "files": ["src/storage.py", "tests/test_storage.py"], "verification": "pytest tests/test_storage.py"},
+    ]
+    full = validate_plan_quality(subtasks)
+    mismatch = [w for w in full["warnings"] if w["type"] == "verification_file_mismatch"]
+    assert any(m["subtask_id"] == "sub-1" and m["verified_file"] == "tests/test_storage.py" for m in mismatch)
+    assert not any(m["subtask_id"] == "sub-2" for m in mismatch)  # 本 step 拥有该文件，不告警
+
+
+def test_verification_own_test_no_warning():
+    """G8 扩展: 验证自己声明的测试文件 → 不告警。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/cli.py", "tests/test_cli.py"], "verification": "pytest tests/test_cli.py"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert not any(w["type"] == "verification_file_mismatch" for w in full["warnings"])
+
+
+def test_verification_file_not_owned_no_warning():
+    """G8 扩展: 验证文件不属于任何 step（既有测试）→ 不告警（回归门是合理场景）。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/cli.py"], "verification": "pytest tests/test_models_utils.py"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert not any(w["type"] == "verification_file_mismatch" for w in full["warnings"])

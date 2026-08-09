@@ -214,6 +214,43 @@ def validate_plan_quality(
                            f"小改动不应过度拆分，串行会叠加延迟且成本翻倍。建议合并为 1 个子任务。"),
             })
 
+    # G8 扩展：verification 与自身改动文件匹配校验
+    # Split Design Benchmark 观察到：step1 改 cli.py 却验证 tests/test_storage.py
+    # （其他 step 的专属文件）→ verification 与改动不匹配。校验 verification 引用的
+    # 测试文件是否属于本 step 的文件作用域；若验证了其他 step 专属文件 → warning。
+    _verification_file_re = re.compile(r"(?:^|\s)(tests?[\w./\-]*\.py)")
+    _all_owners: dict[str, list[str]] = {}
+    for st in subtasks:
+        sid = str(st.get("id", ""))
+        for f in _subtask_file_scope(st):
+            _all_owners.setdefault(f, []).append(sid)
+    for st in subtasks:
+        sid = str(st.get("id", ""))
+        command = str(st.get("verification", "") or "")
+        if not command:
+            continue
+        _v_files = set(m.group(1) for m in _verification_file_re.finditer(command))
+        if not _v_files:
+            continue
+        own_scope = _subtask_file_scope(st)
+        for vf in sorted(_v_files):
+            # 规范化：去掉 ./ 前缀、test 目录归属
+            norm = vf[2:] if vf.startswith("./") else vf
+            if norm in own_scope:
+                continue
+            owners = _all_owners.get(norm, [])
+            # 验证了其他 step 专属文件（且本 step 未声明该文件）→ 依赖缺失
+            if owners and sid not in owners:
+                warnings.append({
+                    "type": "verification_file_mismatch",
+                    "subtask_id": sid,
+                    "verified_file": norm,
+                    "owned_by": owners,
+                    "reason": (f"子任务 {sid} 的验证命令引用了 {norm}，但该文件属于 "
+                               f"{'/'.join(owners)}——若依赖其产物，请补充 depends_on 或将该文件加入 "
+                               f"本步骤的 files；否则请改用本步骤相关的验证文件。"),
+                })
+
     # P2: agent_prompt 函数引用检查（需要 repo 路径）
     if repo:
         agent_prompt_warnings = check_agent_prompt_functions(subtasks, repo)
