@@ -792,18 +792,48 @@ def _estimate_subtasks_from_history(task_id: str, results_path: Optional[Path]) 
         return 0
 
 
+def _measure_elapsed_p95(task_id: str, results_path: Optional[Path]) -> Optional[float]:
+    """CR-timeout 模型：从 results 读取该任务的实测耗时，返回 P95（近似最慢典型值）。
+
+    数据驱动 timeout——有效值 = P95 × 余量。样本 <3 时 P95 不可靠，返回 None
+    （调用方回退难度公式）。
+    """
+    if not results_path or not results_path.exists():
+        return None
+    elapsed = []
+    for line in results_path.read_text(encoding="utf-8").strip().split("\n"):
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if r.get("task_id") == task_id and r.get("elapsed_sec"):
+            try:
+                elapsed.append(float(r["elapsed_sec"]))
+            except (TypeError, ValueError):
+                continue
+    if len(elapsed) < 3:
+        return None
+    elapsed.sort()
+    idx = min(len(elapsed) - 1, int(0.95 * len(elapsed)))
+    return elapsed[idx]
+
+
 def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = None) -> int:
-    """按难度动态计算任务 timeout，解决多子任务/高难度任务被 timeout 截断的问题。
+    """按难度 + 实测耗时动态计算任务 timeout，解决多子任务/高难度任务被 timeout 截断的问题。
 
     S12-P2 G6：耗时由难度驱动，不再按子任务数（控制变量指错方向）。
     mult 复用 retry_timeout 难度倍数表 {easy:1, med:1.5, hard:2.5}。
 
-    优先级：
+    优先级（取最大）：
       1. 任务 YAML 显式声明 `timeout` → 作为下限（不缩短既有配置）
-      2. 难度基准 × mult + 缓冲 → 动态上限；hard 任务且历史子任务数较多时
-         按 max(子任务数 × 基准, 难度动态值) 上浮，兼容多子任务 hard 任务。
+      2. 难度基准 × mult + 缓冲 → 动态下限
+      3. 多子任务 hard 任务：max(子任务数 × 基准 + 缓冲, 难度动态值)
+      4. 实测 P95 × 余量（CR-timeout 模型：数据驱动，随批次收敛到任务真实耗时）
+         余量 = 1.5（high_variance） / 1.3（默认）
 
-    公式：timeout = max(配置值, 难度基准 × mult + 缓冲)
+    公式：timeout = max(YAML, 难度公式, 实测P95 × 余量)
     """
     cfg_timeout = int(task.get("timeout", 1800))
     difficulty = task.get("difficulty", "medium")
@@ -816,6 +846,11 @@ def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = No
     if n > 0:
         per_sub = _DIFFICULTY_TIMEOUT_BASE_SEC * n + _DYNAMIC_TIMEOUT_BUFFER_SEC
         dynamic = max(dynamic, per_sub)
+    # 实测 P95 × 余量（数据驱动；无历史回退难度公式）
+    _p95 = _measure_elapsed_p95(task_id, results_path)
+    if _p95:
+        _margin = 1.5 if task.get("high_variance") else 1.3
+        dynamic = max(dynamic, int(_p95 * _margin))
     return max(cfg_timeout, dynamic)
 
 

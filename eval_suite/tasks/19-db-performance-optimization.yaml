@@ -47,7 +47,7 @@ task: |
 verification:
   - "python -m pytest tests/test_blog_api.py -q"
   - "pip install -e . && python -m pytest tests/test_performance.py -q -v"
-timeout: 2232
+timeout: 2700  # CR-timeout：实测 ~2180s，仅留 50s 余量会 cleanup_race；放宽到 45min
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:
