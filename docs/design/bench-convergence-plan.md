@@ -51,6 +51,13 @@ hard:
 
 运行策略：一个低成本模型、`repeat=3`、`bench-parallel=1`。每个任务失败后先分类和复现，再修一个根因，不同时修改 Planner、Worker、Verifier 和指标。
 
+> **执行状态（2026-08-09）**：
+> - 运行：`agent_go eval bench --tasks eval_suite/golden_tasks/ --candidate-models deepseek-v4-flash --repeat 3 --bench-parallel 1 --source-batch golden-20260809`
+> - 结果：18 条记录（6 任务 × 3 repeat），基线在 `eval_suite/baselines/golden-20260809/`（results.jsonl + manifest.json + summary.json）
+> - **可重复性**：easy 任务（add-format-helper / fix-missing-default）和 add-simple-caching 稳定 3/3 通过；implement-done-command 1/3、conditional-branching 2/3、security-hardening 0/3（均为 verification_failure，原因稳定可解释）
+> - pass_rate_diagnostic=0.958，valid_cost_usd=$0.18，timeout_rate=0
+> - **结论**：系统逻辑可重复；失败集中在 hard/high_variance 任务且原因一致（verification_failure），符合 ADR-009"失败原因稳定可解释"门禁
+
 ## 阶段 D：代表性实验
 
 使用 7 个 smoke 加 2 个 medium 和 2 个 hard，比较 Plan/Verifier 改动前后：
