@@ -409,7 +409,7 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 ### ISSUE-29 LLM 生成的验证命令语法错误导致正确代码误判失败
 
 - **位置**：`executor.py` 验证循环（验证命令直接 `subprocess.run` 执行，无语法预检）
-- **状态**：⏳ 待修复（M2 验证与失败阻断范围）
+- **状态**：✅ 已修复（2026-08-09，阶段 B 收敛）— `_is_safe_verification_command` 增加 `compile()` 单行语法预检
 - **严重度**：P2（偶发，但会把正确代码判失败，消耗 retry 预算）
 
 **问题**：LLM 生成的 `python -c` 单行验证命令可能包含 Python 语法错误。E2E 实测（2026-08-09 多子任务依赖链）：
@@ -444,3 +444,72 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 3. 历史任务已修复并保留 `status=BLOCKED`。
 
 **验收**：全库 1170 任务检查——终态缺 failure_class=0、accepted 无 delivery=0、blocked 无 root=0。
+
+---
+
+## P0 — 必须修复
+
+### ISSUE-31 验证命令沙箱环境与真实环境不一致，正确代码被误判失败
+
+- **位置**：`executor.py` 验证循环（`_build_sandbox_env`）+ `run_subtask` 环境透传
+- **状态**：✅ 已修复（2026-08-09）— 移除 `_apply_resource_limits` 的 `RLIMIT_NPROC`
+- **严重度**：P0（正确代码误判失败，验证层成为误判源）
+
+**问题**：agent_go 执行验证命令时使用 `_build_sandbox_env()`，该环境可能清理/隔离了部分环境变量（如 `AGENT_GO_METERING_PATH`、`AGENT_GO_CLAUDE_MODEL` 等透传逻辑）。当验证命令包含 E2E 类测试（真实 spawn claude 子进程）时，在沙箱环境中**立即失败**（<1 秒），但手动 shell 全部通过。
+
+**实测**（2026-08-09 dogfooding task-20260809-105447-149-d67a sub-2）：
+- 验证命令：`python -m pytest tests/test_executor.py tests/test_planning.py -q`
+- agent_go 沙箱执行：**验证失败**（<1 秒），触发 fix-1，最终 sub-2 标 failed
+- 手动 shell 执行：**155 passed**（全部通过）
+- 后果：正确代码被误判 failed，sub-3 级联阻断，整个任务失败
+
+**影响**：验证环境失真导致能力误判——这是验证层最严重的问题，直接削弱验证门禁的可信度。
+
+**根因与修复**（2026-08-09）：
+- **根因**：`_apply_resource_limits` 设置 `RLIMIT_NPROC=64`。macOS 上 RLIMIT_NPROC 是 **per-user 语义**，限制的是"该用户所有进程总数"（含 agent_go 多任务 + 后台进程累积，实测 455+），而非验证命令的子进程树。用户已有进程数超限时，任何 `fork_exec` 都触发 `BlockingIOError[Errno 35]`，导致 `git init`/`git commit` 子进程失败 → 正确代码误判 failed。
+- **修复**：移除 `RLIMIT_NPROC` 设置（fork 炸弹防护交给 `RLIMIT_CPU`，CPU 时间耗尽即杀）。实测沙箱环境下整批 152 项测试从 5 失败变为全过。
+- **回归测试**：`test_apply_resource_limits_no_nproc`（断言不再设置 RLIMIT_NPROC）。
+
+---
+
+## P1 — 功能受损
+
+### ISSUE-32 Claude 子任务超范围改动，无 scope 约束
+
+- **位置**：`executor.py` TASK.md 生成 + 验证范围
+- **状态**：✅ 已修复（2026-08-09）— 验证通过时审计超范围改动（scope_compliance 记录）
+- **严重度**：P1（改动范围不可控，验证范围随之扩大）
+
+**问题**：子任务 Claude 会**顺手修改与任务描述无关的代码**。dogfooding 实测 sub-2（任务："rejected 不消耗 retry"）除核心改动外，还修改了 `run_subtask` 的 `AGENT_GO_METERING_PATH`/`AGENT_GO_CLAUDE_MODEL` 环境透传清理逻辑，并新增 2 个对应测试——超出任务范围。
+
+**影响**：
+- 改动范围不可控，验证命令需覆盖被意外触碰的模块。
+- 失败时难以判定是核心逻辑问题还是超范围改动引入。
+- 潜在引入与任务目标无关的行为变化。
+
+**现状评估**：
+- ✅ TASK.md 已有"范围约束"（`_build_architecture_context`，基于 files_hint 注入"你只能修改以下文件"）
+- ✅ 验证失败分支已有 `_check_scope_compliance` + `scope_violation` 注入修复 prompt（撤销越界改动）
+- ⚠️ 缺口：验证**通过**时超范围改动静默通过，无审计
+
+**修复**（2026-08-09）：
+- 验证通过分支（`all_pass`）新增 `_check_scope_compliance` 调用，违规时记录 `scope_compliance` 审计到 `verification_results`（out_of_scope/missing），供 review/交付检查发现。
+- 回归测试：`test_scope_violation_recorded_when_verify_passes`、`test_scope_compliant_no_audit`。
+
+### ISSUE-33 Skill 自动匹配误命中无关 skill
+
+- **位置**：`skills.py` 自动发现 + `skill_backfill`
+- **状态**：✅ 已修复（2026-08-09）— `_tokenize_words` CJK 分词从单字符改为 bigram
+- **严重度**：P1（无关 skill 注入污染 TASK.md，干扰 Claude 注意力）
+
+**问题**：Python 后端修复任务两次自动匹配 `security-review` + `frontend-react` skill，其中 `frontend-react` 与任务完全无关。`skill_backfill` 对无 skill 的子任务回填默认 skill，进一步放大误匹配。
+
+**影响**：注入无关 skill 的指令会污染 TASK.md，浪费 Claude 上下文，可能引入错误方向。
+
+**根因与修复**（2026-08-09）：
+- **根因**：`_tokenize_words` 对 CJK 拆单字符（`状态管理` → `状`+`态`+`管`+`理`），丢失语义。高频单字（管理/组件/网络/请求）与任何中文任务都易重叠 ≥2 个字符，导致 `frontend-react` 等无关 skill 误配，并被 `skill_backfill` 放大到所有无 skill 的子任务。
+- **修复**：CJK 改为 **bigram**（相邻两字符对）分词。`状态管理` → `状态`+`态管`+`管理`，保留语义，跨类型任务无重叠。
+- **验证**：Python 修复任务不再匹配 frontend-react；安全任务匹配 security-review；前端任务匹配 frontend-react。
+- **回归测试**：`test_no_cross_type_mismatch_issue33`。
+
+---

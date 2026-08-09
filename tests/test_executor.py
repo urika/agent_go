@@ -1694,6 +1694,94 @@ class TestVerificationLoopE2E:
         assert result["verify_ok"] is True
         mock_eval.assert_not_called()
 
+    def test_scope_violation_recorded_when_verify_passes(self, temp_repo, task_dir, logger):
+        """ISSUE-32: 验证通过但存在超范围改动 → verification_results 记录 scope_compliance 审计。
+
+        修复前：scope 合规只在验证失败分支检查（注入修复 prompt）。验证通过时超范围改动
+        （Claude 顺手改无关文件）静默通过，无审计。修复后：验证通过分支也调用
+        _check_scope_compliance，违规时记录审计供 review/交付检查。
+        """
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        subtask = dict(self._SUBTASK_TPL)
+        subtask["files_hint"] = "src/main.py"  # 范围约束
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
+             patch("agent_go.executor._check_scope_compliance",
+                   return_value={"compliant": False, "out_of_scope": ["tests/test_other.py"],
+                                 "missing": [], "expected": ["src/main.py"], "actual": ["src/main.py", "tests/test_other.py"]}):
+
+            result = _verify_changes(
+                "task-1", "sub-1", subtask, temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": False}},
+            )
+
+        # 验证仍通过（scope 违规是审计，不阻断成功）
+        assert result["verify_ok"] is True
+        scope_records = [v for v in result["verification_results"]
+                         if isinstance(v, dict) and v.get("type") == "scope_compliance"]
+        assert scope_records, "应记录 scope_compliance 审计"
+        assert scope_records[0]["out_of_scope"] == ["tests/test_other.py"]
+
+    def test_scope_compliant_no_audit(self, temp_repo, task_dir, logger):
+        """ISSUE-32: 验证通过且范围合规 → 不记录 scope_compliance 审计。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        subtask = dict(self._SUBTASK_TPL)
+        subtask["files_hint"] = "src/main.py"
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
+             patch("agent_go.executor._check_scope_compliance",
+                   return_value={"compliant": True, "out_of_scope": [], "missing": [],
+                                 "expected": ["src/main.py"], "actual": ["src/main.py"]}):
+
+            result = _verify_changes(
+                "task-1", "sub-1", subtask, temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": False}},
+            )
+
+        assert result["verify_ok"] is True
+        scope_records = [v for v in result["verification_results"]
+                         if isinstance(v, dict) and v.get("type") == "scope_compliance"]
+        assert scope_records == [], "范围合规时不应记录审计"
+
+    def test_rejected_verification_short_circuits(self, temp_repo, task_dir, logger):
+        """S12-P1 G8：验证命令被安全门禁拒绝 → 短路，不重试、不修复、verify_ok=False。
+
+        修复只改代码，不会让被拒绝的命令变得可执行；拒绝应直接判定失败，
+        retry_count 不增加、mock_fix 不被调用（resume 亦不重复修复）。
+        """
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        subtask = dict(self._SUBTASK_TPL)
+        subtask["verification"] = "rm -rf /"  # 安全门禁必然拒绝的命令（不实际执行）
+
+        with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.executor._log_rejected_command"):
+            mock_fix.return_value = MagicMock(returncode=0)
+
+            result = _verify_changes(
+                "task-1", "sub-1", subtask, temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": False}},
+            )
+
+        assert result["verify_ok"] is False, "被拒绝的命令应直接判定失败"
+        assert result["retry_count"] == 0, "被拒绝不应触发重试（retry_count 与初始值相同）"
+        assert mock_fix.call_count == 0, "被拒绝不应调用修复逻辑"
+
 
 # ═══════════════════════════════════════════════════════════════
 # 修复 prompt 内容验证

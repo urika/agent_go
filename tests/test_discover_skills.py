@@ -144,3 +144,29 @@ class TestDiscoverSkills(_MakeSkillDirMixin):
             result = discover_skills("设计 RESTful API!")
         assert len(result) > 0
         assert result[0].name == "api-design"
+
+    def test_no_cross_type_mismatch_issue33(self, tmp_path):
+        """ISSUE-33: Python 修复任务不得误配前端 skill（CJK bigram 防单字符误配）。
+
+        修复前：CJK 按单字符分词，frontend-react description 中的高频字（管理/组件/
+        网络/请求）与任何中文任务都易重叠 ≥2 个字符，导致无关 skill 注入。修复后
+        bigram 保留语义，跨类型任务无重叠。
+        """
+        self._make_skill_dir(tmp_path, "frontend-react",
+                             "React 前端开发 — 组件、状态管理、路由、样式、网络请求")
+        self._make_skill_dir(tmp_path, "security-review",
+                             "安全审查 — 涉及认证、权限、加密、SQL注入、密钥管理的代码")
+
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            # Python 修复任务：不应匹配 frontend-react
+            result = discover_skills("修复 planning.py 的 validate_plan_quality 函数 scope_conflict 误报")
+            names = [s.name for s in result]
+            assert "frontend-react" not in names, f"Python 修复任务误配前端 skill: {names}"
+            # 安全任务：应匹配 security-review
+            result2 = discover_skills("对认证和权限相关的代码进行安全审查，检查 SQL 注入")
+            names2 = [s.name for s in result2]
+            assert "security-review" in names2, f"安全任务应匹配 security-review: {names2}"
+            # 前端任务：应匹配 frontend-react
+            result3 = discover_skills("编写 React 前端组件，处理状态管理和路由")
+            names3 = [s.name for s in result3]
+            assert "frontend-react" in names3, f"前端任务应匹配 frontend-react: {names3}"
