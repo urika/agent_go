@@ -87,6 +87,16 @@ def classify_failure(
     if timed_out:
         return "timeout"
     if result.get("status") in {"completed", "no_changes"}:
+        # 语义评估失败（verification_results 中 type=="semantic" 且 passed=False）
+        # 是真实验证失败，不能因 status=completed 而当作无失败（阶段C review P0）。
+        # LLM 语义评估未通过 → 产物未达到验证标准，归类 verification_failure。
+        _semantic_fails = [
+            v for v in result.get("verification_results", [])
+            if isinstance(v, dict) and v.get("type") == "semantic"
+            and v.get("passed") is False
+        ]
+        if _semantic_fails:
+            return "verification_failure"
         return None
     if result.get("status") == "blocked":
         # A blocked task is an orchestration failure unless a more specific

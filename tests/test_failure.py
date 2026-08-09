@@ -32,3 +32,40 @@ def test_rejected_verification_is_infrastructure_failure():
 
 def test_aggregate_prefers_explicit_delivery_failure():
     assert aggregate_failure_class(["model_failure"], {"delivery_failed": True}) == "delivery_failure"
+
+
+def test_semantic_failure_classified_when_status_completed():
+    """阶段C review P0: status=completed 但语义评估失败 → verification_failure（不再返回 None）。
+
+    implement-done-command r1 / conditional-branching r1 的 binary_pass=false 但 failure_class=null
+    根因：classify_failure 在 status in {completed, no_changes} 时直接返回 None，未检查
+    verification_results 中的 type=="semantic" 且 passed=False。修复后语义失败被正确分类。
+    """
+    result = {
+        "status": "completed",
+        "verify_ok": True,
+        "exit_code": 0,
+        "verification_results": [
+            {"type": "semantic", "passed": False, "reason": "语义评估未通过"},
+        ],
+    }
+    assert classify_failure(result) == "verification_failure"
+
+
+def test_semantic_pass_returns_none_for_completed():
+    """status=completed 且语义评估通过 → 无失败（返回 None）。"""
+    result = {
+        "status": "completed",
+        "verify_ok": True,
+        "exit_code": 0,
+        "verification_results": [
+            {"type": "semantic", "passed": True},
+        ],
+    }
+    assert classify_failure(result) is None
+
+
+def test_completed_no_semantic_results_returns_none():
+    """status=completed 且无语义评估记录 → 无失败（返回 None），不破坏既有行为。"""
+    result = {"status": "completed", "verify_ok": True, "exit_code": 0}
+    assert classify_failure(result) is None
