@@ -1414,7 +1414,20 @@ def test_no_lost_updates_or_cross_contamination(
         r["content"] = f"unique-{i}"
         return r
 
-    mock_run.side_effect = [_unique_result(f"sub-{i}", i) for i in range(n)]
+    # 修复（2026-08-09）：side_effect 必须根据传入的 subtask_id 返回对应结果，
+    # 而非顺序 list——并发下 run_subtask 调用顺序不确定，顺序 pop 会导致
+    # result.json 的 subtask_id 与 content 错配（sub-10 拿到 sub-14 的 content），
+    # 造成偶发失败（全量跑时暴露，单独跑通过）。
+    def _result_by_subtask_id(*args, **kwargs):
+        st = args[1] if len(args) > 1 else kwargs.get("st", {})
+        sid = str(st.get("id", "?"))
+        try:
+            idx = int(sid.rsplit("-", 1)[1])
+        except (ValueError, IndexError):
+            idx = 0
+        return _unique_result(sid, idx)
+
+    mock_run.side_effect = _result_by_subtask_id
     mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
     meta = _default_meta("t-race")
     _run_pipeline(
