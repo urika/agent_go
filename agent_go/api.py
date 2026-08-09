@@ -221,6 +221,11 @@ SCHEMA:
       "verification": "verification command",
       "risks": ["risk description"],
       "agent_prompt": "detailed instructions for the agent executing this step",
+      "rationale": "why this step is separated and what boundary it owns",
+      "scope_boundary": "what this step may change",
+      "do_not_touch": ["files or modules explicitly out of scope"],
+      "requirement_ids": ["REQ-001"],
+      "acceptance_criteria_ids": ["AC-001"],
       "skills": ["skill-name"],
       "agent_type": "developer|architect|reviewer|tester",
       "difficulty": "easy|medium|hard"
@@ -243,6 +248,7 @@ REQUIREMENTS:
 - **Common mistake to avoid**: If step-1 adds caching and needs a fixture, the fixture belongs in step-1's `files` OR step-2 must be a dependency of step-1. Do NOT put "step-2 needs to add a fixture" in step-1's `risks`.
 - 2-5 steps, independently executable
 - Each step MUST have: agent_type, difficulty, agent_prompt
+- Include rationale, scope_boundary, requirement_ids, and acceptance_criteria_ids when the Spec provides stable IDs.
 - agent_type: developer=coding, architect=read-only design, reviewer=code review, tester=testing
 - difficulty: easy=single file small change, medium=single feature, hard=cross-file architecture
 - Use empty array [] when no skills match
@@ -292,6 +298,17 @@ EXAMPLE (3-step plan):
         f"- **拆任务规则**：如果任务整体产出 > {_safe_output_chars} 字，必须拆成多个 step，"
         f"每个 step 的输出分别落在不同文件（例如 chapter-01.md, chapter-02.md ...）。\n"
         f"- 在每个 step 的 agent_prompt 里显式写：「**本次输出上限 {_safe_output_chars} 中文字符，分多次 Write 完成**」。\n"
+    )
+    system_prompt += (
+        "\n## 分解粒度规则（Decomposition Scope Rules）\n"
+        "- **先估算改动规模**，再决定步骤数量：\n"
+        "  - 单文件、<20 行改动 → 1 个步骤（不分解，实现+测试合并为一个步骤）\n"
+        "  - 单文件、20-50 行或 ≤2 个文件 → 1-2 个步骤\n"
+        "  - 多文件、50+ 行 → 2-4 个步骤\n"
+        "  - 跨模块架构改动（重构/迁移/跨服务）→ 3-5 个步骤\n"
+        "- **不要为同一文件的简单改动拆出独立的「编写测试」步骤**——测试应与实现合并到同一步骤\n"
+        "- **不要为单行/极少量改动（如改默认值、修 typo、加 null guard）创建多个步骤**\n"
+        "- 每个步骤应产出有意义、可独立验证的工作单元\n"
     )
 
     # F-1: 注入角色-Skill 映射规则摘要

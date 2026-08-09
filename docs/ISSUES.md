@@ -403,3 +403,44 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 - `__init__.py` / `config.py`：import 时创建 `~/.agent_go/` 目录（既有设计，CODE_REVIEW 已记录）
 - `api.py:116`：except 顺序依赖（`URLError` 是 `OSError` 子类，依赖 HTTPError→URLError→OSError 的声明顺序正确分派，当前行为正确但顺序改动会静默改变行为）；`api.py:387-389` `load_cached_plan` 末尾 `enabled` 判断为死代码（头部已在禁用时 return None）
 - `executor.py:67-72`：argv 解析失败与超时两个分支产出的 result dict 不可区分（均 `exit_code=-1`、`duration_ms=0`），下游只能靠日志文本分辨（可观测性改进建议）
+
+---
+
+### ISSUE-29 LLM 生成的验证命令语法错误导致正确代码误判失败
+
+- **位置**：`executor.py` 验证循环（验证命令直接 `subprocess.run` 执行，无语法预检）
+- **状态**：⏳ 待修复（M2 验证与失败阻断范围）
+- **严重度**：P2（偶发，但会把正确代码判失败，消耗 retry 预算）
+
+**问题**：LLM 生成的 `python -c` 单行验证命令可能包含 Python 语法错误。E2E 实测（2026-08-09 多子任务依赖链）：
+- 验证命令：`python -c "from calculator import divide; assert divide(10,2)==5.0; assert divide(0,5)==0.0; try: divide(1,0); print('Divide by zero raised ValueError as expected'); except ValueError: pass"`
+- **语法错误**：`try: ...; print(...); except ValueError: pass` 在单行 `python -c` 中 `try` 块内分号拼接非法 → `SyntaxError: invalid syntax`
+- 后果：sub-2 代码完全正确（divide 含 b=0 抛 ValueError），但验证命令 exit_code=1 → 误判 failed，下游被阻断
+
+**影响**：LLM 生成的复杂单行断言（尤其含 try/except）语法错误率较高；验证失败后走 retry 也消耗成本（`python -c` 内嵌错误不可自动修复）。
+
+**建议修复方向**（M2）：
+1. 验证命令执行前做**语法预检**（`python3 -m py_compile` 或 AST parse）。
+2. 验证失败时把 stderr 注入 retry 上下文，让 LLM 修复验证命令本身（当前只注入代码 diff）。
+3. 引导 LLM 用多行脚本文件或多行 `-c`（`\n` 分隔）替代单行分号拼接。
+
+---
+
+### ISSUE-30 无子任务结果的提前终止路径缺失 failure_class 契约
+
+- **位置**：`cli.py` Plan 预检阻断路径（`plan_quality["blocking_issues"]` 非空时）
+- **状态**：✅ 已修复（2026-08-09）
+- **严重度**：P0（数据完整性，违反阶段 A 收敛门禁"所有终态失败/阻断任务必须有 failure_class"）
+
+**问题**：Plan 预检发现 `blocking_issues`（如 `verification_command_rejected`）时，代码只写 `meta["status"]="BLOCKED"`，未写 `failure_class`、`failure_reason`、`plan_quality_status`。任务处于终态但无任何 results 子任务，无法推断模型/验证失败，`failure_class=None` 违反 Failure Class 契约。
+
+**实测**（阶段 A 数据清理发现 2 个任务）：
+- `task-20260808-213257-262-5d9c`、`task-20260809-003938-252-c644`
+- 均因 `verification_command_rejected` 被 BLOCKED，`results=[]`、`failure_class=None`
+
+**修复**：
+1. **运行时**（`cli.py:759-769`）：提前终止路径补写 `failure_class="infrastructure_failure"`、`failure_reason="plan_quality_blocked"`、`blocked_without_result=True`、`plan_quality_status`、`blocking_issues`。
+2. **迁移工具**（`metadata_migration.py`）：`results=[]` + 终态（BLOCKED/VERIFICATION_FAILED/DELIVERY_FAILED）+ 无 `failure_class` → 保守补 `system_error` + `blocked_without_result=True` + `root_failure_class="system_error"`（幂等，已标记则跳过）。
+3. 历史任务已修复并保留 `status=BLOCKED`。
+
+**验收**：全库 1170 任务检查——终态缺 failure_class=0、accepted 无 delivery=0、blocked 无 root=0。

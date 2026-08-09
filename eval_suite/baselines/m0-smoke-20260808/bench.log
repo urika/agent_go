@@ -1,0 +1,25 @@
+
+🔍 运行前模型-价格预检（探测实际后端 + 校验定价）…
+  deepseek-v4-flash → 实际 deepseek-v4-flash [✅ 有定价 deepseek-v4-flash ($ 0.14/0.28)]
+  ✅ 全部模型有定价，可安全运行
+🧪 bench 开始（走 harness）: 7 任务 × 1 模型 × 1 重复 = 7 次执行
+   模型: deepseek-v4-flash
+   输出: /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/m0-smoke-20260808/results.jsonl
+   并发度: 2（--bench-parallel 可调）
+
+[1/7] add-format-helper | deepseek-v4-flash | repeat=1
+
+[2/7] fix-missing-default | deepseek-v4-flash | repeat=1
+
+[3/7] add-task-priority | deepseek-v4-flash | repeat=1
+
+[4/7] add-error-handling | deepseek-v4-flash | repeat=1
+
+[5/7] implement-done-command | deepseek-v4-flash | repeat=1
+
+[6/7] email-validator | deepseek-v4-flash | repeat=1
+
+[7/7] integration-tests-datapipeline | deepseek-v4-flash | repeat=1
+
+✅ bench 完成: 7 条结果 → /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/m0-smoke-20260808/results.jsonl
+   下一步: agent_go eval models --results /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/m0-smoke-20260808/results.jsonl

@@ -55,33 +55,33 @@ cmd_run(repo, task)
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Planning: cmd_run / Spec 准入 / generate_plan
-    Planning --> Running: confirm 后 _run_pipeline / 拓扑波次并发
-    Running --> Completed: 全部子任务 completed 或 no_changes
-    Running --> Failed: 存在 failed 子任务
-    Running --> Interrupted: SIGKILL / 异常中断 / meta 停在旧状态
-    Interrupted --> Running: agent_go resume (跳过已完成, 续跑剩余)
-    Interrupted --> Recovering: agent_go recover (从 worktree 重建 meta)
-    Recovering --> Running: recover 分类后 resume
-    Completed --> [*]: notify + final report + cmd_pr
-    Failed --> [*]: notify + 保留失败 worktree (inspect)
+    [*] --> EXECUTING: cmd_run
+    EXECUTING --> DELIVERY_READY: 全部子任务成功
+    EXECUTING --> VERIFICATION_FAILED: 能力失败
+    EXECUTING --> BLOCKED: 约束阻断
+    EXECUTING --> PAUSED: SIGINT/SIGTERM（无 failed）
+    PAUSED --> EXECUTING: resume
+    DELIVERY_READY --> ACCEPTED_DELIVERY: 交付通过
+    DELIVERY_READY --> DELIVERY_FAILED: 交付失败
+    EXECUTING --> CANCELLED: MCP cancel
 ```
 
 > `recover` 按子任务 worktree 状态重判：commit+验证通过→completed、commit+验证失败→failed、无 commit+有改动→reset（resume 重跑）、无 commit+无改动→no_changes。**recover 永不替你 commit 孤儿改动**——commit 是唯一完成边界。
 
-**M0 canonical 状态映射**（`agent_go/status.py`，`status_schema_version` 存在时）：
+**M0 canonical 状态映射**（`agent_go/status.py`，v2 精简，8 状态）：
 
-| M0 状态 | 对应 legacy | 语义 |
-|----------|------------|------|
-| `PLAN_REVIEW` | planning | 规划审查门（plan accepted → 待执行）|
-| `PAUSED` | paused / interrupted | 中断/暂停**可恢复锚点**（`resume` 从 PAUSED 回 EXECUTING）|
-| `EXECUTING` / `VERIFYING` | running | 执行中 |
-| `VERIFICATION_FAILED` | failed | **能力失败优先**——有 failed 子任务（含其级联 blocked）→ 终态 VERIFICATION_FAILED，而非 BLOCKED |
-| `BLOCKED` | failed | **仅纯约束/编排阻断**（cost/metering/依赖环，无 failed 子任务）|
-| `DELIVERY_READY` / `ACCEPTED_DELIVERY` | completed | 全部子任务通过 / 交付验收 |
-| `COMMITTED_UNVERIFIED` | committed | 已提交待验证 |
+| 状态 | 类别 | 语义 |
+|------|------|------|
+| `EXECUTING` | 运行 | pipeline 运行中 / recover 发现需 resume 的工作 / resume 入口 |
+| `PAUSED` | 暂停 | 信号中断（SIGINT/SIGTERM），可 resume |
+| `DELIVERY_READY` | 半终态 | 全部子任务完成，交付待执行 |
+| `ACCEPTED_DELIVERY` | 终态 | 交付门通过 |
+| `VERIFICATION_FAILED` | 终态 | 能力失败（有 failed 子任务）|
+| `BLOCKED` | 终态 | 约束阻断（plan 质量 / cost / metering / 依赖环，无能力失败）|
+| `DELIVERY_FAILED` | 终态 | 交付门失败 |
+| `CANCELLED` | 终态 | 用户取消 |
 
-> 语义修复（2026-08-08）：中断暂停写 `PAUSED`（不再误写 PLAN_REVIEW）；能力失败优先于 BLOCKED。
+> v2 精简（2026-08-08）：从 14 状态精简至 8 状态。移除从未写入的 DRAFT/SPEC_REVIEW/ARCHITECTURE_REVIEW/VERIFYING。PLAN_REVIEW 合并入 BLOCKED，COMMITTED_UNVERIFIED 降级为子任务级标注。
 > 状态是"为什么停"（原因），`failure_class` 是"根因是什么"（归因）——M0 会计以 failure_class 为准。
 
 ### 子任务级（`results[].status`）
@@ -131,7 +131,7 @@ stateDiagram-v2
 另有 plan 缓存（TTL 24h）前置跳过、generate_plan 3 次重试、confirm_plan S/D 重生成、5 轮重生成循环等兜底层，详见 CLAUDE.md「Plan 生成降级链」。
 
 ### 安全白名单
-LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell 注入扫描 → 命令白名单查找 (28 种工具) → 逐 token 正则匹配。防御深度，default-deny。
+LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell 注入扫描 → 命令白名单查找 (35 种工具) → 逐 token 正则匹配。防御深度，default-deny。
 
 ### 沙箱环境
 验证命令在净化环境中执行：剔除含 API_KEY/SECRET/TOKEN/PASSWORD 的环境变量 + 强制删除 AGENT_GO_API_KEY。
@@ -166,7 +166,7 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
 ## 测试
 
 ```bash
-pytest tests/ -q           # 1569 tests, ~60s
+pytest tests/ -q           # 1948 tests
 ```
 
 测试策略：mock 所有外部依赖 (git, claude, API)，验证逻辑正确性。NFR 专项测试在 `test_nfr_*.py`。

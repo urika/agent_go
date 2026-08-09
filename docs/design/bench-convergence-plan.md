@@ -1,0 +1,89 @@
+# Bench 收敛落地计划
+
+## 阶段 A：数据和状态清理
+
+目标：让失败数据可解释。
+
+- 保留历史结果为 exploratory，不与新 batch 合并。
+- 运行 metadata migration 的 dry-run 和备份迁移。
+- 修复 task/subtask `failure_class` 缺失。
+- 修复 blocked root cause 传播。
+- 复核 `accepted_delivery` 必须有 delivery branch/PR。
+- 将历史 crash-but-verified 标记为 historical evidence，不伪装为新成功。
+
+验收：新失败记录的 `failure_class`、状态和根因完整；没有错误 Accepted Delivery。
+
+## 阶段 B：验证命令和 Plan 收敛
+
+目标：避免任务进入执行后才发现验证命令或 Plan 不可执行。
+
+- Plan 阶段预检 verification command。
+- 命令拒绝在执行前阻断，并归类为 `infrastructure_failure`。
+- 检查 `files`、`scope_boundary`、`do_not_touch` 一致性。
+- 检查依赖循环。
+- 记录 requirement/acceptance coverage。
+- 记录 `plan_quality_status`、warning 和 conflict 数量。
+
+验收：收敛批次中不再出现未预检的 rejected verification command；Plan quality 字段完整。
+
+## 阶段 C：Golden Tasks
+
+固定 6 个任务：
+
+```text
+easy:
+  add-format-helper
+  fix-missing-default
+medium:
+  implement-done-command
+  add-simple-caching
+hard:
+  security-hardening-taskmgr
+  conditional-branching-datapipeline
+```
+
+运行策略：一个低成本模型、`repeat=3`、`bench-parallel=1`。每个任务失败后先分类和复现，再修一个根因，不同时修改 Planner、Worker、Verifier 和指标。
+
+## 阶段 D：代表性实验
+
+使用 7 个 smoke 加 2 个 medium 和 2 个 hard，比较 Plan/Verifier 改动前后：
+
+- `binary_pass`
+- `verification_failure`
+- `timeout_rate`
+- `retry_rate`
+- `plan_requirement_coverage`
+- `plan_conflict_count`
+- `Accepted Delivery`
+- `Cost per Accepted Delivery`
+
+## 阶段 E：正式 baseline
+
+只有阶段 A-D 通过后，才运行固定 decision baseline：
+
+```bash
+agent_go eval bench \
+  --tasks eval_suite \
+  --suite decision \
+  --candidate-models <fixed-models> \
+  --repeat 3 \
+  --bench-parallel 1 \
+  --source-batch <immutable-batch> \
+  --output eval_suite/baselines/<immutable-batch>/results.jsonl
+```
+
+随后生成并校验：
+
+```bash
+agent_go eval validate-schema --results <results.jsonl>
+agent_go eval metric-freeze --results <results.jsonl> --source-batch <batch> --suite decision
+agent_go eval batch-manifest --results <results.jsonl> --source-batch <batch>
+```
+
+## 实施规则
+
+- 每阶段只解决一种主因。
+- 每次运行使用新的不可变 `source_batch`。
+- 失败结果必须附带日志和 failure class。
+- 不以单次通过率变化判断优化有效，至少比较同任务重复结果。
+- 未通过门禁时停留在当前阶段，不扩大任务矩阵。

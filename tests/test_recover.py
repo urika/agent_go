@@ -484,7 +484,7 @@ class TestRecoverTask:
         assert result["recovered"][0]["status"] == "completed"
 
     def test_overall_status_all_completed(self, tmp_path):
-        """All subtasks completed → overall completed."""
+        """All subtasks completed → overall completed（交付就绪）。"""
         agent_go_dir = tmp_path / ".agent_go"
         task_dir = agent_go_dir / "task-t1"
         task_dir.mkdir(parents=True)
@@ -505,6 +505,7 @@ class TestRecoverTask:
         with patch("agent_go.recover.AGENT_GO_DIR", agent_go_dir):
             result = recover_task("task-t1")
 
+        # M1-3: 全部 completed → 交付就绪（legacy 映射 completed），不降级为 interrupted
         assert result["overall_status"] == "completed"
 
     def test_overall_status_failed(self, tmp_path):
@@ -594,6 +595,7 @@ class TestRecoverTask:
 
         assert result["meta_updated"] is True
         updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        # M1-3: 全部 completed → 交付就绪（legacy 映射 completed）
         assert updated["status"] == "completed"
         assert "recovered_at" in updated
 
@@ -638,4 +640,73 @@ class TestRecoverTask:
         with patch("agent_go.recover.AGENT_GO_DIR", agent_go_dir):
             result = recover_task("task-t1")
 
-        assert result["overall_status"] == "no_subtasks"
+        assert result["overall_status"] == "interrupted"
+
+
+class TestRecoverDelivery:
+    """M1-3: recover 交付状态保留。"""
+
+    def test_recover_preserves_accepted_delivery(self, tmp_path):
+        """已 ACCEPTED_DELIVERY 的任务 recover 后不降级。"""
+        agent_go_dir = tmp_path / ".agent_go"
+        task_dir = agent_go_dir / "task-t1"
+        task_dir.mkdir(parents=True)
+        meta = {
+            "status": "ACCEPTED_DELIVERY", "status_schema_version": 1,
+            "task_id": "task-t1", "delivery_branch": "agent_go/task-t1/delivery",
+            "pr_url": "https://example.test/pr/1",
+            "subtasks": [{"id": "sub-1", "title": "t1"}],
+            "results": [{"subtask_id": "sub-1", "status": "completed", "verify_ok": True}],
+        }
+        (task_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        with patch("agent_go.recover.AGENT_GO_DIR", agent_go_dir):
+            result = recover_task("task-t1")
+
+        assert result["overall_status"] == "ACCEPTED_DELIVERY"
+        updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        assert updated["status"] == "ACCEPTED_DELIVERY"
+        # delivery 字段保留
+        assert updated["delivery_branch"] == "agent_go/task-t1/delivery"
+        assert updated["pr_url"] == "https://example.test/pr/1"
+
+    def test_recover_all_completed_becomes_delivery_ready(self, tmp_path):
+        """全部 completed 但未交付 → DELIVERY_READY（不降级 EXECUTING）。"""
+        agent_go_dir = tmp_path / ".agent_go"
+        task_dir = agent_go_dir / "task-t1"
+        task_dir.mkdir(parents=True)
+        meta = {
+            "status": "DELIVERY_READY", "status_schema_version": 1,
+            "task_id": "task-t1",
+            "subtasks": [{"id": "sub-1", "title": "t1"}],
+            "results": [{"subtask_id": "sub-1", "status": "completed", "verify_ok": True}],
+        }
+        (task_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        with patch("agent_go.recover.AGENT_GO_DIR", agent_go_dir):
+            result = recover_task("task-t1")
+
+        assert result["overall_status"] == "DELIVERY_READY"
+        updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        assert updated["status"] == "DELIVERY_READY"
+
+    def test_recover_committed_unverified_goes_executing(self, tmp_path):
+        """有 committed_unverified 子任务 → 任务级 EXECUTING（resume 接力）。"""
+        agent_go_dir = tmp_path / ".agent_go"
+        task_dir = agent_go_dir / "task-t1"
+        task_dir.mkdir(parents=True)
+        meta = {
+            "status": "EXECUTING", "status_schema_version": 1,
+            "task_id": "task-t1",
+            "subtasks": [{"id": "sub-1", "title": "t1"}],
+            "results": [{"subtask_id": "sub-1", "status": "committed_unverified",
+                         "verify_ok": None, "recovered": True}],
+        }
+        (task_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        with patch("agent_go.recover.AGENT_GO_DIR", agent_go_dir):
+            result = recover_task("task-t1")
+
+        assert result["overall_status"] == "EXECUTING"
+        updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        assert updated["status"] == "EXECUTING"

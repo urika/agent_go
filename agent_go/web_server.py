@@ -408,8 +408,7 @@ def api_overview() -> dict:
     task_counts = {"total": 0, "in_progress": 0, "delivered": 0,
                    "failed": 0, "blocked": 0, "today_delivered": 0, "today_cost": 0.0}
     # canonical → 大盘分组映射
-    _IN_PROGRESS = {"DRAFT", "SPEC_REVIEW", "ARCHITECTURE_REVIEW", "PLAN_REVIEW",
-                    "EXECUTING", "VERIFYING", "COMMITTED_UNVERIFIED"}
+    _IN_PROGRESS = {"EXECUTING", "PAUSED"}
     _DELIVERED = {"DELIVERY_READY", "ACCEPTED_DELIVERY"}
     _FAILED = {"VERIFICATION_FAILED", "DELIVERY_FAILED"}
     _BLOCKED = {"BLOCKED"}
@@ -1191,9 +1190,7 @@ _SPA_HTML = """<!DOCTYPE html>
 <script>
 const STATUS_COLORS = {
   // 新规范状态（status.py TASK_STATES）—— 按生命周期阶段着色
-  DRAFT:'st-pending', SPEC_REVIEW:'st-pending', ARCHITECTURE_REVIEW:'st-pending',
-  PLAN_REVIEW:'st-pending',
-  EXECUTING:'st-running', VERIFYING:'st-running', COMMITTED_UNVERIFIED:'st-running',
+  EXECUTING:'st-running',
   DELIVERY_READY:'st-completed', ACCEPTED_DELIVERY:'st-completed',
   VERIFICATION_FAILED:'st-failed', DELIVERY_FAILED:'st-failed',
   BLOCKED:'st-blocked', CANCELLED:'st-cancelled',
@@ -1240,8 +1237,7 @@ async function api(path) {
 }
 
 function statusIcon(st) {
-  return {DRAFT:'📝', SPEC_REVIEW:'📋', ARCHITECTURE_REVIEW:'🏗️', PLAN_REVIEW:'📐',
-          EXECUTING:'🔄', VERIFYING:'🔍', COMMITTED_UNVERIFIED:'📦',
+  return {EXECUTING:'🔄',
           DELIVERY_READY:'🟢', ACCEPTED_DELIVERY:'✅',
           VERIFICATION_FAILED:'🔴', DELIVERY_FAILED:'🔴',
           BLOCKED:'⛔', CANCELLED:'⏹️',
@@ -1277,8 +1273,7 @@ async function loadTasks(endpoint) {
 
 // 状态分组：canonical state → 阶段组（用于聚合筛选）
 const STATUS_GROUPS = {
-  planning: ['DRAFT','SPEC_REVIEW','ARCHITECTURE_REVIEW','PLAN_REVIEW'],
-  executing: ['EXECUTING','VERIFYING','COMMITTED_UNVERIFIED','PAUSED'],
+  executing: ['EXECUTING','PAUSED'],
   delivered: ['DELIVERY_READY','ACCEPTED_DELIVERY'],
   failed: ['VERIFICATION_FAILED','DELIVERY_FAILED'],
   blocked: ['BLOCKED'],

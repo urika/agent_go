@@ -106,10 +106,14 @@ _CMD_ARG_RULES = {
     },
     "python": {"-m pytest": "pytest",
                "-c": {"flags": r'^(--help|-h)$', "positionals": r'^[\s\S]*$'},
-               "manage.py": "manage.py"},
+               "manage.py": "manage.py",
+               "": {"flags": r'^(--help|-h|-V|--version|-B|-O|-OO|-u|-W=\S+)$',
+                    "positionals": r'^(?!.*\.\./)[\w./\-_]+$'}},
     "python3": {"-m pytest": "pytest",
                 "-c": {"flags": r'^(--help|-h)$', "positionals": r'^[\s\S]*$'},
-                "manage.py": "manage.py"},
+                "manage.py": "manage.py",
+                "": {"flags": r'^(--help|-h|-V|--version|-B|-O|-OO|-u|-W=\S+)$',
+                     "positionals": r'^(?!.*\.\./)[\w./\-_]+$'}},
     "npm":    {"test": {"flags": r'^(--silent|--verbose)$', "positionals": r'^$'},
                "run":  {"flags": r'^(--silent|--verbose)$', "positionals": r'^[\w:_\-]+$'}},
     "npx":    {"": {"flags": r'^(-y|--yes|--no)$', "positionals": r'^[\w@./\-_]+$'}},
@@ -172,6 +176,17 @@ _CMD_ARG_RULES = {
     "rubocop":{"": {"flags": r'^(-v|--auto-correct|--format=\S+|--config=\S+|--except=\S+|--only=\S+)$',
                     "positionals": r'^[\w./\-_]+$'}},
     "echo":   {"": {"flags": r'^$', "positionals": r'^[\s\S]*$'}},
+    # 只读 POSIX 命令（仅 stdout，无副作用）— M0 smoke 分析发现 Planner 常用 ls/find 等做文件存在性验证
+    "ls":     {"": {"flags": r'^(-[alhrtS1]+)$', "positionals": r'^[\w./\-_*?\[\]]+$'}},
+    "find":   {"": {"flags": r'^(-name$|-type$|-maxdepth$|-mindepth$|-path$)$', "positionals": r'^[\w./\-_*]+$',
+                     "value_flags": ["-name", "-type", "-maxdepth", "-mindepth", "-path"]}},
+    "cat":    {"": {"flags": r'^(-[bnEs]+)$', "positionals": r'^[\w./\-_]+$'}},
+    "head":   {"": {"flags": r'^(-n$|-c$)$', "positionals": r'^[\w./\-_]+$',
+                    "value_flags": ["-n", "-c"]}},
+    "wc":     {"": {"flags": r'^(-[lwcmL]+)$', "positionals": r'^[\w./\-_]+$'}},
+    "test":   {"": {"flags": r'^(-[efdswrxzntLh]+)$', "positionals": r'^[\w./\-_]+$'}},
+    "stat":   {"": {"flags": r'^(-[fLs]+|-c$|--format$)$', "positionals": r'^[\w./\-_]+$',
+                    "value_flags": ["-c", "--format"]}},
 }
 
 
@@ -252,6 +267,21 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
     for pattern, name in _injection_checks:
         if pattern.search(cmd_unquoted):
             return False, f"shell 注入特征: {name}"
+
+    # Stage 2.5: python -c 内容结构校验——单行 -c 不能含装饰器/with 块/换行。
+    # planner 常生成这类命令（如 `python -c "from x import y; @dec\ndef f(): ..."`），
+    # 运行必 SyntaxError，浪费整轮执行。引号内 ; 是合法单行分隔符，不拒绝。
+    if argv[0] in ("python", "python3") and len(argv) >= 3 and argv[1] == "-c":
+        _content = argv[2]
+        _bad = []
+        if "\n" in _content:
+            _bad.append("含换行")
+        if re.search(r"@\w+", _content):
+            _bad.append("含装饰器(@)")
+        if re.search(r"(^|;|\s)with\s+\S", _content):
+            _bad.append("含 with 块")
+        if _bad:
+            return False, f"python -c 内容{'、'.join(_bad)}，无法作为单行执行"
 
     # 处理 && 链：拆分为多个命令分别校验
     # LLM 常生成 "cmd1 && cmd2" 格式的验证命令，每个子命令独立安全

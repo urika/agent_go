@@ -413,6 +413,9 @@ class TestCmdPrOnline:
             "task": "实现登录功能",
             "repo": str(repo_dir),
             "base_branch": "main",
+            "delivery_branch": "agent_go/task-pr-online/delivery",
+            "status_schema_version": 1,
+            "status": "DELIVERY_READY",
             "results": [
                 {"subtask_id": "sub-1", "status": "completed",
                  "summary": "auth.py", "sandbox_type": "headless",
@@ -452,7 +455,9 @@ class TestCmdPrOnline:
         assert len(push_entries) == 1, f"期望 1 次 git push，实际 {len(push_entries)}"
         push_cmd = push_entries[0]
         assert "origin" in push_cmd, f"remote 应为 origin: {push_cmd}"
-        assert "HEAD:main" in push_cmd, f"refspec 应为 HEAD:main: {push_cmd}"
+        # M1.2：推送 delivery branch，禁止把 HEAD 推到 base/main
+        assert "HEAD" not in push_cmd, f"禁止推 HEAD: {push_cmd}"
+        assert "agent_go/task-pr-online/delivery:agent_go/task-pr-online/delivery" in push_cmd, f"应推 delivery branch refspec: {push_cmd}"
         # gh 不可用时备份 PR.md
         assert (task_dir / "PR.md").exists()
 
@@ -506,6 +511,11 @@ class TestCmdPrOnline:
         assert "--body-file" in gh_cmd
         assert "--base" in gh_cmd
         assert "main" in gh_cmd  # base branch
+        # M1.2: PR 成功后应记录 accepted_delivery 并置 ACCEPTED_DELIVERY 状态
+        updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        assert updated.get("pr_url") == "https://github.com/x/y/pull/1"
+        assert updated.get("accepted_delivery") is True
+        assert updated.get("status") == "ACCEPTED_DELIVERY"
 
     def test_pr_gh_not_installed_backups(self, monkeypatch, tmp_path, capsys):
         """gh 未安装 → 提示安装 + 备份 PR.md（不调 subprocess.run）"""

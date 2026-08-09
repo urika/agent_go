@@ -330,8 +330,8 @@ class TestMultiInterruptCycle:
         assert meta["status"] in ("paused", "completed", "failed")
 
     def test_interrupt_with_schema_writes_paused(self, tmp_path):
-        """M0 修复：status_schema_version 存在时，中断 → PAUSED（不再是 PLAN_REVIEW）。
-        回归守护——此前运行时把中断暂停误写为 PLAN_REVIEW，语义错位。"""
+        """M0 修复：status_schema_version 存在时，中断 → PAUSED。
+        回归守护。"""
         import threading
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -365,7 +365,7 @@ class TestMultiInterruptCycle:
                     meta=meta, remote_url="", interrupted=interrupt)
         except SystemExit:
             pass
-        # 有 status_schema_version → 中断写 PAUSED（不是 PLAN_REVIEW）
+        # 有 status_schema_version → 中断写 PAUSED
         assert meta["status"] == "PAUSED", f"中断应写 PAUSED，实际 {meta['status']}"
 
     def test_resume_with_partial_completion(self, tmp_path):

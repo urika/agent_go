@@ -52,9 +52,9 @@ class TestShellInjection:
         assert "命令链" in reason
 
     def test_command_chain_and(self):
-        ok, reason = _is_safe_verification_command("pytest tests/ && cat /etc/passwd")
+        ok, reason = _is_safe_verification_command("pytest tests/ && grep secret /etc/passwd")
         assert not ok
-        # && 已允许，但未知子命令（cat）仍应被拦截
+        # && 已允许，但未知子命令（grep）仍应被拦截
         assert "子命令不通过" in reason or "未知命令" in reason
 
     def test_command_chain_or(self):
@@ -339,6 +339,86 @@ class TestLogRejectedCommand:
 
         lines = audit_path.read_text(encoding="utf-8").strip().split("\n")
         assert len(lines) == 2
+
+
+# ── TestPosixCommands: P0 只读 POSIX 命令白名单 ────────────────
+
+class TestPosixCommands:
+    """M0 smoke 分析新增的 7 个只读 POSIX 命令"""
+
+    def test_ls_allowed(self):
+        ok, _ = _is_safe_verification_command("ls")
+        assert ok
+
+    def test_ls_with_flags(self):
+        ok, _ = _is_safe_verification_command("ls -la tests/")
+        assert ok
+
+    def test_ls_multiple_args(self):
+        ok, _ = _is_safe_verification_command("ls tests/fixtures/sample.csv tests/fixtures/pipeline_valid.json")
+        assert ok
+
+    def test_find_allowed(self):
+        ok, _ = _is_safe_verification_command("find . -name '*.py'")
+        assert ok
+
+    def test_find_with_type(self):
+        ok, _ = _is_safe_verification_command("find tests/ -type f -name '*.json'")
+        assert ok
+
+    def test_find_rejected_delete(self):
+        """find -delete 是破坏性操作，必须被拒绝"""
+        ok, reason = _is_safe_verification_command("find . -name '*.py' -delete")
+        assert not ok
+        assert "参数不允许" in reason or "shell 注入" in reason
+
+    def test_cat_allowed(self):
+        ok, _ = _is_safe_verification_command("cat README.md")
+        assert ok
+
+    def test_cat_with_flags(self):
+        ok, _ = _is_safe_verification_command("cat -n file.txt")
+        assert ok
+
+    def test_head_allowed(self):
+        ok, _ = _is_safe_verification_command("head -n 10 file.txt")
+        assert ok
+
+    def test_head_with_c_flag(self):
+        ok, _ = _is_safe_verification_command("head -c 100 file.txt")
+        assert ok
+
+    def test_wc_allowed(self):
+        ok, _ = _is_safe_verification_command("wc -l file.txt")
+        assert ok
+
+    def test_test_allowed(self):
+        ok, _ = _is_safe_verification_command("test -f config.json")
+        assert ok
+
+    def test_test_directory_check(self):
+        ok, _ = _is_safe_verification_command("test -d src/")
+        assert ok
+
+    def test_stat_allowed(self):
+        ok, _ = _is_safe_verification_command("stat file.txt")
+        assert ok
+
+    def test_stat_with_format(self):
+        ok, _ = _is_safe_verification_command("stat --format '%s' file.txt")
+        assert ok
+
+    def test_echo_and_ls_chain(self):
+        """M0 真实失败场景：echo + ls 命令链必须通过"""
+        cmd = "echo files created && ls tests/fixtures/sample.csv tests/fixtures/pipeline_valid.json tests/fixtures/pipeline_invalid.json"
+        ok, reason = _is_safe_verification_command(cmd)
+        assert ok, f"M0 场景失败: {reason}"
+
+    def test_ls_rejected_recursive_flag(self):
+        """ls -R 递归标志不在允许列表中"""
+        ok, reason = _is_safe_verification_command("ls -R /")
+        assert not ok
+        assert "参数不允许" in reason
 
 
 # ── TestResourceLimits: 资源限制和沙箱环境 ────────────────────

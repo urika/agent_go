@@ -135,6 +135,15 @@ def _match_rule(rule: dict[str, Any], step: dict[str, Any]) -> bool:
         if not any(any(fnmatch(f, pat) for pat in cond["file_patterns"]) for f in files):
             return False
 
+    # P2: exclude_keywords — 反向过滤，命中则规则不生效
+    # 用途：安全规则不应匹配纯 CLI/数据管道任务；前端规则不应匹配后端任务
+    if "exclude_keywords" in cond:
+        title = step.get("title", "")
+        desc = step.get("description", "")
+        combined = f"{title} {desc}".lower()
+        if any(kw.lower() in combined for kw in cond["exclude_keywords"]):
+            return False
+
     return True
 
 

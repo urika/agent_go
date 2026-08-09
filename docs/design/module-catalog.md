@@ -12,7 +12,7 @@
 | `pipeline.py` | DAG wave、并发、生命周期和清理 | meta/results |
 | `executor.py` | 单子任务 worktree、Claude、验证和 commit | result/commit/tag |
 | `subtask.py` | Claude headless、watchdog、进程控制 | subprocess result/metering |
-| `delivery.py` | delivery branch、commit 汇总和交付 | delivery result |
+| `delivery.py` | delivery branch 创建与 commit 汇总、Accepted Delivery 判定 | delivery branch / delivery result |
 | `recover.py` | 从 worktree 重建中断状态 | recovered meta |
 | `git_utils.py` | Git 仓库、worktree 和 gc 操作 | Git operation result |
 | `failure.py` | 失败分类和 kill reason 映射 | failure class |
@@ -29,13 +29,17 @@
 | `mcp_server.py` | 对外 MCP Server | MCP tools/resources |
 | `mcp_client.py` | 消费外部 MCP 工具 | MCP tool calls |
 | `artifacts.py` | 产物收集和导出 | artifact manifest |
-| `review.py` | 结果聚合和审批 | review decision |
 | `checkpoint.py` | worktree 快照和恢复 | snapshot |
 | `notify.py` | 多通道事件通知（desktop / webhook / command / IM 适配器） | notification events |
 | `goal_injector.py` | 在 worktree 内注入 Claude Code `/goal` Stop Hook | goal hook config |
 | `role_skill_map.py` | Config-driven 规则匹配：keywords / file patterns / agent type → skills | matched skills |
 | `agents.py` | Agent 类型定义（developer/architect/reviewer/tester）的 Claude 配置 | agent config |
 | `skills.py` | Skill 加载器：解析 YAML frontmatter + Markdown body 的 SKILL.md | rendered skills |
+| `spec.py` | Task Spec 解析与 L1 准入门禁：模板生成/校验/Plan 约束注入 | spec validation result |
+| `status.py` | Canonical 8 状态映射与 M0 任务状态判定 | canonical status |
+| `utils.py` | 共享工具：验证命令白名单/参考文档读取/commit 格式化/slugify | utility functions |
+| `assessment.py` | 语义评估假阳性数据层：事件模型/持久化/假阳性率计算 | assessment events |
+| `metadata_migration.py` | 历史任务元数据迁移工具（schema 升级/字段补齐） | migrated metadata |
 | `eval.py` | 评估分析：quality / perf / cost (per-role) / reliability / UX + eval gate | eval report |
 | `replay.py` | 执行回放时间线：从 meta/metering/results 重建可视化 | timeline (ASCII/JSON) |
 | `agent_loop.py` | 自主 agent 循环（`--agent-loop`）：tool-use ReAct 直接 API 调用 | loop result |

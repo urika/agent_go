@@ -22,5 +22,13 @@ def test_verification_and_model_failures_are_distinct():
     assert classify_failure({"status": "failed", "verify_ok": True, "exit_code": 1}) == "model_failure"
 
 
+def test_rejected_verification_is_infrastructure_failure():
+    assert classify_failure({
+        "status": "failed",
+        "verify_ok": False,
+        "verification_results": [{"rejected": True}],
+    }) == "infrastructure_failure"
+
+
 def test_aggregate_prefers_explicit_delivery_failure():
     assert aggregate_failure_class(["model_failure"], {"delivery_failed": True}) == "delivery_failure"

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (37 modules, ~17,300 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, crash recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel completion notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (47 modules, ~24,000 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume, crash recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel completion notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
 No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`, `http.server`).
 
@@ -120,45 +120,23 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 
 ## Key Modules
 
+47 模块完整目录见 [docs/design/module-catalog.md](docs/design/module-catalog.md)。
+
+核心模块速览：
+
 | Module | Purpose |
 |--------|---------|
-| `cli.py` | CLI commands: run, resume, list, show, status, pr, config, spec, clean, cache, inspect, review, router, eval, ci, recover, replay, checkpoint, mcp, plan-history, plan-diff |
+| `cli.py` | CLI commands: run, resume, list, show, status, pr, merge, spec, clean, cache, inspect, review, router, eval, ci, recover, replay, checkpoint, mcp, web, plan-history, plan-diff, metadata-migration, delivery |
 | `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
-| `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
-| `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify |
-| `pipeline.py` | Wave scheduler, concurrency, worktree/tag cleanup, remote push, SIGINT |
-| `subtask.py` | Claude -p headless runner, git merge upstream |
-| `git_utils.py` | Project analysis, worktree create/remove/prune, gc.auto control |
-| `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown) |
-| `agents.py` | Agent type system: developer/architect/reviewer/tester |
-| `role_skill_map.py` | Config-driven rule matching: keywords, file patterns, agent type |
-| `config.py` | Config loading, logging, API key resolution, meter_event |
-| `console.py` | Unified output layer: quiet/verbose modes, table/data formatting |
-| `utils.py` | Commit formatting, slugify, shell safety, version detection, doc reading |
-| `router.py` | Role-aware model routing: planner/worker/reviewer, fallback + circuit breaker |
-| `evaluator.py` | LLM semantic evaluation + failure summary for verification loop |
-| `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
-| `goal_injector.py` | /goal Stop Hook injection: .claude/settings.json + verify-goal.sh |
-| `metrics.py` | Data collection: timing, change stats, estimate_cost, aggregate_metering |
-| `eval.py` | Quality/perf/cost (per-role)/reliability/ux evaluation, eval gate ($/pass baseline + regression) |
-| `planning.py` | Planning helpers: estimate_task_duration |
-| `pricing.py` | Model price table (48 models), MODEL_TIER, provider defaults, resolve_price/missing_price_models pre-flight helpers |
-| `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks (pre-flight model-price probe) |
-| `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
-| `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
-| `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |
-| `tui.py` | Curses-based status dashboard (live task monitoring) |
-| `workflow_gen.py` | GitHub Actions CI workflow auto-generation |
-| `replay.py` | Execution replay timeline: loads meta/metering/results, ASCII/JSON visualization |
-| `checkpoint.py` | Worktree file snapshot manager: take/restore/delete, subtask rollback |
-| `mcp_server.py` | agent_go exposed as an MCP server: JSON-RPC 2.0 over stdio, tools + lifecycle event stream |
-| `mcp_http.py` | MCP server HTTP/SSE transport: POST /mcp (JSON-RPC), GET /mcp (SSE notifications), GET /health |
-| `mcp_client.py` | MCP consumption layer: subtasks call external MCP server tools, namespaced `mcp__{server}__{tool}` |
+| `pipeline.py` | Wave scheduler, concurrency, worktree/tag cleanup, remote push, SIGINT, MCP client lifecycle, artifact export |
+| `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify, semantic eval |
+| `subtask.py` | Claude -p headless runner, watchdog, kill_state events (stuck/idle/timeout) |
+| `delivery.py` | Delivery branch, commit summary, Accepted Delivery determination (M1) |
+| `failure.py` | Failure classification + kill reason mapping |
+| `status.py` | Canonical 8-state task status (M0) |
+| `planning.py` | Pre-execution checks: under/over decomposition, difficulty mismatch, agent_prompt function ref validation |
+| `spec.py` | Task Spec parsing + L1 admission gate (S11-P0) |
 | `recover.py` | Rebuilds meta.json from worktree state after SIGKILL/abnormal interruption |
-| `assessment.py` | False-positive evaluation data layer: AssessmentEvent model, persistence, aggregation (pure data module, no core-module imports) |
-| `artifacts.py` | Artifact export (S9-B): collect worktree/__artifacts__/ into --artifact-dir before cleanup |
-| `spec.py` | Task Spec parsing + L1 admission gate (S11-P0): 7-section Markdown spec → structured constraints injected into Plan prompt; deterministic pre-flight checks (required sections / file path validity / verification whitelist / length floor) |
-| `lint.py` | AST-based static checks: detects suspicious for-loop body truncation (see review pattern below) |
 
 ## Key Design Decisions
 
@@ -220,8 +198,8 @@ pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
 ## File Organization
 
 ```
-agent_go/           # 36 package modules (~16,500 lines)
-tests/              # 61 test files, 1569 tests
+agent_go/           # 47 package modules (~24,000 lines)
+tests/              # 61 test files, 1948 tests
 eval_suite/         # Standard task suite for eval bench (tasks + fixtures)
 docs/
 ├── README.md       # 文档索引

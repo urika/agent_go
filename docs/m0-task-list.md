@@ -1,8 +1,8 @@
 # M0 当前阶段工作任务清单
 
 > 阶段：M0 产品契约与指标冻结
-> 状态：进行中
-> 更新日期：2026-08-08
+> 状态：已完成（2026-08-09，含首批固定基线数据）
+> 更新日期：2026-08-09
 > 关联：[prd.md](prd.md) · [roadmap.md](roadmap.md) · [bench-v2-data-requirements.md](design/bench-v2-data-requirements.md)
 
 ## 1. M0 目标
@@ -55,27 +55,21 @@ M0-1、M0-2、M0-3、M0-6 必须先冻结；M0-4、M0-5、M0-7、M0-8 可在规�
 
 ### M0-2 状态机统一
 
-- [x] 定义统一状态集合：
+- [x] 定义统一状态集合（v2 精简至 8 状态）：
 
 ```text
-DRAFT
-SPEC_REVIEW
-ARCHITECTURE_REVIEW
-PLAN_REVIEW
-PAUSED
 EXECUTING
-VERIFYING
-COMMITTED_UNVERIFIED
+PAUSED
 DELIVERY_READY
 ACCEPTED_DELIVERY
 VERIFICATION_FAILED
-DELIVERY_FAILED
 BLOCKED
+DELIVERY_FAILED
 CANCELLED
 ```
 
-> M0-2 状态机语义修复（2026-08-08）：新增 `PAUSED` = 中断/暂停可恢复锚点；
-> `PLAN_REVIEW` 回归为纯净的规划审查门（此前运行时把中断误写为 PLAN_REVIEW，已改）。
+> v2 精简（2026-08-08）：移除 4 个从未写入的状态（DRAFT/SPEC_REVIEW/ARCHITECTURE_REVIEW/VERIFYING），合并 2 个一跳过渡态（PLAN_REVIEW→BLOCKED，COMMITTED_UNVERIFIED→子任务级标注）。
+> 详见 `docs/design/m0-state-machine.md`
 
 - [x] 绘制状态迁移表。
 - [x] 对照 CLI 状态。
@@ -304,11 +298,11 @@ M0 只有在以下条件全部满足后才算完成：
 - [x] Accepted Delivery 可以自动计算。
 - [x] Cost per Accepted Delivery 可以自动计算。
 - [x] 旧 `$ / pass` 不再作为产品主 KPI。
-- [ ] 至少一批新的固定基线数据已生成。
+- [x] 至少一批新的固定基线数据已生成。
 - [x] 单元、集成和最小端到端测试通过。
 - [x] PRD、roadmap、spec 和 Bench 文档一致。
 
-当前唯一未满足的 M0 完成门禁是生成一批新的固定 baseline 数据；历史结果仍为 exploratory，不能替代正式基线。
+M0 完成门禁全部满足。首批固定基线数据：`eval_suite/baselines/m0-smoke-20260808/`（smoke suite × deepseek-v4-flash × 7 任务，schema v1，metric-freeze v1，manifest 已生成）。
 
 ## 6. M0 完成后的下一阶段
 

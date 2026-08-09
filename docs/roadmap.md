@@ -69,6 +69,8 @@ SDD 能力按产品关键路径分三层建设，不把所有治理能力一次�
 
 M1.4 只建设最小可追踪和可审查闭环，不建设完整 KnowledgeStore、活文档或自动架构决策；这些能力必须经过 M3 真实任务验证后再决定。
 
+Bench 在进入正式 decision baseline 前，遵循 [ADR-009 Bench 收敛决策](design/adr/ADR-009-bench-convergence.md) 和 [Bench 收敛计划](design/bench-convergence-plan.md)：先完成数据/状态清理、Plan/Verifier 收敛和 Golden Tasks，再扩大任务矩阵。
+
 ## 2. Roadmap 管理规则
 
 ### 2.1 统一状态

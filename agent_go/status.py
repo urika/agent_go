@@ -1,12 +1,10 @@
-"""Canonical task state machine for M0-2.
+"""Canonical task state machine (M0-2, simplified 2026-08-08).
 
-Subtask result statuses remain intentionally separate.  This module only
-normalizes the task-level ``meta.json.status`` field.
+Task-level ``meta.json.status`` — 8 states.
 
-语义区分（M0 状态机修复）：
-- PLAN_REVIEW：规划审查门（ARCHITECTURE_REVIEW → plan accepted → PLAN_REVIEW → execution started → EXECUTING）。
-  仅表示"计划已获准、待执行"这一短暂过渡，不用于中断暂停。
-- PAUSED：任务被中断/暂停（SIGINT/SIGTERM）时的可恢复锚点，resume 从 PAUSED 回 EXECUTING。
+精简记录（v2）：从 14 状态精简至 8 状态。
+- 移除 4 个从未写入的状态：DRAFT / SPEC_REVIEW / ARCHITECTURE_REVIEW / VERIFYING
+- 合并 2 个一跳过渡态：PLAN_REVIEW → BLOCKED（约束阻断），COMMITTED_UNVERIFIED → EXECUTING（recover 发现 → resume 重验证。subtask 级 committed_unverified 保留在 results[].status 中）
 """
 
 from __future__ import annotations
@@ -15,22 +13,21 @@ from typing import Any
 
 
 TASK_STATES = frozenset({
-    "DRAFT", "SPEC_REVIEW", "ARCHITECTURE_REVIEW", "PLAN_REVIEW",
-    "PAUSED", "EXECUTING", "VERIFYING", "COMMITTED_UNVERIFIED", "DELIVERY_READY",
-    "ACCEPTED_DELIVERY", "VERIFICATION_FAILED", "DELIVERY_FAILED",
-    "BLOCKED", "CANCELLED",
+    "PAUSED", "EXECUTING",
+    "DELIVERY_READY", "ACCEPTED_DELIVERY", "DELIVERY_FAILED",
+    "VERIFICATION_FAILED", "BLOCKED", "CANCELLED",
 })
 STATUS_SCHEMA_VERSION = 1
 
 LEGACY_STATUS_MAP = {
-    "draft": "DRAFT",
-    "spec_review": "SPEC_REVIEW",
-    "architecture_review": "ARCHITECTURE_REVIEW",
-    "plan_review": "PLAN_REVIEW",
+    "draft": "EXECUTING",
+    "spec_review": "EXECUTING",
+    "architecture_review": "EXECUTING",
+    "plan_review": "BLOCKED",
     "running": "EXECUTING",
     "executing": "EXECUTING",
-    "verifying": "VERIFYING",
-    "committed_unverified": "COMMITTED_UNVERIFIED",
+    "verifying": "EXECUTING",
+    "committed_unverified": "EXECUTING",
     "completed": "DELIVERY_READY",
     "failed": "VERIFICATION_FAILED",
     "verification_failed": "VERIFICATION_FAILED",
@@ -46,7 +43,7 @@ LEGACY_STATUS_MAP = {
 
 def normalize_task_status(status: str | None, meta: dict[str, Any] | None = None) -> str:
     """Return a canonical task state, using delivery metadata when available."""
-    value = (status or "DRAFT").strip()
+    value = (status or "EXECUTING").strip()
     if value in TASK_STATES:
         return value
     meta = meta or {}
@@ -54,7 +51,7 @@ def normalize_task_status(status: str | None, meta: dict[str, Any] | None = None
         return "ACCEPTED_DELIVERY"
     if meta.get("delivery_failed") is True:
         return "DELIVERY_FAILED"
-    return LEGACY_STATUS_MAP.get(value.lower(), "DRAFT")
+    return LEGACY_STATUS_MAP.get(value.lower(), "EXECUTING")
 
 
 def set_task_status(meta: dict[str, Any], status: str) -> str:

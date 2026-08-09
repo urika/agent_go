@@ -12,7 +12,6 @@
 - 后续可用 `agent_go resume <task-id>` 重新跑未完成的 subtask
 """
 import json
-import logging
 import os
 import subprocess
 from pathlib import Path
@@ -278,20 +277,29 @@ def recover_task(
         recovered_results.append(sub_state)
 
     # 原子完成规则：commit 是边界
-    # - 所有 subtask 都有 commit 且至少一个 completed → completed
+    # - 所有 subtask 都有 commit 且至少一个 completed → 交付就绪（DELIVERY_READY）
     # - 至少一个 subtask 是 no_changes（没 commit）→ interrupted（resume 会重新跑）
     # - 至少一个 subtask 是 failed → failed（但可 resume 重新尝试）
     # - 任何 dirty/error 状态 → interrupted
     statuses = [r.get("status") for r in recovered_results]
     if not statuses:
-        overall_status = "DRAFT"
+        overall_status = "EXECUTING"
     elif any(s in ("dirty", "reset_failed", "wrong_branch", "no_git_link", "no_worktree", "unknown") for s in statuses):
         overall_status = "EXECUTING"
     elif any(s == "no_changes" for s in statuses):
         # 至少一个 subtask 没 commit → 任务未完成，resume 接力
         overall_status = "EXECUTING"
     elif all(s == "completed" for s in statuses):
-        overall_status = "COMMITTED_UNVERIFIED"
+        # M1-3: 所有子任务 completed（commit + verify pass）→ 任务实际完成。
+        # 保留已有交付状态（ACCEPTED_DELIVERY / DELIVERY_FAILED），否则 DELIVERY_READY。
+        # 避免把已交付任务降级为 EXECUTING（resume 会误重跑）。
+        _prev = meta.get("status")
+        if _prev in ("ACCEPTED_DELIVERY", "DELIVERY_FAILED"):
+            overall_status = _prev
+        elif meta.get("pr_url") or meta.get("explicit_merge_commit"):
+            overall_status = "ACCEPTED_DELIVERY"
+        else:
+            overall_status = "DELIVERY_READY"
     elif any(s == "failed" for s in statuses):
         overall_status = "VERIFICATION_FAILED"
     else:
@@ -309,20 +317,20 @@ def recover_task(
             meta["status"] = overall_status
         else:
             meta["status"] = {
-                "DRAFT": "no_subtasks",
-                "COMMITTED_UNVERIFIED": "completed",
                 "VERIFICATION_FAILED": "failed",
                 "EXECUTING": "interrupted",
+                "DELIVERY_READY": "completed",
+                "ACCEPTED_DELIVERY": "completed",
             }.get(overall_status, overall_status)
         meta["recovered_at"] = datetime.now().isoformat()
         _save_meta_atomic(meta, task_dir)
         meta_updated = True
 
     response_status = overall_status if meta.get("status_schema_version") else {
-        "DRAFT": "no_subtasks",
-        "COMMITTED_UNVERIFIED": "completed",
         "VERIFICATION_FAILED": "failed",
         "EXECUTING": "interrupted",
+        "DELIVERY_READY": "completed",
+        "ACCEPTED_DELIVERY": "completed",
     }.get(overall_status, overall_status)
     response = {
         "task_id": task_id,

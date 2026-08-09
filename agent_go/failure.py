@@ -77,12 +77,16 @@ def classify_failure(
         return explicit
     if meta.get("delivery_failed"):
         return "delivery_failure"
+    if result.get("crash_but_verified"):
+        return "infrastructure_failure"
+    if any(v.get("rejected") for v in result.get("verification_results", []) if isinstance(v, dict)):
+        return "infrastructure_failure"
     kill_reason = result.get("kill_reason") or meta.get("kill_reason")
     if kill_reason in KILL_REASON_CLASS:
         return KILL_REASON_CLASS[kill_reason]
     if timed_out:
         return "timeout"
-    if kill_reason == "none" or result.get("status") in {"completed", "no_changes"}:
+    if result.get("status") in {"completed", "no_changes"}:
         return None
     if result.get("status") == "blocked":
         # A blocked task is an orchestration failure unless a more specific

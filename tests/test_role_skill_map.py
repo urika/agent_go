@@ -45,6 +45,31 @@ class TestMatchRule:
         rule = {}
         assert _match_rule(rule, {"title": "anything"})
 
+    # ── P2: exclude_keywords 反向过滤 ─────────────────────────
+
+    def test_exclude_keywords_blocks_match(self):
+        """exclude_keywords 命中时规则不生效"""
+        rule = {"match": {"keywords": ["安全", "security"], "exclude_keywords": ["CLI", "命令行", "数据管道"]}}
+        # 任务含安全关键词但也含排除词 → 不匹配
+        assert not _match_rule(rule, {"title": "CLI 安全审查工具", "description": ""})
+        assert not _match_rule(rule, {"title": "安全模块", "description": "命令行数据管道"})
+
+    def test_exclude_keywords_not_hit_rule_still_matches(self):
+        """exclude_keywords 未命中时规则正常生效"""
+        rule = {"match": {"keywords": ["安全", "security"], "exclude_keywords": ["CLI", "命令行"]}}
+        assert _match_rule(rule, {"title": "Web 安全审查", "description": "认证模块"})
+
+    def test_exclude_keywords_with_agent_type(self):
+        """exclude_keywords 与 agent_type 组合使用"""
+        rule = {"match": {"agent_type": "architect", "exclude_keywords": ["前端", "frontend"]}}
+        assert _match_rule(rule, {"agent_type": "architect", "title": "后端架构设计"})
+        assert not _match_rule(rule, {"agent_type": "architect", "title": "前端架构设计"})
+
+    def test_exclude_keywords_case_insensitive(self):
+        """exclude_keywords 大小写不敏感"""
+        rule = {"match": {"keywords": ["重构"], "exclude_keywords": ["FRONTEND", "React"]}}
+        assert not _match_rule(rule, {"title": "重构 Frontend 组件"})
+
 
 class TestMatchRules:
     def test_multiple_matches(self):
@@ -134,6 +159,45 @@ class TestApplyRules:
         }
         result = apply_rules({"title": "文档更新", "files": ["README.md"], "skills": [], "description": ""}, role_map)
         assert result["agent_type"] == "architect"
+
+    # ── P2: exclude_keywords 在 apply_rules 中的集成 ──────────
+
+    def test_exclude_keywords_prevents_skill_injection(self):
+        """exclude_keywords 阻止不相关领域技能注入（如 CLI 修 bug 不匹配前端技能）"""
+        role_map = {
+            "rules": [
+                {"match": {"keywords": ["安全"], "exclude_keywords": ["CLI", "命令行", "数据管道"]},
+                 "skills": {"required": ["security-review"]}},
+                {"match": {"keywords": ["修复", "bug"]},
+                 "skills": {"recommended": ["frontend-react"]}},
+            ]
+        }
+        installed = [
+            {"name": "security-review", "description": "安全审查", "path": "/tmp"},
+            {"name": "frontend-react", "description": "React 前端", "path": "/tmp"},
+        ]
+        # CLI 数据管道修复任务 — 安全规则被 exclude 过滤，但 bugfix 规则的推荐技能仍匹配
+        result = apply_rules(
+            {"title": "CLI 数据管道修复 bug", "skills": [], "description": "修复默认参数"},
+            role_map, installed
+        )
+        # security-review 不应注入（被 exclude_keywords 过滤）
+        assert "security-review" not in result["skills"]
+
+    def test_exclude_keywords_allows_when_no_exclusion_hit(self):
+        """无 exclude_keywords 命中时，正常注入"""
+        role_map = {
+            "rules": [
+                {"match": {"keywords": ["安全"], "exclude_keywords": ["CLI"]},
+                 "skills": {"required": ["security-review"]}},
+            ]
+        }
+        installed = [{"name": "security-review", "description": "", "path": "/tmp"}]
+        result = apply_rules(
+            {"title": "Web 安全审查", "skills": [], "description": "认证模块"},
+            role_map, installed
+        )
+        assert "security-review" in result["skills"]
 
 
 class TestLoadRoleSkillMap:

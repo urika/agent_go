@@ -8,6 +8,7 @@ from .console import _LazyConsole
 from .config import write_censored_event
 from .executor import run_subtask
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
+from .failure import classify_failure
 # 解耦：notify 是可选增强，删除模块级 import 以匹配 architecture.md 解耦原则
 # （让函数内动态 import 统一拦截，便于测试 mock 和 disable notify 而不破坏 import）
 
@@ -185,6 +186,7 @@ def _record_subtask_result(
     results_map: dict,
     completed_ids: set,
     failed_ids: set,
+    blocked_ids: set,
     degraded_count: int,
     meta_lock: threading.Lock,
     config: dict,
@@ -202,6 +204,8 @@ def _record_subtask_result(
     with meta_lock:
         worktree_map[st["id"]] = task_dir / st["id"] / "work"
         results_map[st["id"]] = result
+        failed_ids.discard(st["id"])
+        blocked_ids.discard(st["id"])
         if result.get("status") == "degraded" or result.get("degraded"):
             degraded_count += 1
             # S12-P1 G4 安全阀：degrade 模式下统计连续失败（失败递增 / 成功清零）
@@ -226,6 +230,8 @@ def _record_subtask_result(
         completed_ids.add(st["id"])
         if result.get("status") == "failed":
             failed_ids.add(st["id"])
+        elif result.get("status") == "blocked":
+            blocked_ids.add(st["id"])
         # S6 失败通知增强：子任务失败时主动推送（即使整体未完成）
         from .notify import notify_event as _notify_event
         try:
@@ -432,10 +438,15 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                 if blockers:
                     newly_blocked.append(st)
                     blocked_ids.add(st["id"])
+                    root = next((results_map.get(dep) for dep in blockers if results_map.get(dep)), {})
+                    root_class = root.get("failure_class") or classify_failure(root) or "system_error"
                     results_map[st["id"]] = {
                         "subtask_id": st["id"], "status": "blocked",
                         "exit_code": -1, "summary": f"上游失败，已阻断: {blockers}",
                         "blocked_by": blockers,
+                        "root_failure_subtask": root.get("subtask_id") or blockers[0],
+                        "root_failure_class": root_class,
+                        "failure_class": root_class,
                         "failure_reason": "上游依赖失败，级联阻断",
                         "worktree": "", "sandbox_type": "headless",
                         "verify_ok": False, "duration_sec": 0,
@@ -473,6 +484,8 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                                 "subtask_id": st["id"], "status": "blocked", "exit_code": -1,
                                 "summary": "成本计量不可用，已停止调度", "blocked_by": ["metering"],
                                 "failure_reason": "metering.jsonl 不可读", "kill_reason": "metering_unavailable",
+                                "failure_class": "infrastructure_failure",
+                                "root_failure_class": "infrastructure_failure",
                                 "worktree": "", "sandbox_type": "headless", "verify_ok": False,
                                 "duration_sec": 0,
                             }
@@ -513,6 +526,8 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                                     "blocked_by": ["cost_control"],
                                     "failure_reason": "任务成本超预算熔断",
                                     "kill_reason": "over_budget_l3",
+                                    "failure_class": "budget_abort",
+                                    "root_failure_class": "budget_abort",
                                     "worktree": "", "sandbox_type": "headless",
                                     "verify_ok": False, "duration_sec": 0,
                                 }
@@ -542,6 +557,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                     "summary": "预算 reservation 不足，未启动子任务",
                     "blocked_by": ["cost_control"], "failure_reason": "并发启动前预算不足",
                     "kill_reason": "over_budget_l3", "worktree": "", "sandbox_type": "headless",
+                    "failure_class": "budget_abort", "root_failure_class": "budget_abort",
                     "verify_ok": False, "duration_sec": 0,
                 }
             wave = _reserved_wave
@@ -555,6 +571,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                         "subtask_id": st["id"], "status": "failed",
                         "exit_code": -1, "summary": "依赖循环或无法满足的依赖，未执行",
                         "worktree": "", "sandbox_type": "headless",
+                        "failure_class": "system_error", "root_failure_class": "system_error",
                         "verify_ok": False, "duration_sec": 0,
                     }
             break
@@ -590,11 +607,12 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                 logger.info(f"[skip] 用户跳过 Wave {wave_num}")
                 for st in wave:
                     if st["id"] not in results_map:
-                        results_map[st["id"]] = {
+                            results_map[st["id"]] = {
                             "subtask_id": st["id"], "status": "no_changes",
                             "exit_code": 0, "summary": "用户跳过",
                             "worktree": "", "sandbox_type": "headless",
-                            "verify_ok": False, "duration_sec": 0,
+                                "verify_ok": False, "duration_sec": 0,
+                                "failure_class": "user_cancelled",
                         }
                     completed_ids.add(st["id"])
                 remaining = [st for st in remaining if st["id"] not in completed_ids]
@@ -622,6 +640,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                 degraded_count = _record_subtask_result(
                     st, result, task_dir, meta,
                     worktree_map, results_map, completed_ids, failed_ids,
+                    blocked_ids,
                     degraded_count, meta_lock, config,
                 )
         else:
@@ -650,6 +669,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                     degraded_count = _record_subtask_result(
                         st, result, task_dir, meta,
                         worktree_map, results_map, completed_ids, failed_ids,
+                        blocked_ids,
                         degraded_count, meta_lock, config,
                     )
                     # 若中断已触发，取消剩余 futures，加速退出
@@ -673,10 +693,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
         console.sep("─", 50)
 
         # ── 中断检测：信号处理器已触发，安全地保存状态并退出 ──
-        # M0 语义修复：中断暂停写 PAUSED（可恢复锚点），不再是 PLAN_REVIEW（规划审查门）。
-        # 能力失败优先（m0-state-machine.md §状态定义）：中断时若已有 failed 子任务（确定性
-        # 能力失败，非被中断打断），终态为 VERIFICATION_FAILED 而非 PAUSED——PAUSED 暗示
-        # "恢复后能继续"，但能力失败恢复后大概率仍失败，PAUSED 会误导用户。
+        # 能力失败优先：中断时若已有 failed 子任务，终态为 VERIFICATION_FAILED 而非 PAUSED。
         if _interrupted.is_set():
             _has_failed = bool(failed_ids)
             if meta.get("status_schema_version"):
@@ -860,12 +877,36 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
         r.get("status") == "failed" or (r.get("status") == "blocked" and r.get("blocked_by"))
         for r in results_map.values()
     )
+    for result in results_map.values():
+        if result.get("status") in ("completed", "no_changes") and not result.get("crash_but_verified"):
+            result.pop("failure_class", None)
+            result.pop("root_failure_class", None)
+            result.pop("root_failure_subtask", None)
+    meta["failure_class"] = None
     if meta.get("status_schema_version"):
         meta["status"] = "VERIFICATION_FAILED" if has_capability_failure else ("BLOCKED" if has_blocked else "DELIVERY_READY")
     else:
         meta["status"] = "failed" if has_failed else "completed"
-    from .delivery import apply_delivery_result
+
+    # M1.1 交付分支模型：汇总成功子任务 commit 到统一 delivery branch。
+    # 仅当存在可用 base_commit 且仓库有效时执行；失败不阻断主流程（记录原因即可）。
+    from .delivery import apply_delivery_result, create_delivery_branch
     from .failure import aggregate_failure_class
+    _base_commit_for_delivery = meta.get("base_commit") or ""
+    _delivery_err = ""
+    if (_base_commit_for_delivery and not has_capability_failure
+            and not has_failed and (repo / ".git").exists()):
+        _delivery_ok, _delivery_branch, _delivery_err = create_delivery_branch(
+            repo, meta.get("task_id", ""), _base_commit_for_delivery,
+            list(results_map.values()),
+        )
+        if _delivery_ok:
+            meta["delivery_branch"] = _delivery_branch
+            logger.info(f"[delivery] delivery branch: {_delivery_branch}")
+        else:
+            meta["delivery_branch"] = ""
+            meta["delivery_error"] = _delivery_err
+            logger.warning(f"[delivery] delivery branch 创建失败: {_delivery_err}")
     delivery = apply_delivery_result(meta, repo)
     meta["failure_class"] = aggregate_failure_class(
         [r.get("failure_class") for r in results_map.values()], meta

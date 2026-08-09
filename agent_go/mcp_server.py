@@ -577,7 +577,7 @@ class MCPServer:
                     n_done = sum(1 for r in results
                                  if r.get("status") in ("completed", "no_changes"))
 
-                    if status in ("ACCEPTED_DELIVERY", "DELIVERY_READY", "VERIFICATION_FAILED", "DELIVERY_FAILED", "PLAN_REVIEW", "BLOCKED", "CANCELLED"):
+                    if status in ("ACCEPTED_DELIVERY", "DELIVERY_READY", "VERIFICATION_FAILED", "DELIVERY_FAILED", "BLOCKED", "CANCELLED"):
                         time.sleep(0.3)
                         break
 

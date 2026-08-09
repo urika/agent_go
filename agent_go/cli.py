@@ -178,6 +178,12 @@ def _build_parser():
     pr_parser.add_argument("--push", action="store_true", help="Push branch to remote before creating PR")
     pr_parser.add_argument("--remote", default="origin", help="Remote name to push to (default: origin)")
 
+    # merge 子命令（M1.2 显式交付命令）
+    merge_parser = subparsers.add_parser("merge", help="Merge delivery branch into target branch (manual delivery)")
+    merge_parser.add_argument("task_id", help="Task ID whose delivery branch to merge")
+    merge_parser.add_argument("--push", action="store_true", help="Push target branch to remote after merge")
+    merge_parser.add_argument("--remote", default="origin", help="Remote name to push to (default: origin)")
+
     # ci 子命令
     ci_parser = subparsers.add_parser("ci", help="Generate GitHub Actions workflow")
     ci_parser.add_argument("repo", nargs="?", help="Path to the repository (default: current dir)")
@@ -208,6 +214,11 @@ def _build_parser():
     recover_parser.add_argument("task_id", help="Task ID to recover (e.g., task-20260725-224612-955-fd40)")
     recover_parser.add_argument("--dry-run", dest="dry_run", action="store_true",
                                  help="只扫描，不更新 meta.json")
+
+    migrate_parser = subparsers.add_parser("migrate", help="迁移历史任务元数据")
+    migrate_parser.add_argument("subcommand", choices=["failure-metadata"])
+    migrate_parser.add_argument("--apply", action="store_true", help="实际写入迁移结果（默认 dry-run）")
+    migrate_parser.add_argument("--backup-dir", default="", help="写入 meta.json 备份的目录")
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
@@ -240,6 +251,8 @@ def _build_parser():
                              help="Bench 案例套件（默认运行全部 canonical 任务）")
     eval_parser.add_argument("--bench-parallel", dest="bench_parallel", type=int, default=2,
                              help="bench 并发度：同时运行的 (任务×模型×重复) 组合数（默认 2，受 API rate-limit 与本地资源约束）")
+    eval_parser.add_argument("--hard-model", dest="hard_model", default="",
+                             help="CR-建议#5：hard 难度子任务使用的更强模型（如 deepseek-v4-pro）；留空 = 与候选模型相同")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
                              help="读取结果文件（models/cost-baseline/recommend 子命令，逗号分隔多个文件）")
     eval_parser.add_argument("--tolerance", dest="tolerance", type=float, default=1.5,
@@ -575,6 +588,7 @@ def cmd_run(args=None):
         initial_docs = (initial_docs + "\n\n" if initial_docs else "") + f"===== Task Spec §6 参考资料 =====\n{spec_obj.reference}\n===== 结束 ====="
 
     plan = None
+    confirmed_plan = None
     max_iter = config.get("behavior", {}).get("max_plan_iterations", 5)
     iteration = 1
     last_error = None
@@ -697,6 +711,11 @@ def cmd_run(args=None):
 
     # 子任务确认
     confirmed = confirm_subtasks(subtasks, config, logger)
+    from .planning import validate_plan_quality
+    _plan_requirements = []
+    if isinstance(confirmed_plan, dict):
+        _plan_requirements = confirmed_plan.get("acceptance_criteria_ids") or confirmed_plan.get("requirements") or []
+    plan_quality = validate_plan_quality(confirmed, _plan_requirements)
 
     meta = {
         "task_id": task_id, "task": task, "repo": str(repo),
@@ -714,6 +733,12 @@ def cmd_run(args=None):
         "delivery_failed": False,
         "accepted_delivery_reasons": ["delivery_not_attempted"],
         "delivery_attempted": False,
+        "plan_quality": plan_quality,
+        "plan_quality_status": plan_quality["status"],
+        "plan_requirement_coverage": plan_quality["plan_requirement_coverage"],
+        "plan_acceptance_coverage": plan_quality["plan_acceptance_coverage"],
+        "plan_conflict_count": plan_quality["plan_conflict_count"],
+        "plan_warning_count": plan_quality["plan_warning_count"],
     }
     # recover 必须基于本次运行的确切基准提交，不能依赖默认分支名或提交时间窗口。
     if (repo / ".git").exists():
@@ -730,6 +755,19 @@ def cmd_run(args=None):
         except (OSError, subprocess.SubprocessError):
             logger.warning("无法记录 base_commit，recover 将降级为兼容模式")
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if plan_quality["blocking_issues"]:
+        console.error("Plan 预检未通过，任务标记为 BLOCKED（约束阻断），未进入执行。")
+        for issue in plan_quality["blocking_issues"]:
+            console.error(f"  [{issue['type']}] subtask={issue.get('subtask_id', '?')} {issue.get('reason', '')}")
+        meta["status"] = "BLOCKED"
+        meta["failure_class"] = "infrastructure_failure"
+        meta["failure_reason"] = "plan_quality_blocked"
+        meta["blocked_without_result"] = True
+        meta["plan_quality_status"] = plan_quality.get("status", "blocked")
+        meta["blocking_issues"] = plan_quality.get("blocking_issues", [])
+        (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        return
 
     # M4: 时间预估（历史子任务耗时中位数 × 拓扑波次，回答「走之前能跑完吗」）
     # 解耦：从 planning.py 取（预执行估算，不依赖 eval 评估模块）
@@ -791,7 +829,7 @@ def cmd_resume(args=None):
     # logger 需在 result.json 恢复循环之前初始化，否则损坏文件触发 UnboundLocalError
     logger = setup_logger(task_id, task_dir)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
-    if task_status(meta) not in ("PAUSED", "EXECUTING", "PLAN_REVIEW", "COMMITTED_UNVERIFIED", "VERIFICATION_FAILED", "BLOCKED", "CANCELLED", "running", "paused", "interrupted", "cancelled", "stale_aborted"):
+    if task_status(meta) not in ("PAUSED", "EXECUTING", "VERIFICATION_FAILED", "BLOCKED", "CANCELLED", "running", "paused", "interrupted", "cancelled", "stale_aborted"):
         console.print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused/interrupted/cancelled/stale_aborted 状态可恢复")
         sys.exit(1)
 
@@ -924,6 +962,12 @@ def cmd_resume(args=None):
                   worktree_map, results_map, completed_ids, remote_url=remote_url,
                   preserve_worktrees=preserve_worktrees,
                   step_confirm=getattr(args, 'step_confirm', False) if args else False)
+    try:
+        final_meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        if final_meta.get("status") in {"VERIFICATION_FAILED", "BLOCKED", "DELIVERY_FAILED", "CANCELLED"}:
+            raise SystemExit(1)
+    except (OSError, json.JSONDecodeError):
+        pass
 
 def cmd_inspect(args) -> None:
     """查看保留的 worktree 现场。"""
@@ -1694,19 +1738,24 @@ def cmd_pr(args=None):
     if meta.get("issue"):
         pr_body = f"Fixes #{meta['issue']}\n\n{pr_body}"
 
-    # S7: --push 先推送分支到远程
+    # M1.2: --push 推 delivery branch 到远程（不推 HEAD 到 base branch）。
+    # 禁止把当前工作目录 HEAD 误推到目标分支——只推 task 的 delivery branch。
+    delivery_branch = meta.get("delivery_branch") or ""
     if do_push and not offline:
         repo = meta.get("repo", "")
         if repo and Path(repo).exists():
-            branch = meta.get("base_branch", "main")
+            if not delivery_branch:
+                console.error(f"任务 {task_id} 没有 delivery_branch，无法安全推送。"
+                              "请先运行 pipeline 生成交付分支，或手动指定 head。")
+                sys.exit(1)
             push_result = subprocess.run(
-                ["git", "push", remote, f"HEAD:{branch}"],
+                ["git", "push", remote, f"{delivery_branch}:{delivery_branch}"],
                 cwd=str(Path(repo)), capture_output=True, text=True,
             )
             if push_result.returncode == 0:
-                console.success(f"分支已推送到 {remote}/{branch}")
+                console.success(f"分支已推送到 {remote}/{delivery_branch}")
             else:
-                console.print(f"⚠ ️ 推送失败: {push_result.stderr.strip()[:200]}")
+                console.print(f"⚠️  推送失败: {push_result.stderr.strip()[:200]}")
 
     if offline:
         out = task_dir / "PR.md"
@@ -1715,31 +1764,178 @@ def cmd_pr(args=None):
         push_hint = f" --push" if not do_push else ""
         console.print(f"请手动创建 PR 或稍后执行: agent_go pr {task_id}{push_hint}")
     else:
-        # 在线模式：通过 gh CLI 创建 PR
+        # 在线模式：通过 gh CLI 创建 PR，显式指定 head/base。
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as tf:
             tf.write(pr_body)
             pr_file = tf.name
         title = meta.get("task", "agent_go task")[:72]
-        base = meta.get("base_branch", "main")
+        base = meta.get("base_branch") or meta.get("target_branch") or "main"
+        head = delivery_branch or meta.get("base_branch", "main")
         try:
             if not shutil.which("gh"):
                 console.error("未安装 gh CLI。请先安装: brew install gh")
                 (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
                 console.print(f"PR 描述已备份到 {task_dir}/PR.md")
+                meta["delivery_failed"] = True
+                meta["delivery_error"] = "gh CLI 未安装"
+                (task_dir / "meta.json").write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
                 return
             result = subprocess.run([
                 "gh", "pr", "create", "--title", f"{title}",
-                "--body-file", pr_file, "--base", base,
+                "--body-file", pr_file, "--base", base, "--head", head,
             ], capture_output=True, text=True)
             if result.returncode == 0:
-                console.print(result.stdout.strip())
+                pr_url = result.stdout.strip()
+                console.print(pr_url)
+                # 持久化 PR 元数据（M1.2）
+                meta["pr_url"] = pr_url
+                meta["pr_head"] = head
+                meta["pr_base"] = base
+                meta["delivery_attempted"] = True
+                meta["delivery_failed"] = False
+                meta["delivery_error"] = ""
+                meta.pop("accepted_delivery_reasons", None)
+                meta["accepted_delivery"] = True
+                if meta.get("status_schema_version"):
+                    meta["status"] = "ACCEPTED_DELIVERY"
+                (task_dir / "meta.json").write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             else:
                 console.error(f"gh pr create 失败: {result.stderr.strip()}")
                 (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
                 console.print(f"PR 描述已备份到 {task_dir}/PR.md")
+                # 交付失败归类（M1.2）：不能报告 completed，标记 delivery_failed。
+                meta["delivery_attempted"] = True
+                meta["delivery_failed"] = True
+                meta["delivery_error"] = result.stderr.strip()[:300]
+                meta.pop("accepted_delivery_reasons", None)
+                if meta.get("status_schema_version") and not any(
+                    r.get("status") in ("failed", "blocked") for r in meta.get("results", [])
+                ):
+                    meta["status"] = "DELIVERY_FAILED"
+                (task_dir / "meta.json").write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         finally:
             os.unlink(pr_file)
+
+
+def cmd_merge(args=None):
+    """将 delivery branch 显式合并到 target branch（人工交付命令，M1.2）。
+
+    等价于用户在 CI/CD 或本地执行 merge。合并成功后在 meta 记录
+    explicit_merge_commit，使 Accepted Delivery 判定可通过。
+    """
+    if args and hasattr(args, 'task_id'):
+        task_id = args.task_id
+        do_push = getattr(args, 'push', False)
+        remote = getattr(args, 'remote', "origin")
+    elif len(sys.argv) < 3:
+        console.print("Usage: agent_go merge <task-id> [--push] [--remote <name>]")
+        sys.exit(1)
+    else:
+        task_id = sys.argv[2]
+        do_push = "--push" in sys.argv
+        remote = "origin"
+        if "--remote" in sys.argv:
+            try:
+                remote = sys.argv[sys.argv.index("--remote") + 1]
+            except (IndexError, ValueError):
+                pass
+    task_dir = AGENT_GO_DIR / task_id
+    if not task_dir.exists():
+        console.error(f"任务不存在: {task_id}")
+        sys.exit(1)
+    meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    repo = meta.get("repo", "")
+    if not repo or not Path(repo).exists():
+        console.error(f"任务 {task_id} 的仓库不存在: {repo}")
+        sys.exit(1)
+    delivery_branch = meta.get("delivery_branch") or ""
+    target = meta.get("target_branch") or meta.get("base_branch") or "main"
+    if not delivery_branch:
+        console.error(f"任务 {task_id} 没有 delivery_branch，无法合并。")
+        sys.exit(1)
+
+    # 校验 delivery branch 存在
+    check = subprocess.run(
+        ["git", "rev-parse", "--verify", delivery_branch],
+        cwd=str(Path(repo)), capture_output=True, text=True,
+    )
+    if check.returncode != 0:
+        console.error(f"delivery branch {delivery_branch} 不存在于仓库中。")
+        sys.exit(1)
+
+    # 用临时 worktree 在 target branch 上执行 merge，避免污染主工作区。
+    import tempfile as _tf
+    tmp = Path(_tf.mkdtemp(prefix=f"agent_go_merge_{task_id}_"))
+    try:
+        add = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(tmp), target],
+            cwd=str(Path(repo)), capture_output=True, text=True, timeout=30,
+        )
+        if add.returncode != 0:
+            console.error(f"无法创建 merge worktree: {add.stderr.strip()[:200]}")
+            sys.exit(1)
+        merge = subprocess.run(
+            ["git", "merge", "--no-ff", "-m", f"agent_go: merge delivery of {task_id}", delivery_branch],
+            cwd=str(tmp), capture_output=True, text=True, timeout=60,
+        )
+        if merge.returncode != 0:
+            console.error(f"merge 冲突，已保留现场: {merge.stderr.strip()[:300]}")
+            console.print(f"  冲突 worktree: {tmp}")
+            console.print(f"  delivery branch: {delivery_branch}")
+            meta["delivery_failed"] = True
+            meta["delivery_error"] = f"merge 冲突: {merge.stderr.strip()[:200]}"
+            (task_dir / "meta.json").write_text(
+                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            sys.exit(1)
+        # 合并成功：记录 explicit_merge_commit 并推进 target branch。
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(tmp),
+            capture_output=True, text=True, timeout=10,
+        )
+        merge_commit = head.stdout.strip() if head.returncode == 0 else ""
+        if merge_commit:
+            # 用 update-ref 推进分支（branch -f 在 target 被当前 checkout 时静默失败）
+            update_ref = subprocess.run(
+                ["git", "update-ref", f"refs/heads/{target}", merge_commit],
+                cwd=str(Path(repo)), capture_output=True, text=True, timeout=10,
+            )
+            if update_ref.returncode != 0:
+                console.error(f"更新 {target} 分支失败: {update_ref.stderr.strip()[:200]}")
+                sys.exit(1)
+            meta["explicit_merge_commit"] = merge_commit
+            meta["delivery_attempted"] = True
+            meta["delivery_failed"] = False
+            meta["delivery_error"] = ""
+            meta.pop("accepted_delivery_reasons", None)
+            if not any(
+                r.get("status") in ("failed", "blocked") for r in meta.get("results", [])
+            ):
+                meta["accepted_delivery"] = True
+                if meta.get("status_schema_version"):
+                    meta["status"] = "ACCEPTED_DELIVERY"
+            (task_dir / "meta.json").write_text(
+                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            console.success(f"已合并到 {target}: {merge_commit[:12]}")
+            if do_push:
+                push = subprocess.run(
+                    ["git", "push", remote, f"{target}:{target}"],
+                    cwd=str(Path(repo)), capture_output=True, text=True,
+                )
+                if push.returncode == 0:
+                    console.success(f"已推送 {target} 到 {remote}")
+                else:
+                    console.print(f"⚠️  推送失败: {push.stderr.strip()[:200]}")
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(tmp)],
+            cwd=str(Path(repo)), capture_output=True, text=True, timeout=30,
+        )
+        shutil.rmtree(tmp, ignore_errors=True)
+
 
 def cmd_status(args=None):
     """实时监控所有任务状态。默认 TUI 模式。--no-tui 回退文本模式。"""
@@ -2395,6 +2591,8 @@ def main() -> None:
             cmd_clean(args)
         elif args.command == "pr":
             cmd_pr(args)
+        elif args.command == "merge":
+            cmd_merge(args)
         elif args.command == "skills":
             cmd_skills(args)
         elif args.command == "agents":
@@ -2411,6 +2609,10 @@ def main() -> None:
             cmd_router(args)
         elif args.command == "recover":
             cmd_recover(args)
+        elif args.command == "migrate":
+            from .metadata_migration import repair_all_tasks
+            report = repair_all_tasks(apply=args.apply, backup_dir=args.backup_dir or None)
+            console.print(json.dumps(report, ensure_ascii=False, indent=2))
         elif args.command == "inspect":
             cmd_inspect(args)
         elif args.command == "plan-history":

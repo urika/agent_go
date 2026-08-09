@@ -1,9 +1,9 @@
 # agent_go 接口规格速查
 
 > 浓缩自 19 份独立 SPEC。每个模块列出公共接口签名和一行说明。
-> **快照日期：2026-08-08** — 接口签名和当前核心模块已对齐源码。行号仅供参考（会漂移）。详细流程见 `design/functional-architecture.md`，交付/验证契约见对应设计文档。
+> **快照日期：2026-08-09** — 接口签名和当前核心模块已对齐源码。详细流程见 `design/functional-architecture.md`，交付/验证契约见对应设计文档。
 
-## cli.py — CLI 入口 (2100 行)
+## cli.py — CLI 入口
 
 ```
 cmd_run(args)            → Plan → Execute 主流程
@@ -12,7 +12,8 @@ cmd_recover(args)        → SIGKILL 后从 worktree 重建 meta.json (--dry-run
 cmd_list()               → 列出历史任务
 cmd_show(args)           → 查看任务详情
 cmd_status(args)         → 实时监控 (--watch / --no-tui)
-cmd_pr(args)             → 生成 PR 描述 (--push 经 gh CLI 创建)
+cmd_pr(args)             → PR 交付 (M1.2)：推 delivery_branch (--push)，gh pr create --head/--base，失败归 delivery_failed
+cmd_merge(args)          → 显式交付 (M1.2)：merge delivery_branch 到 target_branch，记录 explicit_merge_commit
 cmd_review(args)         → 审查任务结果(--task/--approve/--reject/--changes-requested) 或代码
 cmd_config()             → 查看/编辑配置
 cmd_clean()              → 清理任务目录和 tags
@@ -34,7 +35,42 @@ mcp(args)                → MCP server (stdio / --http HTTP+SSE)
 `run` 另支持 `--max-retries` / `--no-verify-block` / `--goal` / `--goal-hook` / `--semantic-eval` /
 `--agent-loop` / `--interactive` / `--step-confirm` / `--auto-init` / `--parallel N` / `--remote`。
 
-## api.py — LLM Plan 生成 + 缓存 (583 行)
+## spec.py — Task Spec 解析与 L1 准入门禁 (S11-P0)
+
+```
+cmd_spec(args)                           → spec template / validate / show 子命令
+  spec template <repo> --output PATH     → 生成 7-section Task Spec 模板
+  spec validate <path> <repo>            → L1 确定性准入门禁：必填节/文件路径有效性/验证白名单/长度下限
+parse_spec(path)                         → 解析 Task Spec Markdown → dict（§1-§7）
+validate_spec_constraints(spec, repo)    → 逐条检查约束（files/do_not_touch/verification/acceptance_criteria）
+build_spec_context(spec)                 → 将 Spec 约束转为 Plan prompt 注入文本
+```
+
+## delivery.py — 交付分支与 Accepted Delivery 判定 (M1)
+
+```
+create_delivery_branch(task_id, repo, base_commit, results)     → 创建 delivery branch + 汇总 commit
+determine_accepted_delivery(results, delivery_state)            → 判定任务是否达成 Accepted Delivery
+get_delivery_summary(task_dir)                                  → 交付摘要：branch/commits/pr_url
+```
+
+## failure.py — 失败分类与 kill reason 映射
+
+```
+classify_failure(subtask_result, kill_reason)  → 映射到 {model,verification,timeout,budget,infra,delivery,user,system}_failure
+get_failure_summary(results)                   → 任务级失败摘要（含 failure_class 分布）
+```
+
+## status.py — Canonical 任务状态映射 (M0)
+
+```
+CANONICAL_STATUSES               → 8 状态常量：EXECUTING/PAUSED/DELIVERY_READY/ACCEPTED_DELIVERY/
+                                    VERIFICATION_FAILED/BLOCKED/DELIVERY_FAILED/CANCELLED
+resolve_status(meta, results)    → 从 results[] 推导当前 canonical 状态
+is_terminal(status)              → 终态判定
+```
+
+## api.py — LLM Plan 生成 + 缓存
 
 ```
 generate_plan(task, repo, config, logger, ...)  → 调用 LLM → 返回 plan dict
@@ -45,7 +81,7 @@ load_cached_plan(key, task, config, logger)     → 读缓存
 save_cached_plan(key, plan, task, repo, config) → 写缓存
 ```
 
-## pipeline.py — 拓扑波次调度器 (636 行)
+## pipeline.py — 拓扑波次调度器
 
 ```
 _run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核心调度 (内部，cli.py 调用)
@@ -61,14 +97,19 @@ notify_event(event, context, config) → 任务完成/失败通知 (M1)
 _sanitize_preserved_worktree(wt) → S12 失败清理：净化保留 worktree（移除运行时缓存）
 ```
 
-## planning.py — 规划辅助 (M4)
+## planning.py — 规划辅助 (M4 + P0/P1/P2 扩展)
 
 ```
-estimate_task_duration(subtasks, parallel, tasks_dir) → 历史子任务耗时中位数 × 拓扑波次
-check_under_decomposition(subtasks, logger) → S12-P2 G5 规划期欠分解检测（hard + 子任务数<阈值 → 告警）
+estimate_task_duration(subtasks, parallel, tasks_dir)     → 历史子任务耗时中位数 × 拓扑波次 (M4)
+check_under_decomposition(subtasks, logger)               → G5 欠分解检测（hard + 子任务数<阈值 → 告警）
+check_over_decomposition(subtasks, total_files, logger)   → G6 过度分解检测（≤2文件 ≥3任务 或 全线easy ≥3任务 → 告警）
+check_difficulty_mismatch(subtasks, logger)               → CR-G4 难度交叉核对（planner vs 启发式跨两档告警）
+difficulty_hint(subtask)                                   → CR-G4 启发式难度推断（关键词 + 多文件信号）
+check_agent_prompt_functions(subtasks, repo, logger)      → P2 agent_prompt 函数引用静态检查（对比项目源码）
+validate_plan_quality(subtasks, requirements, repo)       → 确定性预执行检查（scope/dep/requirement + P2 集成）
 ```
 
-## executor.py — 子任务执行器 (1459 行)
+## executor.py — 子任务执行器
 
 ```
 run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None) → 单子任务端到端
@@ -90,7 +131,7 @@ _apply_resource_limits()    → setrlimit (失败不阻塞)
 _verify_changes()           → 验证循环 + 修复重试（retry_count 注入 context.md + metering）
 ```
 
-## subtask.py — Claude 调用原语 (479 行)
+## subtask.py — Claude 调用原语
 
 ```
 _run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) → claude -p 无头模式
@@ -108,7 +149,7 @@ _run_headless(task_md, worktree, env, logger, ..., hard_timeout=0, config=None) 
 _git_merge_upstream(src, dst, tag, logger, ...)   → 上游产物 merge
 ```
 
-## ui.py — 终端交互 (779 行)
+## ui.py — 终端交互
 
 ```
 confirm_plan(plan, config, ...)    → Y/S/D/E/R/N 确认
@@ -116,7 +157,7 @@ confirm_subtasks(subtasks, ...)    → Y/N/E/A/D 确认
 plan_to_subtasks(plan, logger)     → Plan.steps → subtasks (注入 agent_prompt + 资源清单)
 ```
 
-## config.py — 配置与日志 (258 行)
+## config.py — 配置与日志
 
 ```
 load_config()                → ~/.agent_go/config.json，浅合并 DEFAULT_CONFIG
@@ -131,7 +172,7 @@ safe_input(prompt)           → input() 包装，EOF → ""
 
 `cost_control` 配置块（S10/S12）：`enabled`(默认 False，L2/L3 总开关) + `l1_enabled`(默认 True，L1 独立开关，冷启动防单次失控) + `max_budget_usd`(L3) + `per_subtask_budget_usd`(按难度，L1 冷启动宽松默认 easy 0.20/medium 0.40/hard 1.00) + `subtask_multiplier`(L2) + `on_exceed` + `budget_mode`(S12-P1：`strict`/`degrade`/`ignore`)。
 
-## console.py — 输出抽象 (216 行)
+## console.py — 输出抽象
 
 ```
 Console(quiet, verbose)      → print/force/info/success/warning/error/debug
@@ -141,7 +182,7 @@ set_default_console(c)       → 替换全局实例 (cli.py cmd_run 调用)
 get_default_console()        → 获取当前实例
 ```
 
-## git_utils.py — Git 操作 (203 行)
+## git_utils.py — Git 操作
 
 ```
 analyze_project(repo)        → git ls-files 或 find
@@ -151,7 +192,7 @@ _worktree_create/remove/prune(repo, ...) → worktree 生命周期
 _set_gc_auto(repo, "0"|"1") → gc.auto 读写 (并发安全)
 ```
 
-## utils.py — 共享工具 (464 行)
+## utils.py — 共享工具
 
 ```
 read_reference_docs(paths, repo, logger)     → 参考文档读取 (路径穿越防御)
@@ -163,7 +204,7 @@ _detect_commit_prefix(title)                 → feat/fix/refactor/docs/test/cho
 _slugify(text)                               → 分支名适用短标识
 ```
 
-## agents.py — Agent 类型系统 (191 行)
+## agents.py — Agent 类型系统
 
 ```
 load_agent_type(name, project_root)  → 用户定义 > 内置 (developer/architect/reviewer/tester)
@@ -172,7 +213,7 @@ get_claude_command(agent, worktree)  → 构建 claude CLI 参数 (headless/交�
 get_agent_env(agent)                 → AGENT_GO_AGENT_TYPE 环境变量
 ```
 
-## skills.py — Skill 加载 (238 行)
+## skills.py — Skill 加载
 
 ```
 load_skill(name, project_root)      → YAML frontmatter + Markdown body
@@ -182,14 +223,15 @@ render_skill_for_execution(skill)    → TASK.md 注入格式 (完整)
 discover_skills(task)                → 关键词自动匹配 (实验性)
 ```
 
-## role_skill_map.py — 角色-Skill 匹配 (161 行)
+## role_skill_map.py — 角色-Skill 匹配
 
 ```
-load_role_skill_map(project_root)    → 加载匹配规则
-apply_rules(step, role_map, skills)  → 注入 required/recommended skills + agent_type
+load_role_skill_map(project_root)    → 加载匹配规则（项目 > 全局 > 默认三层合并）
+apply_rules(step, role_map, skills)  → 注入 required/recommended skills + agent_type + task_type
+_match_rule(rule, step)              → 规则匹配：keywords / agent_type / file_patterns / exclude_keywords (P2)
 ```
 
-## metrics.py — 数据采集 (183 行)
+## metrics.py — 数据采集
 
 ```
 collect_timing(wt, merge, claude, verify, commit) → 5 阶段 ms 采集
@@ -239,7 +281,7 @@ notify_event(event, context, config)   → 唯一入口：on_complete/on_failed/
   ── ${VAR} 环境变量插值、https 校验、超时重试、故障隔离
 ```
 
-## eval.py — 离线评估 (1106 行)
+## eval.py — 离线评估
 
 ```
 analyze_quality(meta)           → Q1-Q10 质量指标 + 综合评分
@@ -398,7 +440,7 @@ execute_tool(name, args, worktree, ...) → 工具分发执行（返回 ToolResu
 cmd_status_tui()  → curses 多面板实时监控（agent_go status --watch）
 ```
 
-## bench.py — 模型对照评估编排器 (585 行)
+## bench.py — 模型对照评估编排器
 
 > **状态**：S8 P0 已落地 + S10-P1 schema 扩展 + S10-P2 P1 字段/代码质量/对照基线/动态 timeout + S12 运行前模型-价格预检。子进程隔离（不 import 核心），读 metering.jsonl + meta.json 数据契约。
 
@@ -470,7 +512,7 @@ _tests_broken_for_worktree(wt)    → pytest 失败用例数（工具缺失→0�
 _git_diff_files(wt)               → 变更 .py 文件列表（HEAD~1..HEAD）
 ```
 
-## cross_judge.py — 交叉评判矩阵 (485 行)
+## cross_judge.py — 交叉评判矩阵
 
 > **状态**：S8 P1 简化版已落地 + S10-P1 自评偏差量化。N 模型互评（禁绝自评）+ 人工校准。
 
@@ -500,7 +542,7 @@ calibrate_judge(llm_path, human_csv)       → 人工校准
   ── 分歧 ≤1.0→✓reliable, 1.0-1.5→⚠marginal, >1.5→✗unreliable
 ```
 
-## pricing.py — 大模型定价表 (152 行)
+## pricing.py — 大模型定价表
 
 > **状态**：从 eval.py 迁出。S8 P0 落地。48 个模型（2026-07 最新）+ 档位元数据。
 
@@ -513,45 +555,4 @@ missing_price_models(list) → 返回缺定价的模型列表（预检用）
 format_price_for_report   → 报告用定价串，缺价标注 ⚠️
 ```
 
-## query.py — 结构化查询 API（待落地）
-
-> **状态**：设计完成。封装现有的 `_read_meta` / `_scan_task_dirs` / `_read_log_events`。
-
-```
-query_task(task_id)                            → Optional[TaskResult]
-query_project_trend(repo, days=30)              → task trend dict
-```
-
-## events.py — 事件总线（待落地）
-
-> **状态**：设计完成。全生命周期事件订阅 + `events.jsonl` 持久化。
-
-```
-emit_event(event)                              → 同步触发已注册 handler
-subscribe_event(event_type, handler, once)     → 注册事件监听器（glob 支持）
-EVENT_TYPES                                    → "plan.generated"|"subtask.started"|... 枚举
-events.jsonl 文件                               → ~/.agent_go/task-xxx/events.jsonl
-```
-
-## knowledge/ — 知识存储（待落地）
-
-> **状态**：设计完成。项目级经验沉淀 + Plan prompt 自动注入。纯 JSON 文件，零外部依赖。
-
-```
-KnowledgeStore(repo_path)                      → 项目级知识存储
-  ├── record_success(category, content, src)   → 记录成功模式
-  ├── record_failure(category, signal, src)    → 记录失败信号
-  ├── get_relevant(desc, max=5)                → 获取最相关的历史经验
-  └── get_project_profile()                    → 项目特征推断
-```
-
-文件结构：
-```
-~/.agent_go/knowledge/<repo-hash>/
-  ├── patterns.json           # 成功模式（验证命令/分解策略）
-  ├── failure-signals.json    # 失败信号（高频失败原因）
-  ├── verified-cmds.json      # 已验证命令（exit_code=0）
-  └── project-meta.json       # 项目特征（语言/框架/构建工具）
-```
-
-## workflow_gen.py — CI 生成 (80 行)
+## workflow_gen.py — CI 生成

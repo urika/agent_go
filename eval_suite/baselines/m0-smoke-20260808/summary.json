@@ -1,0 +1,147 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "1270664f57272a876c31079ffa04ebf6b4a87e635d162426610bbf9c555ca0b8",
+  "generated_at": "2026-08-08T16:45:16.622844+00:00",
+  "metric_freeze_version": 1,
+  "metrics": {
+    "accepted_delivery_count": 0,
+    "accepted_delivery_rate": 0.0,
+    "cost_per_accepted_delivery_usd": null,
+    "delivery_failure_rate": 0.0,
+    "dollar_per_pass_diagnostic_usd": 0.014098,
+    "excluded_reasons": {},
+    "excluded_task_count": 0,
+    "failure_class_counts": {
+      "budget_abort": 0,
+      "delivery_failure": 0,
+      "infrastructure_failure": 0,
+      "model_failure": 0,
+      "system_error": 0,
+      "timeout": 1,
+      "user_cancelled": 0,
+      "verification_failure": 0
+    },
+    "failure_class_summary": {
+      "capability_failure_count": 1,
+      "excluded_reasons": {},
+      "excluded_task_count": 0,
+      "failure_class_cost_usd": {
+        "budget_abort": 0.0,
+        "delivery_failure": 0.0,
+        "infrastructure_failure": 0.0,
+        "model_failure": 0.0,
+        "system_error": 0.0,
+        "timeout": 0.033839,
+        "user_cancelled": 0.0,
+        "verification_failure": 0.0
+      },
+      "failure_class_counts": {
+        "budget_abort": 0,
+        "delivery_failure": 0,
+        "infrastructure_failure": 0,
+        "model_failure": 0,
+        "system_error": 0,
+        "timeout": 1,
+        "user_cancelled": 0,
+        "verification_failure": 0
+      },
+      "timeout_disposition": {
+        "cleanup_race_count": 0,
+        "product_semantics": "failure",
+        "right_censored_for_cost_baseline_count": 1,
+        "timeout_failure_count": 1
+      },
+      "unclassified_count": 5,
+      "valid_task_count": 6
+    },
+    "first_pass_rate": 0.833333,
+    "human_intervention_minutes": 0.0,
+    "pass_rate_diagnostic": 1.0,
+    "pr_creation_rate": 0.0,
+    "retry_rate": 0.0,
+    "time_to_accepted_delivery_sec": null,
+    "timeout_rate": 0.166667,
+    "valid_cost_usd": 0.084589,
+    "valid_task_count": 6
+  },
+  "models": [
+    "deepseek-v4-flash"
+  ],
+  "record_count": 7,
+  "repeat": 1,
+  "repeat_values": [
+    1
+  ],
+  "run_time_range": {
+    "elapsed_sec_max": 420.31,
+    "elapsed_sec_min": 50.06,
+    "first_timestamp": null,
+    "last_timestamp": null
+  },
+  "source_batch": "m0-smoke-20260808",
+  "source_batch_immutable": true,
+  "stress_metrics": {
+    "accepted_delivery_count": 0,
+    "accepted_delivery_rate": 0.0,
+    "cost_per_accepted_delivery_usd": null,
+    "delivery_failure_rate": 0.0,
+    "dollar_per_pass_diagnostic_usd": null,
+    "excluded_reasons": {},
+    "excluded_task_count": 0,
+    "failure_class_counts": {
+      "budget_abort": 0,
+      "delivery_failure": 0,
+      "infrastructure_failure": 0,
+      "model_failure": 0,
+      "system_error": 0,
+      "timeout": 0,
+      "user_cancelled": 0,
+      "verification_failure": 0
+    },
+    "failure_class_summary": {
+      "capability_failure_count": 0,
+      "excluded_reasons": {},
+      "excluded_task_count": 0,
+      "failure_class_cost_usd": {
+        "budget_abort": 0.0,
+        "delivery_failure": 0.0,
+        "infrastructure_failure": 0.0,
+        "model_failure": 0.0,
+        "system_error": 0.0,
+        "timeout": 0.0,
+        "user_cancelled": 0.0,
+        "verification_failure": 0.0
+      },
+      "failure_class_counts": {
+        "budget_abort": 0,
+        "delivery_failure": 0,
+        "infrastructure_failure": 0,
+        "model_failure": 0,
+        "system_error": 0,
+        "timeout": 0,
+        "user_cancelled": 0,
+        "verification_failure": 0
+      },
+      "timeout_disposition": {
+        "cleanup_race_count": 0,
+        "product_semantics": "failure",
+        "right_censored_for_cost_baseline_count": 0,
+        "timeout_failure_count": 0
+      },
+      "unclassified_count": 1,
+      "valid_task_count": 1
+    },
+    "first_pass_rate": 0.0,
+    "human_intervention_minutes": 0.0,
+    "pass_rate_diagnostic": 0.0,
+    "pr_creation_rate": 0.0,
+    "retry_rate": 0.0,
+    "time_to_accepted_delivery_sec": null,
+    "timeout_rate": 0.0,
+    "valid_cost_usd": 0.0,
+    "valid_task_count": 1
+  },
+  "suite": "smoke",
+  "task_catalog_hash": "919bb4cda11406177c9efa4d712bf01ea6e23ede7cd35d6fdf1738dc2fdf3062",
+  "task_count": 7
+}

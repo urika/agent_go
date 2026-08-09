@@ -47,37 +47,19 @@ agent_go 当前核心实现覆盖 `Plan -> Decompose -> Execute -> Verify`；Arc
 ## 4. 状态流转
 
 ```text
-DRAFT
-  -> SPEC_REVIEW
-  -> ARCHITECTURE_REVIEW
-  -> PLAN_REVIEW       # 规划审查门（plan accepted → 待执行）
-  -> EXECUTING
-  -> VERIFYING
-      -> FIXING -> VERIFYING
-      -> BLOCKED
-      -> VERIFICATION_FAILED
-  -> DELIVERY_READY
-  -> PR_CREATED
-
-EXECUTING / VERIFYING
-  --中断(SIGINT/SIGTERM)--> PAUSED   # 可恢复锚点（M0 修复：不再复用 PLAN_REVIEW）
-  --resume--> EXECUTING
-  -> ACCEPTED_DELIVERY
+cmd_run → EXECUTING
+    ├─ 全部成功 → DELIVERY_READY → ACCEPTED_DELIVERY
+    ├─ 能力失败 → VERIFICATION_FAILED
+    ├─ 约束阻断 → BLOCKED
+    ├─ SIGINT/SIGTERM（无 failed）→ PAUSED → resume → EXECUTING
+    └─ MCP cancel → CANCELLED
 ```
-
-恢复相关状态：
-
-```text
-EXECUTING/VERIFYING
-  -> INTERRUPTED
-  -> RECOVERING
-  -> EXECUTING
-```
+v2 精简（2026-08-08）：8 状态。详见 [m0-state-machine.md](m0-state-machine.md)。
 
 重要区分：
 
-- `COMMITTED_UNVERIFIED`：代码已保存，但不能进入下游或交付。
-- `VERIFICATION_FAILED`：验证未通过。
+- `VERIFICATION_FAILED`：验证未通过（能力失败，计入模型能力分母）。
+- `BLOCKED`：约束阻断（plan 质量 / cost / metering / 依赖环，不计入能力分母）。
 - `DELIVERY_FAILED`：代码和验证可能通过，但交付分支或 PR 失败。
 - `ACCEPTED_DELIVERY`：代码、验证和交付均满足产品契约。
 

@@ -660,6 +660,11 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
             "agent_type": rule_result["agent_type"],
             "difficulty": _step_difficulty,
             "task_type": _task_type,  # CR-G3：security/bugfix/refactor/test/docs/... 或 None
+            "rationale": step.get("rationale", ""),
+            "scope_boundary": step.get("scope_boundary", ""),
+            "do_not_touch": list(step.get("do_not_touch", []) or []),
+            "requirement_ids": list(step.get("requirement_ids", []) or []),
+            "acceptance_criteria_ids": list(step.get("acceptance_criteria_ids", []) or []),
             "_agent_type_source": "llm" if step.get("agent_type") else ("rule" if rule_result.get("matched_rules") else "default"),
         })
 

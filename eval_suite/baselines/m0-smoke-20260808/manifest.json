@@ -1,0 +1,28 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "1270664f57272a876c31079ffa04ebf6b4a87e635d162426610bbf9c555ca0b8",
+  "created_at": "2026-08-08T16:45:03.930408+00:00",
+  "immutable": true,
+  "manifest_version": 1,
+  "metric_freeze_version": 1,
+  "models": [
+    "deepseek-v4-flash"
+  ],
+  "record_count": 7,
+  "repeat_values": [
+    1
+  ],
+  "results_sha256": "e2c5d924b580cef1fe01e96aa2a0f932aa444485b010147b191fee76783de069",
+  "source_batch": "m0-smoke-20260808",
+  "suite": "smoke",
+  "task_catalog_hash": "919bb4cda11406177c9efa4d712bf01ea6e23ede7cd35d6fdf1738dc2fdf3062",
+  "task_ids": [
+    "add-error-handling",
+    "add-format-helper",
+    "add-task-priority",
+    "email-validator",
+    "fix-missing-default",
+    "implement-done-command",
+    "integration-tests-datapipeline"
+  ]
+}
