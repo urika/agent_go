@@ -49,10 +49,16 @@ build_spec_context(spec)                 → 将 Spec 约束转为 Plan prompt �
 ## delivery.py — 交付分支与 Accepted Delivery 判定 (M1)
 
 ```
-create_delivery_branch(task_id, repo, base_commit, results)     → 创建 delivery branch + 汇总 commit
-determine_accepted_delivery(results, delivery_state)            → 判定任务是否达成 Accepted Delivery
-get_delivery_summary(task_dir)                                  → 交付摘要：branch/commits/pr_url
+create_delivery_branch(repo, task_id, base_commit, results)     → (ok, branch, err) 创建 delivery branch + 汇总 commit
+evaluate_accepted_delivery(meta, repo)                           → {accepted_delivery, delivery_failed, reasons}
+apply_delivery_result(meta, repo)                                → 持久化交付判定到 meta
+check_mergeability(repo, delivery_branch, target_branch)         → {mergeable, conflicts, ahead, base_sha, head_sha, error}
 ```
+
+PR/merge 集成（`cmd_pr` / `cmd_merge`，M1.2）：
+
+- `cmd_pr <task-id> [--offline] [--push] [--remote]`：head=delivery_branch、base=target；创建前 mergeability 预检；成功写 pr_url/pr_head/pr_base + ACCEPTED_DELIVERY；失败写 delivery_failed + DELIVERY_FAILED
+- `cmd_merge <task-id> [--push]`：merge 前 mergeability 预检；成功推进 target + explicit_merge_commit + ACCEPTED_DELIVERY；冲突阻断不污染
 
 ## failure.py — 失败分类与 kill reason 映射
 

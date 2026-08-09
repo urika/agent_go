@@ -366,7 +366,10 @@ class TestCmdPr:
     def test_online_gh_success(self, monkeypatch, tmp_path, capsys):
         """在线模式 + gh 成功 → 打印 PR URL"""
         from agent_go.cli import cmd_pr
-        task_dir, targets = self._setup_task(tmp_path, self._meta())
+        task_dir, targets = self._setup_task(tmp_path, self._meta(
+            delivery_branch="agent_go/task-pr/delivery", base_branch="main",
+            repo=str(tmp_path / "nonexistent-repo"),
+        ))
         for mod, attr, val in targets:
             monkeypatch.setattr(mod, attr, val)
         cp = MagicMock(returncode=0, stdout="https://github.com/x/y/pull/1\n")
@@ -377,7 +380,10 @@ class TestCmdPr:
     def test_online_gh_failure_backups_pr(self, monkeypatch, tmp_path, capsys):
         """在线模式 + gh 失败 → 备份到 PR.md"""
         from agent_go.cli import cmd_pr
-        task_dir, targets = self._setup_task(tmp_path, self._meta())
+        task_dir, targets = self._setup_task(tmp_path, self._meta(
+            delivery_branch="agent_go/task-pr/delivery", base_branch="main",
+            repo=str(tmp_path / "nonexistent-repo"),
+        ))
         for mod, attr, val in targets:
             monkeypatch.setattr(mod, attr, val)
         cp = MagicMock(returncode=1, stderr="auth error")

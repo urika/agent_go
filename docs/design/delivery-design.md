@@ -81,6 +81,19 @@ M1 新增：
 - 冲突：保留现场（worktree 不清理），写入 `delivery_error`，状态置 `DELIVERY_FAILED`
 - `--push`：merge 后推送 target branch 到远程
 
+### 3.2b mergeability 预检（2026-08-09）
+
+`delivery.py check_mergeability(repo, delivery_branch, target_branch)`：PR/merge 执行前的 dry-run merge 检查。
+
+- 临时 worktree（detached at target）执行 `git merge --no-ff --no-commit`，主工作区和两个分支均不被修改
+- 返回 `{mergeable, conflicts, ahead, base_sha, head_sha, error}`
+- `ahead`（delivery 领先 target 的 commit 数）= 0 时视为可合并（空操作）
+
+集成：
+
+- `cmd_pr`：创建 PR 前检查 mergeability，冲突则阻断（`sys.exit(1)`）；`head` 必须是 `delivery_branch`（无则阻断）；`ahead=0` 时警告 PR 可能为空
+- `cmd_merge`：合并前检查 mergeability，冲突则阻断且不污染 target / 不改 meta
+
 ### 3.3 交付状态与恢复（M1-3）
 
 commit / verification / delivery 三层状态分离：

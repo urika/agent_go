@@ -1,4 +1,4 @@
-from agent_go.delivery import create_delivery_branch, evaluate_accepted_delivery
+from agent_go.delivery import check_mergeability, create_delivery_branch, evaluate_accepted_delivery
 
 
 def _meta(**overrides):
@@ -261,3 +261,68 @@ def test_pipeline_success_creates_delivery_branch(tmp_path):
     # 这里验证 meta 中 delivery_branch 已被赋值（由 pipeline 写入）
     assert meta["delivery_branch"] == "agent_go/task-p1/delivery"
     assert meta["status"] == "DELIVERY_READY"
+
+
+# ═══════════════════════════════════════════════════════════════
+# M1: mergeability 预检（PR/merge 前的 dry-run merge）
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_mergeability_clean_when_no_conflict(tmp_path):
+    """delivery branch 相对 target 有新增且无冲突 → mergeable=True，无 conflicts。"""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    # 在 delivery 分支加一个新文件
+    wt = tmp_path / "wt_delivery"
+    subprocess.run(["git", "worktree", "add", "-b", "delivery/test", str(wt)], cwd=str(repo), capture_output=True)
+    _commit(wt, "new.txt", "new", "add new file")
+    result = check_mergeability(repo, "delivery/test", "main")
+    assert result["mergeable"] is True
+    assert result["conflicts"] == []
+    assert result["ahead"] >= 1
+    assert result["base_sha"]
+    assert result["head_sha"]
+
+
+def test_mergeability_detects_conflict(tmp_path):
+    """delivery branch 修改了 target 也修改的文件 → mergeable=False，conflicts 非空。"""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    # target 分支（main）修改 file.txt
+    _commit(repo, "file.txt", "main change", "main modify")
+    # delivery 分支基于 base 修改同一文件
+    base = subprocess.run(["git", "rev-parse", "HEAD~1"], cwd=str(repo), capture_output=True, text=True).stdout.strip()
+    wt = tmp_path / "wt_conflict"
+    subprocess.run(["git", "worktree", "add", "--detach", str(wt), base], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "delivery/conflict"], cwd=str(wt), capture_output=True)
+    _commit(wt, "file.txt", "delivery change", "delivery modify")
+    result = check_mergeability(repo, "delivery/conflict", "main")
+    assert result["mergeable"] is False
+    assert "file.txt" in result["conflicts"]
+
+
+def test_mergeability_ahead_zero(tmp_path):
+    """delivery branch 与 target 相同（无新增）→ mergeable=True，ahead=0。"""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    result = check_mergeability(repo, "main", "main")
+    assert result["mergeable"] is True
+    assert result["ahead"] == 0
+
+
+def test_mergeability_missing_branch(tmp_path):
+    """delivery branch 不存在 → error 字段，mergeable=False。"""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    result = check_mergeability(repo, "delivery/not-exist", "main")
+    assert result["mergeable"] is False
+    assert "不存在" in result["error"]
+
+
+def test_mergeability_non_git_repo(tmp_path):
+    """非 git 仓库 → error 字段。"""
+    repo = tmp_path / "not-repo"
+    repo.mkdir()
+    result = check_mergeability(repo, "x", "main")
+    assert result["mergeable"] is False
+    assert "git 仓库" in result["error"]

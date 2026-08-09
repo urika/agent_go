@@ -183,3 +183,101 @@ def _create_or_reset_branch(repo: Path, branch: str, base: str) -> bool:
         if r.returncode != 0:
             return False
     return True
+
+
+def check_mergeability(
+    repo: str | Path,
+    delivery_branch: str,
+    target_branch: str,
+) -> dict[str, Any]:
+    """Pre-flight check whether ``delivery_branch`` can merge cleanly into ``target_branch``.
+
+    Performs a dry-run merge in a temporary worktree (detached at target) so the
+    main checkout and both branches are never mutated. Used before ``cmd_pr`` /
+    ``cmd_merge`` to give the user a mergeability verdict before touching GitHub.
+
+    Returns:
+        {
+          "mergeable": bool,       # True if merge would be clean
+          "conflicts": [str],      # conflicting file paths (empty when mergeable)
+          "ahead": int,            # commits delivery_branch is ahead of target
+          "base_sha": str,         # target branch tip
+          "head_sha": str,         # delivery branch tip
+          "error": str,            # diagnostic when refs missing / repo invalid
+        }
+    """
+    repo_path = Path(repo)
+    base = {"mergeable": False, "conflicts": [], "ahead": 0,
+            "base_sha": "", "head_sha": "", "error": ""}
+    if not (repo_path / ".git").exists():
+        base["error"] = "仓库不是 git 仓库"
+        return base
+
+    for ref in (target_branch, delivery_branch):
+        r = subprocess.run(
+            ["git", "rev-parse", "--verify", ref],
+            cwd=str(repo_path), capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            base["error"] = f"分支不存在: {ref}"
+            return base
+    base["base_sha"] = subprocess.run(
+        ["git", "rev-parse", target_branch], cwd=str(repo_path),
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    base["head_sha"] = subprocess.run(
+        ["git", "rev-parse", delivery_branch], cwd=str(repo_path),
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+
+    # Ahead count: commits in delivery_branch not reachable from target.
+    ahead_r = subprocess.run(
+        ["git", "rev-list", "--count", f"{target_branch}..{delivery_branch}"],
+        cwd=str(repo_path), capture_output=True, text=True, timeout=10,
+    )
+    if ahead_r.returncode == 0 and ahead_r.stdout.strip().isdigit():
+        base["ahead"] = int(ahead_r.stdout.strip())
+    if base["ahead"] == 0:
+        base["mergeable"] = True
+        return base
+
+    # Dry-run merge in a temp worktree detached at target.
+    tmp = Path(tempfile.mkdtemp(prefix=f"agent_go_mergecheck_{Path(delivery_branch).name}_"))
+    try:
+        add = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(tmp), target_branch],
+            cwd=str(repo_path), capture_output=True, text=True, timeout=30,
+        )
+        if add.returncode != 0:
+            base["error"] = f"无法创建 merge 检查 worktree: {add.stderr.strip()[:200]}"
+            return base
+        merge = subprocess.run(
+            ["git", "merge", "--no-ff", "--no-commit", delivery_branch],
+            cwd=str(tmp), capture_output=True, text=True, timeout=60,
+        )
+        if merge.returncode == 0:
+            base["mergeable"] = True
+        else:
+            # Enumerate conflicted paths (git status --porcelain shows "UU path").
+            st = subprocess.run(
+                ["git", "status", "--porcelain"], cwd=str(tmp),
+                capture_output=True, text=True, timeout=10,
+            )
+            conflicts = []
+            for line in (st.stdout or "").splitlines():
+                parts = line.strip().split(None, 1)
+                if parts and parts[0].startswith("U"):
+                    conflicts.append(parts[1] if len(parts) > 1 else "")
+            base["conflicts"] = conflicts
+        # Abort the dry-run merge so the temp worktree stays clean for removal.
+        subprocess.run(
+            ["git", "merge", "--abort"], cwd=str(tmp),
+            capture_output=True, text=True, timeout=30,
+        )
+        return base
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(tmp)],
+            cwd=str(repo_path), capture_output=True, text=True, timeout=30,
+        )
+        shutil.rmtree(tmp, ignore_errors=True)

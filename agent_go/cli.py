@@ -1765,13 +1765,33 @@ def cmd_pr(args=None):
         console.print(f"请手动创建 PR 或稍后执行: agent_go pr {task_id}{push_hint}")
     else:
         # 在线模式：通过 gh CLI 创建 PR，显式指定 head/base。
+        # M1: PR head/base 关系校验——head 必须是 delivery_branch，base 必须是 target_branch。
+        base = meta.get("base_branch") or meta.get("target_branch") or "main"
+        head = delivery_branch or meta.get("base_branch", "main")
+        if not delivery_branch:
+            console.error(f"任务 {task_id} 没有 delivery_branch，无法创建 PR（head 必须指向交付分支）。")
+            sys.exit(1)
+        # mergeability 预检：创建 PR 前检查 delivery_branch 能否 clean merge 到 base。
+        from .delivery import check_mergeability
+        repo = meta.get("repo", "")
+        if repo and Path(repo).exists():
+            _mc = check_mergeability(repo, delivery_branch, base)
+            if _mc.get("error"):
+                console.error(f"mergeability 检查失败: {_mc['error']}")
+            elif not _mc.get("mergeable"):
+                console.error(
+                    f"delivery branch 无法 clean merge 到 {base}，发现冲突文件: "
+                    f"{', '.join(_mc.get('conflicts', []) or ['<未知>'])}。"
+                    "请先解决冲突（在 delivery branch 上合并 target 或人工处理）再创建 PR。"
+                )
+                sys.exit(1)
+            elif _mc.get("ahead") == 0:
+                console.warning(f"delivery branch 相对 {base} 无新增 commit，PR 可能为空。")
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as tf:
             tf.write(pr_body)
             pr_file = tf.name
         title = meta.get("task", "agent_go task")[:72]
-        base = meta.get("base_branch") or meta.get("target_branch") or "main"
-        head = delivery_branch or meta.get("base_branch", "main")
         try:
             if not shutil.which("gh"):
                 console.error("未安装 gh CLI。请先安装: brew install gh")
@@ -1866,6 +1886,22 @@ def cmd_merge(args=None):
     if check.returncode != 0:
         console.error(f"delivery branch {delivery_branch} 不存在于仓库中。")
         sys.exit(1)
+
+    # mergeability 预检：合并前检查能否 clean merge（避免污染 target 后才发现冲突）。
+    from .delivery import check_mergeability
+    _mc = check_mergeability(repo, delivery_branch, target)
+    if _mc.get("error"):
+        console.error(f"mergeability 检查失败: {_mc['error']}")
+        sys.exit(1)
+    if not _mc.get("mergeable"):
+        console.error(
+            f"delivery branch 无法 clean merge 到 {target}，发现冲突文件: "
+            f"{', '.join(_mc.get('conflicts', []) or ['<未知>'])}。"
+            "已中止，请先解决冲突。"
+        )
+        sys.exit(1)
+    if _mc.get("ahead") == 0:
+        console.warning(f"delivery branch 相对 {target} 无新增 commit，merge 为空操作。")
 
     # 用临时 worktree 在 target branch 上执行 merge，避免污染主工作区。
     import tempfile as _tf
