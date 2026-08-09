@@ -26,6 +26,13 @@
 
 验收：收敛批次中不再出现未预检的 rejected verification command；Plan quality 字段完整。
 
+> **执行状态（2026-08-09）**：
+> - ✅ scope_conflict 误报修复：`files_hint` 不再并入 `files`，只检查修改文件 ∩ do_not_touch
+> - ✅ ISSUE-29 python -c 单行语法预检：`compile()` 拦截 try/except 等非法拼接（计划阶段）
+> - ✅ verification_command_rejected 归类 `infrastructure_failure`（failure.py 已处理，不计模型能力失败）
+> - ⚠️ "命令被白名单拒绝后跳过 retry" 未采用——compile 预检已拦截不可修复命令；对可修复命令保留 retry 让 Claude 修复
+> - 详细记录见 [plan-capability-phaseb-2026-08-09.md](plan-capability-phaseb-2026-08-09.md)
+
 ## 阶段 C：Golden Tasks
 
 固定 6 个任务：
