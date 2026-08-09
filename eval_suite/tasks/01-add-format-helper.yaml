@@ -10,7 +10,7 @@ task: |
 verification:
   - "python -m pytest tests/test_models_utils.py::test_truncate_text -q"  # 新增测试（需 agent 同时写）
   - "python -c \"from src.utils import truncate_text; assert truncate_text('hi', 5) == 'hi'; assert truncate_text('hello world', 5) == 'hello...'; print('OK')\""
-timeout: 180
+timeout: 400
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

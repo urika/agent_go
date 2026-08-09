@@ -130,3 +130,90 @@ def test_cmd_merge_missing_delivery_branch(tmp_path):
         except SystemExit:
             pass
     exit_mock.assert_called_once_with(1)
+
+
+def test_cmd_pr_blocks_after_explicit_merge(tmp_path):
+    """P1 互斥：任务已显式 merge 交付后，cmd_pr 必须阻断（禁止双交付）。"""
+    repo = _init_repo(tmp_path / "repo")
+    task_dir = tmp_path / ".agent_go" / "task-t3"
+    task_dir.mkdir(parents=True)
+    meta = {"task_id": "task-t3", "repo": str(repo), "delivery_branch": "agent_go/task-t3/delivery",
+            "target_branch": "main", "status_schema_version": 1,
+            "explicit_merge_commit": "a" * 40}
+    (task_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"), \
+         patch("agent_go.cli.sys.exit", side_effect=SystemExit) as exit_mock:
+        try:
+            cmd_pr(Args("task-t3", offline=False, push=True))
+        except SystemExit:
+            pass
+    exit_mock.assert_called_once_with(1)
+
+
+def test_cmd_pr_offline_allowed_after_explicit_merge(tmp_path):
+    """P1 互斥：offline 模式（仅生成 PR.md，不创建真实 PR）不受互斥阻断。"""
+    repo = _init_repo(tmp_path / "repo")
+    task_dir = tmp_path / ".agent_go" / "task-t4"
+    task_dir.mkdir(parents=True)
+    meta = {"task_id": "task-t4", "repo": str(repo), "delivery_branch": "agent_go/task-t4/delivery",
+            "target_branch": "main", "status_schema_version": 1,
+            "explicit_merge_commit": "b" * 40}
+    (task_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"):
+        cmd_pr(Args("task-t4", offline=True))
+    assert (task_dir / "PR.md").exists()
+
+
+def test_cmd_merge_syncs_commit_when_pr_already_merged(tmp_path):
+    """P1 互斥+对齐：任务已有 pr_url 且对应 PR 已在 GitHub 合并时，
+    cmd_merge 直接同步 mergeCommit 完成交付，不再执行本地 merge。"""
+    repo = _init_repo(tmp_path / "repo")
+    task_dir, meta = _make_task(tmp_path, repo)
+    meta["pr_url"] = "https://github.com/urika/agent_go/pull/999"
+    meta["delivery_branch"] = ""
+    (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"), \
+         patch("agent_go.cli.shutil.which", return_value="/usr/local/bin/gh"), \
+         patch("agent_go.cli.subprocess.run", side_effect=lambda cmd, **kw: (
+             subprocess.CompletedProcess(
+                 cmd, 0,
+                 stdout=json.dumps({"state": "MERGED",
+                                    "mergeCommit": {"oid": "9" * 40},
+                                    "mergedAt": "2026-08-09T14:09:14Z"}),
+                 stderr="") if cmd and cmd[:2] == ["gh", "pr"] else
+             subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""))):
+        cmd_merge(Args("task-t1"))
+
+    updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    assert updated["explicit_merge_commit"] == "9" * 40
+    assert updated["status"] == "ACCEPTED_DELIVERY"
+    assert updated["accepted_delivery"] is True
+
+
+def test_cmd_merge_blocks_when_pr_open(tmp_path):
+    """P1 互斥：任务已有 pr_url 但 PR 未合并时，cmd_merge 阻断。"""
+    repo = _init_repo(tmp_path / "repo")
+    task_dir, meta = _make_task(tmp_path, repo)
+    meta["pr_url"] = "https://github.com/urika/agent_go/pull/998"
+    meta["delivery_branch"] = ""
+    (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"), \
+         patch("agent_go.cli.shutil.which", return_value="/usr/local/bin/gh"), \
+         patch("agent_go.cli.subprocess.run", side_effect=lambda cmd, **kw: (
+             subprocess.CompletedProcess(
+                 cmd, 0,
+                 stdout=json.dumps({"state": "OPEN", "mergeCommit": None}),
+                 stderr="") if cmd and cmd[:2] == ["gh", "pr"] else
+             subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""))), \
+         patch("agent_go.cli.sys.exit", side_effect=SystemExit) as exit_mock:
+        try:
+            cmd_merge(Args("task-t1"))
+        except SystemExit:
+            pass
+    exit_mock.assert_called_once_with(1)
+    updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    assert "explicit_merge_commit" not in updated

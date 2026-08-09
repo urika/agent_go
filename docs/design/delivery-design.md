@@ -1,7 +1,7 @@
 # agent_go 交付设计
 
 > 状态：当前 M1 交付闭环基线（M1-1/M1-2 已实现，2026-08-09）
-> 更新日期：2026-08-09
+> 更新日期：2026-08-09（真实 GitHub PR 端到端验证 + pr/merge 互斥建议）
 
 ## 1. 交付边界
 
@@ -153,3 +153,55 @@ M1 实现：delivery branch 在 pipeline 完成后保留在仓库中；`agent_go
 - 非 `main` base branch 可交付。
 - PR 创建失败后只重试交付。✅
 - merge 冲突明确阻断并保留现场。✅
+
+## 7. 真实 GitHub PR 端到端验证记录（2026-08-09）
+
+在 agent_go 自身仓库（`git@github.com:urika/agent_go.git`，`gh` 已登录）跑通完整交付链路。
+
+### 7.1 验证任务
+
+`task-20260809-164929-400-3507`：新增 `utils.py::slugify_branch_name` 纯函数 + `tests/test_utils_branch.py` 5 个单测。
+
+- 拆 2 subtask（developer + tester），均 `verify_ok=True`
+- 生成 delivery branch `agent_go/task-20260809-164929-400-3507/delivery`，领先 main 4 commits
+
+### 7.2 链路步骤与结果
+
+| 环节 | 命令 | 结果 |
+|------|------|------|
+| 交付分支生成 | pipeline 自动 | `DELIVERY_READY`，delivery branch 存在 |
+| push 到远程 | `agent_go pr <tid> --push` | `origin/agent_go/.../delivery` @ `3b1b760` |
+| PR 创建 | 同上 | **PR #38**（`MERGEABLE`，head=delivery branch，base=main，+47/-1） |
+| meta 写回 | 同上 | `pr_url`/`pr_head`/`pr_base`，status → `ACCEPTED_DELIVERY` |
+| 交付合并 | GitHub merge / `agent_go merge` | GitHub merge commit `3bb470e` 合入 main |
+
+### 7.3 发现的问题与建议
+
+**问题 1（P1）：`agent_go pr` 与 `agent_go merge` 是两条互斥交付路径，但可被同时执行。**
+
+本次验证中 `gh pr merge`（GitHub 侧）与 `agent_go merge`（本地侧）先后执行，产生两个不同的 merge commit：
+
+- GitHub 侧：`3bb470e`（正式合入 main）
+- 本地侧：`0ebf20d`（meta `explicit_merge_commit` 记录此值）
+
+最终本地 main 对齐到 GitHub 的 `3bb470e`，`0ebf20d` 不在最终历史中，导致 meta 的 `explicit_merge_commit` 与实际交付 commit 不一致（对象尚存时判定通过，GC 后可能失效）。
+
+**建议**：
+
+1. **二选一**：PR 路径（`agent_go pr --push`）与显式 merge 路径（`agent_go merge`）对同一任务互斥，交付时只走一条。
+2. **对齐 merge commit**：若本地 `agent_go merge` 后又在 GitHub 侧合并 PR，应将 `meta.explicit_merge_commit` 同步为 GitHub 的实际 merge commit（可用 `gh pr view <n> --json mergeCommit` 取得）。
+3. **可重算判定**：`accepted_delivery` 是持久化快照，不随 git 对象变化重算。建议交付判定保存判定时的 `pr_url`/`explicit_merge_commit`，并在统计前对 git 可达性做复查（当前 `evaluate_accepted_delivery(meta, repo)` 支持带 repo 复查，但 meta 快照不会自动失效）。
+
+**问题 2（P2）：历史任务 meta 时效性。**
+
+`task-20260809-104620-524-c43c` 记录 `ACCEPTED_DELIVERY`，但其 delivery branch 已被清理，带 repo 复查时判定 `delivery_failed=True`（`delivery_branch_not_found`）。属判定快照未随 git 状态失效的典型例证（见问题 1-建议 3）。
+
+### 7.4 条件确认
+
+真实 PR 链路需要三要素，本次均确认齐备：
+
+1. **远程仓库**：`origin` 指向真实 GitHub 仓库（`git@github.com:urika/agent_go.git`）。
+2. **GitHub 认证**：`gh auth status` 已登录（含 `repo` scope），`gh pr create` / `gh pr merge` 可用。
+3. **同步的 base**：本地 main 与 `origin/main` 对齐（PR base=main 反映最新代码）。
+
+若缺少任一要素（如无 remote、gh 未登录、main 落后远程），`agent_go pr` 会给出明确错误（推送失败 / gh 未安装 / mergeability 预检失败），不会静默产生错误交付。

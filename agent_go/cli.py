@@ -1784,6 +1784,15 @@ def cmd_pr(args=None):
 
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
 
+    # P1 互斥：任务已通过显式 merge 交付后，禁止再走 PR 路径（避免双交付与 commit 不一致）。
+    if not offline and meta.get("explicit_merge_commit"):
+        console.error(
+            f"任务 {task_id} 已通过显式 merge 交付（explicit_merge_commit="
+            f"{meta['explicit_merge_commit'][:12]}）。PR 与 merge 是互斥交付路径，"
+            "请勿重复交付。"
+        )
+        sys.exit(EX_ERROR)
+
     # 收集变更信息
     subtask_lines = []
     for r in meta.get("results", []):
@@ -1931,6 +1940,29 @@ def cmd_pr(args=None):
             os.unlink(pr_file)
 
 
+def _fetch_merged_pr_commit(pr_url: str, repo: str) -> str:
+    """若 ``pr_url`` 对应的 PR 已在 GitHub 合并，返回其 merge commit sha；否则返回空串。"""
+    if not pr_url or not repo or not Path(repo).exists() or not shutil.which("gh"):
+        return ""
+    import re as _re
+    m = _re.search(r"/pull/(\d+)", pr_url)
+    if not m:
+        return ""
+    try:
+        r = subprocess.run(
+            ["gh", "pr", "view", m.group(1), "--json", "state,mergeCommit,mergedAt"],
+            cwd=str(Path(repo)), capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return ""
+        data = json.loads(r.stdout or "{}")
+        if data.get("state") == "MERGED":
+            return (data.get("mergeCommit") or {}).get("oid", "") or ""
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        pass
+    return ""
+
+
 def cmd_merge(args=None):
     """将 delivery branch 显式合并到 target branch（人工交付命令，M1.2）。
 
@@ -1964,6 +1996,31 @@ def cmd_merge(args=None):
         sys.exit(EX_SYSTEM)
     delivery_branch = meta.get("delivery_branch") or ""
     target = meta.get("target_branch") or meta.get("base_branch") or "main"
+
+    # P1 互斥：任务已走 PR 交付路径时，禁止重复本地 merge。
+    # 若对应 PR 已在 GitHub 合并，直接同步其 merge commit 完成交付（避免双 merge commit 不一致）。
+    _pr_url = meta.get("pr_url") or ""
+    if _pr_url:
+        _merged = _fetch_merged_pr_commit(_pr_url, repo)
+        if _merged:
+            meta["explicit_merge_commit"] = _merged
+            meta["delivery_attempted"] = True
+            meta["delivery_failed"] = False
+            meta["delivery_error"] = ""
+            meta.pop("accepted_delivery_reasons", None)
+            meta["accepted_delivery"] = True
+            if meta.get("status_schema_version"):
+                meta["status"] = "ACCEPTED_DELIVERY"
+            (task_dir / "meta.json").write_text(
+                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            console.success(f"PR {_pr_url} 已在 GitHub 合并，已同步 explicit_merge_commit={_merged[:12]}")
+            return
+        console.error(
+            f"任务 {task_id} 已走 PR 交付路径（{_pr_url}），PR 与 merge 是互斥交付路径。"
+            "请先在 GitHub 合并该 PR，或先移除 meta.pr_url 再执行本地 merge。"
+        )
+        sys.exit(EX_ERROR)
+
     if not delivery_branch:
         console.error(f"任务 {task_id} 没有 delivery_branch，无法合并。")
         sys.exit(EX_ERROR)
