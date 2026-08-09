@@ -14,7 +14,8 @@ from typing import Any, Optional
 
 __all__ = ["estimate_task_duration", "check_under_decomposition",
            "check_over_decomposition", "check_difficulty_mismatch", "difficulty_hint",
-           "check_agent_prompt_functions", "validate_plan_quality"]
+           "check_agent_prompt_functions", "validate_plan_quality",
+           "check_subtask_file_overlap", "_subtask_file_scope"]
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,95 @@ _DEFAULT_SUBTASK_SEC = 240
 
 # S12-P2 G5 V1：hard 任务的最小合理子任务数阈值（硬编码，V2 从 verify_state.json 历史学习）
 DIFFICULTY_BASE_SUBTASKS = {"easy": 1, "medium": 2, "hard": 3}
+
+
+def _subtask_file_scope(st: dict) -> set[str]:
+    """提取子任务的文件作用域（files 字段 ∪ files_hint 逗号拆分，`*` 忽略）。
+
+    与 scope_conflict 检查不同，跨子任务文件重叠检测必须同时看 files 与
+    files_hint（否则 tester 等仅用 files_hint 的场景检测不到真实重叠）。
+    """
+    files: set[str] = set()
+    for f in st.get("files", []) or []:
+        if isinstance(f, str) and f:
+            files.add(f)
+    hint = str(st.get("files_hint", "") or "")
+    if hint and hint != "*":
+        files.update(part.strip() for part in hint.split(",") if part.strip())
+    return files
+
+
+def _has_dependency_path(graph: dict[str, list[str]], start: str, target: str) -> bool:
+    """判断 start 是否可沿 depends_on 传递闭包到达 target（含 start == target）。"""
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        if node == target:
+            return True
+        stack.extend(graph.get(node, []))
+    return False
+
+
+def check_subtask_file_overlap(subtasks: list[dict]) -> dict[str, Any]:
+    """G7 跨子任务文件重叠检测：无依赖路径的子任务共享同一文件 → 交叉污染高风险。
+
+    bench 实证：task-20260809-123021-784-042c 拆 2 个后 sub-2 越界改
+    cli.py+storage.py+models.py，与 sub-1 的 storage.py 重叠 → 交叉污染 →
+    VERIFICATION_FAILED。opencode / Claude Code 官方最佳实践均为
+    「分解工作使每个队友负责不同的文件集」。
+
+    判定：
+    - 某文件被 ≥2 个子任务引用，且其中至少一对子任务之间无依赖路径
+      （无法保证顺序执行）→ blocking issue（file_overlap_without_dependency）。
+    - 所有共享该文件的子任务都在同一条依赖链上（顺序执行，upstream 会 merge）
+      → warning（file_overlap_with_dependency），有集成风险但不阻断。
+
+    Returns:
+        {"issues": [...], "warnings": [...]}
+    """
+    issues: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    graph: dict[str, list[str]] = {}
+    for st in subtasks:
+        sid = str(st.get("id", ""))
+        graph[sid] = [str(dep) for dep in st.get("depends_on", [])]
+
+    file_owners: dict[str, list[str]] = {}
+    for st in subtasks:
+        sid = str(st.get("id", ""))
+        for f in _subtask_file_scope(st):
+            file_owners.setdefault(f, []).append(sid)
+
+    for file, owners in sorted(file_owners.items()):
+        if len(owners) < 2:
+            continue
+        # 判断所有 owner 是否都在同一条依赖链上（任意一对双向可达即顺序保证）
+        all_chained = all(
+            _has_dependency_path(graph, a, b) or _has_dependency_path(graph, b, a)
+            for i, a in enumerate(owners)
+            for b in owners[i + 1:]
+        )
+        entry = {
+            "type": "file_overlap_with_dependency" if all_chained else "file_overlap_without_dependency",
+            "file": file,
+            "subtask_ids": owners,
+            "reason": (
+                f"文件 {file} 被子任务 {'/'.join(owners)} 共同引用" +
+                ("，且无依赖顺序——并行修改同一文件必然交叉污染，建议合并或添加依赖。"
+                 if not all_chained else
+                 "，子任务在同一依赖链上（顺序执行）。仍有集成风险，建议确认改动区域不重叠。")
+            ),
+        }
+        if all_chained:
+            warnings.append(entry)
+        else:
+            issues.append(entry)
+
+    return {"issues": issues, "warnings": warnings}
 
 
 def validate_plan_quality(
@@ -88,6 +178,42 @@ def validate_plan_quality(
     if unique_requirements and coverage < 1.0:
         issues.append({"type": "requirement_coverage_incomplete", "missing": sorted(unique_requirements - covered)})
 
+    # G8: 独立可验证性检查（Split Design Benchmark 实证：claude/opencode 均以
+    # 「能否独立验证」作为拆分/合并判据，如 storage 新方法脱离 cmd_done 无法验证 → 必合）
+    # 检查 1：被依赖的子任务若无验证命令，其产物无法独立验证 → 下游依赖不可信
+    for st in subtasks:
+        sid = str(st.get("id", ""))
+        if str(st.get("verification", "") or "").strip():
+            continue
+        dependents = [other.get("id") for other in subtasks
+                      if sid in {str(d) for d in other.get("depends_on", [])}]
+        if dependents:
+            issues.append({
+                "type": "unverifiable_upstream",
+                "subtask_id": sid,
+                "depended_by": dependents,
+                "reason": (f"子任务 {sid} 无验证命令，但被 {'/'.join(dependents)} 依赖——"
+                           f"上游产物未经验证即被下游消费，建议为 {sid} 补充验证或与下游合并。"),
+            })
+
+    # G7: 跨子任务文件重叠检测（bench 实证的交叉污染根因）
+    overlap = check_subtask_file_overlap(subtasks)
+    issues.extend(overlap["issues"])
+    warnings.extend(overlap["warnings"])
+
+    # G6 升级：小改动（有效文件数 ≤2）但 ≥3 子任务 → 过度分解 → blocking
+    # （bench 实证：fix-missing-default 5 行改动拆 3 个 → 成本翻倍且失败）
+    if len(subtasks) >= 3:
+        all_files = _subtask_file_scope_all(subtasks)
+        if 0 < len(all_files) <= 2:
+            issues.append({
+                "type": "over_decomposition",
+                "subtask_ids": [str(st.get("id", "")) for st in subtasks],
+                "file_count": len(all_files),
+                "reason": (f"{len(subtasks)} 个子任务仅涉及 {len(all_files)} 个文件——"
+                           f"小改动不应过度拆分，串行会叠加延迟且成本翻倍。建议合并为 1 个子任务。"),
+            })
+
     # P2: agent_prompt 函数引用检查（需要 repo 路径）
     if repo:
         agent_prompt_warnings = check_agent_prompt_functions(subtasks, repo)
@@ -97,11 +223,22 @@ def validate_plan_quality(
         "status": "blocked" if issues else ("warning" if warnings else "passed"),
         "blocking_issues": issues,
         "warnings": warnings,
-        "plan_conflict_count": sum(1 for issue in issues if issue["type"] in {"scope_conflict", "dependency_cycle"}),
+        "plan_conflict_count": sum(1 for issue in issues if issue["type"] in {
+            "scope_conflict", "dependency_cycle", "file_overlap_without_dependency",
+            "unverifiable_upstream",
+        }),
         "plan_warning_count": len(warnings),
         "plan_requirement_coverage": coverage,
         "plan_acceptance_coverage": coverage,
     }
+
+
+def _subtask_file_scope_all(subtasks: list[dict]) -> set[str]:
+    """G6 升级用：所有子任务文件作用域并集（供过度分解判定）。"""
+    union: set[str] = set()
+    for st in subtasks:
+        union.update(_subtask_file_scope(st))
+    return union
 
 
 def check_under_decomposition(subtasks: list[dict], logger: Optional[logging.Logger] = None) -> bool:

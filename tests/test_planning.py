@@ -399,3 +399,123 @@ def test_validate_plan_quality_with_repo_integration(tmp_path):
     func_warnings = [w for w in result["warnings"] if w["type"] == "unknown_function_in_agent_prompt"]
     assert len(func_warnings) >= 1
     assert func_warnings[0]["function"] == "nonexistent_helper"
+
+
+# ═══════════════════════════════════════════════════════════════
+# G7: 跨子任务文件重叠检测 + G6 过度分解升级为 blocking
+# ═══════════════════════════════════════════════════════════════
+
+from agent_go.planning import check_subtask_file_overlap
+
+
+def test_file_overlap_without_dependency_is_blocking():
+    """G7: 无依赖关系的子任务共享同一文件 → blocking issue。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/storage.py"], "verification": "pytest tests"},
+    ]
+    result = check_subtask_file_overlap(subtasks)
+    types = {issue["type"] for issue in result["issues"]}
+    assert "file_overlap_without_dependency" in types
+    assert result["warnings"] == []
+    # 集成进 validate_plan_quality → blocked
+    full = validate_plan_quality(subtasks)
+    assert full["status"] == "blocked"
+    assert any(i["type"] == "file_overlap_without_dependency" for i in full["blocking_issues"])
+
+
+def test_file_overlap_with_dependency_is_warning():
+    """G7: 共享文件的子任务在同一条依赖链上 → warning，不阻断。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/storage.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
+    ]
+    result = check_subtask_file_overlap(subtasks)
+    assert result["issues"] == []
+    assert any(w["type"] == "file_overlap_with_dependency" for w in result["warnings"])
+    full = validate_plan_quality(subtasks)
+    # warning（非 blocked）——但可能有 missing_verification 等 warning 混杂，重点是无 file_overlap blocking
+    assert full["status"] in ("passed", "warning")
+    assert not any(i["type"] == "file_overlap_without_dependency" for i in full["blocking_issues"])
+
+
+def test_file_overlap_via_files_hint():
+    """G7: files_hint 引用同一文件也应被检测（tester 场景不误报 scope_conflict 但需报重叠）。"""
+    subtasks = [
+        {"id": "sub-1", "files_hint": "src/cli.py", "verification": "pytest tests"},
+        {"id": "sub-2", "files_hint": "src/cli.py", "verification": "pytest tests"},
+    ]
+    result = check_subtask_file_overlap(subtasks)
+    assert any(i["type"] == "file_overlap_without_dependency" for i in result["issues"])
+
+
+def test_file_overlap_no_common_file():
+    """G7: 文件互斥 → 无重叠。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/cli.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/storage.py"], "verification": "pytest tests"},
+    ]
+    result = check_subtask_file_overlap(subtasks)
+    assert result["issues"] == []
+    assert result["warnings"] == []
+    assert validate_plan_quality(subtasks)["status"] == "passed"
+
+
+def test_over_decomposition_small_change_blocking():
+    """G6 升级: ≤2 文件但 ≥3 子任务 → 过度分解 blocking。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/utils.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/utils.py"], "verification": "pytest tests"},
+        {"id": "sub-3", "files": ["tests/test_utils.py"], "verification": "pytest tests"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert full["status"] == "blocked"
+    assert any(i["type"] == "over_decomposition" for i in full["blocking_issues"])
+
+
+def test_no_over_decomposition_with_no_file_scope():
+    """G6 升级: 文件作用域为空（无法判定改动面）时不触发过度分解阻断。"""
+    subtasks = [
+        {"id": "sub-1", "verification": "pytest tests"},
+        {"id": "sub-2", "verification": "pytest tests"},
+        {"id": "sub-3", "verification": "pytest tests"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert not any(i["type"] == "over_decomposition" for i in full["blocking_issues"])
+
+
+# ═══════════════════════════════════════════════════════════════
+# G8: 独立可验证性检查（Split Design Benchmark 实证的拆分/合并判据）
+# ═══════════════════════════════════════════════════════════════
+
+def test_unverifiable_upstream_is_blocking():
+    """G8: 被依赖的子任务无验证命令 → blocking（上游产物未经验证即被下游消费）。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": ""},
+        {"id": "sub-2", "files": ["src/cli.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert any(i["type"] == "unverifiable_upstream" for i in full["blocking_issues"])
+    issue = next(i for i in full["blocking_issues"] if i["type"] == "unverifiable_upstream")
+    assert issue["subtask_id"] == "sub-1"
+    assert issue["depended_by"] == ["sub-2"]
+
+
+def test_verifiable_upstream_passes():
+    """G8: 被依赖的子任务有验证命令 → 不触发。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests/test_storage.py"},
+        {"id": "sub-2", "files": ["src/cli.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert not any(i["type"] == "unverifiable_upstream" for i in full["blocking_issues"])
+
+
+def test_no_verification_no_dependents_not_blocked():
+    """G8: 无验证命令但无下游依赖的子任务 → 仍保留原 missing_verification warning，不触发 G8。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/cli.py"], "verification": ""},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert not any(i["type"] == "unverifiable_upstream" for i in full["blocking_issues"])
+    assert any(w["type"] == "missing_verification" for w in full["warnings"])
