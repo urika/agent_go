@@ -1072,6 +1072,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             all_pass = True
             failed_cmds: list[str] = []
             failed_outputs: list[str] = []
+            # 安全门禁拒绝的验证命令 (command, reason)：触发 G8 短路，跳过修复重试
+            _rejected_cmd = None
             attempt_label = retry_count + 1
             if retry_count > 0:
                 console.emit("subtask_activity", {"sub_id": sub_id,
@@ -1085,10 +1087,13 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 verification_ms += vr_entry.get("duration_ms", 0)
 
                 if vr_entry.get("rejected"):
+                    # S12-P1 G8 模式：安全门禁拒绝的命令无法通过修复重试解决
+                    # （修复只改代码，不会让该命令变得可执行），记录后短路退出。
                     all_pass = False
                     failed_cmds.append(vcmd)
                     failed_outputs.append(f"[拒绝] {vr_entry.get('reject_reason', '')}")
-                    continue
+                    _rejected_cmd = (vcmd, vr_entry.get("reject_reason", ""))
+                    break
 
                 if vr_entry["exit_code"] not in (0, 127):
                     all_pass = False
@@ -1107,6 +1112,15 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     task_dir, sub_id, verification,
                     retry_count, max_retries,
                     verification_history, verification_results)
+
+            # S12-P1 G8 模式：验证命令被安全门禁拒绝 → 直接判定失败并短路，
+            # 跳过修复重试（不调用修复逻辑、不增加 retry_count；resume 亦不重复修复）。
+            if _rejected_cmd is not None:
+                verify_ok = False
+                logger.warning(
+                    f"[G8] {sub_id} 验证命令被安全门禁拒绝: {_rejected_cmd[0][:100]} — "
+                    f"原因: {_rejected_cmd[1]}，跳过修复重试")
+                break
 
             # 2. shell 验证全部通过 → 可选 LLM 语义评估（Phase 3）
             if all_pass and evaluator_enabled and headless:
