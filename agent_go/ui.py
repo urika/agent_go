@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import safe_input, log_event
+from .exit_codes import EX_USAGE
 from .utils import read_reference_docs
 from .api import generate_plan
 from .console import _LazyConsole
@@ -558,7 +559,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 empty_count += 1
                 if empty_count > 5:
                     console.force("⚠️ 检测到非交互模式，请输入有效选项或使用 --yes 标志")
-                    sys.exit(1)
+                    sys.exit(EX_USAGE)
             else:
                 empty_count = 0
             console.force("无效输入")
@@ -773,7 +774,7 @@ def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], log
                 empty_count += 1
                 if empty_count > 5:
                     console.force("⚠️ 检测到非交互模式，请输入有效选项或使用 --yes 标志")
-                    sys.exit(1)
+                    sys.exit(EX_USAGE)
             else:
                 empty_count = 0
             console.force("无效输入")

@@ -311,12 +311,12 @@ class TestCmdPr:
         return task_dir, monkeypatch_targets
 
     def test_usage_no_task_id(self, monkeypatch):
-        """无 task_id 参数 + 无 argv → Usage + sys.exit(1)"""
+        """无 task_id 参数 + 无 argv → Usage + sys.exit(EX_USAGE)"""
         from agent_go.cli import cmd_pr
         monkeypatch.setattr(sys, "argv", ["agent_go", "pr"])
         with pytest.raises(SystemExit) as exc:
             cmd_pr()
-        assert exc.value.code == 1
+        assert exc.value.code == 2
 
     def test_nonexistent_task_exits(self, monkeypatch, tmp_path):
         from agent_go.cli import cmd_pr

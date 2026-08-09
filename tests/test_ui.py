@@ -407,12 +407,12 @@ class TestConfirmPlan:
         assert docs == ["missing.md"]
 
     def test_empty_input_six_times_exits(self, sample_plan, tmp_path, logger):
-        """连续 6 次空输入判定为非交互模式，退出码 1"""
+        """连续 6 次空输入判定为非交互模式，退出码 EX_USAGE(2)"""
         config = _make_config()
         with patch("agent_go.ui.safe_input", side_effect=[""] * 6):
             with pytest.raises(SystemExit) as exc:
                 confirm_plan(sample_plan, config, tmp_path, logger)
-        assert exc.value.code == 1
+        assert exc.value.code == 2
 
     def test_invalid_choice_resets_empty_count(self, sample_plan, tmp_path, logger):
         """无效选项重置空输入计数，不触发退出"""
@@ -508,11 +508,11 @@ class TestConfirmSubtasks:
         assert result is subtasks
 
     def test_empty_input_six_times_exits(self, logger):
-        """连续 6 次空输入判定为非交互模式，退出码 1"""
+        """连续 6 次空输入判定为非交互模式，退出码 EX_USAGE(2)"""
         with patch("agent_go.ui.safe_input", side_effect=[""] * 6):
             with pytest.raises(SystemExit) as exc:
                 confirm_subtasks(_make_subtasks(), _make_config(), logger)
-        assert exc.value.code == 1
+        assert exc.value.code == 2
 
     def test_invalid_choice_resets_empty_count(self, logger):
         subtasks = _make_subtasks()

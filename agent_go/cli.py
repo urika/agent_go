@@ -22,6 +22,7 @@ from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
 from .git_utils import init_git_repo
 from .status import task_status, set_task_status
+from .exit_codes import EX_OK, EX_ERROR, EX_USAGE, EX_SYSTEM
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,8 @@ def _build_parser():
                             help="--max-cost 的别名（per-task 成本预算，S12-P1 G3）；同传时 --budget 生效")
     run_parser.add_argument("--budget-mode", choices=["strict", "degrade", "ignore"], default=None, dest="budget_mode",
                             help="预算策略（S12-P1 G3）：strict=超预算 block；degrade=切便宜模型继续；ignore=关 L3（默认 strict）")
+    run_parser.add_argument("--dry-run", action="store_true", dest="dry_run",
+                            help="生成 Plan 并展示子任务拆解，但不执行任何操作。配合 --json 输出结构化结果")
     run_parser.add_argument("--config", default=argparse.SUPPRESS, help="Path to config JSON file (default: ~/.agent_go/config.json)")
 
     # resume 子命令
@@ -395,6 +398,7 @@ def cmd_run(args=None):
     auto_yes = args.yes
     headless = auto_yes or args.headless
     parallel = args.parallel
+    dry_run = getattr(args, "dry_run", False)
     quiet = getattr(args, "quiet", False)
     verbose = getattr(args, "verbose", False)
     json_mode = getattr(args, "json_mode", False)
@@ -410,7 +414,7 @@ def cmd_run(args=None):
 
     if not repo.exists():
         console.error(f"路径不存在: {repo}")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
 
     # --auto-init：目标目录非 git 仓库时自动 init + 首次 commit，
     # 保证 worktree / commit / tag / merge 机制可用
@@ -419,7 +423,7 @@ def cmd_run(args=None):
         ok, err = init_git_repo(repo)
         if not ok:
             console.error(f"git init 失败: {err}")
-            sys.exit(1)
+            sys.exit(EX_SYSTEM)
         console.print("✓ git 初始化完成（本地，无 remote）")
 
     config = load_config(config_path=getattr(args, "config", None))
@@ -543,11 +547,11 @@ def cmd_run(args=None):
     if spec_path is not None:
         if not spec_path.exists():
             console.error(f"Spec 文件不存在: {spec_path}")
-            sys.exit(1)
+            sys.exit(EX_USAGE)
         spec_obj = parse_spec(spec_path)
         if spec_obj is None:
             console.error(f"Spec 解析失败: {spec_path}")
-            sys.exit(1)
+            sys.exit(EX_USAGE)
         console.print(f"📋 Task Spec: {spec_obj.title or spec_path.name}")
         # --yes 模式仍跑 L1（确定性检查，0 误判，不跳过）；--force 全跳过
         if not force_spec:
@@ -561,7 +565,7 @@ def cmd_run(args=None):
                     if v.suggestion:
                         console.error(f"     💡 {v.suggestion}")
                 console.error("\n修正 Spec 后重试，或用 --force 跳过审查（不推荐）。")
-                sys.exit(1)
+                sys.exit(EX_ERROR)
             console.print("✅ L1 准入审查通过")
         else:
             console.print("⚠️ --force 已跳过 Spec 准入审查")
@@ -667,7 +671,7 @@ def cmd_run(args=None):
                         resp = safe_input("\n⚠️ 存在符号级冲突，可能集成失败。继续执行? [y/N] ").strip().lower()
                         if resp not in ("y", "yes"):
                             console.error("已取消执行。建议调整 Plan：合并冲突 step 或添加依赖。")
-                            sys.exit(1)
+                            sys.exit(EX_ERROR)
             except Exception as _e:
                 # 冲突检测是辅助功能，失败不阻断主流程
                 logger.warning(f"L1.5 冲突检测失败（跳过）: {_e}")
@@ -757,6 +761,13 @@ def cmd_run(args=None):
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     if plan_quality["blocking_issues"]:
+        if dry_run:
+            _print_dry_run_summary(confirmed_plan, confirmed, plan_quality, {}, console, task_id, task_dir)
+            try:
+                shutil.rmtree(task_dir)
+            except OSError:
+                pass
+            return
         console.error("Plan 预检未通过，任务标记为 BLOCKED（约束阻断），未进入执行。")
         for issue in plan_quality["blocking_issues"]:
             console.error(f"  [{issue['type']}] subtask={issue.get('subtask_id', '?')} {issue.get('reason', '')}")
@@ -780,6 +791,16 @@ def cmd_run(args=None):
     logger.info(f"[M4] 时间预估: {est['estimated_sec']}s "
                 f"(waves={est['waves']}, median={est['median_subtask_sec']}s, samples={est['sample_size']})")
     log_event(logger, "time_estimate", est)
+
+    # ── Dry-Run：生成 Plan + 展示子任务即退出，不执行 ──
+    if dry_run:
+        _print_dry_run_summary(confirmed_plan, confirmed, plan_quality, est, console, task_id, task_dir)
+        # 清理临时 task_dir（仅含 PLAN.md 快照，无执行产物）
+        try:
+            shutil.rmtree(task_dir)
+        except OSError:
+            pass
+        return
 
     _interactive_mode = getattr(args, 'interactive', False)
     _step_confirm = getattr(args, 'step_confirm', False)
@@ -806,6 +827,75 @@ def cmd_run(args=None):
                       remote_url=remote_url, preserve_worktrees=preserve_worktrees,
                       step_confirm=_step_confirm)
 
+
+def _print_dry_run_summary(plan: Optional[dict], subtasks: list, plan_quality: dict,
+                           time_est: dict, console, task_id: str, task_dir: Path) -> None:
+    """Print plan + subtask summary for --dry-run mode. No side effects."""
+    import json as _json
+
+    console.title("DRY-RUN：Plan 预览（未执行任何操作）")
+    console.print(f"   Task ID: {task_id}")
+
+    if plan:
+        goal = plan.get("goal") or plan.get("_original_task", "")
+        console.subtitle("目标")
+        console.print(f"   {goal[:200]}")
+        steps = plan.get("steps") or []
+        console.subtitle(f"Plan 步骤 ({len(steps)} 步)")
+        for s in steps:
+            skills_str = ", ".join(s.get("skills", []) or [])
+            files_str = ", ".join(s.get("files", []) or [])[:80]
+            console.print(f"   [{s.get('id', '?')}] {s.get('title', '?')}")
+            if skills_str:
+                console.print(f"       skills: {skills_str}")
+            if files_str:
+                console.print(f"       files:  {files_str}")
+
+    console.subtitle(f"子任务拆解 ({len(subtasks)} 个)")
+    for st in subtasks:
+        deps = st.get("depends_on", []) or []
+        deps_str = f" ← {', '.join(deps)}" if deps else ""
+        diff = st.get("difficulty", "medium")
+        console.print(f"   [{st['id']}] {st.get('title', '?')}  (difficulty={diff}){deps_str}")
+
+    console.subtitle("Plan 质量报告")
+    pq_status = plan_quality.get("status", "unknown")
+    icon = {"ok": "✅", "warn": "⚠️", "blocked": "🔴"}.get(pq_status, "❓")
+    console.print(f"   {icon} 状态: {pq_status}")
+    console.print(f"   需求覆盖率: {plan_quality.get('plan_requirement_coverage', '?')}")
+    console.print(f"   验收覆盖率: {plan_quality.get('plan_acceptance_coverage', '?')}")
+    console.print(f"   冲突数:     {plan_quality.get('plan_conflict_count', 0)}")
+    console.print(f"   警告数:     {plan_quality.get('plan_warning_count', 0)}")
+    warnings = plan_quality.get("warnings", []) or []
+    for w in warnings[:5]:
+        console.print(f"   ⚠️  {w}")
+    blocking = plan_quality.get("blocking_issues", []) or []
+    for b in blocking:
+        console.print(f"   🔴 BLOCKING: [{b.get('type', '?')}] {b.get('reason', '?')}")
+
+    console.subtitle("时间预估")
+    conf = time_est.get("confidence", "none")
+    conf_label = {"high": "（高置信度）", "medium": "（样本较少）", "low": "（样本很少，仅供参考）",
+                  "none": "（无历史数据，经验值）"}.get(conf, "")
+    console.print(f"   预计耗时: ~{time_est.get('estimated_sec', 0) / 60:.0f} 分钟 {conf_label}")
+    console.print(f"   子任务数: {time_est.get('subtasks', '?')}")
+    console.print(f"   波次数:   {time_est.get('waves', '?')}")
+    console.print(f"   置信度:   {conf}")
+
+    if console.json_mode:
+        console.data({
+            "mode": "dry_run",
+            "task_id": task_id,
+            "plan": plan,
+            "subtasks": subtasks,
+            "plan_quality": plan_quality,
+            "time_estimate": time_est,
+        })
+
+    console.sep()
+    console.success("Dry-run 完成。使用 `agent_go run ... --yes` 执行。")
+
+
 def cmd_resume(args=None):
     """恢复被中断的任务。"""
     if args and hasattr(args, 'task_id'):
@@ -819,19 +909,19 @@ def cmd_resume(args=None):
             preserve_worktrees = False
     elif len(sys.argv) < 3:
         console.print("Usage: agent_go resume <task-id> [--yes] [--headless] [--parallel N] [--remote <url>]")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
     else:
         task_id = sys.argv[2]
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         console.print(f"任务不存在: {task_id}")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
     # logger 需在 result.json 恢复循环之前初始化，否则损坏文件触发 UnboundLocalError
     logger = setup_logger(task_id, task_dir)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
     if task_status(meta) not in ("PAUSED", "EXECUTING", "VERIFICATION_FAILED", "BLOCKED", "CANCELLED", "running", "paused", "interrupted", "cancelled", "stale_aborted"):
         console.print(f"任务状态为 {meta['status']}，无法恢复。仅 running/paused/interrupted/cancelled/stale_aborted 状态可恢复")
-        sys.exit(1)
+        sys.exit(EX_ERROR)
 
     confirmed = meta.get("subtasks", [])
     results = meta.get("results", [])
@@ -965,7 +1055,7 @@ def cmd_resume(args=None):
     try:
         final_meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
         if final_meta.get("status") in {"VERIFICATION_FAILED", "BLOCKED", "DELIVERY_FAILED", "CANCELLED"}:
-            raise SystemExit(1)
+            raise SystemExit(EX_ERROR)
     except (OSError, json.JSONDecodeError):
         pass
 
@@ -1093,13 +1183,13 @@ def cmd_show(args=None):
         task_id = args.task_id
     elif len(sys.argv) < 3:
         console.print("Usage: agent_go show <task-id>")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
     else:
         task_id = sys.argv[2]
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         console.print("任务不存在")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
     console.print(f"\n🆔 {task_id}")
     console.print(f"📝 {meta['task']}")
@@ -1676,7 +1766,7 @@ def cmd_pr(args=None):
         remote = getattr(args, 'remote', "origin")
     elif len(sys.argv) < 3:
         console.print("Usage: agent_go pr <task-id> [--offline] [--push] [--remote <name>]")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
     else:
         task_id = sys.argv[2]
         offline = "--offline" in sys.argv
@@ -1690,7 +1780,7 @@ def cmd_pr(args=None):
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         console.print(f"任务不存在: {task_id}")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
 
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
 
@@ -1747,7 +1837,7 @@ def cmd_pr(args=None):
             if not delivery_branch:
                 console.error(f"任务 {task_id} 没有 delivery_branch，无法安全推送。"
                               "请先运行 pipeline 生成交付分支，或手动指定 head。")
-                sys.exit(1)
+                sys.exit(EX_ERROR)
             push_result = subprocess.run(
                 ["git", "push", remote, f"{delivery_branch}:{delivery_branch}"],
                 cwd=str(Path(repo)), capture_output=True, text=True,
@@ -1770,7 +1860,7 @@ def cmd_pr(args=None):
         head = delivery_branch or meta.get("base_branch", "main")
         if not delivery_branch:
             console.error(f"任务 {task_id} 没有 delivery_branch，无法创建 PR（head 必须指向交付分支）。")
-            sys.exit(1)
+            sys.exit(EX_ERROR)
         # mergeability 预检：创建 PR 前检查 delivery_branch 能否 clean merge 到 base。
         from .delivery import check_mergeability
         repo = meta.get("repo", "")
@@ -1784,7 +1874,7 @@ def cmd_pr(args=None):
                     f"{', '.join(_mc.get('conflicts', []) or ['<未知>'])}。"
                     "请先解决冲突（在 delivery branch 上合并 target 或人工处理）再创建 PR。"
                 )
-                sys.exit(1)
+                sys.exit(EX_ERROR)
             elif _mc.get("ahead") == 0:
                 console.warning(f"delivery branch 相对 {base} 无新增 commit，PR 可能为空。")
         import tempfile
@@ -1853,7 +1943,7 @@ def cmd_merge(args=None):
         remote = getattr(args, 'remote', "origin")
     elif len(sys.argv) < 3:
         console.print("Usage: agent_go merge <task-id> [--push] [--remote <name>]")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
     else:
         task_id = sys.argv[2]
         do_push = "--push" in sys.argv
@@ -1866,17 +1956,17 @@ def cmd_merge(args=None):
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         console.error(f"任务不存在: {task_id}")
-        sys.exit(1)
+        sys.exit(EX_USAGE)
     meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
     repo = meta.get("repo", "")
     if not repo or not Path(repo).exists():
         console.error(f"任务 {task_id} 的仓库不存在: {repo}")
-        sys.exit(1)
+        sys.exit(EX_SYSTEM)
     delivery_branch = meta.get("delivery_branch") or ""
     target = meta.get("target_branch") or meta.get("base_branch") or "main"
     if not delivery_branch:
         console.error(f"任务 {task_id} 没有 delivery_branch，无法合并。")
-        sys.exit(1)
+        sys.exit(EX_ERROR)
 
     # 校验 delivery branch 存在
     check = subprocess.run(
@@ -1885,21 +1975,21 @@ def cmd_merge(args=None):
     )
     if check.returncode != 0:
         console.error(f"delivery branch {delivery_branch} 不存在于仓库中。")
-        sys.exit(1)
+        sys.exit(EX_SYSTEM)
 
     # mergeability 预检：合并前检查能否 clean merge（避免污染 target 后才发现冲突）。
     from .delivery import check_mergeability
     _mc = check_mergeability(repo, delivery_branch, target)
     if _mc.get("error"):
         console.error(f"mergeability 检查失败: {_mc['error']}")
-        sys.exit(1)
+        sys.exit(EX_SYSTEM)
     if not _mc.get("mergeable"):
         console.error(
             f"delivery branch 无法 clean merge 到 {target}，发现冲突文件: "
             f"{', '.join(_mc.get('conflicts', []) or ['<未知>'])}。"
             "已中止，请先解决冲突。"
         )
-        sys.exit(1)
+        sys.exit(EX_ERROR)
     if _mc.get("ahead") == 0:
         console.warning(f"delivery branch 相对 {target} 无新增 commit，merge 为空操作。")
 
@@ -1913,7 +2003,7 @@ def cmd_merge(args=None):
         )
         if add.returncode != 0:
             console.error(f"无法创建 merge worktree: {add.stderr.strip()[:200]}")
-            sys.exit(1)
+            sys.exit(EX_SYSTEM)
         merge = subprocess.run(
             ["git", "merge", "--no-ff", "-m", f"agent_go: merge delivery of {task_id}", delivery_branch],
             cwd=str(tmp), capture_output=True, text=True, timeout=60,
@@ -1926,7 +2016,7 @@ def cmd_merge(args=None):
             meta["delivery_error"] = f"merge 冲突: {merge.stderr.strip()[:200]}"
             (task_dir / "meta.json").write_text(
                 json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-            sys.exit(1)
+            sys.exit(EX_ERROR)
         # 合并成功：记录 explicit_merge_commit 并推进 target branch。
         head = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(tmp),
@@ -1941,7 +2031,7 @@ def cmd_merge(args=None):
             )
             if update_ref.returncode != 0:
                 console.error(f"更新 {target} 分支失败: {update_ref.stderr.strip()[:200]}")
-                sys.exit(1)
+                sys.exit(EX_SYSTEM)
             meta["explicit_merge_commit"] = merge_commit
             meta["delivery_attempted"] = True
             meta["delivery_failed"] = False
@@ -2124,7 +2214,7 @@ def cmd_spec(args) -> None:
         repo = Path(args.repo).resolve() if args.repo else None
         if repo and not repo.exists():
             console.error(f"路径不存在: {repo}")
-            sys.exit(1)
+            sys.exit(EX_USAGE)
         content = render_spec_template(repo)
         if args.output:
             out = Path(args.output)
@@ -2137,11 +2227,11 @@ def cmd_spec(args) -> None:
         spec_path = Path(args.spec_path)
         if not spec_path.exists():
             console.error(f"Spec 文件不存在: {spec_path}")
-            sys.exit(1)
+            sys.exit(EX_USAGE)
         spec = parse_spec(spec_path)
         if spec is None:
             console.error(f"Spec 解析失败: {spec_path}")
-            sys.exit(1)
+            sys.exit(EX_USAGE)
         repo = Path(args.repo).resolve() if args.repo else None
         violations = validate_spec_l1(spec, repo)
         console.print(f"\n📋 Task Spec: {spec.title or spec_path.name}")
@@ -2157,7 +2247,7 @@ def cmd_spec(args) -> None:
                 console.print(f"  {i}. [{v.check}{sec}] {v.message}")
                 if v.suggestion:
                     console.print(f"     💡 {v.suggestion}")
-            sys.exit(1)
+            sys.exit(EX_ERROR)
     else:
         console.print("Usage: agent_go spec <template|validate> [args]")
         console.print("  template [repo] [--output PATH]  生成空白 Task Spec 模板")
@@ -2353,7 +2443,7 @@ def cmd_recover(args) -> None:
 
     if "error" in result:
         console.error(f"{result['error']}")
-        sys.exit(1)
+        sys.exit(EX_SYSTEM)
 
     console.print(f"\n📊 扫描结果：")
     for sub in result.get("recovered", []):
