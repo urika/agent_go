@@ -421,6 +421,44 @@ class TestPosixCommands:
         assert "参数不允许" in reason
 
 
+# ── TestPythonCCompileCheck: python -c 语法预检 ───────────────
+
+class TestPythonCCompileCheck:
+    """python -c 内容 compile 预检：单行无法表达的语法必须被拒绝，合法单行通过"""
+
+    def test_rejects_try_except_single_line(self):
+        """try/except 无法作为单行 -c 表达，compile 预检必须拒绝"""
+        cmd = 'python -c "from calculator import divide; try: divide(1,0); print(1); except ValueError: pass"'
+        ok, reason = _is_safe_verification_command(cmd)
+        assert not ok
+        assert "语法错误" in reason
+
+    def test_rejects_if_else_single_line(self):
+        """if/else 复合语句无法单行拼接，应被拒绝"""
+        cmd = 'python -c "if x > 0: print(1); else: print(0)"'
+        ok, reason = _is_safe_verification_command(cmd)
+        assert not ok
+        assert "语法错误" in reason
+
+    def test_accepts_simple_import_print(self):
+        """合法单行 import + print 应通过"""
+        cmd = 'python -c "import sys; print(sys.version)"'
+        ok, reason = _is_safe_verification_command(cmd)
+        assert ok, f"合法单行被拒绝: {reason}"
+
+    def test_accepts_multiple_statements(self):
+        """合法单行多语句（分号分隔）应通过"""
+        cmd = 'python -c "x = 1; y = 2; print(x+y)"'
+        ok, reason = _is_safe_verification_command(cmd)
+        assert ok, f"合法单行被拒绝: {reason}"
+
+    def test_accepts_python3_single_line(self):
+        """python3 -c 合法单行应同样通过"""
+        cmd = 'python3 -c "print(1 + 2)"'
+        ok, reason = _is_safe_verification_command(cmd)
+        assert ok, f"合法单行被拒绝: {reason}"
+
+
 # ── TestResourceLimits: 资源限制和沙箱环境 ────────────────────
 
 class TestResourceLimits:

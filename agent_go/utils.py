@@ -273,6 +273,12 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
     # 运行必 SyntaxError，浪费整轮执行。引号内 ; 是合法单行分隔符，不拒绝。
     if argv[0] in ("python", "python3") and len(argv) >= 3 and argv[1] == "-c":
         _content = argv[2]
+        # compile 预检：单行 -c 无法表达 try/except、if/else、def 等复合语句，
+        # 直接编译能精确拦截这类 SyntaxError，避免运行期浪费整轮执行。
+        try:
+            compile(_content, "<cmd>", "exec")
+        except SyntaxError as _e:
+            return False, f"python -c 语法错误: {_e}"
         _bad = []
         if "\n" in _content:
             _bad.append("含换行")
