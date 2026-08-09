@@ -184,11 +184,12 @@ def list_skills(project_root: Optional[Path] = None) -> list[dict]:
 
 
 def _tokenize_words(text: str) -> set[str]:
-    """分词：英文按单词提取，连续 CJK 按字符拆分。
+    """分词：英文按单词提取，连续 CJK 按 bigram（相邻两字符对）拆分。
 
-    中文无空格分词，`\\w+` 会把「组件开发与测试」整段合并为单个 token，
-    导致 CJK 关键词重叠判定失真。此函数把 CJK 连续串拆成单字符 token
-    （接近按字分词），英文保持单词粒度，使 overlap 统计可靠。
+    中英文混排无空格分词：单字符会丢失语义，导致高频字（管理/请求/组件/系统）
+    与任何中文任务都发生重叠，误配无关 skill（ISSUE-33，dogfooding 实测 Python
+    修复任务误配 frontend-react）。bigram 保留部分语义（"状态管理"→"状态"+"态管"
+    +"管理"），既避免单字符过度命中，也保留整串 CJK 的匹配能力。
     """
     tokens: set[str] = set()
     for m in re.finditer(r"[a-z0-9]+|[^\W\d_]+", text.lower()):
@@ -196,9 +197,12 @@ def _tokenize_words(text: str) -> set[str]:
         if re.fullmatch(r"[a-z0-9]+", w):
             tokens.add(w)
         else:
-            # CJK 串：按字符拆分
-            for ch in w:
-                tokens.add(ch)
+            # CJK 串：按相邻字符对（bigram）拆分；长度 1 时保留单字符
+            if len(w) >= 2:
+                for i in range(len(w) - 1):
+                    tokens.add(w[i:i + 2])
+            else:
+                tokens.add(w)
     return tokens
 
 

@@ -467,12 +467,31 @@ class TestResourceLimits:
     def test_apply_resource_limits_no_error(self):
         """_apply_resource_limits 在任何平台都不抛异常。
 
-        注意：必须 mock resource.setrlimit — 真实调用会把 RLIMIT_NPROC=64 等限制
+        注意：必须 mock resource.setrlimit — 真实调用会把资源限制
         施加到 pytest 进程本身，导致后续测试无法 fork/创建线程（污染全套件）。
         """
         with patch("resource.setrlimit") as mock_setrlimit:
             _apply_resource_limits()
             assert mock_setrlimit.call_count >= 1
+
+    def test_apply_resource_limits_no_nproc(self):
+        """ISSUE-31: _apply_resource_limits 不得设置 RLIMIT_NPROC。
+
+        macOS 上 RLIMIT_NPROC 是 per-user 语义，限制的是"该用户所有进程总数"。
+        当前用户已有大量进程（agent_go 多任务 + 后台进程累积）时，任何 fork
+        都会触发 BlockingIOError[Errno 35]（Resource temporarily unavailable），
+        使验证命令中的 git 子进程失败、正确代码被误判 failed。
+        """
+        import resource as _resource
+        calls = []
+        with patch("resource.setrlimit") as mock_setrlimit:
+            def _capture(*args):
+                calls.append(args[0])
+            mock_setrlimit.side_effect = _capture
+            _apply_resource_limits()
+        nproc_resources = [c for c in calls if c == _resource.RLIMIT_NPROC]
+        assert nproc_resources == [], f"不得设置 RLIMIT_NPROC，实际设置了 {nproc_resources}"
+
 
     def test_sandbox_env_removes_sensitive_keys(self):
         """_build_sandbox_env 应移除敏感环境变量"""

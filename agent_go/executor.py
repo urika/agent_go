@@ -223,13 +223,19 @@ def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, lo
 
 
 def _apply_resource_limits():
-    """子进程 preexec_fn: 设置 ulimit 资源限制，防止验证命令滥用系统资源。"""
+    """子进程 preexec_fn: 设置 ulimit 资源限制，防止验证命令滥用系统资源。
+
+    RLIMIT_NPROC 不设置（ISSUE-31）：macOS 上 RLIMIT_NPROC 是 per-user 语义，
+    限制的是"该用户所有进程总数"，而非验证命令的子进程树。当前用户已有大量
+    进程（agent_go 多任务 + 后台进程累积，实测 455+）时，任何 fork 都会触发
+    BlockingIOError[Errno 35]，使正确代码被误判失败。fork 炸弹防护交给
+    RLIMIT_CPU（CPU 时间耗尽即杀），而非不精确的 NPROC。
+    """
     try:
         import resource
         resource.setrlimit(resource.RLIMIT_CPU, (60, 60))                      # CPU 60s
         resource.setrlimit(resource.RLIMIT_FSIZE, (50 * 1024 * 1024,) * 2)     # 文件 50MB
         resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))                  # fd 256
-        resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))                     # 子进程 64
     except (ValueError, OSError, ImportError):
         pass  # 限制设置失败（或不支持 resource 模块）不阻塞执行
 
@@ -1185,10 +1191,29 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         retry_count, max_retries,
                         verification_history, verification_results)
 
-            # 3. 全部通过 → 退出
+            # 3. 全部通过 → 退出（ISSUE-32：验证通过但存在超范围改动时记录审计）
             if all_pass:
                 verify_ok = True
                 logger.info(f"验证全部通过 (attempt={attempt_label})")
+                try:
+                    _scope_check = _check_scope_compliance(worktree, subtask.get("files_hint", ""))
+                    if _scope_check and not _scope_check.get("compliant", True):
+                        _oos = _scope_check.get("out_of_scope", [])
+                        _miss = _scope_check.get("missing", [])
+                        logger.warning(
+                            f"[L1] {sub_id} 验证通过但范围偏差: "
+                            f"out_of_scope={_oos[:5]} missing={_miss[:5]}"
+                        )
+                        verification_results.append({
+                            "type": "scope_compliance",
+                            "passed": False,
+                            "out_of_scope": _oos[:10],
+                            "missing": _miss[:10],
+                            "reason": "验证通过但存在超范围改动（审计记录）",
+                        })
+                except Exception:
+                    # scope 检查失败（worktree 异常等）不阻断通过
+                    pass
                 break
 
             # S12-P1 G8：验证循环 kill_reason 感知（不重试预算熔断）
