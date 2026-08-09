@@ -144,13 +144,23 @@ def test_validate_plan_quality_warns_rejected_verification_command():
 
 def test_validate_plan_quality_detects_scope_and_requirement_gaps():
     result = validate_plan_quality([
-        {"id": "sub-1", "verification": "pytest tests", "files_hint": "src/a.py",
+        {"id": "sub-1", "verification": "pytest tests", "files": ["src/a.py"],
          "do_not_touch": ["src/a.py"], "requirement_ids": ["REQ-1"]},
     ], requirements=["REQ-1", "REQ-2"])
     assert result["status"] == "blocked"
     assert {issue["type"] for issue in result["blocking_issues"]} == {
         "scope_conflict", "requirement_coverage_incomplete",
     }
+
+
+def test_validate_plan_quality_files_hint_no_scope_conflict():
+    """tester 场景：files_hint 引用 do_not_touch 文件不触发 scope_conflict（仅 files 参与冲突检查）。"""
+    result = validate_plan_quality([
+        {"id": "sub-1", "verification": "pytest tests", "files_hint": "src/a.py",
+         "do_not_touch": ["src/a.py"]},
+    ])
+    assert result["status"] == "passed"
+    assert "scope_conflict" not in {issue["type"] for issue in result["blocking_issues"]}
 
 
 # ═══════════════════════════════════════════════════════════════
