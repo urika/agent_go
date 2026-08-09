@@ -42,9 +42,10 @@ DEFAULT_CONFIG = {
     },
     "verification": {
         "max_retries": 3,               # 验证失败后最大修复重试次数
-        "retry_timeout": 300,            # 每次修复重试超时（秒）
+        "retry_timeout": 300,           # 每次修复重试超时（秒）
         "run_timeout": 1800,            # 首跑硬超时基数（秒），按难度缩放（easy×1/medium×1.5/hard×2.5），0=禁用
-        "block_on_failure": True,        # 验证失败是否阻断下游依赖（--no-verify-block 可关）
+        "block_on_failure": True,       # 验证失败是否阻断下游依赖（--no-verify-block 可关）
+        "diverge_similarity_threshold": 0.3,  # 打地鼠检测：连续两次语义评估缺陷指纹相似度低于此值 → 提前终止重试
     },
     "goal": {
         "enabled": False,               # 是否在 TASK.md 注入 goal 指令（--goal 开启）

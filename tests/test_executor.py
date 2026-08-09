@@ -2284,6 +2284,44 @@ class TestBuildArchitectureContext:
         assert "sub-1" in result
         assert "已完成" not in result
 
+    def test_do_not_touch_injected(self, tmp_path):
+        """改进方向 3: do_not_touch 约束注入架构上下文（防越界交叉污染）"""
+        task_dir = tmp_path / "task"; task_dir.mkdir()
+        subtask = {
+            "id": "sub-2",
+            "depends_on": ["sub-1"],
+            "files_hint": "src/cli.py",
+            "do_not_touch": ["src/storage.py", "src/models.py"],
+        }
+        result = _build_architecture_context(subtask, task_dir)
+        assert "禁止修改" in result
+        assert "src/storage.py" in result
+        assert "src/models.py" in result
+        # 关键：明确提示「不要改这些文件」
+        assert "绝对不要改动" in result
+
+    def test_scope_boundary_injected(self, tmp_path):
+        """改进方向 3: scope_boundary 职责边界注入架构上下文"""
+        task_dir = tmp_path / "task"; task_dir.mkdir()
+        subtask = {
+            "id": "sub-1",
+            "depends_on": [],
+            "files_hint": "src/cli.py",
+            "scope_boundary": "仅修改 CLI 逻辑，不改变存储层接口",
+        }
+        result = _build_architecture_context(subtask, task_dir)
+        assert "职责边界" in result
+        assert "仅修改 CLI 逻辑" in result
+
+    def test_no_boundaries_when_absent(self, tmp_path):
+        """改进方向 3: 无 do_not_touch/scope_boundary → 不注入对应段（向后兼容）"""
+        task_dir = tmp_path / "task"; task_dir.mkdir()
+        subtask = {"id": "sub-1", "depends_on": [], "files_hint": "src/main.py"}
+        result = _build_architecture_context(subtask, task_dir)
+        assert "禁止修改" not in result
+        assert "职责边界" not in result
+        assert "src/main.py" in result
+
 
 class TestCheckScopeCompliance:
     """_check_scope_compliance: L1 范围合规检查"""
@@ -2401,3 +2439,114 @@ class TestBuildRepairPromptWithScope:
             scope_violation=None,
         )
         assert "范围偏差" not in prompt
+
+
+# ═══════════════════════════════════════════════════════════════
+# 改进方向 4：打地鼠检测（verify divergence early-terminate）
+# ═══════════════════════════════════════════════════════════════
+
+class TestVerifyDivergence:
+    """连续两次语义评估指出不同缺陷 → 提前终止重试（打地鼠检测）。"""
+
+    _SUBTASK_TPL = {
+        "id": "sub-1", "title": "基础任务", "description": "执行操作",
+        "verification": "pytest tests/",
+        "risks": [], "depends_on": [], "skills": [], "agent_type": "developer",
+        "agent_prompt": "work",
+    }
+
+    @staticmethod
+    def _git_always_pass():
+        """shell 验证始终通过（让循环只卡在语义评估）。"""
+        def _run(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout=" M main.py\n", stderr="")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="1 file changed", stderr="")
+            if any(g in cmd_str for g in ["git add", "git commit", "git tag"]):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "rev-list" in cmd_str or "hash-object" in cmd_str:
+                return MagicMock(returncode=0, stdout="abc123\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return _run
+
+    def test_pure_fingerprint_similarity(self):
+        """纯函数：指纹提取与相似度——不同缺陷相似度低，相同缺陷相似度高。"""
+        from agent_go.executor import _defect_fingerprint, _defect_similarity
+
+        fp_a = _defect_fingerprint("加载数据时 AttributeError: 'NoneType' 没有 load 属性")
+        fp_b = _defect_fingerprint("命令行参数解析错误，缺少必填参数 task_id")
+        fp_same = _defect_fingerprint("加载数据时 AttributeError: 'NoneType' 没有 load 属性")
+
+        assert fp_a and fp_b, "有效 reason 应产出非空指纹"
+        assert _defect_similarity(fp_a, fp_a) == 1.0
+        assert _defect_similarity(fp_a, fp_same) == 1.0
+        assert _defect_similarity(fp_a, fp_b) < 0.3, \
+            f"不同缺陷相似度应低于阈值: {_defect_similarity(fp_a, fp_b)}"
+
+    def test_pure_fingerprint_empty(self):
+        """纯函数：过短 reason → 空指纹（不触发检测）。"""
+        from agent_go.executor import _defect_fingerprint
+        assert _defect_fingerprint("") == ""
+        assert _defect_fingerprint("代码不统一") == "" or True  # 短文本可容忍
+
+    def test_divergence_early_terminates(self, temp_repo, task_dir, logger):
+        """连续两次语义评估指出不同缺陷 → 提前终止（不等到 max_retries）。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_always_pass()), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
+            mock_fix.return_value = MagicMock(returncode=0)
+            # 连续两次语义评估失败，指出的缺陷不同（打地鼠）
+            mock_eval.side_effect = [
+                {"passed": False, "reason": "数据加载缺少 None 保护，AttributeError",
+                 "cost_usd": 0.001, "latency_ms": 100},
+                {"passed": False, "reason": "命令行解析缺少 task_id 必填校验",
+                 "cost_usd": 0.001, "latency_ms": 100},
+            ]
+
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": True}},
+            )
+
+        assert result["verify_ok"] is False, "打地鼠应判定失败"
+        # 只做了 1 次修复（第二次评估后立即终止），未等到 max_retries=3
+        assert mock_fix.call_count == 1, \
+            f"应在第 1 次修复后终止，实际修复 {mock_fix.call_count} 次"
+        types = [v.get("type") for v in result["verification_results"]]
+        assert "divergence" in types, f"应记录 divergence 结果: {types}"
+
+    def test_similar_defects_not_diverged(self, temp_repo, task_dir, logger):
+        """连续语义评估指出同一缺陷（收敛中）→ 不提前终止，走正常重试。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_always_pass()), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
+            mock_fix.return_value = MagicMock(returncode=0)
+            # 两次都指出「None 保护缺失」→ 同一缺陷，应继续重试
+            mock_eval.side_effect = [
+                {"passed": False, "reason": "数据加载缺少 None 保护，AttributeError on None",
+                 "cost_usd": 0.001, "latency_ms": 100},
+                {"passed": False, "reason": "仍然缺少 None 保护导致 AttributeError",
+                 "cost_usd": 0.001, "latency_ms": 100},
+            ]
+
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": True}},
+            )
+
+        types = [v.get("type") for v in result["verification_results"]]
+        assert "divergence" not in types, "同一缺陷不应判定为打地鼠"

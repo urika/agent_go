@@ -326,6 +326,19 @@ def _build_architecture_context(subtask, task_dir):
             for sf in scope_files:
                 parts.append(f"  - `{sf}`")
 
+    # 禁止修改约束（SDD 边界传递，防止越界改动导致交叉污染）
+    do_not_touch = subtask.get("do_not_touch", []) or []
+    if do_not_touch:
+        parts.append("- **禁止修改（do_not_touch）**: 以下文件/模块不属于本子任务，绝对不要改动：")
+        for f in do_not_touch:
+            parts.append(f"  - `{f}`")
+        parts.append("  若你发现需要修改这些文件才能完成任务，请停止并说明原因（可能存在拆分或依赖设计问题）。")
+
+    # scope_boundary 语义边界（Planner 标注的职责边界）
+    scope_boundary = subtask.get("scope_boundary", "")
+    if scope_boundary and scope_boundary.strip():
+        parts.append(f"- **职责边界**: {scope_boundary.strip()}")
+
     if len(parts) <= 1:
         # 只有子任务 ID，没有有效上下文
         return ""
@@ -872,6 +885,48 @@ def _check_scope_compliance(worktree, files_hint):
     }
 
 
+def _defect_fingerprint(reason: str) -> str:
+    """从语义评估失败 reason 提取缺陷指纹。
+
+    打地鼠检测用：指纹应捕获「指出的缺陷是什么」，而非文本差异。策略：
+    1. 去除非中英文字符、空白、标点
+    2. 提取高频主题词（中文 bigram + 英文单词）
+    指纹为排序后的主题词集合字符串；不同缺陷 → 主题词集差异大。
+    """
+    import re as _re
+    text = _re.sub(r"[^\w\u4e00-\u9fff]+", "", (reason or "").lower())
+    if len(text) < 4:
+        return ""
+    tokens: set[str] = set()
+    # 英文单词（≥3 字符）与英文标识符（如 AttributeError、NoneType）
+    tokens.update(_re.findall(r"[a-z][a-z0-9_]{2,}", text))
+    # 中文 bigram（相邻两字，捕获中文缺陷描述）
+    cjk = _re.findall(r"[\u4e00-\u9fff]", text)
+    tokens.update("".join(cjk[i:i + 2]) for i in range(len(cjk) - 1))
+    # 去掉过于常见的噪声词（多为表述性动词/副词，不具判别力）
+    noise = {"the", "and", "that", "with", "this", "have", "from", "code", "test",
+             "代码", "实现", "问题", "需要", "应该", "当前", "没有", "存在", "进行",
+             "以及", "由于", "仍然", "还是", "导致", "造成", "出现", "仍然", "缺少",
+             "加载", "数据", "函数", "方法", "调用", "返回", "之后", "已经", "是否",
+             "无法", "不能", "没有", "报错", "失败", "异常", "错误", "还有", "并且",
+             "继续", "再次", "重新", "测试", "检查", "修复", "修改", "添加", "删除"}
+    tokens = {t for t in tokens if t not in noise}
+    if not tokens:
+        return ""
+    return " ".join(sorted(tokens))
+
+
+def _defect_similarity(fp_a: str, fp_b: str) -> float:
+    """计算两个缺陷指纹的相似度（Jaccard）。"""
+    set_a = set(fp_a.split())
+    set_b = set(fp_b.split())
+    if not set_a and not set_b:
+        return 1.0
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
                     task_dir=None, config=None, interrupt_event=None, initial_kill_reason=None):
@@ -1035,6 +1090,10 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             logger.info(f"L1 auto: 验证置信度={_l1_confidence_dict['level']}，自动启用语义评估")
 
     semantic_feedback: Optional[dict] = None
+    # 打地鼠检测（改进方向 4）：记录每次语义评估失败指出的缺陷指纹。
+    # 若连续两次语义评估指出的缺陷类型显著不同（相似度 < 阈值）→ agent 在
+    # 「修 A 漏 B」打地鼠而非收敛 → 提前终止重试，避免浪费 token。
+    _semantic_fail_fingerprints: list[str] = []
     if verification:
         cmds = [verification] if isinstance(verification, str) else verification
 
@@ -1197,6 +1256,11 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     all_pass = False
                     failed_cmds = ["<semantic_eval>"]
                     failed_outputs = [f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')}"]
+                    # 打地鼠检测：记录本次缺陷指纹
+                    _reason = str(semantic_feedback.get("reason", "") or "")
+                    _fp = _defect_fingerprint(_reason)
+                    if _fp:
+                        _semantic_fail_fingerprints.append(_fp)
 
                 # Phase 4: 持久化语义评估后的状态
                 if task_dir:
@@ -1311,6 +1375,33 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 verify_ok = False
                 logger.warning(f"验证失败，已达最大重试次数 ({max_retries})")
                 break
+
+            # 改进方向 4：打地鼠检测——连续两次语义评估指出不同缺陷 → 提前终止
+            # （agent 在「修 A 漏 B」打地鼠而非收敛，继续重试只是浪费 token）
+            _fp_len = len(_semantic_fail_fingerprints)
+            if _fp_len >= 2:
+                _sim = _defect_similarity(
+                    _semantic_fail_fingerprints[-2], _semantic_fail_fingerprints[-1])
+                _diverge_threshold = float(_cfg.get("verification", {}).get(
+                    "diverge_similarity_threshold", 0.3))
+                if _sim < _diverge_threshold:
+                    verify_ok = False
+                    logger.warning(
+                        f"[打地鼠检测] 连续两次语义评估指出不同缺陷 "
+                        f"(similarity={_sim:.2f} < {_diverge_threshold})，提前终止重试")
+                    log_event(logger, "verify_divergence", {
+                        "sub_id": sub_id, "attempt": retry_count,
+                        "similarity": round(_sim, 4), "max_retries": max_retries,
+                        "reasons": _semantic_fail_fingerprints[-2:],
+                    })
+                    verification_results.append({
+                        "type": "divergence",
+                        "passed": False,
+                        "similarity": round(_sim, 4),
+                        "reason": "连续两次语义评估指出不同缺陷（打地鼠），提前终止",
+                    })
+                    _latest_kill_reason[0] = "verify_divergence"
+                    break
 
             # S10 成本控制 L2：子任务累计成本上限（跨重试，防修复循环烧钱）。
             # 每次修复前读取 metering.jsonl 中该子任务累计 cost，超 per_subtask_budget×系数则
