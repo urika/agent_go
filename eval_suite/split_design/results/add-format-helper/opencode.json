@@ -1,0 +1,15 @@
+{
+
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "Add truncate_text function to src/utils.py",
+      "files": ["src/utils.py"],
+      "depends_on": [],
+      "difficulty": "easy",
+      "verification": "python -c \"from src.utils import truncate_text; assert truncate_text('hello') == 'hello'; assert truncate_text('a'*60) == 'a'*50 + '...'\"",
+      "rationale": "改动仅涉及一个文件中的一个函数，没有跨模块依赖，1 个任务足够"
+    }
+  ],
+  "overall_rationale": "单文件、单函数的新增，属于最小粒度改动，拆分 1 个子任务即可完成，不需要也不应该拆分为多个任务"
+}

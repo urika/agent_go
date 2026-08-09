@@ -1,0 +1,17 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "Add TaskStorage.find_by_id/update and implement cmd_done + register 'done' in main()",
+      "files": [
+        "src/storage.py",
+        "src/cli.py"
+      ],
+      "depends_on": [],
+      "difficulty": "medium",
+      "verification": "cd <repo> && python -m pytest tests/ -q && python -m src add 'smoke task' && ID=$(python -m src list all | awk '{print $1}' | tr -d '#' | head -1) && python -m src done \"$ID\" && python -m src list done | grep -q 'smoke task'",
+      "rationale": "改动面仅 2 个文件（src/storage.py、src/cli.py），且同属 src/ 包内、属于同一个功能闭环：TaskStorage 新增的 find_by_id/update 方法唯一消费者就是 cmd_done，脱离 CLI 命令无法独立验证。两者强耦合且需串行（cli 依赖 storage 新方法），拆成 2 个子任务只会强制 depends_on 串行、引入合并摩擦而毫无并行收益，故合并为 1 个任务。storage 端新增 find_by_id(task_id) 和 update(task)（按 id 就地替换并 _write 写回，返回 bool），cli 端 cmd_done 用它加载→查找→mark_done→写回，并在 main() 注册 done 分支。"
+    }
+  ],
+  "overall_rationale": "整体是单个中型改动：storage 层加 find_by_id/update 两个方法，cli 层加 cmd_done 并注册子命令，共触 2 个文件。按拆分原则第 1 条——改动面 <=2 个文件时优先 1 个任务，仅当真正跨模块、可独立验证时才拆分——这里两个文件同属 src/ 核心包，storage 新方法没有独立于 cmd_done 的用途（find_by_id/update 只被 cmd_done 调用），无法独立验证，因此合并为 1 个子任务。若拆为 2 个，子任务 2 必须 depends_on 子任务 1 串行执行，收益为零且增加 worktree 间 merge 的协调开销，故不拆。"
+}

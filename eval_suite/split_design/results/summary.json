@@ -1,0 +1,143 @@
+[
+  {
+    "task": "add-format-helper",
+    "agent": "claude",
+    "n": 1,
+    "files": [
+      "src/utils.py"
+    ],
+    "deps": []
+  },
+  {
+    "task": "add-format-helper",
+    "agent": "opencode",
+    "n": 1,
+    "files": [
+      "src/utils.py"
+    ],
+    "deps": []
+  },
+  {
+    "task": "fix-missing-default",
+    "agent": "claude",
+    "n": 1,
+    "files": [
+      "src/cli.py"
+    ],
+    "deps": []
+  },
+  {
+    "task": "fix-missing-default",
+    "agent": "opencode",
+    "n": 1,
+    "files": [
+      "src/cli.py"
+    ],
+    "deps": []
+  },
+  {
+    "task": "add-simple-caching",
+    "agent": "claude",
+    "n": 1,
+    "files": [
+      "src/storage.py",
+      "src/utils.py"
+    ],
+    "deps": []
+  },
+  {
+    "task": "add-simple-caching",
+    "agent": "opencode",
+    "n": 1,
+    "files": [
+      "src/storage.py",
+      "src/utils.py"
+    ],
+    "deps": []
+  },
+  {
+    "task": "implement-done-command",
+    "agent": "claude",
+    "n": 1,
+    "files": [
+      "src/cli.py",
+      "src/storage.py"
+    ],
+    "deps": []
+  },
+  {
+    "task": "implement-done-command",
+    "agent": "opencode",
+    "n": 1,
+    "files": [
+      "src/cli.py",
+      "src/storage.py"
+    ],
+    "deps": []
+  },
+  {
+    "task": "security-hardening-taskmgr",
+    "agent": "claude",
+    "n": 3,
+    "files": [
+      "src/cli.py",
+      "src/models.py",
+      "src/storage.py",
+      "tests/test_security.py"
+    ],
+    "deps": [
+      [
+        "sub-1",
+        "sub-2"
+      ]
+    ]
+  },
+  {
+    "task": "security-hardening-taskmgr",
+    "agent": "opencode",
+    "n": 2,
+    "files": [
+      "src/cli.py",
+      "src/models.py",
+      "src/storage.py",
+      "tests/test_security.py"
+    ],
+    "deps": [
+      [
+        "sub-1"
+      ]
+    ]
+  },
+  {
+    "task": "conditional-branching-datapipeline",
+    "agent": "claude",
+    "n": 3,
+    "files": [
+      "src/core/pipeline.py",
+      "src/stages/__init__.py",
+      "src/stages/transform.py",
+      "tests/test_branching.py"
+    ],
+    "deps": [
+      [
+        "sub-1",
+        "sub-2"
+      ]
+    ]
+  },
+  {
+    "task": "conditional-branching-datapipeline",
+    "agent": "opencode",
+    "n": 2,
+    "files": [
+      "src/core/pipeline.py",
+      "src/stages/transform.py",
+      "tests/test_branching.py"
+    ],
+    "deps": [
+      [
+        "sub-1"
+      ]
+    ]
+  }
+]

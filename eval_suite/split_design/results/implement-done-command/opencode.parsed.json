@@ -1,0 +1,17 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "实现 cmd_done 命令及 TaskStorage.update 方法",
+      "files": [
+        "src/storage.py",
+        "src/cli.py"
+      ],
+      "depends_on": [],
+      "difficulty": "medium",
+      "verification": "pytest tests/",
+      "rationale": "改动仅涉及 2 个文件且紧密耦合（cli.py 依赖 storage.py 的新方法），合并为 1 个任务避免跨 Agent 传递产物的开销，也消除了文件互斥风险。TaskStorage 新增 update 方法（load_all → 替换目标 task → _write），cli.py 新增 cmd_done 函数 + main 中注册 done 子命令。两个文件的修改在同一 Agent 内原子完成，天然无冲突。"
+    }
+  ],
+  "overall_rationale": "改动面仅 2 个文件（storage.py 加 update 方法，cli.py 加 cmd_done 函数和 main 注册），且 cli.py 直接依赖 storage.py 的新 API，属于高度耦合的单模块改动。按原则 1（改动面 ≤2 文件时优先 1 个任务），合并为 1 个子任务，不产生不必要的拆分，也不需要串行依赖。"
+}

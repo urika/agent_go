@@ -1,0 +1,14 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "修改 cmd_list 默认 status 为 \"all\" 并同步更新 main() 调用点",
+      "files": ["src/cli.py"],
+      "depends_on": [],
+      "difficulty": "easy",
+      "verification": "pytest tests/test_cmd_list.py -v && pytest tests/ -q",
+      "rationale": "改动集中在 src/cli.py 一个文件内的两处：cmd_list 函数签名（status 默认值从 \"\" 改为 \"all\"）以及 main() 中的调用点（无参 list 时传入 \"all\" 而非 \"\"）。现有守卫逻辑 `if status and status != \"all\"` 已能同时满足三个要求——默认 \"all\" 显示全部任务、None 作为假值被防御性放行（等价默认行为）、\"todo\" 正常过滤，因此无需改动其它模块。测试文件 tests/test_cmd_list.py 是 ground-truth 断言，不得修改，只作为验证依据。按拆分原则第 1 条（改动面 <= 2 个文件优先 1 个任务），不拆分。"
+    }
+  ],
+  "overall_rationale": "该任务是单文件、两处小改动的 easy 级修复，属于小型改动，按拆分原则第 1 条合并为 1 个子任务。改动不跨模块（仅 src/cli.py）、不涉及多文件集、可独立完整验证，拆分反而会引入额外的 worktree 合并开销与潜在冲突风险，故 1 个任务即为最优拆分。"
+}

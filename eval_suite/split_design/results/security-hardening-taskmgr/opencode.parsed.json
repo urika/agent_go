@@ -1,0 +1,31 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "Implement all source-level security hardening",
+      "files": [
+        "src/cli.py",
+        "src/storage.py",
+        "src/models.py"
+      ],
+      "depends_on": [],
+      "difficulty": "hard",
+      "verification": "pytest tests/ -q && python -c \"import sys; sys.path.insert(0, '.'); from src.models import Task; assert callable(Task.sanitize); assert Task.sanitize('<b>xss</b>') == 'xss'\"",
+      "rationale": "4 项源改动中有 3 项在 src/cli.py（输入校验+argparse 类型检查），合并到同一子任务避免文件冲突；storage.py 和 models.py 是独立文件，与 cli.py 无交叉，可安全放在同一子任务中一次性实现。运行全部现有测试确保无回归。"
+    },
+    {
+      "id": "sub-2",
+      "title": "Write security regression tests covering all 4 attack vectors",
+      "files": [
+        "tests/test_security.py"
+      ],
+      "depends_on": [
+        "sub-1"
+      ],
+      "difficulty": "medium",
+      "verification": "pytest tests/test_security.py -v",
+      "rationale": "测试必须验证已实现的加固逻辑（描述过长/元字符/路径穿越/ID 格式/HTML 过滤），因此在 sub-1 完成后执行。单独一个测试文件，无跨文件冲突。"
+    }
+  ],
+  "overall_rationale": "拆为 2 个子任务而非更多：cli.py 中两项改动（输入校验 + argparse 类型验证）必须合并（同一文件不可分给两个子任务）；storage.py 和 models.py 与 cli.py 无文件冲突，合入 sub-1 节省一个子任务。测试文件（sub-2）与源码有依赖关系，自然分离以验证实际加固行为。若拆为 4 个单独子任务会引入不必要的人工合并开销和拓扑复杂度，而合并为 1 个子任务虽然可行但会失去实现/测试的职责分离和依赖验证。2 个子任务是该场景的最佳平衡点。"
+}

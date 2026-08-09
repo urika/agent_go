@@ -1,0 +1,32 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "Add BranchRouterStage to the transform module",
+      "files": ["src/stages/transform.py", "src/stages/__init__.py"],
+      "depends_on": [],
+      "difficulty": "easy",
+      "verification": "pytest tests/test_transform.py -q",
+      "rationale": "BranchRouterStage is a self-contained new stage in src/stages/transform.py, following the existing FilterStage/MapStage/AggregateStage pattern (name/inputs/outputs/process). It is fully independent from the pipeline engine and verifiable on its own against the existing transform tests (no regression). Also exports it from src/stages/__init__.py so downstream consumers can import it from the package. No dependency on pipeline changes, so it can run in parallel with sub-2."
+    },
+    {
+      "id": "sub-2",
+      "title": "Add run_branch, run_fanout, and dry_run to Pipeline",
+      "files": ["src/core/pipeline.py"],
+      "depends_on": [],
+      "difficulty": "hard",
+      "verification": "pytest tests/test_pipeline.py -q",
+      "rationale": "All three engine features (run_branch, run_fanout, dry_run) live in src/core/pipeline.py and share the same infrastructure: Context, the stage-execution loop, and ThreadPoolExecutor. Bundling them keeps one agent owning the entire engine file (no file conflicts), and the module boundary matches an independently verifiable unit — existing run/run_async/error/callback behavior must keep passing. run_fanout is the hardest part (per-input Context copies + thread-safe result collection); grouping it with the other pipeline changes avoids artificially splitting one file across serial tasks."
+    },
+    {
+      "id": "sub-3",
+      "title": "Write tests/test_branching.py covering branch, fanout, dry_run, and a mixed pipeline",
+      "files": ["tests/test_branching.py"],
+      "depends_on": ["sub-1", "sub-2"],
+      "difficulty": "medium",
+      "verification": "pytest tests/test_branching.py -v",
+      "rationale": "The test file exercises the integration of BranchRouterStage (sub-1) with run_branch/run_fanout/dry_run (sub-2): 3-branch routing executes only the matching branch, 5-input fanout runs 5 parallel pipelines and collects all results, dry_run logs without mutating context, and a mixed conditional+fanout definition. It therefore must merge both artifacts, so it depends on both sub-1 and sub-2. Kept as its own task because it is a distinct deliverable with its own verification gate, which keeps sub-1/sub-2's verification focused on regression rather than on untested new API."
+    }
+  ],
+  "overall_rationale": "The change surface is hard-rated and spans three files across two independent modules plus a new test file: the pipeline engine (src/core/pipeline.py), the stages module (src/stages/transform.py plus an __init__.py export), and the integration tests (tests/test_branching.py). One subtask would be too coarse — it would force a single agent to own both engine and stage code and blur which module failed verification. Two subtasks (implementation + tests) would merge two independent, disjoint modules into one agent and serialize work that can run in parallel. Three is the minimum that respects both the file-mutual-exclusion rule and independent verifiability: sub-1 (stage) and sub-2 (engine) touch disjoint file sets and run concurrently with their own regression gates, while sub-3 depends on both to write the integration tests. Splitting further (e.g. run_branch / run_fanout / dry_run as separate tasks) would break file exclusivity — they all edit src/core/pipeline.py and would have to be serialized on the same file, adding merge conflicts and overhead with no verification benefit."
+}

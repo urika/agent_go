@@ -1,0 +1,17 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "Add cached decorator to utils.py and apply to storage.py load_all",
+      "files": [
+        "src/utils.py",
+        "src/storage.py"
+      ],
+      "depends_on": [],
+      "difficulty": "easy",
+      "verification": "pytest tests/ -q",
+      "rationale": "仅涉及 2 个文件且改动量小：utils.py 新增 cached 装饰器 + clear_cache，storage.py 导入并用 @cached 修饰 load_all。拆分为两个子任务会引入不必要的跨工作树依赖和 merge 开销，而合并为一个任务可由单个 agent 原子完成，无合并冲突风险。"
+    }
+  ],
+  "overall_rationale": "改动面仅 2 个文件且高度耦合（storage.py 依赖 utils.py 的装饰器），拆分开意味着 sub-2 必须 depends_on sub-1 串行执行，不但没有并行收益，反而增加 git merge 步骤和验证复杂度。根据拆分原则第 1 条，1 个任务是最优选择。"
+}

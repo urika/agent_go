@@ -1,0 +1,14 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "在 src/utils.py 中新增 truncate_text 函数",
+      "files": ["src/utils.py"],
+      "depends_on": [],
+      "difficulty": "easy",
+      "verification": "cd /Users/jinsongwang/workspace/agent_go/eval_suite/fixtures/task-mgr && pytest tests/ -q && python3 -c \"from src.utils import truncate_text; assert truncate_text('hello') == 'hello'; assert truncate_text('hello world', 5) == 'hello...'; assert truncate_text('', 0) == '...'\"",
+      "rationale": "改动只涉及 src/utils.py 一个文件、一个纯函数（无跨模块依赖），完全满足原则 1 中『改动面 <=2 个文件时优先 1 个任务』的条件。函数无状态、无外部依赖，可在单任务内独立实现并验证，无需拆分。"
+    }
+  ],
+  "overall_rationale": "该任务为 easy 级小型改动：仅在 src/utils.py 中新增一个纯函数 truncate_text，改动面只有 1 个文件，不涉及其他模块、状态或共享代码。按拆分原则 1（改动面 ≤2 个文件优先 1 个任务）和原则 4（小型改动 1 个子任务），拆为 1 个子任务是最优解——既避免制造不必要的拆分（任务间传递产物、worktree 开销远超函数本身价值），也不存在文件互斥或合并冲突问题。单任务即可独立完成实现、docstring 与验证。"
+}

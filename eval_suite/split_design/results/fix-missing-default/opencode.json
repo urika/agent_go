@@ -1,0 +1,14 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "Fix cmd_list default status from empty string to 'all'",
+      "files": ["src/cli.py"],
+      "depends_on": [],
+      "difficulty": "easy",
+      "verification": "pytest tests/test_cli.py -k test_cmd_list -v",
+      "rationale": "Only one file (src/cli.py) needs changes: signature change in cmd_list and a corresponding call-site update in main(). Both changes are in the same file and tightly coupled, so a single task avoids unnecessary overhead."
+    }
+  ],
+  "overall_rationale": "1 subtask — the entire fix touches only src/cli.py (signature + call site). Merging into one task avoids cross-file coordination overhead and matches the '<=2 files → 1 task' rule."
+}

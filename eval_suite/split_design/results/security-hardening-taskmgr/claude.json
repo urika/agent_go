@@ -1,0 +1,34 @@
+```json
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "Harden src/cli.py input validation and add argparse-based task-id type validation",
+      "files": ["src/cli.py"],
+      "depends_on": [],
+      "difficulty": "medium",
+      "verification": "python3 -c \"import sys; sys.path.insert(0, '.'); from src.cli import cmd_add; assert cmd_add('x'*201) != 0, 'long desc rejected'; assert cmd_add('rm -f /; echo pwn') != 0, 'shell metachar rejected'; assert cmd_add('buy groceries') == 0, 'valid accepted'\" && python3 -m pytest tests/test_models_utils.py -q",
+      "rationale": "任务点 1（cmd_add/cmd_list 输入校验：>200 字符拒绝、shell 元字符 `; & | $ \\`` 拒绝）和任务点 2（argparse 替代手工 sys.argv 解析，task id 必须匹配 [0-9a-f]{8} 正则）都只改 src/cli.py，按文件互斥原则必须合并到同一子任务。约定：非法输入时命令返回非 0 退出码而非抛异常（与现有 cmd 函数返回 int 的约定一致），供 sub-3 编写一致的安全测试。"
+    },
+    {
+      "id": "sub-2",
+      "title": "Add path traversal protection to src/storage.py and sanitize() to src/models.py",
+      "files": ["src/storage.py", "src/models.py"],
+      "depends_on": [],
+      "difficulty": "easy",
+      "verification": "python3 -c \"import sys; sys.path.insert(0, '.'); from pathlib import Path; from src.storage import TaskStorage; from src.models import Task; assert Task.sanitize('<b>hi</b>') == 'hi', 'HTML stripped'; assert len(Task.sanitize('x'*300)) <= 200, 'max 200 chars'; \ntry: TaskStorage(Path('safe/../evil.json')); assert False, 'must reject ..'\nexcept ValueError: pass\"",
+      "rationale": "任务点 3（storage.py 拒绝含 `..` 的路径，约定在 __init__ 校验并抛 ValueError）与任务点 4（models.py 的 sanitize() classmethod：剥离 HTML 标签、保留纯文本且 ≤200 字符）都是数据层的单点小型加固改动，共 2 个文件，符合「改动面 ≤2 个文件时优先 1 个任务」，合并可避免为两个各约 5 行的改动制造不必要的并行。storage 与 models 均仅由本任务修改，与 sub-1 无文件重叠、无依赖，可与 sub-1 并行。"
+    },
+    {
+      "id": "sub-3",
+      "title": "Write tests/test_security.py covering all 4 attack vectors",
+      "files": ["tests/test_security.py"],
+      "depends_on": ["sub-1", "sub-2"],
+      "difficulty": "medium",
+      "verification": "python3 -m pytest tests/test_security.py -q",
+      "rationale": "任务点 5 要求一个覆盖 4 个攻击向量的单一测试文件 tests/test_security.py。由于它同时针对 cli.py、storage.py、models.py 的行为做断言，为避免文件冲突，测试文件只能由一个子任务独占，且必须先合并 sub-1、sub-2 的产物（经 git merge 上游 tag）才能写出真实可过的测试，因此 depends_on [sub-1, sub-2]。测试内容依据任务规格书写：描述超长/含 shell 元字符被拒、非法 task id 被 argparse 类型校验拒绝、含 `..` 的路径被拒、sanitize() 剥离 HTML 且 ≤200 字符。"
+    }
+  ],
+  "overall_rationale": "整个加固改动横跨 3 个独立源模块（cli / storage / models）加 1 个横切测试文件，属于大型跨模块改动，落在 2-4 个子任务的允许范围内，拆为 3 个：sub-1 独占 cli.py（任务点 1+2 因文件互斥必须同任务），sub-2 独占 storage.py+models.py（任务点 3+4，两个同为数据层的微小改动合并以满足「子任务数量尽量少」），sub-3 独占 tests/test_security.py 并依赖前两者（单文件覆盖全部 4 个向量，须在源码合并后编写）。不拆 1 个：改动确实跨模块且各自可独立验证（3 个不同源文件 + 1 个验收测试门），单个 agent 需同时持有 3 个模块上下文且无法并行。不拆 4 个：storage 与 models 各只有约 5 行同层改动，分成两个 agent 只会增加合并与协调开销而无并行收益。依赖图为 sub-1、sub-2 并行，sub-3 合并两者后统一验收；sub-1 与 sub-2 之间无跨文件依赖（cmd_add 按任务点 1 独立实现拒绝式校验，不依赖 models.sanitize()），因此两条源改动链完全并行，串行仅发生在测试集成这一步。"
+}
+```

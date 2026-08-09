@@ -1,0 +1,30 @@
+{
+  "subtasks": [
+    {
+      "id": "sub-1",
+      "title": "Add run_branch, run_fanout, and dry_run mode to Pipeline",
+      "files": [
+        "src/core/pipeline.py"
+      ],
+      "depends_on": [],
+      "difficulty": "hard",
+      "verification": "pytest tests/test_pipeline.py -v",
+      "rationale": "All three features (run_branch, run_fanout, dry_run) modify only pipeline.py. They share the Pipeline class and can be unit-tested together via the existing test harness. Keeping them in one subtask avoids unnecessary file contention and allows independent verification."
+    },
+    {
+      "id": "sub-2",
+      "title": "Add BranchRouterStage and comprehensive branching/fanout/dry_run tests",
+      "files": [
+        "src/stages/transform.py",
+        "tests/test_branching.py"
+      ],
+      "depends_on": [
+        "sub-1"
+      ],
+      "difficulty": "medium",
+      "verification": "pytest tests/test_branching.py tests/test_transform.py -v",
+      "rationale": "BranchRouterStage goes into transform.py alongside existing stages. The new test_branching.py covers all 4 scenarios (branch, fanout, dry_run, mixed) and depends on sub-1's Pipeline features. Bundling the stage class with its tests avoids a third subtask, and the stage can be verified independently with test_transform.py."
+    }
+  ],
+  "overall_rationale": "2 subtasks is the minimal split: (1) pipeline.py owns all core logic — 3 features in 1 file, independently verifiable; (2) transform.py adds BranchRouterStage + comprehensive integration tests. A single subtask would work but prevents incremental verification of pipeline logic before adding tests; 3+ subtasks would over-split the 2-file production change (violating '改动面优先 1 个任务' principle)."
+}
