@@ -10,7 +10,7 @@ task: |
   并更新 `main()` 中的调用，确保 `all` 状态显示全部任务（当前行为不变）。
 verification:
   - "python -m pytest tests/test_models_utils.py -q"
-  - "python -c \"from src.cli import cmd_list; assert cmd_list() == 0; print('OK')\""
+  - "python -m pytest tests/test_cmd_list.py -q"
 timeout: 444
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）

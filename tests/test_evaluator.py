@@ -92,6 +92,36 @@ class TestGetWorktreeDiff:
         diff = _get_worktree_diff(repo)
         assert "a.txt" in diff or "world" in diff
 
+    def test_multiple_commits_returns_cumulative_diff(self, tmp_path):
+        """修复分多次 commit 时，应返回 root..HEAD 累积 diff（而非仅最近一次 commit 的 diff）。
+
+        这是语义评估误判修复：evaluator 用 `git show HEAD` 只看最近 commit 的增量，
+        导致评估器看不到此前已提交的签名/结构修改。累积 diff 覆盖子任务全部改动。
+        """
+        import subprocess
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True, check=True)
+        # 初始 commit（base）
+        (repo / "cli.py").write_text("def f(x=''):\n    pass\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True, check=True)
+        # commit 1：改签名
+        (repo / "cli.py").write_text("def f(x='all'):\n    pass\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "fix signature"], cwd=str(repo), capture_output=True, check=True)
+        # commit 2：改调用处（工作区干净）
+        (repo / "cli.py").write_text("def f(x='all'):\n    return x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "fix call"], cwd=str(repo), capture_output=True, check=True)
+
+        diff = _get_worktree_diff(repo)
+        # 累积 diff 应包含 commit1 的签名改动（"x='all'"）
+        assert "x='all'" in diff, f"累积 diff 应包含第一次 commit 的签名改动: {diff}"
+        assert "return x" in diff, f"累积 diff 应包含第二次 commit 的改动: {diff}"
+
 
 # ═══════════════════════════════════════════════════════════════
 # evaluate_semantic 主体测试（mock LLM API + git diff）

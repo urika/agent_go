@@ -397,7 +397,15 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _get_worktree_diff(worktree: Path) -> str:
-    """获取 worktree 中的变更 diff — 工作区未提交用 git diff HEAD，已提交用 git show HEAD。"""
+    """获取 worktree 中的变更 diff。
+
+    累积语义（ISSUE：修复分多次 commit 时语义评估误判）：
+    1. 工作区未提交 → `git diff HEAD`（未提交变更）
+    2. 工作区干净 → `git diff <root>..HEAD`（从根 commit 到 HEAD 的**累积** diff，
+       而非 `git show HEAD` 的单次 commit diff）。agent_go 子任务分支从 fixture
+       初始状态（无 parent 的根 commit）创建，root..HEAD 覆盖子任务全部改动；
+       修复分多次 commit 时，评估器能看到此前已提交的签名/结构修改。
+    """
     import subprocess
     result = subprocess.run(
         ["git", "diff", "HEAD"],
@@ -405,11 +413,18 @@ def _get_worktree_diff(worktree: Path) -> str:
     )
     diff = result.stdout
     if not diff.strip():
-        result = subprocess.run(
-            ["git", "show", "HEAD", "--no-renames", "--format="],
+        # 定位根 commit（无 parent）作为 base，取累积 diff
+        root_result = subprocess.run(
+            ["git", "rev-list", "--max-parents=0", "HEAD"],
             cwd=str(worktree), capture_output=True, text=True,
         )
-        diff = result.stdout
+        if root_result.returncode == 0 and root_result.stdout.strip():
+            base = root_result.stdout.strip().splitlines()[0]
+            result = subprocess.run(
+                ["git", "diff", f"{base}..HEAD", "--no-renames"],
+                cwd=str(worktree), capture_output=True, text=True,
+            )
+            diff = result.stdout
     return diff if result.returncode == 0 else ""
 
 
