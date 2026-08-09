@@ -56,7 +56,6 @@ def validate_plan_quality(
         else:
             warnings.append({"type": "missing_verification", "subtask_id": sid})
         files = set(st.get("files", []) or [])
-        files.update(f.strip() for f in str(st.get("files_hint", "")).split(",") if f.strip() and f.strip() != "*")
         forbidden = set(st.get("do_not_touch", []) or [])
         overlap = sorted(files & forbidden)
         if overlap:
