@@ -57,6 +57,12 @@ hard:
 > - **可重复性**：easy 任务（add-format-helper / fix-missing-default）和 add-simple-caching 稳定 3/3 通过；implement-done-command 1/3、conditional-branching 2/3、security-hardening 0/3（均为 verification_failure，原因稳定可解释）
 > - pass_rate_diagnostic=0.958，valid_cost_usd=$0.18，timeout_rate=0
 > - **结论**：系统逻辑可重复；失败集中在 hard/high_variance 任务且原因一致（verification_failure），符合 ADR-009"失败原因稳定可解释"门禁
+>
+> **阶段 C Review 修复（2026-08-09）**：
+> - **P0 分类缺口**：`classify_failure` 在 `status in {completed, no_changes}` 时直接返回 None，未检查语义评估失败 → implement-done-command r1 / conditional-branching r1 的 `binary_pass=false` 但 `failure_class=null`。
+> - **修复**：`failure.py` 在 completed/no_changes 分支检查 `verification_results` 中 `type=="semantic" && passed is False` → 返回 `verification_failure`。提交 609b94a，全量 1967 测试通过。
+> - **子集重验**：重跑 implement-done-command + conditional-branching + security-hardening（3 任务 × 3 repeat = 9 条），基线 `eval_suite/baselines/golden-subset-20260809/`。**0/6 失败缺 failure class**（全部 verification_failure），确认修复生效。
+> - **P1 记录**：implement-done-command 跨 repeat 不稳定（语义验证时好时坏）；security-hardening 对 deepseek-v4-flash 超出模型能力（应标记为模型局限性，不用于判断产品整体通过率）。
 
 ## 阶段 D：代表性实验
 

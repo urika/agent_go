@@ -1,0 +1,46 @@
+{
+  "implement-done-command": {
+    "task_version": "b7236f20a60f3da3",
+    "suites": [
+      "golden"
+    ],
+    "risk_types": [
+      "cross_file",
+      "cli"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "conditional-branching-datapipeline": {
+    "task_version": "eac68ac34b7c2a91",
+    "suites": [
+      "golden"
+    ],
+    "risk_types": [
+      "branching",
+      "pipeline"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "high",
+    "high_variance": true,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "security-hardening-taskmgr": {
+    "task_version": "eb8de8793b04200a",
+    "suites": [
+      "golden"
+    ],
+    "risk_types": [
+      "security"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "high",
+    "high_variance": true,
+    "semantic_probe": true,
+    "delivery_probe": true
+  }
+}

@@ -1,0 +1,29 @@
+
+🔍 运行前模型-价格预检（探测实际后端 + 校验定价）…
+  deepseek-v4-flash → 实际 deepseek-v4-flash [✅ 有定价 deepseek-v4-flash ($ 0.14/0.28)]
+  ✅ 全部模型有定价，可安全运行
+🧪 bench 开始（走 harness）: 3 任务 × 1 模型 × 3 重复 = 9 次执行
+   模型: deepseek-v4-flash
+   输出: /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/golden-subset-20260809/results.jsonl
+   并发度: 1（--bench-parallel 可调）
+
+[1/9] implement-done-command | deepseek-v4-flash | repeat=1
+
+[2/9] implement-done-command | deepseek-v4-flash | repeat=2
+
+[3/9] implement-done-command | deepseek-v4-flash | repeat=3
+
+[4/9] security-hardening-taskmgr | deepseek-v4-flash | repeat=1
+
+[5/9] security-hardening-taskmgr | deepseek-v4-flash | repeat=2
+
+[6/9] security-hardening-taskmgr | deepseek-v4-flash | repeat=3
+
+[7/9] conditional-branching-datapipeline | deepseek-v4-flash | repeat=1
+
+[8/9] conditional-branching-datapipeline | deepseek-v4-flash | repeat=2
+
+[9/9] conditional-branching-datapipeline | deepseek-v4-flash | repeat=3
+
+✅ bench 完成: 9 条结果 → /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/golden-subset-20260809/results.jsonl
+   下一步: agent_go eval models --results /Users/jinsongwang/workspace/agent_go/eval_suite/baselines/golden-subset-20260809/results.jsonl
