@@ -1,0 +1,160 @@
+{
+  "add-format-helper": {
+    "task_version": "d16a321bf23fdcf6",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "single_file"
+    ],
+    "business_relevance": "medium",
+    "runtime_cost": "low",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "fix-missing-default": {
+    "task_version": "cfcc49a54c3219bd",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "bugfix"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "low",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "add-task-priority": {
+    "task_version": "ec1a5b0f0d0b3c6f",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "feature"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "low",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "add-error-handling": {
+    "task_version": "a855e93bdc2bb578",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "error_handling"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "low",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "implement-done-command": {
+    "task_version": "b7236f20a60f3da3",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "cross_file",
+      "cli"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "email-validator": {
+    "task_version": "2af7672640ab3c28",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "semantic_probe"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": true,
+    "delivery_probe": true
+  },
+  "integration-tests-datapipeline": {
+    "task_version": "18b6bcbfdf3ee2f7",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "integration",
+      "pipeline"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "high",
+    "high_variance": true,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "refactor-to-dict": {
+    "task_version": "4191744d48922a8c",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "refactor"
+    ],
+    "business_relevance": "medium",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "safe-file-reader": {
+    "task_version": "09e3e4ccbbfc18d4",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "semantic_probe",
+      "security"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": true,
+    "delivery_probe": true
+  },
+  "add-tag-system": {
+    "task_version": "c9fd25fdb359261b",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "data_model",
+      "cross_file"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "add-metrics-system": {
+    "task_version": "0aa27d4add3ebcb4",
+    "suites": [
+      "phaseD"
+    ],
+    "risk_types": [
+      "observability"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "high",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  }
+}

@@ -142,9 +142,25 @@ _CMD_ARG_RULES = {
     "mypy":   {"": {"flags": r'^(-v|--strict|--ignore-missing-imports|--config-file=\S+|--no-error-summary|--show-error-codes|--show-error-context|--python-version=\S+|--platform=\S+|--disable-error-code=\S+|--enable-error-code=\S+)$',
                      "positionals": r'^[\w./\-_]+$'}},
     "manage.py": {"": {"flags": r'^(--settings=\S+|--pythonpath=\S+|--no-color|--verbosity=\S+|--traceback|--dry-run|--check|--list|--merge|--name=\S+|--empty|--run-syncdb|--database=\S+|--noinput|--skip-checks|--force-color|--keepdb|--parallel|--failfast|--tag=\S+|--exclude-tag=\S+)$',
-                       "positionals": r'^[\w.:\-_]+$'}},
+                       "positionals": r'^[\w.:\-_]+$'},
+                  "shell": {"flags": r'^(-c)$',
+                            "positionals": r'^[\s\S]*$'},
+                  "migrate": {"flags": r'^(--plan|--database=\S+|--fake|--list)$',
+                              "positionals": r'^[\w\-_]+$'},
+                  "makemigrations": {"flags": r'^(--check|--dry-run|--name=\S+|--empty|--merge)$',
+                                     "positionals": r'^[\w\-_]+$'},
+                  "test": {"flags": r'^(--verbosity=\S+|--noinput|--failfast|--keepdb|--parallel|--tag=\S+|--exclude-tag=\S+)$',
+                           "positionals": r'^[\w.\-_:]+$'}},
     "django-admin": {"": {"flags": r'^(--settings=\S+|--pythonpath=\S+|--no-color|--verbosity=\S+|--traceback|--dry-run|--check|--skip-checks)$',
-                           "positionals": r'^[\w.:\-_]+$'}},
+                           "positionals": r'^[\w.:\-_]+$'},
+                     "shell": {"flags": r'^(-c)$',
+                               "positionals": r'^[\s\S]*$'},
+                     "migrate": {"flags": r'^(--plan|--database=\S+|--fake|--list)$',
+                                 "positionals": r'^[\w\-_]+$'},
+                     "makemigrations": {"flags": r'^(--check|--dry-run|--name=\S+|--empty|--merge)$',
+                                        "positionals": r'^[\w\-_]+$'},
+                     "test": {"flags": r'^(--verbosity=\S+|--noinput|--failfast|--keepdb|--parallel|--tag=\S+|--exclude-tag=\S+)$',
+                              "positionals": r'^[\w.\-_:]+$'}},
     "black":  {"--check": {"flags": r'^(-v|--diff|--config=\S+|--line-length=\S+|--exclude=\S+)$',
                            "positionals": r'^[\w./\-_]+$'}},
     "isort":  {"--check": {"flags": r'^(-v|--diff|--profile=\S+|--config-file=\S+)$',
@@ -318,29 +334,40 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
             return False, f"别名目标不存在: {rules_entry}"
         rules_entry = target
 
-    # 尝试匹配子命令（最长前缀优先）
-    for sub in sorted(rules_entry.keys(), key=len, reverse=True):
-        if not sub:
-            continue
-        sub_tokens = sub.split()
-        if len(remaining) >= len(sub_tokens) and remaining[:len(sub_tokens)] == sub_tokens:
-            rule_val = rules_entry[sub]
-            # 子命令 alias（如 "-m pytest": "pytest"；或自引用如 python manage.py → manage.py）
-            if isinstance(rule_val, str):
-                target_rules = rules_entry.get(rule_val)
-                if target_rules is None or isinstance(target_rules, str):
-                    # alias 指向其他顶层命令（如 "pytest"）
-                    target_entry = _CMD_ARG_RULES.get(rule_val)
-                    if target_entry is None or isinstance(target_entry, str):
-                        return False, f"子命令别名目标不存在: {rule_val}"
-                    target_rules = target_entry.get("")
-                    if target_rules is None:
-                        return False, f"子命令别名目标无默认规则: {rule_val}"
-                matched_rules = target_rules
-            else:
-                matched_rules = rule_val
-            remaining = remaining[len(sub_tokens):]
-            break
+    # 尝试匹配子命令（最长前缀优先），外层 while 支持多层 alias 重定向
+    # 例：python manage.py shell ... → python alias 到 manage.py → 再匹配 shell 子命令
+    while True:
+        sub_matched = False
+        for sub in sorted(rules_entry.keys(), key=len, reverse=True):
+            if not sub:
+                continue
+            sub_tokens = sub.split()
+            if len(remaining) >= len(sub_tokens) and remaining[:len(sub_tokens)] == sub_tokens:
+                sub_matched = True
+                rule_val = rules_entry[sub]
+                # 子命令 alias（如 "-m pytest": "pytest"；或自引用如 python manage.py → manage.py）
+                if isinstance(rule_val, str):
+                    target_rules = rules_entry.get(rule_val)
+                    if target_rules is None or isinstance(target_rules, str):
+                        # alias 指向其他顶层命令或自引用 → 推进 remaining 并切换 rules_entry 重新匹配
+                        target_entry = _CMD_ARG_RULES.get(rule_val)
+                        if target_entry is None:
+                            return False, f"子命令别名目标不存在: {rule_val}"
+                        if isinstance(target_entry, str):
+                            return False, f"别名目标也是别名: {rule_val} -> {target_entry}"
+                        remaining = remaining[len(sub_tokens):]
+                        rules_entry = target_entry
+                        break  # 退出内层 for，外层 while 用新 rules_entry 重新匹配
+                    matched_rules = target_rules
+                else:
+                    matched_rules = rule_val
+                remaining = remaining[len(sub_tokens):]
+                break  # 找到具体规则，退出内层 for
+
+        if not sub_matched:
+            break  # 无子命令匹配，回退到默认规则
+        if matched_rules is not None:
+            break  # 找到具体规则，退出外层 while
 
     if matched_rules is None:
         # 回退到空子命令规则

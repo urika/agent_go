@@ -1,0 +1,33 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "1270664f57272a876c31079ffa04ebf6b4a87e635d162426610bbf9c555ca0b8",
+  "created_at": "2026-08-09T11:15:47.610979+00:00",
+  "immutable": true,
+  "manifest_version": 1,
+  "metric_freeze_version": 1,
+  "models": [
+    "deepseek-v4-flash"
+  ],
+  "record_count": 22,
+  "repeat_values": [
+    1,
+    2
+  ],
+  "results_sha256": "ff72fa8ab90f4734705e03ae481e0dc7b57d93e1b3a51d8d376e90d91c9e2e33",
+  "source_batch": "phaseD-20260809",
+  "suite": "phaseD",
+  "task_catalog_hash": "7fa662d2d7637d939fdf181f54759cdce13baf8825ca77041ca78f839433a181",
+  "task_ids": [
+    "add-error-handling",
+    "add-format-helper",
+    "add-metrics-system",
+    "add-tag-system",
+    "add-task-priority",
+    "email-validator",
+    "fix-missing-default",
+    "implement-done-command",
+    "integration-tests-datapipeline",
+    "refactor-to-dict",
+    "safe-file-reader"
+  ]
+}

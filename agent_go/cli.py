@@ -250,7 +250,7 @@ def _build_parser():
     eval_parser.add_argument("--source-batch", dest="source_batch", default="",
                              help="批次标识（bench 子命令，如 baseline / results_v2 / smoke-*，写入每条 record）")
     eval_parser.add_argument("--suite", dest="bench_suite", default="",
-                             choices=["smoke", "core", "decision", "stress", "golden"],
+                             choices=["smoke", "core", "decision", "stress", "golden", "phaseD"],
                              help="Bench 案例套件（golden=阶段C Golden Tasks 固定 6 任务；默认运行全部 canonical 任务）")
     eval_parser.add_argument("--bench-parallel", dest="bench_parallel", type=int, default=2,
                              help="bench 并发度：同时运行的 (任务×模型×重复) 组合数（默认 2，受 API rate-limit 与本地资源约束）")

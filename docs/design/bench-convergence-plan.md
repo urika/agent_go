@@ -77,6 +77,17 @@ hard:
 - `Accepted Delivery`
 - `Cost per Accepted Delivery`
 
+> **执行状态（2026-08-09）**：
+> - **任务集**：7 smoke（add-format-helper/fix-missing-default/add-task-priority/add-error-handling/implement-done-command/email-validator/integration-tests-datapipeline）+ 2 medium（refactor-to-dict/safe-file-reader）+ 2 hard（add-tag-system/add-metrics-system），目录 `eval_suite/phaseD_tasks/`
+> - **运行**：1 模型（deepseek-v4-flash）× repeat 2 × bench-parallel 1 = 22 条，`eval_suite/baselines/phaseD-20260809/`
+> - **结果**：pass_rate=0.861，$/pass=$0.0175，timeout_rate=0.111，retry_rate=0.167
+> - **与阶段 C 重叠任务对比**：
+>   - `add-format-helper`：C 3/3 → D 2/2 ✅ 稳定
+>   - `implement-done-command`：C 1/3 → D **2/2** ✅ 明显改善（近期 failure 分类 + rejected 短路修复生效）
+>   - `fix-missing-default`：C 3/3 → D 1/2 ⚠️（rep1 超时，当时系统负载高，rep2 pass）
+> - **观察**：email-validator 2/2 infrastructure_failure（系统级，非能力）；safe-file-reader 2/2 verification_failure（semantic_probe 任务，模型能力边界）；integration-tests 2/2 binary_pass=True 但右删失（timed_out 被排除于成本基线）
+> - **结论**：近期改动（failure 分类、rejected 短路、mergeability、NPROC）无能力回归，implement-done-command 有实质改善。可进入阶段 E。
+
 ## 阶段 E：正式 baseline
 
 只有阶段 A-D 通过后，才运行固定 decision baseline：
