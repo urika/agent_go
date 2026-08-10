@@ -95,6 +95,22 @@ Plan 生成专用 API 配置。非空时**完全覆盖** `plan_api`（Planner �
 | `retry_timeout` | int | `300` | 每次重试超时（秒） |
 | `run_timeout` | int | `1800` | Claude 执行超时（秒） |
 | `block_on_failure` | bool | `true` | 验证失败时阻止下游子任务 |
+| `diverge_similarity_threshold` | float | `0.3` | 打地鼠检测：连续两次语义评估缺陷指纹相似度低于此值 → 提前终止重试 |
+| `readonly_review` | object | `{enabled:false}` | 独立只读审查 subagent（两阶段审查，见下） |
+
+### `verification.readonly_review`（独立只读审查 subagent）
+
+验证失败时，用独立模型黑盒分析失败根因（不参与实现），审查意见注入修复 prompt，消除「实现者盲区」。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 是否启用只读审查（默认关，成本可控） |
+| `model` | str | `""` | 审查模型（空 = 复用 evaluator.model） |
+| `provider` | str | `""` | 审查 API 提供商（空 = 复用 evaluator.provider） |
+| `base_url` | str | `""` | 审查 API 端点（空 = 复用 evaluator.base_url） |
+| `skill` | str | `""` | 审查维度 skill 名（空 = 内置通用模板）。配置后加载 `~/.agent_go/skills/<name>/SKILL.md` 的 body 作为「领域审查维度指引」注入审查 prompt |
+| `max_tokens` | int | `2048` | 审查响应最大 token |
+| `timeout_ms` | int | `90000` | 审查 API 调用超时（毫秒） |
 
 ---
 
@@ -233,6 +249,16 @@ Agent 类型默认配置。
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | (agent type) | str | — | 按子任务 agent_type 指定模型（覆盖难度路由） |
+
+### `worker_models_by_cognitive`（认知模式→模型，异构模型路由）
+
+按认知模式（explore/implement/review）路由模型。优先级最高：配置后覆盖 `worker_models_by_type` 与 `worker_models[difficulty]`。认知模式来源：`subtask.cognitive_mode`（planner 可标注）或按 agent_type 推断（architect→explore, reviewer→review, 其余→implement）。例：`{"explore": "claude-haiku-4-5", "review": "claude-opus-4-8", "implement": "claude-sonnet-4-6"}`。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `explore` | str | `""` | 探索/分析类子任务模型（便宜模型） |
+| `implement` | str | `""` | 实现类子任务模型（强模型） |
+| `review` | str | `""` | 审查类子任务模型（独立模型） |
 
 ---
 

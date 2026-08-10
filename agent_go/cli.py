@@ -170,6 +170,10 @@ def _build_parser():
     show_skill_parser.add_argument("name", help="Skill name")
     show_skill_parser.add_argument("--json", action="store_true", dest="json_mode",
                                    help="Output as JSON (frontmatter + body + raw)")
+    resolve_skill_parser = skills_sub.add_parser("resolve", help="Trace a Skill's symlink resolution chain")
+    resolve_skill_parser.add_argument("name", help="Skill name")
+    resolve_skill_parser.add_argument("--json", action="store_true", dest="json_mode",
+                                      help="Output resolution chain as JSON")
 
     # agents 子命令
     subparsers.add_parser("agents", help="List available Agent types")
@@ -2363,10 +2367,33 @@ def cmd_clean(args=None) -> None:
         console.print("已取消")
 
 def cmd_skills(args=None) -> None:
-    """列出或查看 Skill。agent_go skills [list | show <name>]。"""
-    from .skills import get_skill_full
+    """列出或查看 Skill。agent_go skills [list | show <name> | resolve <name>]。"""
+    from .skills import get_skill_full, resolve_skill_chain
 
     sub = getattr(args, "skills_subcommand", None) if args else None
+
+    # resolve <name>：追踪 symlink 解析链（多级 skill 目录诊断）
+    if sub == "resolve":
+        name = args.name
+        info = resolve_skill_chain(name)
+        if not info:
+            console.error(f"Skill 不存在: {name}。可用: agent_go skills list")
+            return
+        if getattr(args, "json_mode", False):
+            console.print(json.dumps(info, indent=2, ensure_ascii=False))
+            return
+        console.print(f"\n🔗 Skill 解析链: {info['name']}")
+        console.sep("─", 55)
+        for i, hop in enumerate(info["dir_chain"]):
+            icon = "→" if i < len(info["dir_chain"]) - 1 else "✔"
+            console.print(f"  {icon} {hop}")
+        console.sep("─", 55)
+        console.print(f"📄 最终解析: {info['resolved']}")
+        console.print(f"✅ 文件存在: {'是' if info['exists'] else '否（🔴 断裂）'}")
+        console.print(f"🔗 是否为 symlink: {'是' if info['is_symlink'] else '否'}")
+        if not info["exists"]:
+            console.warning(f"Skill '{name}' 的解析目标不存在——请检查 symlink 是否断裂。")
+        return
 
     # show <name>：输出完整 SKILL.md（人类可读 / --json 结构化，供 Agent 自描述读取）
     if sub == "show":

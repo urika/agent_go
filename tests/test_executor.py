@@ -635,6 +635,70 @@ class TestRunSubtask:
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
+    def test_skill_inject_mode_guide_for_claude(self, mock_wt_create, mock_subprocess,
+                                                mock_headless, mock_load_agent,
+                                                temp_repo, task_dir, fast_logger):
+        """claude worker（agent_loop 关闭）→ skill 注入 mode="guide"。"""
+        mock_wt_create.return_value = (True, "")
+        mock_load_agent.return_value = None
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+
+        subtask = {
+            "id": "sub-1", "title": "安全审查", "description": "审查代码安全性",
+            "agent_prompt": "请审查安全", "verification": "", "risks": [],
+            "depends_on": [], "skills": ["security-review"],
+            "agent_type": "reviewer",
+        }
+        with patch("agent_go.skills.load_skill") as mock_load_skill, \
+             patch("agent_go.skills.render_skill_for_execution") as mock_render, \
+             patch("agent_go.skills.list_skills") as mock_list_skills:
+            mock_load_skill.return_value = {"name": "security-review", "content": "skill body"}
+            mock_render.return_value = "## Skill: security-review\nskill content here"
+            mock_list_skills.return_value = [{"name": "security-review"}]
+            run_subtask("test-task", subtask, temp_repo, task_dir,
+                        fast_logger, headless=True,
+                        config={"agent_loop": {"enabled": False}})
+        _, kwargs = mock_render.call_args
+        assert kwargs.get("mode") == "guide", \
+            f"claude worker 应使用 guide 注入，实际 {kwargs.get('mode')}"
+
+    @patch("agent_go.executor.load_agent_type")
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_skill_inject_mode_full_for_agent_loop(self, mock_wt_create, mock_subprocess,
+                                                  mock_headless, mock_load_agent,
+                                                  temp_repo, task_dir, fast_logger):
+        """agent_loop 后端（无 claude skill 机制）→ skill 注入 mode="full"。"""
+        mock_wt_create.return_value = (True, "")
+        mock_load_agent.return_value = None
+        mock_subprocess.return_value = make_subprocess_mock()
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+
+        subtask = {
+            "id": "sub-1", "title": "安全审查", "description": "审查代码安全性",
+            "agent_prompt": "请审查安全", "verification": "", "risks": [],
+            "depends_on": [], "skills": ["security-review"],
+            "agent_type": "developer", "difficulty": "easy",
+        }
+        with patch("agent_go.skills.load_skill") as mock_load_skill, \
+             patch("agent_go.skills.render_skill_for_execution") as mock_render, \
+             patch("agent_go.skills.list_skills") as mock_list_skills:
+            mock_load_skill.return_value = {"name": "security-review", "content": "skill body"}
+            mock_render.return_value = "## Skill: security-review\nskill content here"
+            mock_list_skills.return_value = [{"name": "security-review"}]
+            run_subtask("test-task", subtask, temp_repo, task_dir,
+                        fast_logger, headless=True,
+                        config={"agent_loop": {"enabled": True}})
+        _, kwargs = mock_render.call_args
+        assert kwargs.get("mode") == "full", \
+            f"agent_loop 应使用 full 注入，实际 {kwargs.get('mode')}"
+
+    @patch("agent_go.executor.load_agent_type")
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
     def test_agent_type_configured(self, mock_wt_create, mock_subprocess,
                                    mock_headless, mock_load_agent,
                                    temp_repo, task_dir, fast_logger,
@@ -2550,3 +2614,383 @@ class TestVerifyDivergence:
 
         types = [v.get("type") for v in result["verification_results"]]
         assert "divergence" not in types, "同一缺陷不应判定为打地鼠"
+
+
+class TestCognitiveModelRouting:
+    """异构模型路由：认知模式（explore/implement/review）→ 独立模型。"""
+
+    def test_infer_cognitive_mode(self):
+        """纯函数：认知模式推断——显式标注优先，agent_type 兜底。"""
+        from agent_go.executor import _infer_cognitive_mode
+
+        assert _infer_cognitive_mode({"cognitive_mode": "explore"}) == "explore"
+        assert _infer_cognitive_mode({"cognitive_mode": "review"}) == "review"
+        assert _infer_cognitive_mode({"agent_type": "architect"}) == "explore"
+        assert _infer_cognitive_mode({"agent_type": "reviewer"}) == "review"
+        assert _infer_cognitive_mode({"agent_type": "developer"}) == "implement"
+        assert _infer_cognitive_mode({"agent_type": "tester"}) == "implement"
+        assert _infer_cognitive_mode({}) == "implement"
+        # 非法显式值回退 agent_type 推断
+        assert _infer_cognitive_mode({"cognitive_mode": "weird", "agent_type": "architect"}) == "explore"
+
+    def test_cognitive_route_overrides_difficulty(self, temp_repo, task_dir, logger):
+        """配置了 worker_models_by_cognitive → 认知模式模型覆盖难度路由。"""
+        from agent_go.executor import run_subtask
+
+        subtask = {
+            "id": "sub-1", "title": "基础任务", "description": "执行操作",
+            "files_hint": "*", "verification": "pytest", "risks": [], "depends_on": [],
+            "skills": [], "agent_type": "reviewer", "difficulty": "easy",
+            "agent_prompt": "work",
+        }
+        config = {
+            "worker_models": {"easy": "", "medium": "", "hard": ""},
+            "worker_models_by_cognitive": {"review": "claude-opus-4-8"},
+            "verification": {"max_retries": 1},
+            "evaluator": {"enabled": False},
+            "plan_api": {},
+            "agent_loop": {"enabled": False},
+        }
+        with patch("agent_go.executor._run_claude") as mock_claude, \
+             patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
+             patch("agent_go.executor._verify_changes") as mock_verify:
+            mock_verify.return_value = {
+                "has_changes": True, "summary": "1 file changed", "metrics_changes": {},
+                "git_commit_ms": 1, "verification_ms": 1, "verify_ok": True, "git_ok": True,
+                "retry_count": 0, "verification_results": [], "commit_hash": "abc",
+                "change_stats": {}, "kill_reason": "none",
+            }
+            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
+            result = run_subtask(
+                "task-1", subtask, temp_repo, task_dir, logger, headless=True,
+                metering_path="", config=config,
+            )
+
+        env = mock_claude.call_args[0][2]
+        assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-opus-4-8", \
+            f"认知模式路由应覆盖难度路由: {env.get('AGENT_GO_CLAUDE_MODEL')}"
+        assert env["AGENT_GO_COGNITIVE_MODE"] == "review"
+
+    def test_cognitive_route_falls_back_to_difficulty(self, temp_repo, task_dir, logger):
+        """未配置认知模式映射 → 回退既有 difficulty 路由。"""
+        from agent_go.executor import run_subtask
+
+        subtask = {
+            "id": "sub-1", "title": "基础任务", "description": "执行操作",
+            "files_hint": "*", "verification": "pytest", "risks": [], "depends_on": [],
+            "skills": [], "agent_type": "developer", "difficulty": "hard",
+            "agent_prompt": "work",
+        }
+        config = {
+            "worker_models": {"hard": "claude-opus-4-8", "medium": "", "easy": ""},
+            "worker_models_by_cognitive": {},
+            "verification": {"max_retries": 1},
+            "evaluator": {"enabled": False},
+            "plan_api": {},
+            "agent_loop": {"enabled": False},
+        }
+        with patch("agent_go.executor._run_claude") as mock_claude, \
+             patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
+             patch("agent_go.executor._verify_changes") as mock_verify:
+            mock_verify.return_value = {
+                "has_changes": True, "summary": "1 file changed", "metrics_changes": {},
+                "git_commit_ms": 1, "verification_ms": 1, "verify_ok": True, "git_ok": True,
+                "retry_count": 0, "verification_results": [], "commit_hash": "abc",
+                "change_stats": {}, "kill_reason": "none",
+            }
+            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
+            result = run_subtask(
+                "task-1", subtask, temp_repo, task_dir, logger, headless=True,
+                metering_path="", config=config,
+            )
+
+        env = mock_claude.call_args[0][2]
+        assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-opus-4-8", \
+            "未配置认知模式映射时回退难度路由"
+
+
+class TestReadonlyReview:
+    """独立只读审查 subagent：验证失败时黑盒分析失败根因注入修复 prompt。"""
+
+    def test_repair_prompt_injects_review(self):
+        """_build_repair_prompt：readonly_review 意见注入修复 prompt。"""
+        review = {
+            "root_cause": "实现缺陷：遗漏 None 保护",
+            "blind_spot": "实现者可能忽略空输入边界",
+            "suggestions": "在 load() 开头加 None 守卫\n补充空列表测试",
+        }
+        prompt = _build_repair_prompt(
+            task_md="# Task", failed_cmds=["pytest"], failed_outputs=["FAIL"],
+            git_diff="+def load():", attempt=1, max_retries=2, history=[],
+            readonly_review=review,
+        )
+        assert "独立只读审查意见" in prompt
+        assert "实现缺陷：遗漏 None 保护" in prompt
+        assert "空输入边界" in prompt
+        assert "load() 开头加 None 守卫" in prompt
+
+    def test_repair_prompt_without_review(self):
+        """无 readonly_review → 不出现审查段落。"""
+        prompt = _build_repair_prompt(
+            task_md="# Task", failed_cmds=["pytest"], failed_outputs=["FAIL"],
+            git_diff="+def load():", attempt=1, max_retries=2, history=[],
+        )
+        assert "独立只读审查意见" not in prompt
+
+    def test_review_disabled_returns_none(self, tmp_path, logger):
+        """readonly_review.enabled=False → run_readonly_review 返回 None（不调用 API）。"""
+        from agent_go.review_agent import run_readonly_review
+        with patch("agent_go.api.call_api") as mock_api:
+            result = run_readonly_review(
+                {"id": "sub-1"}, tmp_path, "pytest", ["pytest"], ["FAIL"],
+                "diff", {"verification": {"readonly_review": {"enabled": False}}}, logger,
+            )
+        assert result is None
+        mock_api.assert_not_called()
+
+    def test_review_enabled_parses_response(self, tmp_path, logger):
+        """readonly_review.enabled=True → 解析审查响应并返回结构化结果。"""
+        from agent_go.review_agent import run_readonly_review
+        fake_content = ('```json\n{"root_cause": "测试问题：断言与需求不符", '
+                        '"blind_spot": "无", "suggestions": "修正断言"}\n```')
+        with patch("agent_go.api.call_api", return_value=fake_content), \
+             patch("agent_go.metrics.estimate_cost", return_value=0.001), \
+             patch("agent_go.config.meter_event") as mock_meter:
+            result = run_readonly_review(
+                {"id": "sub-1"}, tmp_path, "pytest", ["pytest"], ["FAIL"],
+                "diff",
+                {"verification": {"readonly_review": {"enabled": True}},
+                 "evaluator": {"model": "claude-haiku-4-5"},
+                 "plan_api": {"provider": "anthropic", "model": "claude-sonnet-4"}},
+                logger, metering_path="x.jsonl",
+            )
+        assert result is not None
+        assert result["root_cause"].startswith("测试问题")
+        assert result["suggestions"] == "修正断言"
+        assert mock_meter.called, "应写入 metering（role=reviewer）"
+        # metering role 应为 reviewer
+        meter_event = mock_meter.call_args[0][1]
+        assert meter_event["role"] == "reviewer"
+
+    def test_review_api_failure_fail_open(self, tmp_path, logger):
+        """API 失败 → 返回 None（fail-open，不阻断验证循环）。"""
+        from agent_go.review_agent import run_readonly_review
+        with patch("agent_go.api.call_api", side_effect=RuntimeError("boom")):
+            result = run_readonly_review(
+                {"id": "sub-1"}, tmp_path, "pytest", ["pytest"], ["FAIL"],
+                "diff", {"verification": {"readonly_review": {"enabled": True}}}, logger,
+            )
+        assert result is None
+
+    def test_review_skill_injected_into_prompt(self, tmp_path, logger):
+        """配置 skill → skill body 注入为「领域审查维度指引」段落。"""
+        from agent_go.review_agent import run_readonly_review
+        fake_content = '{"root_cause": "x", "blind_spot": "无", "suggestions": "y"}'
+        with patch("agent_go.api.call_api", return_value=fake_content) as mock_api, \
+             patch("agent_go.metrics.estimate_cost", return_value=0.0), \
+             patch("agent_go.config.meter_event"), \
+             patch("agent_go.skills.load_skill") as mock_skill:
+            mock_skill.return_value = MagicMock(body="## 安全审查规则\n- JWT 必须 RS256\n- 禁止硬编码密钥")
+            run_readonly_review(
+                {"id": "sub-1"}, tmp_path, "pytest", ["pytest"], ["FAIL"],
+                "diff",
+                {"verification": {"readonly_review": {"enabled": True, "skill": "security-review"}},
+                 "plan_api": {"provider": "anthropic", "model": "claude-sonnet-4"}},
+                logger, metering_path="x.jsonl",
+            )
+        prompt = mock_api.call_args[0][1][0]["content"]
+        assert "领域审查维度指引" in prompt, "skill 应注入为领域审查指引"
+        assert "JWT 必须 RS256" in prompt
+        assert "禁止硬编码密钥" in prompt
+        assert "security-review" in prompt or "安全审查规则" in prompt
+
+    def test_review_skill_missing_falls_back(self, tmp_path, logger):
+        """skill 不存在 → 回退内置模板（prompt 不含领域指引段）。"""
+        from agent_go.review_agent import run_readonly_review
+        fake_content = '{"root_cause": "x", "blind_spot": "无", "suggestions": "y"}'
+        with patch("agent_go.api.call_api", return_value=fake_content) as mock_api, \
+             patch("agent_go.metrics.estimate_cost", return_value=0.0), \
+             patch("agent_go.config.meter_event"), \
+             patch("agent_go.skills.load_skill", return_value=None):
+            run_readonly_review(
+                {"id": "sub-1"}, tmp_path, "pytest", ["pytest"], ["FAIL"],
+                "diff",
+                {"verification": {"readonly_review": {"enabled": True, "skill": "missing-skill"}},
+                 "plan_api": {"provider": "anthropic", "model": "claude-sonnet-4"}},
+                logger, metering_path="x.jsonl",
+            )
+        prompt = mock_api.call_args[0][1][0]["content"]
+        assert "领域审查维度指引" not in prompt, "skill 缺失时应回退内置模板"
+
+    def test_review_skill_infer_repo_from_worktree(self, tmp_path, logger):
+        """项目级 skill：从 worktree 向上推断 repo 根，能找到 <repo>/.agent_go/skills。"""
+        from agent_go.review_agent import run_readonly_review
+        # 构造 worktree 树：tmp_path/work/sub-1/<repo>/.git
+        repo_root = tmp_path / "work" / "sub-1" / "myrepo"
+        (repo_root / ".git").mkdir(parents=True)
+        fake_content = '{"root_cause": "x", "blind_spot": "无", "suggestions": "y"}'
+        with patch("agent_go.api.call_api", return_value=fake_content) as mock_api, \
+             patch("agent_go.metrics.estimate_cost", return_value=0.0), \
+             patch("agent_go.config.meter_event"), \
+             patch("agent_go.skills.load_skill") as mock_skill:
+            mock_skill.return_value = MagicMock(body="# 项目审查规则\n- 禁止修改核心模型")
+            run_readonly_review(
+                {"id": "sub-1"}, repo_root / "src", "pytest", ["pytest"], ["FAIL"],
+                "diff",
+                {"verification": {"readonly_review": {"enabled": True, "skill": "proj-review"}},
+                 "plan_api": {"provider": "anthropic", "model": "claude-sonnet-4"}},
+                logger, metering_path="x.jsonl",
+            )
+        # load_skill 收到的 project_root 应是推断出的 repo 根
+        proj_root = mock_skill.call_args[0][1]
+        assert proj_root is not None and proj_root == repo_root, \
+            f"应推断 repo 根 {repo_root}，实际 {proj_root}"
+        prompt = mock_api.call_args[0][1][0]["content"]
+        assert "禁止修改核心模型" in prompt, "项目级 skill body 应注入"
+
+    def test_infer_repo_root(self, tmp_path):
+        """纯函数：_infer_repo_root 向上找含 .git 的目录。"""
+        from agent_go.review_agent import _infer_repo_root
+        repo_root = tmp_path / "repo"
+        (repo_root / ".git").mkdir(parents=True)
+        nested = repo_root / "src" / "deep"
+        nested.mkdir(parents=True)
+        assert _infer_repo_root(nested) == repo_root
+        assert _infer_repo_root(tmp_path / "no-repo") is None
+
+    def test_review_no_skill_config_uses_template(self, tmp_path, logger):
+        """未配置 skill → 仅内置通用模板。"""
+        from agent_go.review_agent import run_readonly_review
+        fake_content = '{"root_cause": "x", "blind_spot": "无", "suggestions": "y"}'
+        with patch("agent_go.api.call_api", return_value=fake_content) as mock_api, \
+             patch("agent_go.metrics.estimate_cost", return_value=0.0), \
+             patch("agent_go.config.meter_event"):
+            run_readonly_review(
+                {"id": "sub-1"}, tmp_path, "pytest", ["pytest"], ["FAIL"],
+                "diff",
+                {"verification": {"readonly_review": {"enabled": True}},
+                 "plan_api": {"provider": "anthropic", "model": "claude-sonnet-4"}},
+                logger, metering_path="x.jsonl",
+            )
+        prompt = mock_api.call_args[0][1][0]["content"]
+        assert "领域审查维度指引" not in prompt
+        assert "独立的只读代码审查 agent" in prompt
+
+    def test_verify_changes_invokes_review_on_failure(self, temp_repo, task_dir, logger):
+        """验证失败且启用只读审查 → 审查 agent 被调用。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        subtask = {
+            "id": "sub-1", "title": "基础任务", "description": "执行操作",
+            "verification": "pytest tests/", "risks": [], "depends_on": [],
+            "skills": [], "agent_type": "developer", "agent_prompt": "work",
+        }
+
+        def _git_fail(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout=" M main.py\n", stderr="")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="1 file changed", stderr="")
+            if any(g in cmd_str for g in ["git add", "git commit", "git tag"]):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=_git_fail), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_verification_cmd") as mock_vcmd, \
+             patch("agent_go.review_agent.run_readonly_review") as mock_review:
+            mock_fix.return_value = MagicMock(returncode=0)
+            mock_vcmd.return_value = {"command": "pytest", "exit_code": 1,
+                                      "duration_ms": 10, "attempt": 1,
+                                      "stdout_tail": "FAIL", "stderr_tail": ""}
+            mock_review.return_value = {
+                "root_cause": "实现缺陷", "blind_spot": "x", "suggestions": "y",
+                "cost_usd": 0.001, "latency_ms": 100,
+            }
+            _verify_changes(
+                "task-1", "sub-1", subtask, temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 1,
+                                         "readonly_review": {"enabled": True}}},
+            )
+
+        assert mock_review.called, "验证失败 + 启用只读审查 → 审查 agent 应被调用"
+
+
+class TestPermissionMinimization:
+    """工具/权限最小化：subtask 级 allowed_tools / permission_mode 覆盖 agent 默认。"""
+
+    def test_subtask_allowed_tools_override(self, temp_repo, task_dir, logger):
+        """subtask 声明 allowed_tools → 覆盖 agent 默认工具白名单。"""
+        from agent_go.executor import run_subtask
+
+        subtask = {
+            "id": "sub-1", "title": "基础任务", "description": "执行操作",
+            "files_hint": "*", "verification": "pytest", "risks": [], "depends_on": [],
+            "skills": [], "agent_type": "developer", "difficulty": "easy",
+            "agent_prompt": "work",
+            "allowed_tools": ["Read", "Grep", "Glob"],
+        }
+        config = {
+            "worker_models": {}, "verification": {"max_retries": 1},
+            "evaluator": {"enabled": False}, "plan_api": {},
+            "agent_loop": {"enabled": False},
+        }
+        with patch("agent_go.executor._run_claude") as mock_claude, \
+             patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
+             patch("agent_go.executor._verify_changes") as mock_verify:
+            mock_verify.return_value = {
+                "has_changes": True, "summary": "1 file changed", "metrics_changes": {},
+                "git_commit_ms": 1, "verification_ms": 1, "verify_ok": True, "git_ok": True,
+                "retry_count": 0, "verification_results": [], "commit_hash": "abc",
+                "change_stats": {}, "kill_reason": "none",
+            }
+            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
+            run_subtask(
+                "task-1", subtask, temp_repo, task_dir, logger, headless=True,
+                metering_path="", config=config,
+            )
+
+        # agent 对象作为 _run_claude 的第 5 个位置参数传入
+        agent_arg = mock_claude.call_args[0][4]
+        assert agent_arg.claude_config["allowed_tools"] == ["Read", "Grep", "Glob"], \
+            f"subtask 级工具白名单应覆盖 agent 默认: {agent_arg.claude_config}"
+
+    def test_no_subtask_override_keeps_default(self, temp_repo, task_dir, logger):
+        """subtask 未声明工具字段 → 保留 agent 默认配置。"""
+        from agent_go.executor import run_subtask
+
+        subtask = {
+            "id": "sub-1", "title": "基础任务", "description": "执行操作",
+            "files_hint": "*", "verification": "pytest", "risks": [], "depends_on": [],
+            "skills": [], "agent_type": "developer", "difficulty": "easy",
+            "agent_prompt": "work",
+        }
+        config = {
+            "worker_models": {}, "verification": {"max_retries": 1},
+            "evaluator": {"enabled": False}, "plan_api": {},
+            "agent_loop": {"enabled": False},
+        }
+        with patch("agent_go.executor._run_claude") as mock_claude, \
+             patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
+             patch("agent_go.executor._verify_changes") as mock_verify:
+            mock_verify.return_value = {
+                "has_changes": True, "summary": "1 file changed", "metrics_changes": {},
+                "git_commit_ms": 1, "verification_ms": 1, "verify_ok": True, "git_ok": True,
+                "retry_count": 0, "verification_results": [], "commit_hash": "abc",
+                "change_stats": {}, "kill_reason": "none",
+            }
+            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
+            run_subtask(
+                "task-1", subtask, temp_repo, task_dir, logger, headless=True,
+                metering_path="", config=config,
+            )
+
+        agent_arg = mock_claude.call_args[0][4]
+        # developer 内置默认无 allowed_tools（完整权限），应保留
+        assert "allowed_tools" not in (agent_arg.claude_config or {}), \
+            f"未覆盖时应保留 agent 默认: {agent_arg.claude_config}"

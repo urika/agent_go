@@ -661,6 +661,9 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
             "agent_type": rule_result["agent_type"],
             "difficulty": _step_difficulty,
             "task_type": _task_type,  # CR-G3：security/bugfix/refactor/test/docs/... 或 None
+            "cognitive_mode": step.get("cognitive_mode", ""),  # explore/implement/review（异构模型路由）
+            "allowed_tools": list(step.get("allowed_tools", []) or []),  # 工具白名单（权限最小化）
+            "permission_mode": step.get("permission_mode", ""),  # bypassPermissions/acceptEdits/default
             "rationale": step.get("rationale", ""),
             "scope_boundary": step.get("scope_boundary", ""),
             "do_not_touch": list(step.get("do_not_touch", []) or []),

@@ -228,7 +228,10 @@ SCHEMA:
       "acceptance_criteria_ids": ["AC-001"],
       "skills": ["skill-name"],
       "agent_type": "developer|architect|reviewer|tester",
-      "difficulty": "easy|medium|hard"
+      "difficulty": "easy|medium|hard",
+      "cognitive_mode": "explore|implement|review",
+      "allowed_tools": ["Read", "Write", "Edit", "Bash"],
+      "permission_mode": "bypassPermissions|acceptEdits|default"
     }
   ],
   "dependencies": {"2": [1]},
@@ -251,6 +254,8 @@ REQUIREMENTS:
 - Include rationale, scope_boundary, requirement_ids, and acceptance_criteria_ids when the Spec provides stable IDs.
 - agent_type: developer=coding, architect=read-only design, reviewer=code review, tester=testing
 - difficulty: easy=single file small change, medium=single feature, hard=cross-file architecture
+- cognitive_mode (optional): explore=research/cheap model, implement=coding/strong model, review=independent inspection. Architect/reviewer steps default to explore/review. When in doubt, omit — system infers from agent_type.
+- allowed_tools / permission_mode (optional): omit for full default tools; use only when a step MUST be restricted (e.g. read-only review step: ["Read","Grep","Glob"]).
 - Use empty array [] when no skills match
 - Dependencies map step IDs to prerequisite step IDs
 

@@ -283,6 +283,22 @@ def _create_worktree(task_id, sub_id, repo, task_dir, logger):
     return worktree, worktree_create_ms
 
 
+def _infer_cognitive_mode(subtask: dict) -> str:
+    """推断子任务的认知模式（异构模型路由维度）。
+
+    优先级：subtask.cognitive_mode（planner 可标注）> 按 agent_type 推断。
+    agent_type → 模式：architect→explore, reviewer→review, 其余→implement。
+    """
+    explicit = subtask.get("cognitive_mode", "")
+    if explicit in ("explore", "implement", "review"):
+        return explicit
+    agent_type = subtask.get("agent_type", "developer")
+    return {
+        "architect": "explore",
+        "reviewer": "review",
+    }.get(agent_type, "implement")
+
+
 def _build_architecture_context(subtask, task_dir):
     """构建架构上下文段落（SDD 设计意图传递）。
 
@@ -346,7 +362,7 @@ def _build_architecture_context(subtask, task_dir):
     return "## 架构上下文\n\n" + "\n".join(parts) + "\n"
 
 
-def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_conflicts=None, config=None):
+def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_conflicts=None, config=None, skill_inject_mode="full"):
     """Build TASK.md content. Returns (task_md, verification, skill_names, unresolved_skills)."""
     task_md_parts = [f"# 子任务: {subtask['title']}", ""]
 
@@ -470,9 +486,9 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
                 try:
                     sk = load_skill(sn, repo)
                     if sk:
-                        task_md_parts.append(render_skill_for_execution(sk))
+                        task_md_parts.append(render_skill_for_execution(sk, mode=skill_inject_mode))
                         task_md_parts.append("")
-                        logger.info(f"Skill 注入: {sn} → TASK.md")
+                        logger.info(f"Skill 注入: {sn} → TASK.md (mode={skill_inject_mode})")
                     else:
                         unresolved_skills.append(sn)
                 except Exception as _one_skill_err:
@@ -586,6 +602,7 @@ def _build_repair_prompt(
     history: list[dict],
     semantic_feedback: Optional[dict] = None,
     scope_violation: Optional[dict] = None,
+    readonly_review: Optional[dict] = None,
 ) -> str:
     """构建增强的修复提示词，注入完整失败上下文（Phase 1 验证循环）。
 
@@ -595,6 +612,7 @@ def _build_repair_prompt(
     - 当前 git diff（让 Claude 看到自己改了什么）
     - 历史修复尝试摘要（避免重复同样错误）
     - LLM 语义评估反馈（Phase 3）
+    - 独立只读审查意见（两阶段审查：独立模型黑盒分析失败根因）
     - 剩余机会提示
     """
     parts = [task_md, "", "---", ""]
@@ -640,6 +658,20 @@ def _build_repair_prompt(
             parts.append(f"**原因:** {semantic_feedback['reason']}")
         if semantic_feedback.get("suggestions"):
             parts.append(f"**修复建议:** {semantic_feedback['suggestions']}")
+        parts.append("")
+
+    # 独立只读审查意见（两阶段审查：独立模型黑盒分析，消除实现者盲区）
+    if readonly_review:
+        parts.append("### 独立只读审查意见（不参与实现的黑盒分析）")
+        if readonly_review.get("root_cause"):
+            parts.append(f"**失败根因判断:** {readonly_review['root_cause']}")
+        if readonly_review.get("blind_spot"):
+            parts.append(f"**可能被忽视的盲区:** {readonly_review['blind_spot']}")
+        if readonly_review.get("suggestions"):
+            parts.append("**独立审查建议的修复方向:**")
+            for _sug_line in str(readonly_review["suggestions"]).split("\n"):
+                if _sug_line.strip():
+                    parts.append(f"- {_sug_line.strip()}")
         parts.append("")
 
     # 失败命令及输出
@@ -1479,11 +1511,32 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             # ── L1 范围合规检查：比对实际改动文件 vs files_hint 预期范围 ──
             scope_violation = _check_scope_compliance(worktree, subtask.get("files_hint", ""))
 
+            # 两阶段审查（改进方向 2）：独立只读审查 subagent——不参与实现、
+            # 只做黑盒分析失败根因，消除「实现者盲区」。默认关闭（readonly_review.enabled）。
+            # 审查意见注入修复 prompt；失败时 fail-open（返回 None，不阻断验证循环）。
+            readonly_review = None
+            _rr_cfg = _cfg.get("verification", {}).get("readonly_review", {}) or {}
+            if _rr_cfg.get("enabled", False):
+                readonly_review = _safe_optional_call(
+                    ".review_agent", "run_readonly_review", logger,
+                    subtask, worktree, verification, failed_cmds, failed_outputs,
+                    git_diff, _cfg, logger,
+                    metering_path=_cfg_for_meter.get("_metering_path", "") if _cfg_for_meter else "",
+                    fallback=None,
+                    label="review_agent.run_readonly_review",
+                )
+                if readonly_review:
+                    log_event(logger, "readonly_review", {
+                        "sub_id": sub_id, "attempt": retry_count,
+                        "root_cause": (readonly_review.get("root_cause") or "")[:120],
+                    })
+
             fix_prompt = _build_repair_prompt(
                 task_md, failed_cmds, failed_outputs,
                 git_diff, retry_count, max_retries, verification_history,
                 semantic_feedback=semantic_feedback,
-                scope_violation=scope_violation)
+                scope_violation=scope_violation,
+                readonly_review=readonly_review)
 
             # 修复执行带硬超时（verification.retry_timeout，按 difficulty 弹性缩放）
             _difficulty = subtask.get("difficulty", "medium")
@@ -1686,9 +1739,17 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         logger.warning(f"[checkpoint] snapshot 失败（非关键）: {sub_id}: {_cp_err}")
 
     # 3. Build TASK.md
+    # Skill 注入模式决策（见 docs/design/skill-injection-strategy.md）：
+    # - claude worker（claude -p / headless / greywall）→ "guide"：只给 name + 绝对路径，
+    #   让 claude 自主读取 ~/.claude/skills/<name>/SKILL.md（claude 原生 skill 机制，语义判断更强）。
+    # - agent_loop（无 claude 机制）→ "full"：编排层必须注入完整 body。
+    _ag_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)
+    _is_simple = _is_simple_task(subtask)
+    _skill_inject_mode = "full" if (_ag_loop_enabled and _is_simple and headless) else "guide"
     task_md, verification, skill_names, unresolved_skills = _build_task_md(
         subtask, repo, task_dir, worktree, logger, headless,
         merge_conflicts=merge_conflicts, config=config,
+        skill_inject_mode=_skill_inject_mode,
     )
 
     # Write TASK.md to disk
@@ -1767,6 +1828,21 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     agent_type_name = subtask.get("agent_type", "developer")
     agent = load_agent_type(agent_type_name, repo)
     if agent:
+        # 工具/权限最小化（改进方向 3）：subtask 级声明可覆盖 agent 默认配置。
+        # 支持字段：allowed_tools（工具白名单，如 ["Read","Grep","Glob"] 只读审查）
+        #          permission_mode（bypassPermissions/acceptEdits/default）。
+        # planner/角色映射可借此做权限隔离（对应 opencode Explore deny-edit 能力）。
+        _sub_allowed = subtask.get("allowed_tools")
+        _sub_perm = subtask.get("permission_mode")
+        if _sub_allowed is not None or _sub_perm:
+            _cc = dict(agent.claude_config or {})
+            if _sub_allowed is not None:
+                _cc["allowed_tools"] = list(_sub_allowed)
+                logger.info(f"[permission] {sub_id} 工具白名单覆盖: {', '.join(_cc['allowed_tools'])}")
+            if _sub_perm:
+                _cc["permission_mode"] = _sub_perm
+                logger.info(f"[permission] {sub_id} 权限模式覆盖: {_sub_perm}")
+            agent.claude_config = _cc
         env.update(get_agent_env(agent))
         logger.info(f"Agent: {agent.type_name}")
     else:
@@ -1783,6 +1859,21 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         difficulty = "medium"
     worker_models = _effective_config(config).get("worker_models", {})
     routed_model = worker_models.get(difficulty, "")
+
+    # 异构模型路由（认知模式）：explore/implement/review → 独立模型。
+    # 认知模式来源：subtask.cognitive_mode（planner 可标注）优先，
+    # 否则按 agent_type 推断（architect→explore, reviewer→review, 其余→implement）。
+    # 优先级最高：配置了 cognitive 映射则覆盖 task_type / difficulty 路由（实现者用强模型、
+    # 探索用便宜模型、审查用独立模型），未配置回退既有逻辑。
+    _cognitive_mode = _infer_cognitive_mode(subtask)
+    _cog_models = _effective_config(config).get("worker_models_by_cognitive", {}) or {}
+    _cog_model = _cog_models.get(_cognitive_mode, "") if isinstance(_cog_models, dict) else ""
+    if _cog_model:
+        routed_model = _cog_model
+        logger.info(f"[cognitive] {sub_id} cognitive_mode={_cognitive_mode} → model={_cog_model}（覆盖 task_type/difficulty 路由）")
+        log_event(logger, "model_routing", {"sub_id": sub_id, "cognitive_mode": _cognitive_mode,
+                                             "difficulty": difficulty, "model": routed_model})
+    env["AGENT_GO_COGNITIVE_MODE"] = _cognitive_mode
     # CR-G3：task_type 路由（优先于 difficulty）。task_type 由 Spec `task_type:` 字段或
     # role_skill_map 关键词检测得出（plan_to_subtasks 写入子任务）；配了
     # worker_models_by_type[type] 则覆盖难度路由，未配回退难度（degrade/fallback 仍在其后生效）。

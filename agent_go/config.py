@@ -46,6 +46,20 @@ DEFAULT_CONFIG = {
         "run_timeout": 1800,            # 首跑硬超时基数（秒），按难度缩放（easy×1/medium×1.5/hard×2.5），0=禁用
         "block_on_failure": True,       # 验证失败是否阻断下游依赖（--no-verify-block 可关）
         "diverge_similarity_threshold": 0.3,  # 打地鼠检测：连续两次语义评估缺陷指纹相似度低于此值 → 提前终止重试
+        # 独立只读审查 subagent（两阶段审查）：验证失败时，用独立模型做黑盒分析
+        # （不参与实现，消除「实现者盲区」），审查意见注入修复 prompt。
+        # 默认关闭（成本可控）；model 空 = 复用 evaluator.model。
+        # skill：可选审查维度 skill 名（空 = 内置通用模板）。配置后加载
+        # ~/.agent_go/skills/<name>/SKILL.md 的 body 作为审查维度指引，实现领域化审查。
+        "readonly_review": {
+            "enabled": False,
+            "model": "",
+            "provider": "",
+            "base_url": "",
+            "skill": "",
+            "max_tokens": 2048,
+            "timeout_ms": 90000,
+        },
     },
     "goal": {
         "enabled": False,               # 是否在 TASK.md 注入 goal 指令（--goal 开启）
@@ -127,6 +141,13 @@ DEFAULT_CONFIG = {
                                     # 由 Spec `task_type:` 字段或 role_skill_map 关键词检测得出），
                                     # 值 = 该类型用的模型名。默认空 = 功能关闭，纯难度路由。
                                     # 例：{"security": "claude-opus-4-8", "docs": "claude-haiku-4-5"}
+    "worker_models_by_cognitive": {},  # 认知模式→模型路由（异构模型路由：探索/实现/审查）。
+                                       # 键 = cognitive_mode（explore/implement/review），
+                                       # 值 = 该认知模式用的模型名。优先级最高（覆盖 task_type/difficulty）。
+                                       # 认知模式来源：subtask.cognitive_mode（planner 可标注）
+                                       # 或按 agent_type 推断（architect→explore, reviewer→review, 其余→implement）。
+                                       # 例：{"explore": "claude-haiku-4-5", "review": "claude-opus-4-8",
+                                       #      "implement": "claude-sonnet-4-6"}
     "local_model_names": {},        # 本地后端真实模型名映射（routed → 实际名，如
                                     # {"claude-haiku-4-5": "Qwen3.6-27B-4bit"}）；
                                     # 探测本地代理 /status 失败时的兜底

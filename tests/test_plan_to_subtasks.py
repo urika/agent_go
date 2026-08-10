@@ -111,4 +111,33 @@ def test_task_type_none_when_no_match_no_override(tmp_path, logger):
         "agent_prompt": "", "verification": "",
     }], "dependencies": {}}
     subs = plan_to_subtasks(plan, logger, repo=tmp_path)
+
+
+def test_cognitive_and_permission_passthrough(tmp_path, logger):
+    """异构模型路由 + 权限最小化字段透传：cognitive_mode / allowed_tools / permission_mode。"""
+    from agent_go.ui import plan_to_subtasks
+    plan = {"steps": [{
+        "id": 1, "title": "只读审查", "description": "审查代码",
+        "agent_prompt": "", "verification": "",
+        "cognitive_mode": "review",
+        "allowed_tools": ["Read", "Grep", "Glob"],
+        "permission_mode": "default",
+    }], "dependencies": {}}
+    subs = plan_to_subtasks(plan, logger, repo=tmp_path)
+    assert subs[0]["cognitive_mode"] == "review"
+    assert subs[0]["allowed_tools"] == ["Read", "Grep", "Glob"]
+    assert subs[0]["permission_mode"] == "default"
+
+
+def test_cognitive_and_permission_defaults(tmp_path, logger):
+    """未声明 cognitive/allowed_tools/permission_mode → 空默认值（不破坏既有行为）。"""
+    from agent_go.ui import plan_to_subtasks
+    plan = {"steps": [{
+        "id": 1, "title": "实现", "description": "实现功能",
+        "agent_prompt": "", "verification": "",
+    }], "dependencies": {}}
+    subs = plan_to_subtasks(plan, logger, repo=tmp_path)
+    assert subs[0]["cognitive_mode"] == ""
+    assert subs[0]["allowed_tools"] == []
+    assert subs[0]["permission_mode"] == ""
     assert subs[0]["task_type"] is None

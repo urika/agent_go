@@ -13,6 +13,7 @@ allowed-tools: Read, Write
 2. <project>/.agent_go/skills/<name>/SKILL.md
 """
 
+import os
 import re
 import json
 import logging
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 __all__ = [
     "load_skill", "load_skills", "discover_skills", "list_skills",
     "render_skill_for_plan", "render_skill_for_execution",
+    "get_skill_full", "resolve_skill_chain",
 ]
 
 logger = logging.getLogger(__name__)
@@ -129,6 +131,58 @@ def load_skills(names: list[str], project_root: Optional[Path] = None) -> list[S
     return skills
 
 
+def resolve_skill_chain(name: str, project_root: Optional[Path] = None) -> Optional[dict]:
+    """追踪 Skill 的 symlink 解析链（诊断多级 skill 目录）。
+
+    多级目录模型（见 docs/design/skill-injection-strategy.md）：
+      入口可能是 symlink 目录（如 ~/.agent_go/skills/<name> -> ~/.claude/skills/<name>
+      -> ~/.cc-switch/skills/<name>），SKILL.md 文件本身通常不是 symlink。
+    本函数从**入口目录**逐跳展开 symlink，输出完整解析链与最终 SKILL.md。
+
+    返回：
+        {
+          "name": str,
+          "entry": 入口 SKILL.md 路径,
+          "dir_chain": [入口目录 → 每跳 symlink 目标],
+          "resolved": 最终真实 SKILL.md 绝对路径,
+          "exists": bool（resolved 文件是否存在）,
+          "is_symlink": bool,
+        }
+        未找到时返回 None。
+    """
+    from pathlib import Path as _P
+    s = load_skill(name, project_root)
+    if not s:
+        return None
+    entry_md = _P(s.path)                       # ~/.agent_go/skills/<name>/SKILL.md
+    entry_dir = entry_md.parent                 # ~/.agent_go/skills/<name>
+    chain = [str(entry_dir)]
+    resolved_dir = entry_dir
+    seen = set()
+    while resolved_dir.is_symlink():
+        real = resolved_dir.readlink()
+        if not real.is_absolute():
+            real = resolved_dir.parent / real
+        # 规范化（normpath 折叠 .. 段），但保留中间 symlink 跳不做完全折叠，
+        # 以展示每一跳（如 ~/.claude/skills/x 再指到 ~/.cc-switch/skills/x）
+        norm = _P(os.path.normpath(str(real)))
+        chain.append(str(norm))
+        if str(norm) in seen:
+            chain.append(f"⚠️ 循环 symlink: {norm}")
+            break
+        seen.add(str(norm))
+        resolved_dir = norm
+    final = resolved_dir / "SKILL.md"
+    return {
+        "name": name,
+        "entry": str(entry_md),
+        "dir_chain": chain,
+        "resolved": str(final),
+        "exists": final.exists(),
+        "is_symlink": len(chain) > 1,
+    }
+
+
 def get_skill_full(name: str, project_root: Optional[Path] = None) -> Optional[dict]:
     """获取 Skill 完整内容（frontmatter + body + 原始 SKILL.md 文本）。
 
@@ -207,37 +261,56 @@ def _tokenize_words(text: str) -> set[str]:
 
 
 def discover_skills(task: str, project_root: Optional[Path] = None, max_skills: int = 3) -> list[Skill]:
-    """根据任务描述自动匹配 Skill（关键词命中 description）。"""
-    all_skills = list_skills(project_root)
-    matched = []
-    task_lower = task.lower()
+    """根据任务描述自动匹配 Skill（关键词命中 description）。
 
+    匹配策略（IDF 加权，消除泛词误配）：
+    1. 计算每个词在**当前已安装 skill 集合**中的文档频率 df（出现在几个 skill 描述中）。
+    2. 匹配分 = Σ 1/df：只出现在一个 skill 的专属词（如「风控」「银行」）得高分，
+       出现在大量 skill 的泛词（如「生成」「整理」「报告」）得分趋近 0。
+    3. 硬门槛：共同词 ≥2 且 IDF 分 ≥1.0（相当于至少一个专属词）。
+       —— 避免「银行业智能风控报告」任务误配 lark-workflow-meeting-summary
+       （报告/整理/生成 均为泛词，IDF 分 0.75 <1.0）或 byted-ark-seedance-skill。
+    4. 按 IDF 分降序取前 max_skills 个。
+    """
+    all_skills = list_skills(project_root)
+    if not all_skills:
+        return []
+
+    task_words = _tokenize_words(task.lower())
+    _skip = {
+        "verification", "validate", "valid", "list", "read", "write",
+        "create", "file", "files", "string", "function", "functions",
+        "input", "output", "task", "return", "returns", "add", "using",
+        "and", "the", "a", "an", "of", "for", "in", "with", "to",
+        "py", "str", "txt", "all", "any", "its", "it", "are", "is",
+        "be", "by", "on", "at", "as", "or", "not", "no", "each",
+    }
+
+    # 文档频率：词 → 出现在多少个 skill description 中（本集合内计算，测试隔离）
+    doc_freq: dict[str, int] = {}
     for info in all_skills:
-        desc_lower = info["description"].lower()
-        # 检查 description 中是否有任何词出现在 task 中
-        desc_words = _tokenize_words(desc_lower)
-        task_words = _tokenize_words(task_lower)
-        # 排除通用结构词（任务模板字段名、弱语义词），避免单词误配
-        _skip = {
-            "verification", "validate", "valid", "list", "read", "write",
-            "create", "file", "files", "string", "function", "functions",
-            "input", "output", "task", "return", "returns", "add", "using",
-            "and", "the", "a", "an", "of", "for", "in", "with", "to",
-            "py", "str", "txt", "all", "any", "its", "it", "are", "is",
-            "be", "by", "on", "at", "as", "or", "not", "no", "each",
-        }
+        desc_words = _tokenize_words(info["description"].lower())
+        for w in desc_words - _skip:
+            if not w.isdigit():
+                doc_freq[w] = doc_freq.get(w, 0) + 1
+
+    matched = []
+    for info in all_skills:
+        desc_words = _tokenize_words(info["description"].lower())
         overlap = (desc_words & task_words) - _skip
         # 排除纯数字（任务编号/规则序号，无语义），防数字误配
         overlap = {w for w in overlap if not w.isdigit()}
-        # 至少 2 个实质词重叠才匹配，防止单泛词误配（如 orm-optimizer 的
-        # "verification" 与任务模板字段重叠）。CJK 按字符分词后能产出
-        # 正常的多字重叠，故不再需要中文单词特例。
-        if len(overlap) >= 2:
-            s = load_skill(info["name"], project_root)
-            if s:
-                matched.append((len(overlap), s))
+        if len(overlap) < 2:
+            continue
+        # IDF 加权分：专属词（df 小）主导，泛词（df 大）趋零
+        score = sum(1.0 / doc_freq[w] for w in overlap)
+        if score < 1.0:
+            continue
+        s = load_skill(info["name"], project_root)
+        if s:
+            matched.append((round(score, 4), s))
 
-    # 按匹配度排序，取前 N 个
+    # 按 IDF 加权分降序取前 N 个
     matched.sort(key=lambda x: x[0], reverse=True)
     return [s for _, s in matched[:max_skills]]
 
@@ -261,8 +334,69 @@ def render_skill_for_plan(skill: Skill) -> str:
     return "\n".join(lines)
 
 
-def render_skill_for_execution(skill: Skill) -> str:
-    """将 Skill 渲染为 TASK.md 执行指令格式（完整内容）。"""
+def _rewrite_relative_paths(body: str, skill_path: Optional[Path]) -> str:
+    """将 skill body 中的相对路径引用重写为绝对路径。
+
+    问题（symlink 实测）：lark 系列 skill 正文引用 `../lark-shared/SKILL.md` 等
+    相对路径（在 claude 的 skill 目录体系中是有效的）。agent_go 把 body 注入
+    TASK.md 后，这些相对路径在 worktree 中解析错误（指向仓库内不存在的目录），
+    导致 claude 读不到依赖 skill。此处将 `../xxx/SKILL.md` / `./xxx.md` 形式
+    的相对引用解析为基于 skill 文件真实位置（resolve 后）的绝对路径。
+
+    仅当存在引用且能解析到真实文件时重写；否则保持原样（fail-open）。
+    """
+    if not body or not skill_path:
+        return body
+    import re as _re
+    try:
+        base_dir = skill_path.resolve().parent
+    except OSError:
+        return body
+
+    def _replace(m: _re.Match) -> str:
+        ref = m.group(0)
+        rel = m.group(1)
+        target = (base_dir / rel).resolve()
+        if target.exists():
+            return ref.replace(rel, str(target), 1)
+        return ref
+
+    # 匹配 markdown 链接 [text](../path) / 反引号 `../path` / 裸相对路径 ../path
+    pattern = _re.compile(r"(?<![\w./-])((?:\.\./)+[A-Za-z0-9_\-./]+(?:\.md|/SKILL\.md))")
+    return pattern.sub(_replace, body)
+
+
+def render_skill_for_execution(skill: Skill, mode: str = "full") -> str:
+    """将 Skill 渲染为 TASK.md 执行指令格式。
+
+    两种注入模式（决策见 docs/design/skill-injection-strategy.md）：
+    - mode="full"（默认）：注入完整 body + 相对路径重写。用于**无原生 skill 机制的
+      后端**（agent_loop / 未来非 claude worker），必须由编排层提供全部知识。
+    - mode="guide"：轻量指引——只给 skill 名、领域、**绝对路径**，让 claude 自主
+      读取 ~/.claude/skills/<name>/SKILL.md 并按触发条件判断。避免编排层的关键词
+      匹配（弱于 claude 语义理解）误导 worker，也避免完整 body 塞入 TASK.md 造成
+      上下文浪费与相对路径失效。用于 **claude worker**（claude 原生可读 skill）。
+    """
+    if mode == "guide":
+        lines = [
+            f"## Skill 知识注入: {skill.name}（轻量指引）",
+        ]
+        if skill.description:
+            lines.append(f"**领域**: {skill.description}")
+        if skill.allowed_tools:
+            lines.append(f"**推荐工具**: {', '.join(skill.allowed_tools)}")
+        # 绝对路径：skill.path 可能是 symlink 目录（~/.agent_go/skills/<name> →
+        # ~/.claude/skills/<name>），resolve() 得到真实目录；再拼 SKILL.md 供 claude Read。
+        real_dir = skill.path.resolve() if skill.path else Path("")
+        real_file = real_dir / "SKILL.md" if real_dir.suffix != ".md" else real_dir
+        lines.extend([
+            "",
+            f"**Skill 文件**: `{real_file}`",
+            "请先使用 Read 工具读取上述 Skill 文件，按其指令执行本子任务。",
+            "若文件无法读取或与本任务无关，可忽略并继续。",
+        ])
+        return "\n".join(lines)
+
     lines = [
         f"## Skill 知识注入: {skill.name}",
     ]
@@ -271,5 +405,6 @@ def render_skill_for_execution(skill: Skill) -> str:
     if skill.allowed_tools:
         lines.append(f"**推荐工具**: {', '.join(skill.allowed_tools)}")
     lines.append("")
-    lines.append(skill.body)
+    body = _rewrite_relative_paths(skill.body, skill.path)
+    lines.append(body)
     return "\n".join(lines)

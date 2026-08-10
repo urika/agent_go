@@ -194,12 +194,12 @@ Claude Code 官方明确「避免文件冲突」：**分解工作使每个队友
 
 | # | 改进方向 | 现状 | 优先级 | 说明 |
 |---|----------|------|--------|------|
-| 1 | 异构模型路由 | difficulty → worker_models 已有 | P1 | 可进一步按认知模式路由：探索类便宜模型 / 实现类强模型 / 审查类独立模型 |
-| 2 | 只读审查 subagent | 验证循环是同一进程自修复 | P1 | 独立只读审查 agent，消除「实现者盲区」（对应调研 §2-3/§4 两阶段审查） |
-| 3 | 上下文显式注入 | context.md 已注入直接上游摘要 | P2 | 强化：注入关键因果链/约束条件，减少 Telephone Game（调研 §5） |
-| 4 | 重试收敛提前终止 | max_retries 硬上限 | P2 | 连续两次语义评估指出不同缺陷时提前终止（打地鼠检测） |
-| 5 | 工具/权限最小化 | 无工具级隔离 | P2 | Explore deny edit 对应能力（调研 §1 四原则） |
-| 6 | 上下文去重注入 | TASK.md 逐字重复 | P2 | 共享基座 + 增量，打破成本线性膨胀 |
+| 1 | 异构模型路由 | difficulty → worker_models 已有 | P1 | ✅ 已落地：`worker_models_by_cognitive` 按认知模式（explore/implement/review）路由，覆盖 task_type/difficulty。模式来源：subtask.cognitive_mode 或按 agent_type 推断（architect→explore, reviewer→review）。探索便宜模型/实现强模型/审查独立模型 |
+| 2 | 只读审查 subagent | 验证循环是同一进程自修复 | P1 | ✅ 已落地：`review_agent.py` 独立只读审查（`verification.readonly_review.enabled`），验证失败时黑盒分析失败根因，意见注入修复 prompt（对应调研 §2-3/§4 两阶段审查）。默认关闭（成本可控），fail-open 不阻断验证循环。支持 `readonly_review.skill` 加载领域审查维度（如 `~/.agent_go/skills/readonly-review/SKILL.md`），空则回退内置通用模板 |
+| 3 | 上下文显式注入 | context.md 已注入直接上游摘要 | P2 | ⏳ 待落地：强化注入关键因果链/约束条件，减少 Telephone Game（调研 §5） |
+| 4 | 重试收敛提前终止 | max_retries 硬上限 | P2 | ✅ 已落地：`diverge_similarity_threshold` 打地鼠检测——连续两次语义评估指出不同缺陷时提前终止（`_defect_fingerprint`/`_defect_similarity`） |
+| 5 | 工具/权限最小化 | 无工具级隔离 | P2 | ✅ 已落地：subtask 支持 `allowed_tools`/`permission_mode` 字段覆盖 agent 默认（Explore deny edit 对应能力，调研 §1 四原则）。`--allowedTools` 白名单透传 claude -p |
+| 6 | 上下文去重注入 | TASK.md 逐字重复 | P2 | ⏳ 待落地：共享基座 + 增量，打破成本线性膨胀 |
 
 ## 11. 参考资料
 
