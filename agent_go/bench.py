@@ -1607,6 +1607,119 @@ def _recommend_worker_models(models: dict[str, Any]) -> dict[str, Optional[dict]
     }
 
 
+def _recommend_roles(models: dict[str, Any]) -> dict[str, Optional[dict]]:
+    """CR-G5 / P1：基于模型生产力指标推荐完整角色路由（planner/worker/reviewer + fallback）。
+
+    与 _recommend_worker_models（只推荐难度槽模型名）不同，本函数产出 config 可直接
+    写入的 router.roles 结构（provider + model + fallback），并内建两项 PRD 铁律：
+      - planner 不降级：不配 fallback（规划 token 是全局成本前置变量，省小钱 Worker 膨胀数倍）
+      - reviewer 不同源：reviewer 与 worker 不得同 provider（视角低相关，防自评偏差）
+
+    角色选择规则（确定性、可审计）：
+      - planner：通过率最高者（能力优先；不可能是性价比理由降级）→ 无 fallback
+      - worker ：性价比最优者（best_value 或 dollar_per_pass 最低；能力 ≥70%）→
+                 fallback 取次优候选（不同 provider，可用性降级）
+      - reviewer：与 worker 不同 provider 的通过率最高者 → 无 fallback（低频角色不降级）
+    低置信（sample_size<5）仍可展示但标注，不自动写入（与 CR-P1-1 一致）。
+
+    Args:
+        models: analyze_model_productivity 输出的 {"模型名": metrics, ...}。
+
+    Returns:
+        {"planner": {"provider","model","reason",...}|None, "worker": ..., "reviewer": ...}
+    """
+    from .pricing import infer_provider
+
+    # 候选池：通过率达标 + 可用（含低置信，标注）
+    cands = [(n, m) for n, m in models.items()
+             if (m.get("avg_pass_rate") or 0) >= 0.60 and m.get("sample_size", 0) >= 3]
+    if not cands:
+        return {"planner": None, "worker": None, "reviewer": None,
+                "note": "无通过率≥60% 且样本≥3 的模型，无法推荐"}
+
+    def _provider(n: str) -> Optional[str]:
+        return infer_provider(n)
+
+    def _desc(n: str, m: dict) -> dict:
+        return {
+            "model": n,
+            "provider": _provider(n),
+            "avg_pass_rate": m["avg_pass_rate"],
+            "dollar_per_pass": m.get("dollar_per_pass"),
+            "recommendation": m["recommendation"],
+            "best_value": bool(m.get("best_value")),
+            "low_confidence": m.get("low_confidence", False),
+        }
+
+    _cands_desc = [(n, m, _desc(n, m)) for n, m in cands]
+
+    # ── planner：通过率最高（能力优先），无 fallback ──
+    _planner = max(_cands_desc, key=lambda t: t[1]["avg_pass_rate"])
+    planner = _planner[2]
+    planner["reason"] = f"通过率最高 {planner['avg_pass_rate']:.0%}（Planner 铁律：不配置 fallback）"
+
+    # ── worker：性价比优先（≥70% 能力门槛） ──
+    _worker_cands = [t for t in _cands_desc if t[1]["avg_pass_rate"] >= 0.70]
+    if _worker_cands:
+        _worker = min(_worker_cands, key=lambda t: (
+            0 if t[2]["best_value"] else 1, t[2]["dollar_per_pass"] if t[2]["dollar_per_pass"] is not None else 999))
+    else:
+        _worker = max(_cands_desc, key=lambda t: t[1]["avg_pass_rate"])
+    worker = dict(_worker[2])
+    worker["reason"] = f"最佳性价比（通过率 {worker['avg_pass_rate']:.0%}，$/pass ${worker['dollar_per_pass'] or 0:.4f}）"
+
+    # worker fallback：不同 provider 的次优候选（可用性降级）
+    _fb_cands = [t for t in _cands_desc
+                 if t[0] != worker["model"] and _provider(t[0]) != worker["provider"]]
+    if _fb_cands:
+        _fb = max(_fb_cands, key=lambda t: t[1]["avg_pass_rate"])
+        worker["fallback"] = {"provider": _fb[2]["provider"], "model": _fb[0]}
+
+    # ── reviewer：与 worker 不同 provider 的通过率最高者（不同源铁律） ──
+    _rev_cands = [t for t in _cands_desc
+                  if t[0] != worker["model"] and _provider(t[0]) != worker["provider"]]
+    if _rev_cands:
+        _rev = max(_rev_cands, key=lambda t: t[1]["avg_pass_rate"])
+        reviewer = dict(_rev[2])
+        reviewer["reason"] = (f"通过率最高 {reviewer['avg_pass_rate']:.0%} 且与 worker "
+                              f"({worker['provider']}) 不同源（Reviewer 铁律）")
+    else:
+        reviewer = None
+
+    return {"planner": planner, "worker": worker, "reviewer": reviewer}
+
+
+def _apply_roles(roles_proposal: dict[str, Optional[dict]]) -> list[str]:
+    """把角色路由推荐写入 config.json 的 router.roles（原子写：tmp + rename）。
+
+    保留现有 config 其余部分；仅更新 router.roles 三个角色。provider 推断失败
+    （None）的角色跳过不写（避免写入无 provider 的坏配置），返回跳过列表说明。
+    """
+    cfg: dict[str, Any] = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            cfg = {}
+    _router = cfg.setdefault("router", {})
+    _roles = _router.setdefault("roles", {})
+    _skipped = []
+    for _role in ("planner", "worker", "reviewer"):
+        _p = roles_proposal.get(_role)
+        if not _p or not _p.get("provider") or not _p.get("model"):
+            _skipped.append(_role)
+            continue
+        _role_cfg = {"provider": _p["provider"], "model": _p["model"]}
+        _fb = _p.get("fallback")
+        if _fb and _fb.get("provider") and _fb.get("model"):
+            _role_cfg["fallback"] = {"provider": _fb["provider"], "model": _fb["model"]}
+        _roles[_role] = _role_cfg
+    _tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    _tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    _tmp.replace(CONFIG_PATH)
+    return _skipped
+
+
 def _apply_worker_models(proposal: dict[str, Optional[dict]]) -> None:
     """把推荐写入 config.json 的 worker_models（原子写：tmp + rename）。"""
     cfg: dict[str, Any] = {}

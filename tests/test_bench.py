@@ -1509,3 +1509,115 @@ def test_prune_fixture_worktrees_active_kept(tmp_path):
     after = sp.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True)
     assert len([l for l in after.stdout.strip().split("\n") if l.strip()]) == 2, \
         "活跃 worktree 不应被 prune"
+
+
+# ═══════════════════════════════════════════════════════════════
+# P1 router recommend：完整角色路由推荐（planner/worker/reviewer + fallback）
+# ═══════════════════════════════════════════════════════════════
+
+def _role_model(name, pass_rate, dpp, best_value=False, rec="recommended", low=False):
+    """构造 _recommend_roles 消费的 models 项（与 analyze_model_productivity 输出对齐）。"""
+    return {name: {"avg_pass_rate": pass_rate, "dollar_per_pass": dpp,
+                   "sample_size": 10, "recommendation": rec,
+                   "best_value": best_value, "low_confidence": low}}
+
+
+def test_recommend_roles_ironclad_rules():
+    """P1：planner 不降级（无 fallback）；reviewer 与 worker 不同 provider。"""
+    from agent_go.bench import _recommend_roles
+    models = {
+        **_role_model("deepseek-chat", 0.75, 0.008, best_value=True, rec="conditional"),
+        **_role_model("claude-opus-4-8", 0.88, 0.25),
+        **_role_model("gemini-3.1-pro", 0.90, 0.30),
+        **_role_model("kimi-k2", 0.82, 0.05),
+    }
+    p = _recommend_roles(models)
+    # planner = 通过率最高（gemini）且无 fallback
+    assert p["planner"]["model"] == "gemini-3.1-pro"
+    assert "fallback" not in p["planner"]
+    # worker = 最佳性价比（deepseek best_value）→ fallback 不同 provider
+    assert p["worker"]["model"] == "deepseek-chat"
+    fb = p["worker"]["fallback"]
+    assert fb is not None and fb["provider"] != "deepseek"
+    # reviewer 与 worker 不同源
+    assert p["reviewer"]["provider"] != p["worker"]["provider"]
+
+
+def test_recommend_roles_cheapest_worker_when_no_best_value():
+    """P1：无 best_value 时 worker 取 $/pass 最低（≥70% 能力门槛）。"""
+    from agent_go.bench import _recommend_roles
+    models = {
+        **_role_model("claude-opus-4-8", 0.88, 0.25),
+        **_role_model("gpt-4.1", 0.80, 0.12),
+    }
+    p = _recommend_roles(models)
+    assert p["worker"]["model"] == "gpt-4.1"       # $/pass 最低且 ≥70%
+    assert p["planner"]["model"] == "claude-opus-4-8"
+    # reviewer：与 worker(openai) 不同源的最高通过率者
+    assert p["reviewer"]["model"] == "claude-opus-4-8"
+    assert p["reviewer"]["provider"] == "anthropic"
+
+
+def test_recommend_roles_no_qualified_returns_none():
+    """P1：无通过率≥60% 模型 → 三角色 None + note。"""
+    from agent_go.bench import _recommend_roles
+    models = _role_model("weak", 0.50, 0.001, rec="discouraged")
+    p = _recommend_roles(models)
+    assert p["planner"] is None and p["worker"] is None and p["reviewer"] is None
+    assert "note" in p
+
+
+def test_recommend_roles_reviewer_none_when_all_same_provider():
+    """P1：合格模型均与 worker 同 provider → reviewer None 或不同源（不同源铁律）。"""
+    from agent_go.bench import _recommend_roles
+    models = {
+        **_role_model("deepseek-chat", 0.78, 0.008, best_value=True),
+        **_role_model("deepseek-v4-pro", 0.60, 0.43),
+    }
+    p = _recommend_roles(models)
+    assert p["worker"]["model"] == "deepseek-chat"
+    if p["reviewer"] is not None:
+        assert p["reviewer"]["provider"] != "deepseek"
+
+
+def test_apply_roles_writes_and_skips(tmp_path):
+    """P1：_apply_roles 写 router.roles，保留其余 config，provider None 的角色跳过。"""
+    from agent_go.bench import _apply_roles
+    import json as _j
+    cfg = tmp_path / "config.json"
+    cfg.write_text(_j.dumps({"worker_models": {"easy": ""}}, ensure_ascii=False))
+    proposal = {
+        "planner": {"provider": "google", "model": "gemini-3.1-pro"},
+        "worker": {"provider": "deepseek", "model": "deepseek-chat",
+                   "fallback": {"provider": "google", "model": "gemini-3.1-pro"}},
+        "reviewer": None,
+        "unknown": {"provider": None, "model": "x"},
+    }
+    from unittest.mock import patch
+    with patch("agent_go.bench.CONFIG_PATH", cfg):
+        skipped = _apply_roles(proposal)
+    saved = _j.loads(cfg.read_text(encoding="utf-8"))
+    assert skipped == ["reviewer"]
+    assert saved["router"]["roles"]["planner"] == {"provider": "google", "model": "gemini-3.1-pro"}
+    assert saved["router"]["roles"]["worker"] == {
+        "provider": "deepseek", "model": "deepseek-chat",
+        "fallback": {"provider": "google", "model": "gemini-3.1-pro"}}
+    assert "unknown" not in saved["router"]["roles"]      # 非三角色键不处理
+    assert saved["worker_models"]["easy"] == ""      # 保留原配置
+
+
+def test_apply_roles_atomic_preserves_unknown_keys(tmp_path):
+    """P1：_apply_roles 原子写不破坏未知顶层键。"""
+    from agent_go.bench import _apply_roles
+    import json as _j
+    cfg = tmp_path / "config.json"
+    cfg.write_text(_j.dumps({"api_key": "k", "router": {"enabled": False}}, ensure_ascii=False))
+    proposal = {"planner": {"provider": "anthropic", "model": "claude-opus-4-8"},
+                "worker": None, "reviewer": None}
+    from unittest.mock import patch
+    with patch("agent_go.bench.CONFIG_PATH", cfg):
+        _apply_roles(proposal)
+    saved = _j.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["api_key"] == "k"
+    assert saved["router"]["enabled"] is False
+    assert saved["router"]["roles"]["planner"] == {"provider": "anthropic", "model": "claude-opus-4-8"}

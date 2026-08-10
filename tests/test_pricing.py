@@ -125,3 +125,40 @@ class TestValidateWorkerTier:
     def test_non_dict_returns_empty(self):
         assert validate_worker_tier(None) == []  # type: ignore[arg-type]
         assert validate_worker_tier("not a dict") == []  # type: ignore[arg-type]
+
+
+class TestInferProvider:
+    """P1 router recommend：模型名 → provider 反查（前缀匹配 + 后缀剥离）。"""
+
+    def test_known_prefixes(self):
+        from agent_go.pricing import infer_provider
+        cases = {
+            "claude-opus-4-8": "anthropic",
+            "gpt-4.1": "openai",
+            "o4-mini": "openai",
+            "gemini-2.5-pro": "google",
+            "deepseek-chat": "deepseek",
+            "qwen-max": "aliyun",
+            "doubao-lite": "volcengine",
+            "kimi-k2": "moonshot",
+            "glm-4.7": "zhipu",
+        }
+        for model, expected in cases.items():
+            assert infer_provider(model) == expected, f"{model} → {infer_provider(model)}"
+
+    def test_version_suffix_stripped(self):
+        from agent_go.pricing import infer_provider
+        assert infer_provider("claude-opus-4-8-20251001") == "anthropic"
+        assert infer_provider("deepseek-v4-flash-old") == "deepseek"
+        assert infer_provider("deepseek-chat-v4") == "deepseek"
+
+    def test_unknown_returns_none(self):
+        from agent_go.pricing import infer_provider
+        assert infer_provider("custom-thing") is None
+        assert infer_provider("") is None
+        assert infer_provider(None) is None  # type: ignore[arg-type]
+
+    def test_local_models(self):
+        from agent_go.pricing import infer_provider
+        assert infer_provider("qwen3.6-27b-4bit") == "local"
+        assert infer_provider("llama-3.3-70b") == "local"

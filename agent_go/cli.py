@@ -352,6 +352,13 @@ def _build_parser():
     set_role_parser.add_argument("--fallback-provider", help="Fallback provider")
     set_role_parser.add_argument("--fallback-model", help="Fallback model name")
     set_role_parser.add_argument("--fallback-base-url", help="Fallback API base URL")
+    recommend_parser = router_sub.add_parser("recommend", help="基于 bench 结果推荐角色路由配置（P1）")
+    recommend_parser.add_argument("--results", default="eval_suite/results.jsonl",
+                                  help="结果文件（同 eval recommend）")
+    recommend_parser.add_argument("--apply", action="store_true",
+                                  help="把推荐写入 config.json 的 router.roles（默认 dry-run）")
+    recommend_parser.add_argument("--force", action="store_true",
+                                  help="apply 时：低置信（n<5）角色仍写入（默认跳过）")
 
     return parser
 
@@ -2698,15 +2705,19 @@ def cmd_router(args=None) -> None:
 
     if subcmd == "enable":
         router_cfg["enabled"] = True
-        CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_config(config, CONFIG_PATH)
         console.success("角色感知路由已启用")
         _print_router_config(router_cfg)
         return
 
     if subcmd == "disable":
         router_cfg["enabled"] = False
-        CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_config(config, CONFIG_PATH)
         console.success("角色感知路由已禁用（回退到 plan_api）")
+        return
+
+    if subcmd == "recommend":
+        _cmd_router_recommend(args)
         return
 
     if subcmd == "set-role":
@@ -2732,12 +2743,75 @@ def cmd_router(args=None) -> None:
             console.print("路由执行时 metering 将标记 policy_violation=planner_fallback_configured")
             console.print("建议移除 fallback: agent_go router set-role planner --provider ... --model ... --base-url ...")
 
-        CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_config(config, CONFIG_PATH)
         console.success(f"{role} 角色已配置")
         _print_role_config(role, router_cfg)
         return
 
-    console.print(f"未知操作: {subcmd}。可用: show | enable | disable | set-role")
+    console.print(f"未知操作: {subcmd}。可用: show | enable | disable | set-role | recommend")
+
+
+def _cmd_router_recommend(args) -> None:
+    """router recommend：基于 bench 结果推荐角色路由（planner/worker/reviewer + fallback）。
+
+    P1（docs/design/model-evaluation-and-tiering.md §5）：闭环到配置——读
+    analyze_model_productivity 结果 → _recommend_roles（铁律：planner 不降级、
+    reviewer 不同源）→ dry-run 展示 / --apply 写 config.json 的 router.roles。
+    provider 推断失败的角色跳过写入（advisory，不静默写坏配置）。
+    """
+    from .bench import analyze_model_productivity, _recommend_roles, _apply_roles
+    from .config import CONFIG_PATH
+
+    results_path = Path(getattr(args, "results", "eval_suite/results.jsonl") or "eval_suite/results.jsonl")
+    data = analyze_model_productivity(results_path)
+    if "error" in data:
+        console.warning(f"{data['error']} → 先跑 agent_go eval bench")
+        return
+
+    proposal = _recommend_roles(data["models"])
+    console.print(f"\n🔀 角色路由推荐（基于 {data['total_runs']} 次执行）")
+    console.print("─" * 88)
+    for _role in ("planner", "worker", "reviewer"):
+        _p = proposal.get(_role)
+        if not _p:
+            console.print(f"  {_role:<9} → （无合格候选）")
+            continue
+        _low = " ⚠小样本" if _p.get("low_confidence") else ""
+        _fb = _p.get("fallback")
+        _fb_str = (f" → fallback: {_fb['provider']}:{_fb['model']}" if _fb else "（不降级）")
+        _dpp = _p.get("dollar_per_pass")
+        console.print(f"  {_role:<9} → {_p.get('provider')}:{_p['model']}{_fb_str}{_low}")
+        console.print(f"             (通过率 {_p.get('avg_pass_rate', 0):.0%}, $/pass ${_dpp or 0:.4f}; {_p.get('reason')})")
+    console.print("─" * 88)
+    _note = proposal.get("note")
+    if _note:
+        console.warning(_note)
+
+    if not getattr(args, "apply", False):
+        console.print("（dry-run，未写入。用 --apply 写入 config.json 的 router.roles）")
+        return
+
+    # CR-P1-1：小样本（n<5 低置信）不自动路由——--apply 默认跳过，--force 覆盖。
+    _force = getattr(args, "force", False)
+    _apply_proposal = dict(proposal)
+    if not _force:
+        for _role in ("planner", "worker", "reviewer"):
+            _p = proposal.get(_role)
+            if _p and _p.get("low_confidence"):
+                console.warning(f"{_role}: 低置信（n<5），--apply 跳过（--force 覆盖）")
+                _apply_proposal[_role] = None
+    _skipped = _apply_roles(_apply_proposal)
+    if _skipped:
+        for _role in _skipped:
+            console.warning(f"{_role}: provider 无法推断或已跳过，未写入（用 set-role 手动配置）")
+    console.success(f"✅ 已写入 {CONFIG_PATH} 的 router.roles；router.enabled 请用 'agent_go router enable' 启用")
+
+
+def _atomic_write_config(config: dict, config_path) -> None:
+    """原子写 config.json：tmp + rename，避免写中断导致配置损坏。"""
+    _tmp = config_path.with_suffix(".json.tmp")
+    _tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+    _tmp.replace(config_path)
 
 
 def _print_router_config(router_cfg: dict) -> None:
