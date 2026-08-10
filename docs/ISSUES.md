@@ -552,24 +552,28 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 ### ISSUE-36 eval_suite/fixtures/ 被主仓库与 fixture 独立仓库双重跟踪
 
 - **位置**：`eval_suite/fixtures/`（fp-sandbox / task-mgr / data-pipeline / django-blog）
-- **状态**：⏳ 待处理（结构性问题，2026-08-10 记录）
+- **状态**：✅ 已缓解（2026-08-10）— 主仓库 `.gitignore` 忽略 bench 运行时产物 `eval_suite/fixtures/fp-sandbox/solution.py`；结构重构记录为后续
 - **严重度**：P2（状态冲突，但不阻塞 bench 运行）
 
 **问题**：4 个 fixture 项目都是独立 git 仓库（各有 `.git`），但主仓库也通过 `git ls-files` 跟踪了其中 75 个内容文件（历史遗留 f92d218 提交时一并纳入）。双重管理导致状态冲突：
 - 阶段 E 期间 fp-sandbox 的 `solution.py`：主仓库跟踪的是旧版本，fixture 仓库初始状态（3ecb2b9）无此文件 → 主仓库工作区显示删除，实际是运行时产物混入主仓库。
 - django-blog 的 `tests/test_performance.py` 同理（db 任务运行时被修改）。
 
-**处理**：本次仅 `git rm --cached eval_suite/fixtures/fp-sandbox/solution.py` 移除该冲突点（fixture 运行时产物不应由主仓库跟踪）。未做大规模重构。
+**处理**（2026-08-10）：
+- 已 `git rm --cached eval_suite/fixtures/fp-sandbox/solution.py` 移除该冲突点。
+- 主仓库 `.gitignore` 新增 `eval_suite/fixtures/fp-sandbox/solution.py`，防止 bench 再次污染主仓库 status / 被 `git add -A` 误提交。
+
+**约束**：fixture 仓库**无 remote**，若整体 `git rm --cached` 全部 fixture 内容，fresh clone 主仓库后将无 fixture 可跑 bench——故本次采用「忽略运行时产物」的保守缓解，未做大规模 untrack。
 
 **建议修复方向**（M2+ 结构重构时）：
-1. 主仓库 `.gitignore` 忽略 `eval_suite/fixtures/*/`（内容由 fixture 独立仓库管理）。
-2. 或 `git rm --cached` 全部 fixture 内容文件，改为 bench/CI 运行时单独 clone/复制 fixture 仓库。
+1. 为 fixture 仓库补 remote（或推送到独立 repo），主仓库 `git rm --cached` 全部 fixture 内容，改为 bench/CI 运行时单独 clone/复制 fixture 仓库。
+2. 或主仓库 `.gitignore` 忽略 `eval_suite/fixtures/*/`（内容由 fixture 独立仓库管理）。
 3. 需要确认 CI（git clone 主仓库）是否依赖 fixture 工作区文件；若依赖，需在 CI 中单独检出 fixture 仓库。
 
 ### ISSUE-37 eval gate 扫描全库 AGENT_GO_DIR，无法隔离到 bench batch
 
 - **位置**：`eval.py` `cmd_eval` gate 分支（`gate_cost` / `gate_cost_regression`）
-- **状态**：⏳ 待修复（2026-08-10 阶段 E 收尾发现）
+- **状态**：✅ 已修复（2026-08-10）— `eval gate --results <file>` 用 batch 数据计算 $/pass
 - **严重度**：P2（发布门禁语义与 batch 化基准不匹配，误报劣化）
 
 **问题**：`eval gate` 的两种模式（`--baseline` 绝对阈值 / `--check-regression` 回归）都硬编码扫描 `AGENT_GO_DIR`（~/.agent_go/ 全部历史任务 metering），**不接受 `--results`**。而 bench 的 `metric-freeze` / `batch-manifest` 是基于 results.jsonl 的 batch 数据。
@@ -581,15 +585,17 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 
 **影响**：发布门禁无法针对"本次冻结的基线"做准确判断，会误报劣化。阶段 E 数据本身达标，但 gate 工具无法体现。
 
-**建议修复方向**：
-1. `eval gate` 支持 `--results <results.jsonl>`，从 batch 数据计算 $/pass（排除 timed_out 右删失），而非 AGENT_GO_DIR 全库。
-2. 或 `--source-batch <batch>` 筛选 AGENT_GO_DIR 中匹配 source_batch 的任务。
-3. 与 `metric-freeze` 的 `valid_cost_usd / valid_task_count` 语义对齐。
+**修复**（2026-08-10）：
+1. `gate_cost` / `gate_cost_regression` 新增 `records` 参数：非空时用 `compute_frozen_metrics` 从 batch records 计算 `$/pass`（= `valid_cost / diagnostic_pass`，与 metric-freeze 的 `dollar_per_pass_diagnostic_usd` 对齐）；空则回退 `analyze_cost(tasks_dir)` 全库扫描（向后兼容）。
+2. `cmd_eval` gate 分支：`--results <file>` 非默认值时通过 `validate_results_file` 加载 batch records 传入。
+3. timed_out 记录计为失败（产品语义 `timeout_disposition=failure`，pass_rate=0 不贡献分母）——与 metric-freeze 一致。
+
+**验证**：`agent_go eval gate --baseline 0.05 --results eval_suite/baselines/decision-20260809/results.jsonl` → ✅ $/pass=$0.019993 达标（修复前全库误报 $0.20 不通过）。
 
 ### ISSUE-38 fixture 仓库 worktree 泄漏（bench 运行残留）
 
 - **位置**：`agent_go/bench.py` + `executor.py` worktree 管理
-- **状态**：⏳ 待修复（2026-08-10 历史数据清理发现）
+- **状态**：✅ 已修复（2026-08-10）— bench 每任务后 prune fixture 源仓库 + `clean --fixture-worktrees` 兜底
 - **严重度**：P2（磁盘泄漏，长期运行累积 GB 级残留）
 
 **问题**：agent_go bench 复制 fixture 到临时目录运行（bench.py:246 不复制 `.git`），但 `git worktree add` 时 worktree 仍注册到 **fixture 源仓库**的 `.git/worktrees/`，且 bench 清理逻辑不覆盖 → 每次运行在 fixture 源仓库累积一个 worktree 注册项，长期泄漏。
@@ -605,8 +611,8 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 - `git worktree list` / `git gc` / fixture 操作变慢
 - 长期运行每个 bench 任务泄漏一个注册项
 
-**建议修复方向**：
-1. **bench 完成时统一清理**：`_run_one_task` 结束后，删除注册到 fixture 源仓库的 worktree（当前只清理 task 目录内的 worktree，不清理 fixture 源仓库的注册）。
-2. **复制 fixture 时不带 .git**：确保临时目录的 worktree 注册在临时仓库，不写回源仓库。
-3. 或 executor 用 `--force` 方式在任务结束时 `git worktree remove`，并 `git worktree prune` 清孤立注册。
-4. 提供一次性清理脚本（如 `agent_go clean --fixture-worktrees`）兜底历史残留。
+**修复**（2026-08-10）：
+1. `bench.py` 新增 `_prune_fixture_worktrees(repo)`：每个 bench 任务结束后对 fixture 源仓库执行 `git worktree prune`（清除指向已删除 task worktree 的失效注册），`_run_one_wrapper` 中调用。廉价、幂等、安全。
+2. `agent_go clean --fixture-worktrees` 一次性兜底：扫描 `eval_suite/fixtures/*` 与所有任务 `meta.repo` 引用的本地仓库，逐一 `git worktree prune`，输出清理后注册数。
+
+**验证**：单测覆盖 `_prune_fixture_worktrees`（失效注册清除 / 活跃 worktree 保留 / 非 git no-op）+ `cmd_clean --fixture-worktrees` 分支。

@@ -20,3 +20,7 @@ __pycache__/
 .idea/
 .obsidian/
 2026-05-15-211101-command-messageinitcommand-message.txt
+
+# ISSUE-36：bench 运行时在 fixture 仓库内产生的产物（fixture 独立 git 仓库管理，
+# 主仓库不跟踪，避免 bench 运行污染主仓库 status / 被 git add -A 误提交）
+eval_suite/fixtures/fp-sandbox/solution.py
