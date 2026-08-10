@@ -221,6 +221,23 @@ L2/L3 熔断触发时写入 `cost_censored` 事件。该事件的 `cost_usd` 是
 
 **关键约束**：开启 L2/L3 前**必须**先运行 `eval cost-baseline` 校准。未校准的基线会导致高误杀率。
 
+> **2026-08-10 已校准并启用**：`~/.agent_go/config.json` 的 `cost_control.enabled=true`。
+> 校准数据来源是**真实 worker metering**（`~/.agent_go/task-*/metering.jsonl`，生产路由
+> claude-opus/sonnet/haiku + deepseek-pro），**不是** decision bench baseline——
+> 后者用 deepseek-v4-flash（P90 easy $0.008）与生产成本差 10-25×，直接用于校准会大量误杀。
+>
+> 校准值（P90×1.5）：
+> | 难度 | per_subtask_budget | L2 累计上限(×2.5) |
+> |---|---|---|
+> | easy | $0.64 | $1.60 |
+> | medium | $0.88 | $2.20 |
+> | hard | $2.27 | $5.67 |
+>
+> L3 `max_budget_usd=0` → 用动态默认（Σ per_subtask × 2.5 × 子任务数）。
+> 验证：1262 easy / 145 hard 子任务 **0 误杀**；1643 medium 仅 4 个超限（跑飞异常任务）；
+> 1106 真实任务 L3 熔断率 < 0.5%（单 medium 任务 $2.20 熔断 2.8% 均为异常）。
+> 若更换模型路由（如切到更贵/更便宜的模型），需重新运行 `eval cost-baseline` 校准。
+
 ---
 
 ## 5. 常见问题与解决方案
