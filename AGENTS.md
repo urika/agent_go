@@ -91,6 +91,7 @@ agent_go pr <task-id> --push
 agent_go ci --dry-run
 agent_go cache stats
 agent_go router show
+agent_go router recommend [--results FILE] [--apply] [--force]   # P1：基于 bench 结果推荐角色路由
 agent_go skills list
 agent_go skills show <name>
 agent_go agents

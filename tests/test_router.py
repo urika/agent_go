@@ -417,6 +417,127 @@ class TestCliRouter:
         help_text = parser.format_help()
         assert "router" in help_text.lower()
 
+    def test_router_recommend_subcommand_registered(self):
+        """P1：router recommend 子命令已注册（含 --results/--apply/--force）。"""
+        from agent_go.cli import _build_parser
+        parser = _build_parser()
+        a = parser.parse_args(["router", "recommend"])
+        assert a.router_subcommand == "recommend"
+        assert a.results == "eval_suite/results.jsonl"
+        assert a.apply is False
+        a2 = parser.parse_args(["router", "recommend", "--results", "x.jsonl", "--apply", "--force"])
+        assert a2.results == "x.jsonl" and a2.apply is True and a2.force is True
+
+    def test_router_recommend_dry_run_no_write(self, tmp_path, capsys):
+        """P1：dry-run 展示推荐，不写 router.roles（config 自动创建属正常行为）。"""
+        from agent_go.cli import cmd_router
+        import argparse
+        import json as _j
+        cfg = tmp_path / "config.json"
+        cfg.write_text(_j.dumps({"worker_models": {"easy": ""}}))
+        models = {
+            "deepseek-chat": {"avg_pass_rate": 0.75, "dollar_per_pass": 0.008,
+                              "sample_size": 10, "recommendation": "conditional",
+                              "best_value": True, "low_confidence": False},
+            "claude-opus-4-8": {"avg_pass_rate": 0.88, "dollar_per_pass": 0.25,
+                                "sample_size": 10, "recommendation": "recommended",
+                                "best_value": False, "low_confidence": False},
+        }
+        args = argparse.Namespace(router_subcommand="recommend", apply=False,
+                                  force=False, results="eval_suite/results.jsonl")
+        with patch("agent_go.bench.analyze_model_productivity",
+                   return_value={"models": models, "total_runs": 50}), \
+             patch("agent_go.cli.AGENT_GO_DIR", tmp_path), \
+             patch("agent_go.config.CONFIG_PATH", cfg):
+            cmd_router(args)
+        saved = _j.loads(cfg.read_text(encoding="utf-8"))
+        assert "roles" not in saved.get("router", {}), "dry-run 不应写 router.roles"
+        out = capsys.readouterr().out
+        assert "角色路由推荐" in out
+        assert "claude-opus-4-8" in out
+        assert "deepseek-chat" in out
+
+    def test_router_recommend_apply_writes(self, tmp_path):
+        """P1：--apply 写入 config router.roles（保留原配置）。"""
+        import json as _j
+        from agent_go.cli import cmd_router
+        import argparse
+        cfg = tmp_path / "config.json"
+        cfg.write_text(_j.dumps({"worker_models": {"easy": ""}}))
+        models = {
+            "deepseek-chat": {"avg_pass_rate": 0.75, "dollar_per_pass": 0.008,
+                              "sample_size": 10, "recommendation": "conditional",
+                              "best_value": True, "low_confidence": False},
+            "claude-opus-4-8": {"avg_pass_rate": 0.88, "dollar_per_pass": 0.25,
+                                "sample_size": 10, "recommendation": "recommended",
+                                "best_value": False, "low_confidence": False},
+        }
+        args = argparse.Namespace(router_subcommand="recommend", apply=True,
+                                  force=False, results="eval_suite/results.jsonl")
+        with patch("agent_go.bench.analyze_model_productivity",
+                   return_value={"models": models, "total_runs": 50}), \
+             patch("agent_go.cli.AGENT_GO_DIR", tmp_path), \
+             patch("agent_go.config.CONFIG_PATH", cfg), \
+             patch("agent_go.bench.CONFIG_PATH", cfg):
+            cmd_router(args)
+        saved = _j.loads(cfg.read_text(encoding="utf-8"))
+        assert saved["worker_models"]["easy"] == ""       # 保留原配置
+        roles = saved["router"]["roles"]
+        assert roles["worker"]["provider"] == "deepseek"  # best_value 性价比
+        assert roles["worker"]["fallback"]["provider"] != "deepseek"
+        assert roles["planner"]["model"] == "claude-opus-4-8"
+        assert "fallback" not in roles["planner"]         # Planner 铁律：不降级
+
+    def test_router_recommend_apply_skips_low_confidence(self, tmp_path):
+        """P1：低置信（n<5）角色在 --apply 无 --force 时跳过。"""
+        import json as _j
+        from agent_go.cli import cmd_router
+        import argparse
+        cfg = tmp_path / "config.json"
+        cfg.write_text(_j.dumps({"worker_models": {"easy": ""}}))
+        models = {
+            "deepseek-chat": {"avg_pass_rate": 0.75, "dollar_per_pass": 0.008,
+                              "sample_size": 4, "recommendation": "conditional",
+                              "best_value": True, "low_confidence": True},
+            "claude-opus-4-8": {"avg_pass_rate": 0.88, "dollar_per_pass": 0.25,
+                                "sample_size": 3, "recommendation": "recommended",
+                                "best_value": False, "low_confidence": True},
+        }
+        args = argparse.Namespace(router_subcommand="recommend", apply=True,
+                                  force=False, results="eval_suite/results.jsonl")
+        with patch("agent_go.bench.analyze_model_productivity",
+                   return_value={"models": models, "total_runs": 50}), \
+             patch("agent_go.cli.AGENT_GO_DIR", tmp_path), \
+             patch("agent_go.config.CONFIG_PATH", cfg), \
+             patch("agent_go.bench.CONFIG_PATH", cfg):
+            cmd_router(args)
+        saved = _j.loads(cfg.read_text(encoding="utf-8"))
+        roles = saved.get("router", {}).get("roles", {})
+        assert not roles, "低置信角色不应写入 config"
+
+    def test_router_recommend_apply_force_overrides_low_confidence(self, tmp_path):
+        """P1：--force 时低置信角色仍写入。"""
+        import json as _j
+        from agent_go.cli import cmd_router
+        import argparse
+        cfg = tmp_path / "config.json"
+        cfg.write_text(_j.dumps({}))
+        models = {
+            "deepseek-chat": {"avg_pass_rate": 0.75, "dollar_per_pass": 0.008,
+                              "sample_size": 4, "recommendation": "conditional",
+                              "best_value": True, "low_confidence": True},
+        }
+        args = argparse.Namespace(router_subcommand="recommend", apply=True,
+                                  force=True, results="eval_suite/results.jsonl")
+        with patch("agent_go.bench.analyze_model_productivity",
+                   return_value={"models": models, "total_runs": 50}), \
+             patch("agent_go.cli.AGENT_GO_DIR", tmp_path), \
+             patch("agent_go.config.CONFIG_PATH", cfg), \
+             patch("agent_go.bench.CONFIG_PATH", cfg):
+            cmd_router(args)
+        saved = _j.loads(cfg.read_text(encoding="utf-8"))
+        assert saved["router"]["roles"]["worker"]["model"] == "deepseek-chat"
+
 
 # ═══════════════════════════════════════════════════════════════
 # CircuitBreaker 半开边界
