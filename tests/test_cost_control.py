@@ -218,6 +218,51 @@ class TestL3TaskBudget:
 # 测量/控制解耦：censored 事件写入
 # ─────────────────────────────────────────────────────────────
 
+class TestMeteringAvailableColdStart:
+    """成本控制冷启动：metering.jsonl 尚未创建 ≠ 计量不可用（避免 L3 误中止任务）。"""
+
+    def test_missing_file_is_available_pipeline(self, tmp_path):
+        """文件不存在（任务刚启动，尚未写入成本）→ 视为计量可用（放行首个 wave）。"""
+        from agent_go.pipeline import _metering_available
+        mp = tmp_path / "metering.jsonl"
+        assert not mp.exists()
+        assert _metering_available(str(mp)) is True, \
+            "任务启动时 metering 未创建应视为可用（预算尚未消耗）"
+
+    def test_missing_file_is_available_executor(self, tmp_path):
+        """同语义，executor 侧的 _metering_available。"""
+        from agent_go.executor import _metering_available
+        mp = tmp_path / "metering.jsonl"
+        assert not mp.exists()
+        assert _metering_available(str(mp)) is True
+
+    def test_existing_file_readable_is_available(self, tmp_path):
+        """文件存在且可读 → 可用。"""
+        from agent_go.pipeline import _metering_available
+        mp = tmp_path / "metering.jsonl"
+        mp.write_text('{"role": "worker", "cost_usd": 0.1}\n', encoding="utf-8")
+        assert _metering_available(str(mp)) is True
+
+    def test_empty_path_is_available(self):
+        """metering_path 为空（未配置）→ 视为可用（成本控制不因此阻断）。"""
+        from agent_go.pipeline import _metering_available
+        assert _metering_available("") is True
+
+    def test_l3_does_not_abort_when_metering_not_created(self, tmp_path, monkeypatch):
+        """L3 在 metering 文件尚未创建时不中止任务（首个 wave 放行）。"""
+        from agent_go.pipeline import _meter_total_cost, _metering_available
+        mp = tmp_path / "metering.jsonl"  # 不存在
+        # 模拟 pipeline L3 检查的判定：可用 + 累计成本 0 < 预算 → 不熔断
+        assert _metering_available(str(mp)) is True
+        assert _meter_total_cost(str(mp)) == 0.0
+        # budget 为正 → 0 < budget，不触发熔断
+        assert _meter_total_cost(str(mp)) < 0.5
+
+
+# ─────────────────────────────────────────────────────────────
+# 测量/控制解耦：censored 事件写入
+# ─────────────────────────────────────────────────────────────
+
 class TestCensoredEvent:
     def test_write_censored_event_appends(self, tmp_path):
         """L2/L3 熔断时写 cost_censored 事件到 metering.jsonl（控制不中断测量）。"""

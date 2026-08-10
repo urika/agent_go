@@ -118,11 +118,20 @@ def _meter_total_cost(metering_path: str) -> float:
 
 
 def _metering_available(metering_path: str) -> bool:
+    """计量文件是否可用。
+
+    语义（成本控制冷启动修复）：文件**不存在**视为可用——任务刚启动时
+    metering.jsonl 尚未创建（第一个 worker 写入成本时才生成），此时预算
+    尚未消耗，应放行首个 wave，而不是中止任务。仅当文件**存在但读取失败**
+    （权限/磁盘错误）才算不可用。
+    """
     if not metering_path:
-        return False
+        return True
     try:
         with open(metering_path, encoding="utf-8"):
             return True
+    except FileNotFoundError:
+        return True
     except OSError:
         return False
 

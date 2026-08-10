@@ -2994,3 +2994,94 @@ class TestPermissionMinimization:
         # developer 内置默认无 allowed_tools（完整权限），应保留
         assert "allowed_tools" not in (agent_arg.claude_config or {}), \
             f"未覆盖时应保留 agent 默认: {agent_arg.claude_config}"
+
+
+class TestTaskBaseShared:
+    """TASK_BASE.md 共享基座：绝对路径引用，不复制进 worktree（避免污染 git 变更范围）。"""
+
+    def test_task_md_references_absolute_path(self, tmp_path, logger):
+        """TASK_BASE.md 存在 → TASK.md 用绝对路径引用（不注入内联要求、不提示复制）。"""
+        from agent_go.executor import _build_task_md
+
+        task_dir = tmp_path / "task"
+        task_dir.mkdir(parents=True)
+        (task_dir / "TASK_BASE.md").write_text("# 通用执行要求\n- 不要自行 git commit\n", encoding="utf-8")
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+
+        subtask = {
+            "id": "sub-1", "title": "实现功能", "description": "写代码",
+            "files_hint": "*", "verification": "pytest", "risks": [],
+            "depends_on": [], "skills": [], "agent_type": "developer",
+            "agent_prompt": "work", "difficulty": "easy",
+        }
+        task_md, _, _, _ = _build_task_md(
+            subtask, tmp_path, task_dir, worktree, logger, headless=True, config={},
+        )
+        # 用绝对路径引用共享基座
+        assert str(task_dir / "TASK_BASE.md") in task_md, \
+            "TASK.md 应引用共享基座的绝对路径"
+        assert "worktree 根目录" not in task_md, \
+            "不应再提示基座在 worktree 根目录（已改为绝对路径引用）"
+        # 不应回退到内联完整要求
+        assert "变更保留在此目录" not in task_md
+
+    def test_task_md_falls_back_inline_without_base(self, tmp_path, logger):
+        """TASK_BASE.md 不存在 → 回退内联通用要求（兼容旧任务 resume）。"""
+        from agent_go.executor import _build_task_md
+
+        task_dir = tmp_path / "task"
+        task_dir.mkdir(parents=True)
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        subtask = {
+            "id": "sub-1", "title": "实现功能", "description": "写代码",
+            "files_hint": "*", "verification": "pytest", "risks": [],
+            "depends_on": [], "skills": [], "agent_type": "developer",
+            "agent_prompt": "work", "difficulty": "easy",
+        }
+        task_md, _, _, _ = _build_task_md(
+            subtask, tmp_path, task_dir, worktree, logger, headless=True, config={},
+        )
+        assert "变更保留在此目录" in task_md, "无基座时应回退内联通用要求"
+
+    def test_run_subtask_does_not_copy_base_to_worktree(self, temp_repo, task_dir, logger):
+        """run_subtask：不把 TASK_BASE.md 复制进 worktree（不污染子任务 git 变更范围）。"""
+        from agent_go.executor import run_subtask
+
+        subtask = {
+            "id": "sub-1", "title": "基础任务", "description": "执行操作",
+            "files_hint": "*", "verification": "pytest", "risks": [], "depends_on": [],
+            "skills": [], "agent_type": "developer", "difficulty": "easy",
+            "agent_prompt": "work",
+        }
+        config = {
+            "worker_models": {}, "verification": {"max_retries": 1},
+            "evaluator": {"enabled": False}, "plan_api": {},
+            "agent_loop": {"enabled": False},
+        }
+        with patch("agent_go.executor._run_claude") as mock_claude, \
+             patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
+             patch("agent_go.executor._verify_changes") as mock_verify:
+            mock_verify.return_value = {
+                "has_changes": True, "summary": "1 file changed", "metrics_changes": {},
+                "git_commit_ms": 1, "verification_ms": 1, "verify_ok": True, "git_ok": True,
+                "retry_count": 0, "verification_results": [], "commit_hash": "abc",
+                "change_stats": {}, "kill_reason": "none",
+            }
+            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
+            run_subtask(
+                "task-1", subtask, temp_repo, task_dir, logger, headless=True,
+                metering_path="", config=config,
+            )
+
+        # 基座写入 task_dir 而非 worktree（temp_repo 即 worktree）
+        assert (task_dir / "TASK_BASE.md").exists(), "共享基座应写入 task_dir"
+        assert not (temp_repo / "TASK_BASE.md").exists(), \
+            "共享基座不应复制进 worktree（避免污染 git 变更范围）"
+
+    def test_copy_base_function_removed(self):
+        """_copy_base_md_to_worktree 函数已移除（不再有把基座复制进 worktree 的入口）。"""
+        import agent_go.executor as ex
+        assert not hasattr(ex, "_copy_base_md_to_worktree"), \
+            "复制基座进 worktree 的函数应已移除"

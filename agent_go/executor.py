@@ -410,21 +410,37 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
 
     # 验证要求
     verification = subtask.get("verification", "")
-    exec_requirements = [
-        "",
-        "## 执行要求",
-        "- 在此隔离 worktree 中完成修改",
-        "- 变更保留在此目录",
-        "- **你必须生成实际的代码变更。仅分析/阅读代码而不做修改将被视为任务失败。**",
-        "- **不要仅输出想法或计划 — 直接修改代码文件。**",
-        "- **不要自行 git commit** — 修改文件后保留为未提交状态，编排层会在验证通过后统一提交（commit 是完成边界）。你只需确保验证通过。",
-    ]
+    # ── 改进 D：引用 TASK_BASE.md（共享基座），不重复注入通用执行要求 ──
+    # 共享基座不复制进 worktree（避免进入子任务 git 变更范围污染 diff），
+    # 而是用绝对路径引用 task_dir/TASK_BASE.md，claude 可跨目录读取。
+    base_md_path = task_dir / "TASK_BASE.md"
+    if base_md_path.exists():
+        task_md_parts.extend([
+            "",
+            "## 执行要求",
+            f"> 通用执行要求详见共享文件 `{base_md_path}`（所有子任务共用，位于 worktree 之外，"
+            "不需要、也不应修改它）。",
+            "",
+        ])
+    else:
+        # 兜底：基座文件不存在时回退到内联（兼容旧任务 resume）
+        task_md_parts.extend([
+            "",
+            "## 执行要求",
+            "- 在此隔离 worktree 中完成修改",
+            "- 变更保留在此目录",
+            "- **你必须生成实际的代码变更。仅分析/阅读代码而不做修改将被视为任务失败。**",
+            "- **不要仅输出想法或计划 — 直接修改代码文件。**",
+            "- **不要自行 git commit** — 修改文件后保留为未提交状态，编排层会在验证通过后统一提交（commit 是完成边界）。你只需确保验证通过。",
+        ])
+    step_requirements = []
     if verification:
-        exec_requirements.append(f"- **必须执行验证**: `{verification}`，确保通过后再完成")
-        exec_requirements.append("- 如验证失败，请修复问题后重新验证，直到通过")
+        step_requirements.append(f"- **必须执行验证**: `{verification}`，确保通过后再完成")
+        step_requirements.append("- 如验证失败，请修复问题后重新验证，直到通过")
     if not headless:
-        exec_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
-    task_md_parts.extend(exec_requirements)
+        step_requirements.append("- 完成后退出 Claude Code（/exit 或 Ctrl+D）")
+    if step_requirements:
+        task_md_parts.extend(step_requirements)
 
     # S9-B 产物导出约定：--artifact-dir 开启时注入 __artifacts__/ 目录约定
     # 声明制——只有写入 __artifacts__/ 的文件才视为交付物，随 worktree 清理不丢失
@@ -855,11 +871,20 @@ def _meter_cost_for_sub(metering_path: str, sub_id: str) -> float:
 
 
 def _metering_available(metering_path: str) -> bool:
+    """计量文件是否可用。
+
+    语义（成本控制冷启动修复）：文件**不存在**视为可用——任务刚启动时
+    metering.jsonl 尚未创建（第一个 worker 写入成本时才生成），此时预算
+    尚未消耗，应放行首个 wave，而不是中止任务。仅当文件**存在但读取失败**
+    （权限/磁盘错误）才算不可用。
+    """
     if not metering_path:
-        return False
+        return True
     try:
         with open(metering_path, encoding="utf-8"):
             return True
+    except FileNotFoundError:
+        return True
     except OSError:
         return False
 
@@ -1624,13 +1649,78 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     }
 
 
+
+
+def _extract_files_changed(summary: str) -> list[str]:
+    """从 diff summary 中提取修改的文件列表（正则，零 LLM 成本）。
+
+    summary 格式例：'src/blog/views.py | 33 +++++++++++\n src/blog/models.py | 7 +++++++'
+    返回：['src/blog/views.py', 'src/blog/models.py']
+    """
+    if not summary:
+        return []
+    files: list[str] = []
+    for line in summary.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'^(\S+?)\s+\|', line)
+        if m:
+            fpath = m.group(1).strip()
+            if fpath and not fpath.startswith("("):
+                files.append(fpath)
+    return files
+
+
+def _build_task_base_md(config=None) -> str:
+    """构建 TASK_BASE.md —— 所有子任务共享的执行要求基座。
+
+    写入一次到 task_dir / "TASK_BASE.md"，各子任务 TASK.md 引用之，
+    避免 N 份重复的通用执行要求造成 token 线性膨胀。
+
+    返回 Markdown 字符串。
+    """
+    cfg = config or {}
+    parts: list[str] = [
+        "# 通用执行要求（所有子任务共享）",
+        "",
+        "以下要求适用于本任务的每一个子任务：",
+        "",
+        "- 在此隔离 worktree 中完成修改",
+        "- 变更保留在此目录",
+        "- **你必须生成实际的代码变更。仅分析/阅读代码而不做修改将被视为任务失败。**",
+        "- **不要仅输出想法或计划 — 直接修改代码文件。**",
+        "- **不要自行 git commit** — 修改文件后保留为未提交状态，编排层会在验证通过后统一提交（commit 是完成边界）。你只需确保验证通过。",
+        "- 如验证失败，请修复问题后重新验证，直到通过",
+    ]
+
+    # 产物输出约定（条件注入，与 _build_task_md 保持一致）
+    if cfg.get("artifact_dir"):
+        from .artifacts import ARTIFACT_DIR_NAME
+        parts.extend([
+            "",
+            "## 产物输出",
+            f"如需生成文档/表格/演示文稿等非代码交付物，写入 `{ARTIFACT_DIR_NAME}/` 目录。",
+            "该目录下的文件将在任务完成后导出到指定位置（--artifact-dir），不会随 worktree 清理丢失。",
+        ])
+
+    return "\n".join(parts) + "\n"
+
+
 def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary, verification, retry_count=0, verification_state=None):
-    """Generate shared context file for downstream subtasks. Writes to context.md."""
+    """Generate shared context file for downstream subtasks. Writes to context.md.
+
+    改进 D：上下文增强——包含修改文件列表，减少下游信息盲区（Telephone Game）。
+    """
     ctx_parts = [
         f"### {sub_id}: {subtask['title']}",
-        f"- 状态: {'通过' if verify_ok else '需关注'}",
-        f"- 变更: {summary}",
+        f"- 状态: {'✅ 通过' if verify_ok else '❌ 需关注'}",
+        f"- 变更摘要: {summary}",
     ]
+    # ── 改进 D：修改文件列表提取（正则，零 LLM 成本）──
+    files_changed = _extract_files_changed(summary)
+    if files_changed:
+        ctx_parts.append(f"- 修改的文件: {', '.join(files_changed)}")
     if retry_count > 0:
         attempts = (verification_state or {}).get("attempts", retry_count + 1)
         ctx_parts.append(f"- 修复重试: {retry_count}/{max(0, attempts - 1)} 次")
@@ -1645,12 +1735,11 @@ def _generate_context(subtask, task_dir, sub_id, logger, headless, result, verif
         if decisions:
             ctx_parts.append(f"- 关键决策: {'; '.join(decisions[:3])}")
     ctx_parts.append("")
-    # 线程安全地追加共享上下文
     # 写入独立上下文文件（仅被直接下游子任务读取）
     ctx_file = task_dir / sub_id / "context.md"
     ctx_file.write_text("\n".join(ctx_parts) + "\n", encoding="utf-8")
     line_count = len("\n".join(ctx_parts).splitlines())
-    logger.info(f"上下文已写入: {line_count} 行")
+    logger.info(f"上下文已写入: {line_count} 行（含 {len(files_changed)} 个修改文件）")
 
 
 def _is_simple_task(subtask: dict) -> bool:
@@ -1739,6 +1828,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         logger.warning(f"[checkpoint] snapshot 失败（非关键）: {sub_id}: {_cp_err}")
 
     # 3. Build TASK.md
+    # ── 改进 D：TASK_BASE.md 共享基座（写入一次，所有子任务引用，避免 N 份重复）──
+    # 注意：不复制进 worktree——共享基座若进入子任务 git 变更范围，会污染验证 diff
+    # （claude 会把它当越界产物处理，且首次验证 git diff 显示基座文件而非实际变更）。
+    # 由 _build_task_md 用绝对路径引用 task_dir/TASK_BASE.md。
+    base_md_path = task_dir / "TASK_BASE.md"
+    if not base_md_path.exists():
+        base_md_path.write_text(_build_task_base_md(config), encoding="utf-8")
+        logger.info("TASK_BASE.md 共享基座已写入")
     # Skill 注入模式决策（见 docs/design/skill-injection-strategy.md）：
     # - claude worker（claude -p / headless / greywall）→ "guide"：只给 name + 绝对路径，
     #   让 claude 自主读取 ~/.claude/skills/<name>/SKILL.md（claude 原生 skill 机制，语义判断更强）。
