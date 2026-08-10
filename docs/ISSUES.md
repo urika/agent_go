@@ -565,3 +565,23 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 1. 主仓库 `.gitignore` 忽略 `eval_suite/fixtures/*/`（内容由 fixture 独立仓库管理）。
 2. 或 `git rm --cached` 全部 fixture 内容文件，改为 bench/CI 运行时单独 clone/复制 fixture 仓库。
 3. 需要确认 CI（git clone 主仓库）是否依赖 fixture 工作区文件；若依赖，需在 CI 中单独检出 fixture 仓库。
+
+### ISSUE-37 eval gate 扫描全库 AGENT_GO_DIR，无法隔离到 bench batch
+
+- **位置**：`eval.py` `cmd_eval` gate 分支（`gate_cost` / `gate_cost_regression`）
+- **状态**：⏳ 待修复（2026-08-10 阶段 E 收尾发现）
+- **严重度**：P2（发布门禁语义与 batch 化基准不匹配，误报劣化）
+
+**问题**：`eval gate` 的两种模式（`--baseline` 绝对阈值 / `--check-regression` 回归）都硬编码扫描 `AGENT_GO_DIR`（~/.agent_go/ 全部历史任务 metering），**不接受 `--results`**。而 bench 的 `metric-freeze` / `batch-manifest` 是基于 results.jsonl 的 batch 数据。
+
+**实测**（阶段 E 收尾）：
+- 阶段 E decision baseline（48 条，冻结于 decision-20260809）：$/pass = **$0.0167**（32/34 valid，$0.536 成本），远低于 $0.05 阈值，达标
+- `agent_go eval gate --baseline 0.05`：扫描全库 1976 个历史子任务，$/pass = **$0.20** → 判定"不通过"
+- 差异根因：全库含早期高成本模型 + 大量探索性任务，噪声淹没 batch 真实值
+
+**影响**：发布门禁无法针对"本次冻结的基线"做准确判断，会误报劣化。阶段 E 数据本身达标，但 gate 工具无法体现。
+
+**建议修复方向**：
+1. `eval gate` 支持 `--results <results.jsonl>`，从 batch 数据计算 $/pass（排除 timed_out 右删失），而非 AGENT_GO_DIR 全库。
+2. 或 `--source-batch <batch>` 筛选 AGENT_GO_DIR 中匹配 source_batch 的任务。
+3. 与 `metric-freeze` 的 `valid_cost_usd / valid_task_count` 语义对齐。
