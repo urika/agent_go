@@ -15,7 +15,8 @@ from typing import Any, Optional
 __all__ = ["estimate_task_duration", "check_under_decomposition",
            "check_over_decomposition", "check_difficulty_mismatch", "difficulty_hint",
            "check_agent_prompt_functions", "validate_plan_quality",
-           "check_subtask_file_overlap", "_subtask_file_scope"]
+           "check_subtask_file_overlap", "check_parallel_import_relations",
+           "_subtask_file_scope"]
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,126 @@ def check_subtask_file_overlap(subtasks: list[dict]) -> dict[str, Any]:
             issues.append(entry)
 
     return {"issues": issues, "warnings": warnings}
+
+
+def _parse_imports(file_text: str) -> set[str]:
+    """从源码文本提取 import 的模块路径（正则，零 AST 依赖，容错更强）。
+
+    覆盖：import a.b.c / from a.b import c / import a.b as x / from a import (b, c)。
+    返回模块路径集合（a.b.c 的顶级 a.b 前缀也计入，便于模糊匹配）。
+    """
+    mods: set[str] = set()
+    for m in re.finditer(r"^\s*(?:import|from)\s+([\w.]+)", file_text, re.MULTILINE):
+        mod = m.group(1).strip()
+        if mod:
+            mods.add(mod)
+            # 记录顶级前缀（from a.b.c import d → a.b.c 与 a.b 与 a）
+            parts = mod.split(".")
+            for i in range(1, len(parts)):
+                mods.add(".".join(parts[:i]))
+    return mods
+
+
+def check_parallel_import_relations(subtasks: list[dict], repo: Path) -> list[dict]:
+    """改进 C（轻量版）：并行 wave 内的跨文件 import 关系 warning。
+
+    背景（workflow-vs-subagent-review.md）：完整合约冻结依赖 LLM 标记
+    contracts_provided/consumed，标记错了更糟。降级为机械规则：对**无依赖路径**
+    的子任务对（并行执行，无法保证顺序），若 A 修改的文件被 B 修改的文件 import
+    （或反之），说明存在跨 worktree 的接口耦合——各自验证在自己 worktree 中通过，
+    但合并后可能因接口不一致而冲突。
+
+    纯 AST/regex，零 LLM 依赖。只在 repo 存在时生效（需读源码）。返回 warning 列表。
+
+    Returns:
+        list[dict]: {"type": "parallel_import_relation", "from_subtask", "to_subtask",
+                     "imported_file", "importing_file", "reason"}
+    """
+    if not repo or not subtasks:
+        return []
+
+    graph: dict[str, list[str]] = {}
+    for st in subtasks:
+        sid = str(st.get("id", ""))
+        graph[sid] = [str(dep) for dep in st.get("depends_on", [])]
+
+    # 收集每个子任务修改文件的 import 集（缓存，避免重复读盘）
+    file_imports: dict[str, set[str]] = {}
+    subtask_files: dict[str, set[str]] = {}
+    for st in subtasks:
+        sid = str(st.get("id", ""))
+        files = _subtask_file_scope(st)
+        subtask_files[sid] = files
+        for f in files:
+            if f in file_imports:
+                continue
+            fpath = repo / f
+            try:
+                if fpath.is_file():
+                    file_imports[f] = _parse_imports(fpath.read_text(encoding="utf-8", errors="replace"))
+                else:
+                    file_imports[f] = set()
+            except OSError:
+                file_imports[f] = set()
+
+    warnings: list[dict] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for a in subtasks:
+        for b in subtasks:
+            sid_a, sid_b = str(a.get("id", "")), str(b.get("id", ""))
+            if sid_a >= sid_b or (sid_a, sid_b) in seen_pairs:
+                continue
+            # 只在无依赖路径的并行对之间检查（同链顺序执行 → 上游 merge 已保证一致性）
+            if _has_dependency_path(graph, sid_a, sid_b) or _has_dependency_path(graph, sid_b, sid_a):
+                continue
+            seen_pairs.add((sid_a, sid_b))
+
+            for fa in subtask_files.get(sid_a, set()):
+                for fb in subtask_files.get(sid_b, set()):
+                    if fa == fb:
+                        continue
+                    # A 修改的文件被 B 修改的文件 import
+                    if file_imports.get(fb) and _file_imports_module(fa, file_imports[fb]):
+                        warnings.append({
+                            "type": "parallel_import_relation",
+                            "from_subtask": sid_a,
+                            "to_subtask": sid_b,
+                            "imported_file": fa,
+                            "importing_file": fb,
+                            "reason": (f"子任务 {sid_a} 修改 {fa}，而 {sid_b} 修改的 {fb} 引用它——"
+                                       f"两者并行执行无依赖顺序，若接口不一致合并后可能冲突。"
+                                       f"建议确认接口契约，或添加依赖串行化。"),
+                        })
+                        break
+                else:
+                    continue
+                break
+    return warnings
+
+
+def _file_imports_module(target_file: str, import_mods: set[str]) -> bool:
+    """判断目标文件路径是否被 import 模块集合引用。
+
+    匹配规则（模糊但低误报）：
+    - target='src/blog/views.py' ↔ import 'src.blog.views' / 'src.blog' / 'blog.views'
+    - target='src/models.py' ↔ import 'src.models' / 'models'
+    归一化：文件路径 '/' → '.'，去 .py 后缀，与 import 模块路径比对。
+    """
+    # 归一化文件路径为模块形式：src/blog/views.py → src.blog.views；去掉 __init__
+    target_mod = target_file.replace("\\", "/").lstrip("./").replace("/", ".").rstrip(".py")
+    if target_mod.endswith(".__init__"):
+        target_mod = target_mod[: -len(".__init__")]
+    for mod in import_mods:
+        mod_norm = mod.strip().replace("/", ".")
+        if mod_norm == target_mod:
+            return True
+        # import 是目标的前缀（src.blog → src.blog.views）或目标的子模块
+        if target_mod.startswith(mod_norm + "."):
+            return True
+        # import 是目标的非顶级子模块（views → src.blog.views）
+        if target_mod.endswith("." + mod_norm):
+            return True
+    return False
 
 
 def validate_plan_quality(
@@ -255,6 +376,10 @@ def validate_plan_quality(
     if repo:
         agent_prompt_warnings = check_agent_prompt_functions(subtasks, repo)
         warnings.extend(agent_prompt_warnings)
+
+    # 改进 C（轻量版）：并行 wave 内跨文件 import 关系 warning（零 LLM 依赖）
+    if repo:
+        warnings.extend(check_parallel_import_relations(subtasks, repo))
 
     return {
         "status": "blocked" if issues else ("warning" if warnings else "passed"),

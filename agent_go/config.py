@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
         "run_timeout": 1800,            # 首跑硬超时基数（秒），按难度缩放（easy×1/medium×1.5/hard×2.5），0=禁用
         "block_on_failure": True,       # 验证失败是否阻断下游依赖（--no-verify-block 可关）
         "diverge_similarity_threshold": 0.3,  # 打地鼠检测：连续两次语义评估缺陷指纹相似度低于此值 → 提前终止重试
+        "revert_threshold": 2,          # 回退/振荡检测：同一 worktree 累积 diff 状态出现次数 ≥ 此值 → 判定循环振荡终止
         # 独立只读审查 subagent（两阶段审查）：验证失败时，用独立模型做黑盒分析
         # （不参与实现，消除「实现者盲区」），审查意见注入修复 prompt。
         # 默认关闭（成本可控）；model 空 = 复用 evaluator.model。

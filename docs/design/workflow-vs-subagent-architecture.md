@@ -2,8 +2,23 @@
 
 > 目的：将 Workflow（确定性脚本编排）与动态 Subagent（模型自主委派）的设计差异，映射到 agent_go 的三层架构改造方案。
 > 前提：已阅读 [subagent-design-research.md](subagent-design-research.md)（拆分算法 G6/G7/G8 已落地）。
-> 状态：设计草案
+> 状态：设计草案（已审查，见 [workflow-vs-subagent-review.md](workflow-vs-subagent-review.md)）
 > 日期：2026-08-10
+
+## 0. 实施状态（2026-08-11 更新）
+
+本设计经 [workflow-vs-subagent-review.md](workflow-vs-subagent-review.md) 审查后大幅收缩，6 项中 4 项已落地、2 项建议不实施。设计正文保留为历史草案，实际采纳情况：
+
+| # | 改进项 | 决定 | 实施 |
+|---|--------|------|------|
+| A | 三层架构显式化 | ❌ 不实施（架构 ceremony） | — |
+| B | 收敛条件细化 | ✅ 仅回退检测 | `_diff_stat_hash` + `verification.revert_threshold`（默认 2），`kill_reason=verify_revert` |
+| C | 合约先行并行 | ✅ 降级为 import 关系 warning | `check_parallel_import_relations`（纯 AST/regex，零 LLM，不阻断） |
+| D | 上下文基座+增量注入 | ✅ 已落地 | TASK_BASE.md 共享基座（绝对路径引用） |
+| E | 认知模式三级路由 | ✅ 已落地 | `_infer_cognitive_mode` + `worker_models_by_cognitive` |
+| F | Pipeline/Barrier 自适应 | ❌ 移除（设计者自认收益有限） | — |
+
+下方各节保留原始设计，供理解方案全貌与决策依据。
 
 ## 1. 核心概念：两个维度，而非对立
 

@@ -292,6 +292,7 @@ system_error
 - 验证失败上下文和 repair retry 记录。
 - 上游失败时下游明确 blocked。
 - 无进展检测，避免重复 retry 消耗预算。
+  - ✅ 已落地（2026-08-11）：回退/振荡检测 `diff_stat_hash` + `verification.revert_threshold`（默认 2），同一累积状态出现 ≥ 阈值即终止并标记 `verify_revert`；打地鼠检测 `diverge_similarity_threshold`。见 [workflow-vs-subagent-review.md](design/workflow-vs-subagent-review.md)。
 - 循环状态埋点：`diff_stat_hash`、`failure_pattern`、`effective_strategy`、`no_progress`。
 - 有界 Reflexion：仅在 retry 达到阈值后分析根因，不改变默认成功语义。
 

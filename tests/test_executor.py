@@ -2616,6 +2616,103 @@ class TestVerifyDivergence:
         assert "divergence" not in types, "同一缺陷不应判定为打地鼠"
 
 
+class TestVerifyRevertDetection:
+    """回退/振荡检测（workflow-vs-subagent 改进 B-回退）：
+    修复后 worktree 累积 diff 状态重复出现 → 循环振荡，提前终止重试。"""
+
+    _SUBTASK_TPL = {
+        "id": "sub-1", "title": "基础任务", "description": "执行操作",
+        "verification": "pytest tests/", "risks": [], "depends_on": [],
+        "skills": [], "agent_type": "developer", "agent_prompt": "work",
+    }
+
+    @staticmethod
+    def _git_with_base(base_commit):
+        """构造 subprocess.run side_effect：git 命令成功、验证始终失败、diff 恒定。
+
+        模拟「修复无效果」：每次 fix 后 worktree 累积 diff 相对 base 不变 →
+        diff stat hash 恒定 → 触发回退检测。
+        """
+        verify_count = [0]
+
+        def _run(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout=" M main.py\n", stderr="")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="1 file changed, 10 insertions(+)", stderr="")
+            if any(g in cmd_str for g in ["git add", "git commit", "git tag"]):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "pytest" in cmd_str:
+                verify_count[0] += 1
+                return MagicMock(returncode=1, stdout="", stderr="FAIL")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return _run
+
+    def test_revert_detection_terminates_early(self, temp_repo, task_dir, logger):
+        """有 _base_commit 且累积 diff 状态重复 → 提前终止（revert 结果记录）。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_with_base("abc123")), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 5}, "_base_commit": "abc123"},
+            )
+
+        assert result["verify_ok"] is False
+        types = [v.get("type") for v in result["verification_results"]]
+        assert "revert" in types, f"应记录 revert 结果: {types}"
+        # revert_threshold=2 → 第 3 次见到同一状态时终止 → 只做 2 次修复
+        assert mock_fix.call_count <= 2, f"应在循环振荡时提前终止（修复 {mock_fix.call_count} 次）"
+        assert mock_fix.call_count < 5, "不应跑满 max_retries=5"
+
+    def test_revert_disabled_without_base(self, temp_repo, task_dir, logger):
+        """无 _base_commit → 回退检测跳过，走正常重试预算。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        with patch("subprocess.run", side_effect=self._git_with_base("")), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 3}},
+            )
+
+        assert result["verify_ok"] is False
+        types = [v.get("type") for v in result["verification_results"]]
+        assert "revert" not in types, "无基座时不应触发回退检测"
+        assert result["retry_count"] == 3, "应跑满 max_retries=3"
+
+    def test_diff_stat_hash_pure(self, temp_repo):
+        """纯函数：_diff_stat_hash 归一化 diff stat 输出（忽略行尾对齐差异）。"""
+        from agent_go.executor import _diff_stat_hash
+        with patch("agent_go.executor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=" src/a.py  | 3 ++\n src/b.py  | 2 --\n 2 files changed",
+                stderr="")
+            h1 = _diff_stat_hash(temp_repo, "abc123")
+            # 归一化后同内容同 hash
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=" src/a.py   | 3 ++\n src/b.py   | 2 --\n 2 files changed",
+                stderr="")
+            h2 = _diff_stat_hash(temp_repo, "abc123")
+        assert h1 == h2, "忽略列对齐差异后 hash 应一致"
+        assert len(h1) == 16, "sha1 前 16 字符"
+
+
 class TestCognitiveModelRouting:
     """异构模型路由：认知模式（explore/implement/review）→ 独立模型。"""
 

@@ -551,3 +551,64 @@ def test_verification_file_not_owned_no_warning():
     ]
     full = validate_plan_quality(subtasks)
     assert not any(w["type"] == "verification_file_mismatch" for w in full["warnings"])
+
+
+# ═══════════════════════════════════════════════════════════════
+# 改进 C（轻量版）：并行 wave 内跨文件 import 关系 warning
+# ═══════════════════════════════════════════════════════════════
+
+from agent_go.planning import check_parallel_import_relations
+
+
+def test_parallel_import_relation_warning(tmp_path):
+    """并行子任务：A 修改的文件被 B 修改的文件 import → warning。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "views.py").write_text("from src.blog import views", encoding="utf-8")
+    (tmp_path / "src" / "blog").mkdir()
+    (tmp_path / "src" / "blog" / "views.py").write_text("def get_post_list(): pass", encoding="utf-8")
+
+    subtasks = [
+        {"id": "sub-1", "files": ["src/blog/views.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/views.py"], "verification": "pytest tests"},
+    ]
+    warnings = check_parallel_import_relations(subtasks, tmp_path)
+    rel = [w for w in warnings if w["type"] == "parallel_import_relation"]
+    assert len(rel) >= 1, f"应检测到跨文件 import 关系: {warnings}"
+    assert rel[0]["imported_file"] == "src/blog/views.py"
+    assert rel[0]["importing_file"] == "src/views.py"
+
+    # 集成进 validate_plan_quality → warning 但非 blocking
+    full = validate_plan_quality(subtasks, repo=tmp_path)
+    assert any(w["type"] == "parallel_import_relation" for w in full["warnings"])
+    assert full["status"] == "warning", "import 关系是告警不阻断"
+
+
+def test_parallel_import_relation_skips_dependent(tmp_path):
+    """有依赖路径的子任务对 → 不告警（上游 merge 保证顺序一致性）。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "views.py").write_text("from src.blog import views", encoding="utf-8")
+    (tmp_path / "src" / "blog").mkdir()
+    (tmp_path / "src" / "blog" / "views.py").write_text("def get_post_list(): pass", encoding="utf-8")
+
+    subtasks = [
+        {"id": "sub-1", "files": ["src/blog/views.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/views.py"], "verification": "pytest tests",
+         "depends_on": ["sub-1"]},
+    ]
+    warnings = check_parallel_import_relations(subtasks, tmp_path)
+    assert not any(w["type"] == "parallel_import_relation" for w in warnings), \
+        f"依赖链上的子任务不应告警: {warnings}"
+
+
+def test_parallel_import_relation_no_match(tmp_path):
+    """无 import 关系 / 文件不存在 → 不告警。"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("import os", encoding="utf-8")
+    subtasks = [
+        {"id": "sub-1", "files": ["src/a.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/b.py"], "verification": "pytest tests"},
+    ]
+    warnings = check_parallel_import_relations(subtasks, tmp_path)
+    assert not any(w["type"] == "parallel_import_relation" for w in warnings)
+    # 无 repo → 不检测
+    assert check_parallel_import_relations(subtasks, None) == []

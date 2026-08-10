@@ -984,6 +984,48 @@ def _defect_similarity(fp_a: str, fp_b: str) -> float:
     return len(set_a & set_b) / len(set_a | set_b)
 
 
+def _diff_stat_hash(worktree: Path, base_ref: str = "HEAD") -> Optional[str]:
+    """计算 worktree 相对基准的 diff stat 哈希（确定性，零误报）。
+
+    回退/振荡检测用：修复重试后若 worktree 的**累积变更**回到之前见过的状态
+    （agent 撤销了自己的修复，或修复无实际效果），则 hash 重现。
+
+    基准选择：
+    - base_ref="HEAD" → 未提交变更（首跑验证用）
+    - base_ref=<subtask base commit> → 从子任务基座起的累积 diff（修复重试用，
+      因为每次 fix 都会 commit，工作区恒净，必须比累计变更才能检测回退）
+
+    与 _defect_fingerprint（语义，易受表述影响）互补——这是纯文件系统的
+    O(1) 确定性信号：同一变更内容 → 同一 hash。
+
+    Args:
+        worktree: worktree 路径
+        base_ref: 对比基线（commit 或 "HEAD"）
+
+    Returns:
+        规范化 diff --stat 的 sha1 hex（16 字符）；
+        "clean" = 无未提交变更（固定哨兵）；
+        None = git 失败或异常（调用方静默跳过回退检测）。
+    """
+    import hashlib as _hashlib
+    try:
+        r = subprocess.run(
+            ["git", "diff", "--stat", base_ref], cwd=str(worktree),
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return None
+        stat = r.stdout.strip()
+        if not stat:
+            return "clean"
+        # 归一化：仅规范化 | 前面的空白填充（不同 git 版本/终端宽度差异），
+        # 保留 | 后面的变更计数（+/-），确保不同修改量的相同文件集不产生相同 hash。
+        lines = [re.sub(r'\s+\|', '|', ln).strip() for ln in stat.splitlines()]
+        return _hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return None
+
+
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
                     task_dir=None, config=None, interrupt_event=None, initial_kill_reason=None):
@@ -1151,6 +1193,12 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     # 若连续两次语义评估指出的缺陷类型显著不同（相似度 < 阈值）→ agent 在
     # 「修 A 漏 B」打地鼠而非收敛 → 提前终止重试，避免浪费 token。
     _semantic_fail_fingerprints: list[str] = []
+    # 回退/振荡检测（workflow-vs-subagent 改进 B-回退）：记录每次验证失败时
+    # worktree 的 diff stat hash。若某次失败时 hash 重现 → agent 撤销了修复
+    # 或修复无实际效果，回到之前见过的状态 → 循环振荡，立即终止。
+    _diff_stat_hashes: list[str] = []
+    _diff_stat_revert_threshold = int(_cfg.get("verification", {}).get(
+        "revert_threshold", 2))
     if verification:
         cmds = [verification] if isinstance(verification, str) else verification
 
@@ -1459,6 +1507,39 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     })
                     _latest_kill_reason[0] = "verify_divergence"
                     break
+
+            # 回退/振荡检测（workflow-vs-subagent 改进 B-回退）：
+            # 验证失败时计算 worktree 的**累积** diff stat hash（相对子任务基座）。
+            # 若同一状态已出现 ≥ revert_threshold 次（即本次是第 threshold+1 次见到），
+            # 说明 agent 撤回修复或修复无实际效果（循环振荡）→ 立即终止，不浪费剩余
+            # 重试预算。确定性信号（纯 git diff --stat），零误报。
+            # 仅当 _base_commit 已知时启用（真实 pipeline 注入；单元测试/直接调用
+            # 无基座时跳过，避免误判——累积 diff 对比只在有明确基座时才有意义）。
+            _revert_base = _cfg.get("_base_commit", "") if isinstance(_cfg, dict) else ""
+            _cur_stat_hash = ""
+            if _revert_base:
+                _cur_stat_hash = _diff_stat_hash(worktree, _revert_base)
+                if _cur_stat_hash and _diff_stat_hashes.count(_cur_stat_hash) >= _diff_stat_revert_threshold:
+                    verify_ok = False
+                    _latest_kill_reason[0] = "verify_revert"
+                    logger.warning(
+                        f"[回退检测] 验证失败时 worktree 累积变更第 "
+                        f"{_diff_stat_hashes.count(_cur_stat_hash) + 1} 次出现 "
+                        f"(diff_stat_hash={_cur_stat_hash})——agent 修复被撤销或无效，"
+                        f"判定循环振荡，提前终止重试")
+                    log_event(logger, "verify_revert", {
+                        "sub_id": sub_id, "attempt": retry_count,
+                        "diff_stat_hash": _cur_stat_hash, "max_retries": max_retries,
+                    })
+                    verification_results.append({
+                        "type": "revert",
+                        "passed": False,
+                        "diff_stat_hash": _cur_stat_hash,
+                        "reason": "worktree 状态重复出现（循环振荡），提前终止",
+                    })
+                    break
+                if _cur_stat_hash:
+                    _diff_stat_hashes.append(_cur_stat_hash)
 
             # S10 成本控制 L2：子任务累计成本上限（跨重试，防修复循环烧钱）。
             # 每次修复前读取 metering.jsonl 中该子任务累计 cost，超 per_subtask_budget×系数则
