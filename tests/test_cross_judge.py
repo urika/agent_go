@@ -52,14 +52,14 @@ class TestInferProvider:
 
     def test_china_providers(self):
         """alibaba/volcengine/moonshot/zhipu"""
-        assert _infer_provider("qwen-max") == "alibaba"
+        assert _infer_provider("qwen-max") == "aliyun"
         assert _infer_provider("doubao-1.5-pro") == "volcengine"
         assert _infer_provider("kimi-k2") == "moonshot"
         assert _infer_provider("glm-5") == "zhipu"
 
     def test_unknown_falls_back_to_custom(self):
         assert _infer_provider("some-unknown-model") == "custom"
-        assert _infer_provider("llama-3") == "custom"
+        assert _infer_provider("llama-3") == "local"  # pricing 前缀表映射为 local
 
 
 # ═══════════════════════════════════════════════════════════════

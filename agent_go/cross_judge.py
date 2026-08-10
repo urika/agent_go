@@ -299,25 +299,13 @@ def _same_provider(model_a: str, model_b: str) -> bool:
 
 
 def _infer_provider(model: str) -> str:
-    """从模型名推断 provider。"""
-    m = model.lower()
-    if "claude" in m or "fable" in m or "haiku" in m or "sonnet" in m or "opus" in m:
-        return "anthropic"
-    if "gpt" in m or "o1" in m or "o3" in m or "o4" in m:
-        return "openai"
-    if "gemini" in m:
-        return "google"
-    if "deepseek" in m:
-        return "deepseek"
-    if "qwen" in m or "qwq" in m:
-        return "alibaba"
-    if "doubao" in m:
-        return "volcengine"
-    if "kimi" in m:
-        return "moonshot"
-    if "glm" in m:
-        return "zhipu"
-    return "custom"
+    """从模型名推断 provider（委托 pricing.infer_provider，统一实现）。
+
+    pricing.infer_provider 通过前缀表精确匹配；本函数作为薄适配层，
+    将 None（未知模型）映射为 "custom" 以保持调用方语义兼容。
+    """
+    from .pricing import infer_provider as _ip
+    return _ip(model) or "custom"
 
 
 def _heuristic_score(reason: str) -> float:

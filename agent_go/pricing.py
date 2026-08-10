@@ -8,7 +8,7 @@
 """
 
 __all__ = ["MODEL_PRICES", "PROVIDER_DEFAULT_MODEL", "LEGACY_PROVIDER_DEFAULT_MODEL", "PROVIDER_DEFAULT_MODEL_CUTOFF", "MODEL_TIER",
-           "resolve_price", "missing_price_models", "format_price_for_report"]
+           "resolve_price", "missing_price_models", "format_price_for_report", "infer_provider"]
 
 from typing import Optional  # noqa: E402
 
@@ -218,6 +218,53 @@ def resolve_price(model: str) -> Optional[dict[str, float]]:
 def missing_price_models(models: list[str]) -> list[str]:
     """返回缺少定价的模型列表（用于运行前预检）。"""
     return [m for m in models if m and resolve_price(m) is None]
+
+
+# 模型名前缀 → provider 反查表（P1 router recommend / advisory 校验用）。
+# 顺序敏感：先匹配更特异的前缀（如 claude-*），否则 doubao/doubao-lite 会误入。
+_MODEL_PROVIDER_PREFIXES: list[tuple[str, str]] = [
+    ("claude-", "anthropic"), ("claude[", "anthropic"), ("sonnet[", "anthropic"),
+    ("fable", "anthropic"), ("haiku", "anthropic"), ("opus", "anthropic"),
+    ("gpt-", "openai"), ("o3", "openai"), ("o4-", "openai"),
+    ("gemini-", "google"),
+    ("deepseek-", "deepseek"),
+    ("qwen-", "aliyun"),
+    ("doubao-", "volcengine"),
+    ("kimi-", "moonshot"),
+    ("glm-", "zhipu"),
+    ("llama", "local"),
+    ("qwen3", "local"),
+    ("qwen2", "local"),
+    ("deepseek-r1", "deepseek"),
+]
+
+
+def infer_provider(model: str) -> Optional[str]:
+    """模型名 → provider 反查（前缀匹配，支持版本号后缀剥离）。
+
+    P1 router recommend 需要"同源铁律"校验（reviewer 与 worker 不同 provider），
+    而 bench results 里只有模型名、没有 provider 记录——此函数按定价表前缀还原。
+
+    Args:
+        model: 模型名（如 "deepseek-chat" / "claude-opus-4-8" / "qwen-max"）。
+
+    Returns:
+        provider 名（anthropic/openai/google/deepseek/aliyun/volcengine/moonshot/zhipu/local），
+        无法识别返回 None（自定义模型不阻断，advisory 语义）。
+    """
+    if not model:
+        return None
+    _m = model.strip()
+    for _suf in ("-20251001", "-20250514", "-v2", "-v3", "-old"):
+        if _m.endswith(_suf):
+            _base = _m[: -len(_suf)]
+            if resolve_price(_base):
+                _m = _base
+            break
+    for _prefix, _prov in _MODEL_PROVIDER_PREFIXES:
+        if _m.startswith(_prefix):
+            return _prov
+    return None
 
 
 def format_price_for_report(model: str) -> str:
