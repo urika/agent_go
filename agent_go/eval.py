@@ -524,11 +524,29 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
 # 发布门禁：$/pass rate（北极星指标）
 # ═══════════════════════════════════════════════════════════════
 
-def gate_cost(baseline: float, tasks_dir: Path) -> dict[str, Any]:
+def _gate_cost_from_records(records: list[dict[str, Any]]) -> tuple[Optional[float], int, float]:
+    """从 bench results records 计算 $/pass 门禁指标（batch 隔离语义）。
+
+    与 metric-freeze 对齐：valid_cost / diagnostic_pass（dollar_per_pass_diagnostic_usd）。
+    相比 analyze_cost(AGENT_GO_DIR) 全库扫描，此路径只统计给定 batch 的记录，
+    排除 timed_out 等无效任务，避免全库噪声淹没 batch 真实值（ISSUE-37）。
+
+    Returns:
+       (actual $/pass, completed_subtasks, estimated_cost_usd)
+    """
+    from .metrics import compute_frozen_metrics
+    fm = compute_frozen_metrics(records or [])
+    actual = fm.get("dollar_per_pass_diagnostic_usd")
+    completed = fm.get("valid_task_count", 0)
+    total_cost = fm.get("valid_cost_usd", 0.0)
+    return actual, completed, total_cost
+
+
+def gate_cost(baseline: float, tasks_dir: Path, records: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     """$/pass rate 发布门禁。
 
-    PRD 铁律：发布门禁「$/pass rate 不劣化」。本函数取 analyze_cost 的 dollar_per_pass_rate，
-    与 baseline 比较，返回结构化判定结果，供 cmd_eval 决定退出码。
+    PRD 铁律：发布门禁「$/pass rate 不劣化」。取 $/pass rate（默认 analyze_cost 全库；
+    传入 records 时用 batch 数据），与 baseline 比较，返回结构化判定结果，供 cmd_eval 决定退出码。
 
     失败语义：actual is not None 且 actual > baseline → 不通过（实际成本/通过率劣于基线）。
     无数据语义：actual is None（无完成任务或无 metering）→ 通过，但标注门禁未生效
@@ -537,15 +555,20 @@ def gate_cost(baseline: float, tasks_dir: Path) -> dict[str, Any]:
     Args:
        baseline: 允许的 $/pass rate 上限（美元/通过子任务）。如 0.05 表示 ≤ $0.05/pass。
        tasks_dir: 任务目录（通常 AGENT_GO_DIR）。
+       records: 可选 bench results records。非空时用 batch 数据计算 $/pass（ISSUE-37），
+                忽略 tasks_dir 全库扫描。
 
     Returns:
        dict: {passed: bool, actual: float|None, baseline: float,
               completed_subtasks: int, estimated_cost_usd: float, reason: str}
     """
-    cost_report = analyze_cost(tasks_dir)
-    actual = cost_report.get("dollar_per_pass_rate")
-    completed = cost_report.get("completed_subtasks", 0)
-    total_cost = cost_report.get("estimated_cost_usd", 0.0)
+    if records:
+        actual, completed, total_cost = _gate_cost_from_records(records)
+    else:
+        cost_report = analyze_cost(tasks_dir)
+        actual = cost_report.get("dollar_per_pass_rate")
+        completed = cost_report.get("completed_subtasks", 0)
+        total_cost = cost_report.get("estimated_cost_usd", 0.0)
 
     if actual is None:
        return {
@@ -616,7 +639,8 @@ def save_cost_baseline(tasks_dir: Path, rate: float) -> None:
 
 
 def gate_cost_regression(tasks_dir: Path, tolerance: float = _REGRESSION_TOLERANCE,
-                        update: bool = False) -> dict[str, Any]:
+                        update: bool = False,
+                        records: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     """$/pass rate 回归门禁（PRD "不劣化"语义）。
 
     对比当前 rate 与已存储基线，劣化幅度 > tolerance（默认 10%）→ 不通过。
@@ -627,14 +651,18 @@ def gate_cost_regression(tasks_dir: Path, tolerance: float = _REGRESSION_TOLERAN
        tasks_dir: 任务目录（基线文件存于此）。
        tolerance: 允许的劣化比例（0.10 = 10%）。当前 rate ≤ 基线×(1+tolerance) 即通过。
        update: True 时无论结果都更新基线（用于主动刷新基线，如模型升级后重置）。
+       records: 可选 bench results records。非空时用 batch 数据计算 $/pass（ISSUE-37）。
 
     Returns:
        dict: {passed, actual, baseline, tolerance, regression_pct, reason, updated}
     """
-    cost_report = analyze_cost(tasks_dir)
-    actual = cost_report.get("dollar_per_pass_rate")
-    completed = cost_report.get("completed_subtasks", 0)
-    total_cost = cost_report.get("estimated_cost_usd", 0.0)
+    if records:
+        actual, completed, total_cost = _gate_cost_from_records(records)
+    else:
+        cost_report = analyze_cost(tasks_dir)
+        actual = cost_report.get("dollar_per_pass_rate")
+        completed = cost_report.get("completed_subtasks", 0)
+        total_cost = cost_report.get("estimated_cost_usd", 0.0)
     stored_baseline = load_cost_baseline(tasks_dir)
 
     def _result(passed, reason, baseline_val, updated):
@@ -946,16 +974,28 @@ def cmd_eval(args=None) -> None:
        # 发布门禁：两种模式互斥
        #   --check-regression：PRD "不劣化"语义，对比历史基线（劣化 > 容差即失败）
        #   --baseline X（默认）：绝对阈值模式（actual > X 即失败，X 缺省 0.05）
+       #   --results FILE（可选）：用 bench batch 数据计算 $/pass（ISSUE-37），
+       #    而非扫描 AGENT_GO_DIR 全库（全库含历史高成本模型/探索任务，噪声淹没 batch 真实值）。
+       gate_records = None
+       results_arg = getattr(args, "results", "") if args is not None else ""
+       if results_arg and results_arg != "eval_suite/results.jsonl":
+            try:
+                from .bench_schema import validate_results_file
+                gate_records = validate_results_file(results_arg)
+                console.print(f"[gate] 使用 batch 数据: {results_arg} ({len(gate_records)} records, source_batch={gate_records[0].get('source_batch', '') if gate_records else ''})")
+            except (OSError, ValueError) as exc:
+                console.error(f"[gate] 读取 --results 失败，回退 AGENT_GO_DIR 全库: {exc}")
+                gate_records = None
        if check_regression or update_baseline:
-           result = gate_cost_regression(AGENT_GO_DIR, update=update_baseline)
-           _print_gate_report(result)
+            result = gate_cost_regression(AGENT_GO_DIR, update=update_baseline, records=gate_records)
+            _print_gate_report(result)
        else:
-           if baseline is None:
-               baseline = 0.05
-               console.warning("未指定 --baseline，使用 PRD Q3 默认 0.05（$/pass rate ≤ $0.05）")
-               console.print("   提示：用 --check-regression 切换到「不劣化」语义（对比历史基线）")
-           result = gate_cost(baseline, AGENT_GO_DIR)
-           _print_gate_report(result)
+            if baseline is None:
+                baseline = 0.05
+                console.warning("未指定 --baseline，使用 PRD Q3 默认 0.05（$/pass rate ≤ $0.05）")
+                console.print("   提示：用 --check-regression 切换到「不劣化」语义（对比历史基线）")
+            result = gate_cost(baseline, AGENT_GO_DIR, records=gate_records)
+            _print_gate_report(result)
        # 门禁失败 → 非零退出，CI 红灯
        if not result["passed"]:
            sys.exit(1)

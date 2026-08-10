@@ -1443,3 +1443,69 @@ def test_collect_result_no_changes_counts_as_pass(tmp_path):
     assert result["completed"] == 2
     assert result["pass_rate"] == 1.0
     assert result["all_verify_ok"] is True
+
+
+# ═══════════════════════════════════════════════════════════════
+# ISSUE-38：fixture 仓库 worktree 泄漏清理
+# ═══════════════════════════════════════════════════════════════
+
+def _init_git(tmp_path):
+    """初始化一个真实 git 仓库。"""
+    repo = tmp_path / "fixture-repo"
+    repo.mkdir()
+    subprocess_run = __import__("subprocess").run
+    subprocess_run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess_run(["git", "config", "user.email", "t@t.com"], cwd=repo)
+    subprocess_run(["git", "config", "user.name", "t"], cwd=repo)
+    (repo / "a.txt").write_text("x", encoding="utf-8")
+    subprocess_run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess_run(["git", "commit", "-qm", "init"], cwd=repo)
+    return repo
+
+
+def test_prune_fixture_worktrees_removes_stale(tmp_path):
+    """_prune_fixture_worktrees：清理指向已删除目录的失效 worktree 注册。"""
+    import subprocess as sp
+    from agent_go.bench import _prune_fixture_worktrees
+
+    repo = _init_git(tmp_path)
+    wt_dir = tmp_path / "work"
+    # 注册一个 worktree，然后删除其目录（模拟 bench 打断后残留注册）
+    sp.run(["git", "worktree", "add", str(wt_dir), "-b", "agent_go/x/y"],
+           cwd=repo, capture_output=True, check=True)
+    sp.run(["rm", "-rf", str(wt_dir)], check=True)
+
+    # 清理前：worktree list 有残留
+    before = sp.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True)
+    assert len([l for l in before.stdout.strip().split("\n") if l.strip()]) >= 2
+
+    _prune_fixture_worktrees(repo)
+
+    after = sp.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True)
+    assert len([l for l in after.stdout.strip().split("\n") if l.strip()]) == 1, \
+        "prune 后应只剩主仓库 worktree"
+
+
+def test_prune_fixture_worktrees_non_git_noop(tmp_path):
+    """非 git 仓库 → 无异常（幂等 no-op）。"""
+    from agent_go.bench import _prune_fixture_worktrees
+    repo = tmp_path / "not-a-repo"
+    repo.mkdir()
+    _prune_fixture_worktrees(repo)  # 不应抛异常
+
+
+def test_prune_fixture_worktrees_active_kept(tmp_path):
+    """活跃 worktree（目录仍存在）→ 保留。"""
+    import subprocess as sp
+    from agent_go.bench import _prune_fixture_worktrees
+
+    repo = _init_git(tmp_path)
+    wt_dir = tmp_path / "active-work"
+    sp.run(["git", "worktree", "add", str(wt_dir), "-b", "agent_go/x/y"],
+           cwd=repo, capture_output=True, check=True)
+
+    _prune_fixture_worktrees(repo)
+
+    after = sp.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True)
+    assert len([l for l in after.stdout.strip().split("\n") if l.strip()]) == 2, \
+        "活跃 worktree 不应被 prune"

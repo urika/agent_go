@@ -97,6 +97,64 @@ def test_cmd_pr_push_uses_delivery_branch(tmp_path):
     assert updated["status"] == "ACCEPTED_DELIVERY"
 
 
+def test_cmd_pr_reuses_existing_pr(tmp_path):
+    """gh 报 "already exists"（该 delivery branch 已有 PR）→ 复用已有 PR，不误判交付失败。
+
+    真实远端场景：PR 创建后再次运行 cmd_pr，gh 返回 "a pull request for branch X into
+    branch Y already exists: <url>"。修复前 cmd_pr 标记 DELIVERY_FAILED；修复后从错误
+    信息提取已有 PR URL，标记 ACCEPTED_DELIVERY。
+    """
+    repo = _init_repo(tmp_path / "repo")
+    task_dir, meta = _make_task(tmp_path, repo)
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+
+    def fake_run(cmd, **kwargs):
+        if cmd and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "push":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd and len(cmd) >= 2 and cmd[0] == "gh":
+            err = ('a pull request for branch "agent_go/task-t1/delivery" into branch "main" '
+                   'already exists:\nhttps://github.com/example/repo/pull/42')
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=err)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"), \
+         patch("agent_go.cli.shutil.which", return_value="/usr/local/bin/gh"), \
+         patch("agent_go.cli.subprocess.run", side_effect=fake_run):
+        cmd_pr(Args("task-t1", offline=False, push=True))
+
+    updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    assert updated["pr_url"] == "https://github.com/example/repo/pull/42"
+    assert updated["pr_head"] == "agent_go/task-t1/delivery"
+    assert updated["pr_base"] == "main"
+    assert updated["delivery_failed"] is False
+    assert updated["accepted_delivery"] is True
+    assert updated["status"] == "ACCEPTED_DELIVERY"
+
+
+def test_cmd_pr_gh_real_failure_marks_delivery_failed(tmp_path):
+    """gh pr create 真实失败（非 already exists）→ 标记 DELIVERY_FAILED。"""
+    repo = _init_repo(tmp_path / "repo")
+    task_dir, meta = _make_task(tmp_path, repo)
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+
+    def fake_run(cmd, **kwargs):
+        if cmd and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "push":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd and len(cmd) >= 2 and cmd[0] == "gh":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="authentication failed")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"), \
+         patch("agent_go.cli.shutil.which", return_value="/usr/local/bin/gh"), \
+         patch("agent_go.cli.subprocess.run", side_effect=fake_run):
+        cmd_pr(Args("task-t1", offline=False, push=True))
+
+    updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    assert updated["delivery_failed"] is True
+    assert updated["accepted_delivery"] is False
+    assert updated["status"] == "DELIVERY_FAILED"
+
+
 def test_cmd_merge_success_advances_target_branch(tmp_path):
     """cmd_merge 成功后将 target branch 推进到 merge commit 并记录 explicit_merge_commit。"""
     repo = _init_repo(tmp_path / "repo")

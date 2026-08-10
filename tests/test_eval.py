@@ -410,6 +410,61 @@ class TestGateCost:
         assert result["passed"] is False
 
 
+class TestGateCostFromRecords:
+    """ISSUE-37：gate_cost 支持 --results batch 隔离（不用全库扫描）。"""
+
+    def _record(self, task_id="t1", total_cost=0.02, pass_rate=1.0,
+                binary_pass=True, failure_class=None, timed_out=False):
+        return {
+            "task_id": task_id, "task_version": 1, "suite": "decision",
+            "source_batch": "decision-20260809", "model": "deepseek-v4-flash",
+            "binary_pass": binary_pass, "pass_rate": pass_rate,
+            "failure_class": failure_class, "total_cost_usd": total_cost,
+            "timed_out": timed_out, "bench_schema_version": 1,
+        }
+
+    def test_records_under_baseline_passes(self, tmp_path):
+        """batch 数据 $/pass 低于基线 → 通过（不受全库高成本任务干扰）。"""
+        records = [
+            self._record("t1", total_cost=0.02, pass_rate=1.0),
+            self._record("t2", total_cost=0.02, pass_rate=1.0),
+        ]
+        result = gate_cost(0.05, tmp_path, records=records)
+        assert result["passed"] is True
+        # $/pass = 0.04 / 2 = 0.02
+        assert result["actual"] == round(0.04 / 2, 6)
+        assert result["completed_subtasks"] == 2
+
+    def test_records_over_baseline_fails(self, tmp_path):
+        """batch 数据 $/pass 高于基线 → 不通过。"""
+        records = [
+            self._record("t1", total_cost=0.08, pass_rate=1.0),
+        ]
+        result = gate_cost(0.05, tmp_path, records=records)
+        assert result["passed"] is False
+        assert result["actual"] == 0.08
+
+    def test_records_timed_out_counts_as_failure(self, tmp_path):
+        """timed_out 计为失败（产品语义 timeout_disposition=failure）：pass_rate=0
+        不贡献分母 → $/pass 上升，与 metric-freeze dollar_per_pass_diagnostic_usd 一致。"""
+        records = [
+            self._record("t1", total_cost=0.04, pass_rate=1.0),
+            self._record("t2", total_cost=0.06, pass_rate=0.0, binary_pass=False,
+                         failure_class="timeout", timed_out=True),
+        ]
+        result = gate_cost(0.05, tmp_path, records=records)
+        # valid_cost=0.10, diagnostic_pass=1.0 → $/pass=0.10 > 0.05
+        assert result["actual"] == round(0.10 / 1.0, 6)
+        assert result["passed"] is False, "timeout 计为失败 → $/pass 应劣化"
+
+    def test_records_empty_falls_back_to_dir(self, tmp_path):
+        """records 为空列表 → 回退 tasks_dir 扫描（向后兼容）。"""
+        # 空 records + 无任务目录 → actual=None 通过（门禁未生效）
+        result = gate_cost(0.05, tmp_path, records=[])
+        assert result["actual"] is None
+        assert result["passed"] is True
+
+
 class TestAnalyzeReliability:
     """可靠性分析"""
 

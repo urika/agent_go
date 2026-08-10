@@ -597,3 +597,41 @@ class TestCmdEvalGate:
         cmd_eval(None)
         out = capsys.readouterr().out
         assert "发布门禁" in out
+
+    def test_gate_uses_batch_records_when_results_given(self, tmp_path, monkeypatch, capsys):
+        """ISSUE-37: 传 --results 时用 batch 数据算 $/pass，而非 AGENT_GO_DIR 全库。
+
+        全库可能含历史高成本模型（$/pass 高，误报劣化）；batch 记录隔离后反映真实
+        成本效率。本测试：AGENT_GO_DIR 造一个高成本任务（$0.20/pass），但 --results
+        传入低成本 batch（$0.02/pass）→ 门禁应通过（用 batch）。
+        """
+        import agent_go.config as config_mod
+        monkeypatch.setattr(config_mod, "AGENT_GO_DIR", tmp_path)
+        # 全库造高成本任务（$0.20/pass，若被扫描会失败）
+        self._mk_task(tmp_path, "task-historical", cost_usd=0.20, completed=1)
+        # --results 传入低成本 batch records
+        results_file = tmp_path / "results.jsonl"
+        records = [
+            {"task_id": "t1", "total_cost_usd": 0.02, "binary_pass": True, "timed_out": False,
+             "source_batch": "batch-x", "bench_schema_version": 1, "status": None,
+             "accepted_delivery": False, "architecture_compliance": None,
+             "delivery_branch_created": False, "pr_created": False,
+             "failure_class": None, "elapsed_sec": 100.0},
+            {"task_id": "t2", "total_cost_usd": 0.02, "binary_pass": True, "timed_out": False,
+             "source_batch": "batch-x", "bench_schema_version": 1, "status": None,
+             "accepted_delivery": False, "architecture_compliance": None,
+             "delivery_branch_created": False, "pr_created": False,
+             "failure_class": None, "elapsed_sec": 100.0},
+        ]
+        results_file.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        args = argparse.Namespace(subcommand="gate", task_id=None,
+                                  eval_all=False, baseline=0.05,
+                                  results=str(results_file))
+        # patch validate_results_file：mock records 缺完整 schema 字段，直接返回避免校验失败
+        # （eval.py gate 分支内 `from .bench_schema import validate_results_file`，patch 源模块即可拦截）
+        with patch("agent_go.bench_schema.validate_results_file", return_value=records):
+            cmd_eval(args)  # 应通过（batch $/pass=$0.02 ≤ 0.05）
+        out = capsys.readouterr().out
+        assert "通过" in out, f"batch 数据应通过门禁: {out}"
+        assert "使用 batch 数据" in out

@@ -148,6 +148,8 @@ def _build_parser():
     _clean_parser = subparsers.add_parser("clean", help="Remove task data")
     _clean_parser.add_argument("--older-than", type=int, default=None,
                                help="只清理早于 N 天前的任务目录（保留期清理，S12 失败清理 #3）")
+    _clean_parser.add_argument("--fixture-worktrees", action="store_true",
+                               help="只清理 eval_suite/fixtures/ 下 fixture 仓库的失效 worktree 注册（ISSUE-38，不删任务目录）")
 
     # config 子命令
     subparsers.add_parser("config", help="View current configuration")
@@ -1908,7 +1910,7 @@ def cmd_pr(args=None):
             result = subprocess.run([
                 "gh", "pr", "create", "--title", f"{title}",
                 "--body-file", pr_file, "--base", base, "--head", head,
-            ], capture_output=True, text=True)
+            ], capture_output=True, text=True, cwd=str(Path(repo)))
             if result.returncode == 0:
                 pr_url = result.stdout.strip()
                 console.print(pr_url)
@@ -1926,20 +1928,44 @@ def cmd_pr(args=None):
                 (task_dir / "meta.json").write_text(
                     json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             else:
-                console.error(f"gh pr create 失败: {result.stderr.strip()}")
-                (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
-                console.print(f"PR 描述已备份到 {task_dir}/PR.md")
-                # 交付失败归类（M1.2）：不能报告 completed，标记 delivery_failed。
-                meta["delivery_attempted"] = True
-                meta["delivery_failed"] = True
-                meta["delivery_error"] = result.stderr.strip()[:300]
-                meta.pop("accepted_delivery_reasons", None)
-                if meta.get("status_schema_version") and not any(
-                    r.get("status") in ("failed", "blocked") for r in meta.get("results", [])
-                ):
-                    meta["status"] = "DELIVERY_FAILED"
-                (task_dir / "meta.json").write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                # M1.2 真实远端：gh 报 "already exists" 说明该 delivery branch 已有 PR
+                # （head/base 正确），应视为成功——从错误信息提取已有 PR URL，而非误判交付失败。
+                import re as _re
+                _err = result.stderr.strip()
+                _existing = _re.search(r"(https://\S+/pull/\d+)", _err)
+                if _existing and "already exists" in _err:
+                    pr_url = _existing.group(1)
+                    console.print(pr_url)
+                    console.warning("该 delivery branch 已有 PR，复用已有 PR。")
+                    meta["pr_url"] = pr_url
+                    meta["pr_head"] = head
+                    meta["pr_base"] = base
+                    meta["delivery_attempted"] = True
+                    meta["delivery_failed"] = False
+                    meta["delivery_error"] = ""
+                    meta.pop("accepted_delivery_reasons", None)
+                    meta["accepted_delivery"] = True
+                    if meta.get("status_schema_version"):
+                        meta["status"] = "ACCEPTED_DELIVERY"
+                    (task_dir / "meta.json").write_text(
+                        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                    console.print(f"PR 元数据已持久化，任务标记为 ACCEPTED_DELIVERY")
+                else:
+                    console.error(f"gh pr create 失败: {_err}")
+                    (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
+                    console.print(f"PR 描述已备份到 {task_dir}/PR.md")
+                    # 交付失败归类（M1.2）：不能报告 completed，标记 delivery_failed。
+                    meta["delivery_attempted"] = True
+                    meta["delivery_failed"] = True
+                    meta["delivery_error"] = _err[:300]
+                    meta["accepted_delivery"] = False
+                    meta.pop("accepted_delivery_reasons", None)
+                    if meta.get("status_schema_version") and not any(
+                        r.get("status") in ("failed", "blocked") for r in meta.get("results", [])
+                    ):
+                        meta["status"] = "DELIVERY_FAILED"
+                    (task_dir / "meta.json").write_text(
+                        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         finally:
             os.unlink(pr_file)
 
@@ -2314,9 +2340,72 @@ def cmd_spec(args) -> None:
         console.print("  template [repo] [--output PATH]  生成空白 Task Spec 模板")
         console.print("  validate <spec_path> [repo]       对 Spec 文件运行 L1 准入审查")
 
+def _prune_fixture_repo_worktrees(fixtures_base: str = "eval_suite/fixtures") -> None:
+    """清理 fixture 仓库与历史任务关联仓库的失效 worktree 注册（ISSUE-38）。
+
+    bench 直接对 fixture 源仓库跑 `agent_go run`，executor 的 `git worktree add`
+    把 worktree 注册到 fixture 源仓库 `.git/worktrees/`；timeout/SIGKILL 打断时
+    pipeline 清理不执行，注册项残留。`git worktree prune` 清除指向不存在目录的
+    注册——廉价、幂等、安全。本函数扫描：
+      1. <fixtures_base>/*（bench fixture 源仓库，默认 eval_suite/fixtures）
+      2. 所有任务 meta.repo 引用的本地仓库
+
+    Args:
+        fixtures_base: fixture 目录基路径（测试可注入 tmp 路径隔离）。
+    """
+    from .git_utils import _worktree_prune
+
+    candidates: set[str] = set()
+    # 1. fixture 源仓库
+    for _base in (fixtures_base, f"{fixtures_base.rstrip('/')}/*"):
+        _glob = sorted(Path(_base).glob("*")) if Path(_base).exists() else []
+        for p in _glob:
+            if (p / ".git").exists():
+                candidates.add(str(p))
+    # 2. 任务 meta.repo 引用的仓库
+    for _td in sorted(AGENT_GO_DIR.glob("task-*")):
+        _mp = _td / "meta.json"
+        if not _mp.exists():
+            continue
+        try:
+            _meta = json.loads(_mp.read_text(encoding="utf-8"))
+            _repo = _meta.get("repo", "")
+            if _repo and Path(_repo).exists() and (Path(_repo) / ".git").exists():
+                candidates.add(_repo)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    _total = 0
+    for _repo in sorted(candidates):
+        try:
+            ok, err = _worktree_prune(Path(_repo))
+            # 统计 prune 后残留（反映实际清理量）
+            _wt = subprocess.run(["git", "worktree", "list"],
+                                 cwd=_repo, capture_output=True, text=True, timeout=15)
+            _count = len([_line for _line in _wt.stdout.strip().split("\n") if _line.strip()])
+            if ok:
+                console.print(f"✅ {_repo}: worktree 注册 {_count} 条")
+            else:
+                console.warning(f"⚠️  {_repo}: prune 失败: {err}")
+            _total += 1
+        except (subprocess.SubprocessError, OSError) as e:
+            console.warning(f"⚠️  {_repo}: 清理异常: {e}")
+    if not _total:
+        console.print("未发现可清理的仓库")
+    else:
+        console.print(f"已处理 {_total} 个仓库（worktree prune）")
+
+
 def cmd_clean(args=None) -> None:
     import shutil as _shutil
     import time as _time
+
+    # ISSUE-38：--fixture-worktrees → 只清理 fixture 仓库的失效 worktree 注册，
+    # 不删任务目录（一次性兜底清理历史残留；bench 已内建任务后自动 prune）。
+    if getattr(args, "fixture_worktrees", False):
+        _prune_fixture_repo_worktrees()
+        return
+
     tasks = sorted(AGENT_GO_DIR.glob("task-*"))
     if not tasks:
         console.print("暂无任务")

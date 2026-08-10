@@ -242,6 +242,42 @@ class TestCmdClean:
                 cmd_clean()
             mock_print.assert_called()
 
+    def test_clean_fixture_worktrees_calls_prune(self, tmp_path):
+        """--fixture-worktrees → 调用 _prune_fixture_repo_worktrees，不删任务目录。"""
+        from agent_go.cli import cmd_clean
+        task_dir = tmp_path / "task-001"
+        task_dir.mkdir()
+        with patch("agent_go.cli._prune_fixture_repo_worktrees") as mock_prune:
+            with patch("agent_go.cli.AGENT_GO_DIR", tmp_path):
+                cmd_clean(MagicMock(fixture_worktrees=True, older_than=None))
+        mock_prune.assert_called_once()
+        assert task_dir.exists(), "--fixture-worktrees 不应删除任务目录"
+
+    def test_prune_fixture_repo_worktrees_skips_non_git(self, tmp_path):
+        """_prune_fixture_repo_worktrees：非 git 目录跳过（不触发 prune）。"""
+        from agent_go.cli import _prune_fixture_repo_worktrees
+        # 构造一个 AGENT_GO_DIR 下的任务 meta 指向「非 git 目录」
+        non_git = tmp_path / "repo-non-git"
+        non_git.mkdir()
+        task_dir = tmp_path / "task-x"
+        task_dir.mkdir()
+        (task_dir / "meta.json").write_text(json.dumps({
+            "repo": str(non_git), "status": "completed",
+        }), encoding="utf-8")
+
+        with patch("agent_go.cli.AGENT_GO_DIR", tmp_path), \
+             patch("agent_go.git_utils._worktree_prune") as mock_prune, \
+             patch("agent_go.cli.subprocess.run") as mock_run:
+            mock_prune.return_value = (True, "")
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            # fixtures_base 注入 tmp：避免扫描真实 eval_suite/fixtures（有 .git + worktree）
+            _prune_fixture_repo_worktrees(fixtures_base=str(tmp_path))
+
+        # 非 git 候选仓库不应被 prune
+        pruned_paths = [c.args[0] for c in mock_prune.call_args_list]
+        assert not any(str(non_git) in str(p) for p in pruned_paths), \
+            f"非 git 目录不应被 prune: {pruned_paths}"
+
 
 class TestCmdStatus:
     """cmd_status 状态监控"""

@@ -11,6 +11,7 @@ CLI:
 import argparse
 import hashlib
 import json
+import logging
 import re
 import shlex
 import subprocess
@@ -459,6 +460,9 @@ def cmd_bench(args=None) -> None:
                              no_skills=no_skills, source_batch=source_batch,
                              results_path=output_path,
                              hard_model=getattr(args, "hard_model", "") or "")
+        # ISSUE-38：任务结束后清理 fixture 源仓库失效 worktree 注册
+        # （timeout/SIGKILL 打断时 pipeline 清理不执行，注册项残留）
+        _prune_fixture_worktrees(_repo)
         # _run_one_task 返回单条 record（dict）；防御历史 list[dict] 签名
         _recs = _rec if isinstance(_rec, list) else [_rec]
         for _r2 in _recs:
@@ -723,6 +727,24 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
         _after_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
         _new_dirs = _after_dirs - _before_dirs
     return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch)
+
+
+def _prune_fixture_worktrees(repo: Path) -> None:
+    """清理 fixture 源仓库的失效 worktree 注册（ISSUE-38）。
+
+    bench 直接对 fixture 源仓库（含 .git）跑 `agent_go run`，executor 的
+    `git worktree add` 把 worktree 注册到 fixture 源仓库 `.git/worktrees/`。
+    正常收尾 pipeline 会 prune，但被 timeout/SIGKILL 打断的 bench 任务会残留
+    注册项（路径指向 ~/.agent_go/task-*/sub-*/work，目录已删除或清理）。
+    `git worktree prune` 会清除指向不存在目录的注册——廉价且安全，任务完成后调用。
+    """
+    try:
+        from .git_utils import _worktree_prune
+        ok, err = _worktree_prune(repo)
+        if not ok:
+            logging.getLogger(__name__).warning(f"[bench] fixture worktree prune 失败 ({repo}): {err}")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"[bench] fixture worktree prune 异常 ({repo}): {e}")
 
 
 def _dir_matches_task(td: Path, expected_task: str) -> bool:
