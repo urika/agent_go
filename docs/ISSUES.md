@@ -585,3 +585,28 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 1. `eval gate` 支持 `--results <results.jsonl>`，从 batch 数据计算 $/pass（排除 timed_out 右删失），而非 AGENT_GO_DIR 全库。
 2. 或 `--source-batch <batch>` 筛选 AGENT_GO_DIR 中匹配 source_batch 的任务。
 3. 与 `metric-freeze` 的 `valid_cost_usd / valid_task_count` 语义对齐。
+
+### ISSUE-38 fixture 仓库 worktree 泄漏（bench 运行残留）
+
+- **位置**：`agent_go/bench.py` + `executor.py` worktree 管理
+- **状态**：⏳ 待修复（2026-08-10 历史数据清理发现）
+- **严重度**：P2（磁盘泄漏，长期运行累积 GB 级残留）
+
+**问题**：agent_go bench 复制 fixture 到临时目录运行（bench.py:246 不复制 `.git`），但 `git worktree add` 时 worktree 仍注册到 **fixture 源仓库**的 `.git/worktrees/`，且 bench 清理逻辑不覆盖 → 每次运行在 fixture 源仓库累积一个 worktree 注册项，长期泄漏。
+
+**实测**（2026-08-10 清理前）：
+- 4 个 fixture 源仓库共残留 **2198 个 worktree**：
+  - task-mgr 1250、data-pipeline 616、django-blog 194、fp-sandbox 140
+- 路径全部指向 ~/.agent_go/task-*/sub-*/work（bench 子任务 worktree）
+- 已清理 1323 个（3 天前），剩余 865 个为近期保留
+
+**影响**：
+- fixture 仓库 `.git/worktrees/` 无限膨胀（本次清理前 ~/.agent_go 总 18GB，其中 fixture worktree 相关占大头）
+- `git worktree list` / `git gc` / fixture 操作变慢
+- 长期运行每个 bench 任务泄漏一个注册项
+
+**建议修复方向**：
+1. **bench 完成时统一清理**：`_run_one_task` 结束后，删除注册到 fixture 源仓库的 worktree（当前只清理 task 目录内的 worktree，不清理 fixture 源仓库的注册）。
+2. **复制 fixture 时不带 .git**：确保临时目录的 worktree 注册在临时仓库，不写回源仓库。
+3. 或 executor 用 `--force` 方式在任务结束时 `git worktree remove`，并 `git worktree prune` 清孤立注册。
+4. 提供一次性清理脚本（如 `agent_go clean --fixture-worktrees`）兜底历史残留。
