@@ -513,3 +513,22 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 - **回归测试**：`test_no_cross_type_mismatch_issue33`。
 
 ---
+
+## P1 — 功能受损
+
+### ISSUE-34 python -c 装饰器检测误判 email 地址中的 @
+
+- **位置**：`utils.py` `_is_safe_verification_command` Stage 2.5
+- **状态**：✅ 已修复（2026-08-10）— 移除 `@\w+` 正则，仅依赖 `compile()` 预检
+- **严重度**：P1（合法验证命令被拒，任务被误判 infrastructure_failure）
+
+**问题**：装饰器检测用 `re.search(r"@\w+", content)` 判断"含装饰器(@)"。但 email 地址（如 `test@example.com`、`'a@b.c'`）中的 `@example`/`@b` 匹配该正则 → 含 email 地址的合法验证命令被误判为含装饰器而拒绝。
+
+**实测**（阶段 E decision bench email-validator 0/3 全 infrastructure_failure）：
+- 验证命令：`python3 -c "from solution import validate_email, batch_validate; ... r=batch_validate(['a@b.c','']); ..."`
+- `@b.c` 匹配 `@\w+` → 命令被拒 → sub-1 failed → `kill_reason=interrupted_or_unknown` → infrastructure_failure
+- 3 次 repeat 全部失败，全部因同一误判
+
+**修复**：移除 `@\w+` 装饰器检测，完全依赖 `compile()` 预检（单行 `-c` 中真正的装饰器 `@dec def f()` 必然 SyntaxError，compile 已精确拦截；email 地址命令 compile 通过）。
+
+**回归测试**：`test_accepts_email_address_not_decorator`、`test_rejects_single_line_decorator`。
