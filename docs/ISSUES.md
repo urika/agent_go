@@ -532,3 +532,36 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 **修复**：移除 `@\w+` 装饰器检测，完全依赖 `compile()` 预检（单行 `-c` 中真正的装饰器 `@dec def f()` 必然 SyntaxError，compile 已精确拦截；email 地址命令 compile 通过）。
 
 **回归测试**：`test_accepts_email_address_not_decorator`、`test_rejects_single_line_decorator`。
+
+### ISSUE-35 _generate_context 引用未定义的 _extract_key_constraints（NameError）
+
+- **位置**：`executor.py` `_generate_context`
+- **状态**：✅ 已修复（2026-08-10）— 还原到 HEAD 版本，移除半成品"改进 D"调用
+- **严重度**：P0（成功子任务也会 NameError → failed → system_error）
+
+**问题**：工作区存在未提交的半成品改动，给 `_generate_context` 增加了 `_extract_key_constraints(summary, diff_stat)` 和 `_extract_files_changed(summary)` 调用，但**这两个函数从未实现**，且 `diff_stat` 变量未定义。任何子任务（无论成功失败）生成 context 时触发 `NameError: name '_extract_key_constraints' is not defined` → 子任务 failed → system_error。
+
+**实测**（阶段 E email-validator 重跑 rep1）：
+- `串行异常 sub-1: NameError: name '_extract_key_constraints' is not defined`
+- 非 email-validator 任务本身问题，而是执行器通用 bug
+
+**修复**：还原 `executor.py` 到 HEAD 版本（移除未实现的"改进 D"调用），`_generate_context` 恢复可工作状态。
+
+**教训**：未实现的函数引用（半成品改动）会在执行路径随机触发崩溃，且不在单元测试覆盖内。任何新增代码必须实现完整或先 commit 基线。
+
+### ISSUE-36 eval_suite/fixtures/ 被主仓库与 fixture 独立仓库双重跟踪
+
+- **位置**：`eval_suite/fixtures/`（fp-sandbox / task-mgr / data-pipeline / django-blog）
+- **状态**：⏳ 待处理（结构性问题，2026-08-10 记录）
+- **严重度**：P2（状态冲突，但不阻塞 bench 运行）
+
+**问题**：4 个 fixture 项目都是独立 git 仓库（各有 `.git`），但主仓库也通过 `git ls-files` 跟踪了其中 75 个内容文件（历史遗留 f92d218 提交时一并纳入）。双重管理导致状态冲突：
+- 阶段 E 期间 fp-sandbox 的 `solution.py`：主仓库跟踪的是旧版本，fixture 仓库初始状态（3ecb2b9）无此文件 → 主仓库工作区显示删除，实际是运行时产物混入主仓库。
+- django-blog 的 `tests/test_performance.py` 同理（db 任务运行时被修改）。
+
+**处理**：本次仅 `git rm --cached eval_suite/fixtures/fp-sandbox/solution.py` 移除该冲突点（fixture 运行时产物不应由主仓库跟踪）。未做大规模重构。
+
+**建议修复方向**（M2+ 结构重构时）：
+1. 主仓库 `.gitignore` 忽略 `eval_suite/fixtures/*/`（内容由 fixture 独立仓库管理）。
+2. 或 `git rm --cached` 全部 fixture 内容文件，改为 bench/CI 运行时单独 clone/复制 fixture 仓库。
+3. 需要确认 CI（git clone 主仓库）是否依赖 fixture 工作区文件；若依赖，需在 CI 中单独检出 fixture 仓库。

@@ -111,6 +111,14 @@ agent_go eval metric-freeze --results <results.jsonl> --source-batch <batch> --s
 agent_go eval batch-manifest --results <results.jsonl> --source-batch <batch>
 ```
 
+> **执行状态（2026-08-10）**：
+> - ✅ 正式 decision baseline 完成：16 任务 × deepseek-v4-flash × 3 repeat = 48 条
+> - ✅ `eval_suite/baselines/decision-20260809/`（results.jsonl + summary.json + manifest.json immutable，schema valid 48 records）
+> - ✅ 核心指标：pass_rate_diagnostic=0.914、$/pass=$0.0158、first_pass_rate=0.852、timeout_rate=0.185、valid_task_count=27
+> - ✅ accepted_delivery_rate=0（交付门未在 bench 启用，M1 交付闭环已实现但未接入 bench 验收）
+> - 期间修复 ISSUE-34（`@\w+` 误判 email 地址，email-validator 0/3→3/3）与 ISSUE-35（`_generate_context` 未定义函数 NameError）
+> - ✅ 收敛流程 A-E 全部完成，满足 ADR-009 退出条件，可进入 M2 或扩展能力决策
+
 ## 实施规则
 
 - 每阶段只解决一种主因。
