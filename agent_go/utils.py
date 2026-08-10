@@ -298,8 +298,10 @@ def _is_safe_verification_command(command: str) -> tuple[bool, str]:
         _bad = []
         if "\n" in _content:
             _bad.append("含换行")
-        if re.search(r"@\w+", _content):
-            _bad.append("含装饰器(@)")
+        # 装饰器不单独检测：compile() 已能精确拦截单行 -c 中非法的装饰器
+        # （@dec def f() 在单行中必 SyntaxError）。@\w+ 正则会误判 email 地址
+        # 中的 @（如 validate_email('test@example.com')），导致合法验证命令被拒
+        # （阶段 E email-validator 0/3 全 infrastructure_failure 根因）。
         if re.search(r"(^|;|\s)with\s+\S", _content):
             _bad.append("含 with 块")
         if _bad:

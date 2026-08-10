@@ -458,6 +458,27 @@ class TestPythonCCompileCheck:
         ok, reason = _is_safe_verification_command(cmd)
         assert ok, f"合法单行被拒绝: {reason}"
 
+    def test_accepts_email_address_not_decorator(self):
+        """email 地址中的 @ 不应被误判为装饰器（阶段 E email-validator 0/3 根因）。
+
+        修复前：@\\w+ 正则把 validate_email('test@example.com') 中的 @example 误判
+        为装饰器，合法验证命令被拒 → sub-1 failed → infrastructure_failure。
+        修复后：仅依赖 compile() 拦截真正的单行装饰器语法错误，email 命令通过。
+        """
+        cmd = ('python -c "from solution import validate_email; '
+               "assert validate_email('test@example.com') == True; "
+               "assert validate_email('') == False; "
+               "assert validate_email('test@.com') == False\"")
+        ok, reason = _is_safe_verification_command(cmd)
+        assert ok, f"email 验证命令被误拒: {reason}"
+
+    def test_rejects_single_line_decorator(self):
+        """真正的单行装饰器（@dec def f()）仍应被 compile() 拒绝。"""
+        cmd = 'python -c "@dec def f(): pass"'
+        ok, reason = _is_safe_verification_command(cmd)
+        assert not ok
+        assert "语法错误" in reason
+
 
 # ── TestResourceLimits: 资源限制和沙箱环境 ────────────────────
 
