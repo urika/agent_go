@@ -83,6 +83,8 @@ agent_go eval models --results eval_suite/results.jsonl
 agent_go eval cost-baseline --results eval_suite/results_v3.jsonl,eval_suite/results_v4_calib.jsonl   # 删失校正成本基线（排除 timed_out 右删失，P90×tolerance，S10）
 agent_go eval judge --results eval_suite/results.jsonl --judge-models M1,M2
 agent_go eval judge calibrate --llm-scores ... --human-scores ...
+agent_go eval calibrate-difficulty --results eval_suite/results.jsonl            # P2：基于 bench 实测校准任务难度标签（dry-run）
+agent_go eval calibrate-difficulty --results eval_suite/results.jsonl --apply     # 写回任务 YAML 的 difficulty
 agent_go eval gate --baseline 0.05
 agent_go eval gate --check-regression --update-baseline
 

@@ -1,6 +1,6 @@
 # 模型评估与分级策略设计稿
 
-> **状态**：✅ P0 已实施（2026-07-25，`pricing.py` / `bench.py` / `cross_judge.py` / `eval_suite`）；✅ P1 `router recommend` 已实施（2026-08-11，`bench.py` / `cli.py` / `pricing.py`）
+> **状态**：✅ P0 已实施（2026-07-25，`pricing.py` / `bench.py` / `cross_judge.py` / `eval_suite`）；✅ P1 `router recommend` 已实施（2026-08-11，`bench.py` / `cli.py` / `pricing.py`）；✅ P2 任务集扩充 + 难度自动校准已实施（2026-08-11，任务集 22→35，`eval calibrate-difficulty`）
 > **基线日期**：2026-07-25
 > **S12 更新（2026-08-07）**：✅ 智谱后端定价补全（glm-4.7/glm-5.1/glm-5.2/glm-4.5-air，联网查证）；✅ 运行前模型-价格预检（`bench.py _probe_actual_model` 探测实际后端 + `pricing.resolve_price` 校验定价覆盖，缺定价告警/中止）；✅ 实际路由验证：claude-haiku-4-5/sonnet-4-6/opus-4-7 → 智谱统一归一 glm-4.7（有定价，成本按真实模型计价）
 > **基线日期**：2026-07-25
@@ -416,7 +416,7 @@ qwen3.6-27b-local 65%        $0.08    185s    15%     90/50/20             ⚠ c
 | **P0** | 标准任务集种子（规划 8，实际 22 任务 + ground truth）+ `eval bench` 编排器 + `analyze_model_productivity` + `eval models` | 评估机制可用 |
 | **P1** | 交叉评判矩阵（N 模型互评，**P1 简化版**：四维评分退化为单一 semantic_score，P2 升级结构化 rubric）+ 人工抽检校准 | 第 2 层，假阳性检测 |
 | **P1** | `router recommend`（基于评估结果自动推荐路由，**已实施** 2026-08-11：`agent_go router recommend [--results FILE] [--apply] [--force]`，一次产出并原子写入 `router.roles` + `worker_models`；`eval recommend` 委托同一 `build_recommendation` 逻辑）+ `config.example.json` 三套预设 | 闭环到配置 |
-| **P2** | 任务集扩充（社区贡献）+ 难度自动校准 | 长期演进 |
+| **P2** | 任务集扩充（**已实施** 2026-08-11：22→35 任务，easy 5→13 / medium 5→10 / hard 12，新增 fp-sandbox 单文件 ×5、task-mgr ×5、data-pipeline ×3）+ 难度自动校准（**已实施** 2026-08-11：`agent_go eval calibrate-difficulty [--results FILE] [--apply]`，基于 bench 实测 pass_rate + 耗时对比相邻难度中位数，输出升/降档建议并可选写回 YAML） | 长期演进 |
 
 ### 改动文件清单（P0）
 
