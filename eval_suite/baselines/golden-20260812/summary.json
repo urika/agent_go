@@ -1,0 +1,151 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "3b938e8322bef06959b81d7ea9176a46b2ff83e01eac4aad8be4e04517a2a9cd",
+  "generated_at": "2026-08-11T19:32:31.441957+00:00",
+  "metric_freeze_version": 1,
+  "metrics": {
+    "accepted_delivery_count": 0,
+    "accepted_delivery_rate": 0.0,
+    "cost_per_accepted_delivery_usd": null,
+    "delivery_failure_rate": 0.0,
+    "dollar_per_pass_diagnostic_usd": 0.015369,
+    "excluded_reasons": {},
+    "excluded_task_count": 0,
+    "failure_class_counts": {
+      "budget_abort": 0,
+      "delivery_failure": 0,
+      "infrastructure_failure": 0,
+      "model_failure": 0,
+      "system_error": 0,
+      "timeout": 0,
+      "user_cancelled": 0,
+      "verification_failure": 1
+    },
+    "failure_class_summary": {
+      "capability_failure_count": 1,
+      "excluded_reasons": {},
+      "excluded_task_count": 0,
+      "failure_class_cost_usd": {
+        "budget_abort": 0.0,
+        "delivery_failure": 0.0,
+        "infrastructure_failure": 0.0,
+        "model_failure": 0.0,
+        "system_error": 0.0,
+        "timeout": 0.0,
+        "user_cancelled": 0.0,
+        "verification_failure": 0.039852
+      },
+      "failure_class_counts": {
+        "budget_abort": 0,
+        "delivery_failure": 0,
+        "infrastructure_failure": 0,
+        "model_failure": 0,
+        "system_error": 0,
+        "timeout": 0,
+        "user_cancelled": 0,
+        "verification_failure": 1
+      },
+      "timeout_disposition": {
+        "cleanup_race_count": 0,
+        "product_semantics": "failure",
+        "right_censored_for_cost_baseline_count": 1,
+        "timeout_failure_count": 0
+      },
+      "unclassified_count": 7,
+      "valid_task_count": 8
+    },
+    "first_pass_rate": 0.875,
+    "human_intervention_minutes": 0.0,
+    "pass_rate_diagnostic": 0.875,
+    "pr_creation_rate": 0.0,
+    "retry_rate": 0.125,
+    "time_to_accepted_delivery_sec": null,
+    "timeout_rate": 0.0,
+    "valid_cost_usd": 0.107585,
+    "valid_task_count": 8
+  },
+  "models": [
+    "deepseek-v4-flash"
+  ],
+  "record_count": 12,
+  "repeat": [
+    1,
+    2
+  ],
+  "repeat_values": [
+    1,
+    2
+  ],
+  "run_time_range": {
+    "elapsed_sec_max": 455.65,
+    "elapsed_sec_min": 45.05,
+    "first_timestamp": null,
+    "last_timestamp": null
+  },
+  "source_batch": "golden-20260812",
+  "source_batch_immutable": true,
+  "stress_metrics": {
+    "accepted_delivery_count": 0,
+    "accepted_delivery_rate": 0.0,
+    "cost_per_accepted_delivery_usd": null,
+    "delivery_failure_rate": 0.0,
+    "dollar_per_pass_diagnostic_usd": 0.03766,
+    "excluded_reasons": {},
+    "excluded_task_count": 0,
+    "failure_class_counts": {
+      "budget_abort": 0,
+      "delivery_failure": 0,
+      "infrastructure_failure": 0,
+      "model_failure": 0,
+      "system_error": 0,
+      "timeout": 0,
+      "user_cancelled": 0,
+      "verification_failure": 0
+    },
+    "failure_class_summary": {
+      "capability_failure_count": 0,
+      "excluded_reasons": {},
+      "excluded_task_count": 0,
+      "failure_class_cost_usd": {
+        "budget_abort": 0.0,
+        "delivery_failure": 0.0,
+        "infrastructure_failure": 0.0,
+        "model_failure": 0.0,
+        "system_error": 0.0,
+        "timeout": 0.0,
+        "user_cancelled": 0.0,
+        "verification_failure": 0.0
+      },
+      "failure_class_counts": {
+        "budget_abort": 0,
+        "delivery_failure": 0,
+        "infrastructure_failure": 0,
+        "model_failure": 0,
+        "system_error": 0,
+        "timeout": 0,
+        "user_cancelled": 0,
+        "verification_failure": 0
+      },
+      "timeout_disposition": {
+        "cleanup_race_count": 0,
+        "product_semantics": "failure",
+        "right_censored_for_cost_baseline_count": 0,
+        "timeout_failure_count": 0
+      },
+      "unclassified_count": 4,
+      "valid_task_count": 4
+    },
+    "first_pass_rate": 1.0,
+    "human_intervention_minutes": 0.0,
+    "pass_rate_diagnostic": 1.0,
+    "pr_creation_rate": 0.0,
+    "retry_rate": 0.0,
+    "time_to_accepted_delivery_sec": null,
+    "timeout_rate": 0.0,
+    "valid_cost_usd": 0.150639,
+    "valid_task_count": 4
+  },
+  "suite": "golden",
+  "task_catalog_hash": "7d080b11d012c8bfa1abc2e69d22ccf490e3b93152b8ae96378fb5a38455077a",
+  "task_count": 6
+}

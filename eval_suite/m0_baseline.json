@@ -1,6 +1,18 @@
 {
   "baseline_id": "m0-canonical-v1",
   "suite": "canonical",
+  "status": "accepted",
+  "decision_source_batch": "decision-20260812",
+  "decision_metrics": {
+    "valid_task_count": 22,
+    "pass_rate_diagnostic": 0.924241,
+    "first_pass_rate": 0.863636,
+    "dollar_per_pass_diagnostic_usd": 0.019274,
+    "timeout_rate": 0.090909,
+    "gate_baseline_usd": 0.023475,
+    "gate_actual_usd": 0.024589,
+    "gate_regression_pct": 4.7
+  },
   "tasks": [
     "add-format-helper", "fix-missing-default", "add-task-priority", "add-error-handling", "write-storage-test",
     "implement-done-command", "refactor-to-dict", "add-simple-caching", "email-validator", "safe-file-reader",

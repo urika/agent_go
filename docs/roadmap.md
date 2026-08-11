@@ -209,56 +209,58 @@ system_error
 - 能区分模型失败、基础设施失败、timeout、预算中止和交付失败。
 - 输出 Accepted Delivery Rate 和 Cost per Accepted Delivery。
 
-状态：`implemented/tested`（M0-1 至 M0-12 已实现；正式固定 baseline 尚未生成，因此暂不标记为产品 `accepted`）。
+状态：`accepted`（M0-1 至 M0-12 已实现；正式固定 baseline 已生成：`decision-20260812`，35 任务 canonical，`pass_rate_diagnostic=0.924`、`first_pass_rate=0.864`、`$/pass=$0.0193`，`eval gate` 通过，据此标记为产品 `accepted`）。
 
 ## 5. 阶段一：M1 交付闭环
 
 目标：解决“代码做出来但没有可靠到达用户目标分支”的最高优先级问题。
 
+状态：`accepted`（M1.1-M1.4 交付物与验收全部达成，2026-08-12 完成正式验收。真实交付证据：urika/agent_go PR#38 MERGED、urika/vibe-astock PR#1 OPEN、urika/llama-defender PR#8 MERGED，均 head=delivery branch、base=main；多子任务依赖链 + 非 main 默认分支端到端验证通过；192 项 M1 相关测试通过。唯一 ⚠️ 项为架构审查硬门禁，属刻意保留的 fail-open 设计）。
+
 ### M1.1 交付分支模型
 
 交付物：
 
-- 每个 task 明确记录 `base_commit`、`base_branch`、`delivery_branch`。
-- 所有成功子任务的 commit hash 可追溯。
-- 多子任务结果汇总到一个明确的 delivery branch。
-- 上游 artifact merge 和最终交付 merge 语义分离。
+- 每个 task 明确记录 `base_commit`、`base_branch`、`delivery_branch`。✅（`cli.py:763` meta 初始化 + `_record_git_meta`；真实任务 meta.json 均含三项）
+- 所有成功子任务的 commit hash 可追溯。✅（`results[].commit_hash` 逐子任务记录，`cmd_inspect`/`replay` 可查）
+- 多子任务结果汇总到一个明确的 delivery branch。✅（`delivery.py:create_delivery_branch` 聚合全部已接受子任务 commit）
+- 上游 artifact merge 和最终交付 merge 语义分离。✅（子任务内 `git merge` upstream tag 属 artifact 传递；`cmd_merge`/`create_delivery_branch` 属交付 merge）
 
 验收：
 
-- 单子任务真实 Git 仓库端到端通过。
-- 多子任务依赖链真实 Git 仓库端到端通过。
-- 非 `main` 默认分支（如 `master`、`develop`）可以正确执行。
-- 不依赖提交时间窗口判断 worker 是否产生了 commit。
+- 单子任务真实 Git 仓库端到端通过。✅（urika/agent_go PR#38 MERGED，2026-08-09；urika/vibe-astock PR#1 OPEN，head=delivery branch）
+- 多子任务依赖链真实 Git 仓库端到端通过。✅（task-20260809-084815：3 subtask / 2 依赖链 → ACCEPTED_DELIVERY）
+- 非 `main` 默认分支（如 `master`、`develop`）可以正确执行。✅（task-20260809-113310：base_branch=`fix/dogfooding-issues`，2 subtask 全部 completed + delivery branch 生成）
+- 不依赖提交时间窗口判断 worker 是否产生了 commit。✅（以 `commit_hash` 存在性为准，见 `recover.py` "commit 是完成边界"）
 
 ### M1.2 PR 交付
 
 交付物：
 
-- `cmd_pr` 使用明确的 `head` 和 `base`，禁止把当前工作目录 HEAD 误推到 `main`。
-- `pr_url`、head branch、base branch 写入任务结果。
-- PR 创建失败归类为 `delivery_failure`，不能报告为 completed。
-- 提供显式 `agent_go merge` 或等价的人工交付命令。
+- `cmd_pr` 使用明确的 `head` 和 `base`，禁止把当前工作目录 HEAD 误推到 `main`。✅（`cli.py:1897` head=delivery_branch、base=target_branch，无 delivery_branch 则拒绝）
+- `pr_url`、head branch、base branch 写入任务结果。✅（`meta.pr_url/pr_head/pr_base`，成功与 PR 复用路径均持久化）
+- PR 创建失败归类为 `delivery_failure`，不能报告为 completed。✅（`cli.py:1980` `delivery_failed=True`、`accepted_delivery=False`、status=DELIVERY_FAILED）
+- 提供显式 `agent_go merge` 或等价的人工交付命令。✅（`cmd_merge`，含 mergeability 预检 + PR-open 阻断 + 已合并 PR commit 同步）
 
 验收：
 
-- 生成的 PR head/base 正确。
-- PR 包含全部已接受子任务变更。
-- 交付失败时可以从 delivery branch 重试，不需要重新执行 Claude。
+- 生成的 PR head/base 正确。✅（urika/vibe-astock#1 head=`agent_go/.../delivery` base=main；urika/llama-defender#8 MERGED head/base 一致）
+- PR 包含全部已接受子任务变更。✅（`create_delivery_branch` 聚合全部已完成子任务 commit 后创建 PR；`test_create_delivery_branch_aggregates_commits`）
+- 交付失败时可以从 delivery branch 重试，不需要重新执行 Claude。✅（`cmd_pr` 从保留的 delivery branch 直接重新推送/创建 PR，不重跑 worker；`test_cmd_pr_gh_real_failure_marks_delivery_failed`）
 
 ### M1.3 交付状态与恢复
 
 交付物：
 
-- commit、verification、delivery 三种状态分离。
-- `recover` 和 `resume` 使用 task lock、base commit 和 commit hash。
-- 已提交但未验证的任务进入 `committed_unverified`，不得直接进入下游。
+- commit、verification、delivery 三种状态分离。✅（subtask `status`=completed/failed/no_changes（commit+verify）；delivery 独立为 `delivery_failed/accepted_delivery/status=ACCEPTED_DELIVERY/DELIVERY_FAILED`）
+- `recover` 和 `resume` 使用 task lock、base commit 和 commit hash。✅（`recover.py:238` / `pipeline.py:311` 共享 `.task.lock`（fcntl LOCK_EX|LOCK_NB）；以 commit hash 与 verify 日志判定）
+- 已提交但未验证的任务进入 `committed_unverified`，不得直接进入下游。✅（`recover.py:214` 有 commit + verify 未知 → committed_unverified；`resume` 接力重验证后下游 wave 才可执行）
 
 验收：
 
-- SIGTERM、SIGKILL、PR 创建失败、merge 冲突等场景均可区分。
-- recover 不会破坏运行中的 task。
-- resume 不会重复提交或混入旧 worktree 改动。
+- SIGTERM、SIGKILL、PR 创建失败、merge 冲突等场景均可区分。✅（recover 按 commit/verify 状态分类；PR 失败→DELIVERY_FAILED；merge 冲突→`check_mergeability` 报告冲突文件）
+- recover 不会破坏运行中的 task。✅（`.task.lock` 非阻塞独占锁，BlockingIOError 即拒绝并发，与 pipeline/resume 互斥）
+- resume 不会重复提交或混入旧 worktree 改动。✅（recover 无条件 reset orphan 变更、不替用户 commit；`test_resets_*`/`test_no_commits_no_orphan_no_changes` 等 56 项恢复测试覆盖）
 
 ### M1.4 SDD 最小治理闭环
 
