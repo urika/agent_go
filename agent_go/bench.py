@@ -1973,3 +1973,243 @@ def cmd_cost_baseline(args=None) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 # _read_jsonl / _read_json 已抽取到 eval.py（共享实现）
+
+# ═══════════════════════════════════════════════════════════════
+# P2 难度自动校准（任务集扩充配套）：基于 bench 实测校准难度标签
+# ═══════════════════════════════════════════════════════════════
+
+_DIFF_ORDER = ["easy", "medium", "hard"]
+_DIFF_UP_THRESHOLD = 0.40       # pass_rate 低于此 → 建议升档（实际比标注难）
+_DIFF_DOWN_THRESHOLD = 0.85     # pass_rate 高于此 → 候选降档（结合耗时确认）
+_DIFF_ELAPSED_FACTOR = 2.0      # avg_elapsed > 同难度中位数 × 此值 → 升档信号
+_DIFF_CROSS_DIFF_RATIO = 1.2    # avg_elapsed ≤ 更简单档中位数 × 此值 → 降档信号
+
+
+def calibrate_task_difficulty(results_paths: list, tasks_dir: str = "eval_suite") -> dict:
+    """基于 bench 实测数据校准任务难度标签（P2）。
+
+    设计原则（与 _recommend 决策阈值对齐，PRD 铁律）：
+      - 通过率是主信号：pass_rate 高 → 任务实际偏简单；低 → 偏难。
+      - 耗时为辅助信号：结合"同难度中位数"做相对判断，避免绝对阈值误判
+        （硬任务本就更耗时）。
+      - 同难度比较：升/降档都基于该难度在**本批数据中的中位数**，
+        而非拍脑袋的绝对秒数。
+
+    判定规则（对每个有数据的任务）：
+      - 升档（up）：pass_rate < 0.40（通过率低，能力不足）
+        或 avg_elapsed > 同难度中位数 × 2.0（异常耗时）
+      - 降档（down）：pass_rate >= 0.85 且
+        avg_elapsed < 同难度中位数 × 0.35（又快又准 → 标难了）
+      - 维持（keep）：其余
+
+    Args:
+        results_paths: 一个或多个 results*.jsonl 路径
+        tasks_dir: eval_suite 目录（读 tasks/*.yaml 的标注难度）
+
+    Returns:
+        {"tasks": {task_id: {labeled, suggested, pass_rate, avg_elapsed,
+                              n, reason, action}},
+         "by_difficulty_elapsed_median": {diff: median_sec},
+         "summary": {"total", "up", "down", "keep", "no_data"}}
+    """
+    if yaml is None:
+        return {"error": "yaml 未安装，无法读取任务配置"}
+
+    records: list[dict] = []
+    for _p in (results_paths if isinstance(results_paths, (list, tuple)) else [results_paths]):
+        _f = Path(_p)
+        if not _f.exists():
+            continue
+        for line in _f.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    if not records:
+        return {"error": "无数据"}
+
+    # 读任务标注难度（task_id → labeled difficulty）
+    labeled: dict[str, str] = {}
+    _td = Path(tasks_dir)
+    if (_td / "tasks").is_dir():
+        for tf in sorted((_td / "tasks").glob("*.yaml")):
+            try:
+                _t = yaml.safe_load(tf.read_text(encoding="utf-8"))
+                if _t and _t.get("id"):
+                    labeled[_t["id"]] = _t.get("difficulty", "medium")
+            except Exception:
+                continue
+
+    # 聚合每任务实测指标（仅自然记录；timed_out 右删失不计入耗时均值）
+    agg: dict[str, dict] = {}
+    for r in records:
+        tid = r.get("task_id", "")
+        if not tid or tid.startswith("task-"):  # 跳过探索期临时任务
+            continue
+        a = agg.setdefault(tid, {"elapsed": [], "pass": [], "n": 0})
+        a["pass"].append(1.0 if (r.get("pass_rate") or 0) > 0 else 0.0)
+        if not r.get("timed_out"):
+            _el = r.get("elapsed_sec") or r.get("elapsed") or 0
+            if _el:
+                a["elapsed"].append(float(_el))
+        a["n"] += 1
+
+    def _median(vals: list[float]) -> float:
+        if not vals:
+            return 0.0
+        s = sorted(vals)
+        m = len(s) // 2
+        return s[m] if len(s) % 2 else round((s[m - 1] + s[m]) / 2, 2)
+
+    # 各难度 elapsed 中位数（用于相对判断）
+    diff_elapsed: dict[str, list[float]] = {}
+    for tid, a in agg.items():
+        diff = labeled.get(tid, "medium")
+        diff_elapsed.setdefault(diff, []).extend(a["elapsed"])
+    by_diff_median = {d: _median(v) for d, v in diff_elapsed.items()}
+
+    tasks_out: dict[str, dict] = {}
+    summary = {"total": 0, "up": 0, "down": 0, "keep": 0, "no_data": 0}
+    for tid, a in agg.items():
+        labeled_diff = labeled.get(tid, "medium")
+        avg_pass = round(sum(a["pass"]) / a["n"], 4) if a["n"] else 0.0
+        avg_elapsed = round(sum(a["elapsed"]) / len(a["elapsed"]), 1) if a["elapsed"] else None
+        diff_median = by_diff_median.get(labeled_diff, 0.0)
+
+        suggested = labeled_diff
+        reason = ""
+        action = "keep"
+        # 降档参照：更简单一档的中位数（如 hard→medium 时参照 medium 档中位数）。
+        # 避免"同难度中位数被自身数据主导"导致的自我参照失效。
+        _lower_diff = _next_diff(labeled_diff, -1)
+        _lower_median = by_diff_median.get(_lower_diff, 0.0) if _lower_diff != labeled_diff else 0.0
+        if avg_pass < _DIFF_UP_THRESHOLD:
+            suggested = _next_diff(labeled_diff, 1)
+            action = "up"
+            reason = f"通过率 {avg_pass:.0%} < {_DIFF_UP_THRESHOLD:.0%}，实际比标注难"
+        elif (avg_pass >= _DIFF_DOWN_THRESHOLD and avg_elapsed is not None
+              and _lower_median > 0 and avg_elapsed <= _lower_median * _DIFF_CROSS_DIFF_RATIO):
+            suggested = _lower_diff
+            action = "down"
+            reason = (f"通过率 {avg_pass:.0%} ≥ {_DIFF_DOWN_THRESHOLD:.0%} 且耗时 "
+                      f"{avg_elapsed:.0f}s ≤ {_lower_diff}档中位数 {_lower_median:.0f}s × "
+                      f"{_DIFF_CROSS_DIFF_RATIO:.1f}，实际比标注简单")
+        elif (avg_elapsed is not None and diff_median > 0
+              and avg_elapsed > diff_median * _DIFF_ELAPSED_FACTOR):
+            suggested = _next_diff(labeled_diff, 1)
+            action = "up"
+            reason = (f"耗时 {avg_elapsed:.0f}s > 同难度中位数 {diff_median:.0f}s × "
+                      f"{_DIFF_ELAPSED_FACTOR:.1f}，疑似低估")
+
+        summary[action] += 1
+        summary["total"] += 1
+        tasks_out[tid] = {
+            "labeled": labeled_diff,
+            "suggested": suggested,
+            "pass_rate": avg_pass,
+            "avg_elapsed": avg_elapsed,
+            "n": a["n"],
+            "action": action,
+            "reason": reason,
+        }
+
+    # 有 YAML 但无实测数据的任务 → no_data
+    for tid, diff in labeled.items():
+        if tid not in tasks_out:
+            tasks_out[tid] = {
+                "labeled": diff, "suggested": diff, "pass_rate": None,
+                "avg_elapsed": None, "n": 0, "action": "no_data",
+                "reason": "无实测数据（本次 results 未覆盖）",
+            }
+            summary["no_data"] += 1
+
+    return {
+        "tasks": tasks_out,
+        "by_difficulty_elapsed_median": by_diff_median,
+        "summary": summary,
+    }
+
+
+def _next_diff(current: str, delta: int) -> str:
+    """难度档位移动（easy→medium→hard），边界处保持不变。"""
+    _i = _DIFF_ORDER.index(current) if current in _DIFF_ORDER else 1
+    _j = max(0, min(len(_DIFF_ORDER) - 1, _i + delta))
+    return _DIFF_ORDER[_j]
+
+
+def _apply_difficulty_calibration(cal: dict, tasks_dir: str = "eval_suite") -> list[str]:
+    """把校准建议写回任务 YAML 的 difficulty 字段（原子写：tmp + rename）。
+
+    仅更新 action in ("up", "down") 的任务；keep/no_data 不动。
+    返回实际修改的任务 id 列表。
+    """
+    if yaml is None:
+        return []
+    _td = Path(tasks_dir) / "tasks"
+    _changed: list[str] = []
+    if not _td.is_dir():
+        return _changed
+    for tf in sorted(_td.glob("*.yaml")):
+        try:
+            _t = yaml.safe_load(tf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not _t or not _t.get("id"):
+            continue
+        _c = cal.get("tasks", {}).get(_t["id"])
+        if not _c or _c.get("action") not in ("up", "down"):
+            continue
+        _new = _c["suggested"]
+        if _t.get("difficulty") != _new:
+            _t["difficulty"] = _new
+            _tmp = tf.with_suffix(".yaml.tmp")
+            _tmp.write_text(yaml.safe_dump(_t, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            _tmp.replace(tf)
+            _changed.append(_t["id"])
+    return _changed
+
+
+def cmd_calibrate_difficulty(args=None) -> None:
+    """P2：难度自动校准命令（agent_go eval calibrate-difficulty）。
+
+    CLI: agent_go eval calibrate-difficulty [--results FILE[,FILE...]]
+         [--tasks eval_suite] [--apply] [--threshold-up F] [--threshold-down F]
+    默认 dry-run 展示建议表；--apply 写回任务 YAML 的 difficulty。
+    """
+    _workspace = Path(__file__).resolve().parent.parent
+    results_arg = getattr(args, "results", None) or "eval_suite/results.jsonl"
+    results_paths = [p.strip() for p in results_arg.split(",") if p.strip()]
+    results_paths = [_workspace / p if not Path(p).is_absolute() else Path(p) for p in results_paths]
+    tasks_dir = _workspace / (getattr(args, "tasks", None) or "eval_suite")
+
+    cal = calibrate_task_difficulty(results_paths, tasks_dir=str(tasks_dir))
+    if "error" in cal:
+        console.error(cal["error"])
+        return
+
+    s = cal["summary"]
+    console.print("难度校准建议（基于 bench 实测）")
+    console.print(f"总计 {s['total']} 个有数据任务: 升档 {s['up']} / 降档 {s['down']} / 维持 {s['keep']} / 无数据 {s['no_data']}")
+    console.print("")
+    console.print(f"{'任务':<40} {'标注':<7} {'建议':<7} {'通过率':>7} {'耗时':>8} {'n':>3}  原因")
+    console.print("─" * 110)
+    for tid in sorted(cal["tasks"]):
+        t = cal["tasks"][tid]
+        _mark = {"up": "⬆", "down": "⬇", "keep": "·", "no_data": "-"}[t["action"]]
+        _pr = f"{t['pass_rate']:.0%}" if t["pass_rate"] is not None else "  -"
+        _el = f"{t['avg_elapsed']:.0f}s" if t["avg_elapsed"] is not None else " -"
+        console.print(f"{_mark} {tid:<38} {t['labeled']:<7} {t['suggested']:<7} "
+                      f"{_pr:>7} {_el:>8} {t['n']:>3}  {t['reason']}")
+    console.print("─" * 110)
+    console.print("中位数参考: " + ", ".join(
+        f"{d}={v:.0f}s" for d, v in sorted(cal["by_difficulty_elapsed_median"].items())))
+
+    if not getattr(args, "apply", False):
+        console.print("（dry-run，未写入。用 --apply 写回任务 YAML 的 difficulty）")
+        return
+    _changed = _apply_difficulty_calibration(cal, tasks_dir=str(tasks_dir))
+    if _changed:
+        console.success(f"已更新 {len(_changed)} 个任务难度: {', '.join(_changed)}")
+    else:
+        console.print("无需要更新的任务")

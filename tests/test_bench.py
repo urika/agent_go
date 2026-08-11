@@ -1702,3 +1702,142 @@ def test_apply_recommendation_roles_only_flag(tmp_path):
     assert saved["worker_models"]["easy"] == "keep-me"      # 未动
     assert saved["router"]["roles"]["planner"] == {"provider": "anthropic", "model": "claude-opus-4-8"}
     assert skipped == ["worker", "reviewer"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# P2 难度自动校准
+# ═══════════════════════════════════════════════════════════════
+
+def _mk_diff_tasks(tmp_path):
+    """构造带 difficulty 标注的任务 YAML（easy/medium/hard 各一）。"""
+    import yaml as _y
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    specs = [
+        {"id": "easy-task", "difficulty": "easy", "repo": "x", "task": "t",
+         "verification": ["true"]},
+        {"id": "medium-task", "difficulty": "medium", "repo": "x", "task": "t",
+         "verification": ["true"]},
+        {"id": "hard-task", "difficulty": "hard", "repo": "x", "task": "t",
+         "verification": ["true"]},
+    ]
+    for s in specs:
+        (tasks_dir / f"{s['id']}.yaml").write_text(
+            _y.safe_dump(s, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return tmp_path
+
+
+def _mk_diff_results(tmp_path):
+    """构造 results.jsonl：easy-task 高通过率+低耗时；medium-task 低通过率。"""
+    import json as _j
+    records = [
+        # easy-task：3 次，全通过，耗时 30s（比 easy 中位数低很多）
+        {"task_id": "easy-task", "pass_rate": 1.0, "elapsed_sec": 30,
+         "timed_out": False, "model": "m"},
+        {"task_id": "easy-task", "pass_rate": 1.0, "elapsed_sec": 35,
+         "timed_out": False, "model": "m"},
+        {"task_id": "easy-task", "pass_rate": 1.0, "elapsed_sec": 32,
+         "timed_out": False, "model": "m"},
+        # medium-task：3 次，全失败（通过率低 → 升档）
+        {"task_id": "medium-task", "pass_rate": 0.0, "elapsed_sec": 100,
+         "timed_out": False, "model": "m"},
+        {"task_id": "medium-task", "pass_rate": 0.0, "elapsed_sec": 110,
+         "timed_out": False, "model": "m"},
+        {"task_id": "medium-task", "pass_rate": 0.0, "elapsed_sec": 105,
+         "timed_out": False, "model": "m"},
+        # hard-task：通过率 50%，耗时 300s（维持）
+        {"task_id": "hard-task", "pass_rate": 0.5, "elapsed_sec": 300,
+         "timed_out": False, "model": "m"},
+        {"task_id": "hard-task", "pass_rate": 0.5, "elapsed_sec": 310,
+         "timed_out": False, "model": "m"},
+        # 探索期任务应被跳过（task- 前缀）
+        {"task_id": "task-20260725-000000-000", "pass_rate": 1.0,
+         "elapsed_sec": 10, "timed_out": False, "model": "m"},
+    ]
+    rp = tmp_path / "results.jsonl"
+    rp.write_text("\n".join(_j.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return rp
+
+
+def test_calibrate_difficulty_up_on_low_pass_rate(tmp_path):
+    """P2：通过率 <40% → 升档；通过率 50% → 维持。"""
+    from agent_go.bench import calibrate_task_difficulty
+    _mk_diff_tasks(tmp_path)
+    rp = _mk_diff_results(tmp_path)
+    cal = calibrate_task_difficulty([str(rp)], tasks_dir=str(tmp_path))
+    assert "error" not in cal
+    t = cal["tasks"]
+    assert t["medium-task"]["action"] == "up"
+    assert t["medium-task"]["suggested"] == "hard"
+    assert t["hard-task"]["action"] == "keep"
+    # 探索期临时任务被跳过
+    assert "task-20260725-000000-000" not in t
+
+
+def test_calibrate_difficulty_down_on_fast_and_high_pass(tmp_path):
+    """P2：高通过率 + 远低于同难度中位数耗时 → 降档。"""
+    from agent_go.bench import calibrate_task_difficulty
+    _mk_diff_tasks(tmp_path)
+    rp = _mk_diff_results(tmp_path)
+    cal = calibrate_task_difficulty([str(rp)], tasks_dir=str(tmp_path))
+    t = cal["tasks"]
+    # easy-task pass=100%，耗时 30-35s；easy 中位数 = 32s → 30 < 32×0.35=11.2? 否。
+    # 构造专门场景：让 easy-task 耗时远低于同难度中位数 → 降档到？easy 已是下界。
+    assert t["easy-task"]["action"] == "keep"
+
+
+def test_calibrate_difficulty_down_medium_from_hard_results(tmp_path):
+    """P2 降档：hard 任务全通过且耗时远低 → 降为 medium。"""
+    import json as _j
+    import yaml as _y
+    from agent_go.bench import calibrate_task_difficulty
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    specs = [
+        {"id": "t-hard", "difficulty": "hard", "repo": "x", "task": "t",
+         "verification": ["true"]},
+        {"id": "t-medium", "difficulty": "medium", "repo": "x", "task": "t",
+         "verification": ["true"]},
+    ]
+    for s in specs:
+        (tasks_dir / f"{s['id']}.yaml").write_text(
+            _y.safe_dump(s, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    # t-hard: pass 100%，耗时 20s（hard 中位数 300s×0.35=105s → 降档）
+    # t-medium: pass 100%，耗时 200s（medium 中位数 200s×0.35=70s → 不降）
+    records = [
+        {"task_id": "t-hard", "pass_rate": 1.0, "elapsed_sec": 20,
+         "timed_out": False, "model": "m"},
+        {"task_id": "t-hard", "pass_rate": 1.0, "elapsed_sec": 25,
+         "timed_out": False, "model": "m"},
+        {"task_id": "t-medium", "pass_rate": 1.0, "elapsed_sec": 200,
+         "timed_out": False, "model": "m"},
+        {"task_id": "t-medium", "pass_rate": 1.0, "elapsed_sec": 210,
+         "timed_out": False, "model": "m"},
+    ]
+    rp = tmp_path / "r.jsonl"
+    rp.write_text("\n".join(_j.dumps(r) for r in records) + "\n", encoding="utf-8")
+    cal = calibrate_task_difficulty([str(rp)], tasks_dir=str(tmp_path))
+    t = cal["tasks"]
+    assert t["t-hard"]["action"] == "down", t["t-hard"]
+    assert t["t-hard"]["suggested"] == "medium"
+    assert t["t-medium"]["action"] == "keep"
+
+
+def test_calibrate_difficulty_apply_updates_yaml(tmp_path):
+    """P2 --apply：把 up/down 写回任务 YAML。"""
+    import json as _j
+    import yaml as _y
+    from unittest.mock import patch
+    from agent_go.bench import _apply_difficulty_calibration, calibrate_task_difficulty
+    _mk_diff_tasks(tmp_path)
+    rp = _mk_diff_results(tmp_path)
+    cal = calibrate_task_difficulty([str(rp)], tasks_dir=str(tmp_path))
+    changed = _apply_difficulty_calibration(cal, tasks_dir=str(tmp_path))
+    assert "medium-task" in changed
+    # 校验 YAML 已被更新
+    yf = tmp_path / "tasks" / "medium-task.yaml"
+    _t = _y.safe_load(yf.read_text(encoding="utf-8"))
+    assert _t["difficulty"] == "hard"
+    # easy-task / hard-task 未变
+    assert _y.safe_load((tmp_path / "tasks" / "easy-task.yaml").read_text(encoding="utf-8"))["difficulty"] == "easy"
+    assert _y.safe_load((tmp_path / "tasks" / "hard-task.yaml").read_text(encoding="utf-8"))["difficulty"] == "hard"

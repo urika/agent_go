@@ -966,6 +966,10 @@ def cmd_eval(args=None) -> None:
        # CR-G5：bench 推荐 → worker_models 自动衔接（dry-run / --apply）
        from .bench import cmd_recommend
        cmd_recommend(args)
+    elif sub == "calibrate-difficulty":
+       # P2：基于 bench 实测自动校准任务难度标签（dry-run / --apply 写回 YAML）
+       from .bench import cmd_calibrate_difficulty
+       cmd_calibrate_difficulty(args)
     elif sub == "judge":
        # 交叉评判矩阵（S8 P1，第 2 层语义评估）
        from .cross_judge import cmd_judge

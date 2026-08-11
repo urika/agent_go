@@ -27,9 +27,11 @@ def test_suite_selection_is_small_for_smoke_and_stress():
     smoke = [tid for tid, item in catalog.items() if "smoke" in item["suites"]]
     stress = [tid for tid, item in catalog.items() if "stress" in item["suites"]]
     decision = [tid for tid, item in catalog.items() if "decision" in item["suites"]]
-    assert 6 <= len(smoke) <= 8
+    # P2 任务集扩充（2026-08-11）：35 个 canonical 任务。
+    # smoke/stress 保持精简（快速冒烟 + 高方差子集），decision 覆盖主力评测任务。
+    assert 6 <= len(smoke) <= 10
     assert 4 <= len(stress) <= 8
-    assert 12 <= len(decision) <= 16
+    assert 20 <= len(decision) <= 35
 
 
 def test_m0_baseline_freezes_all_tasks_and_stress_exclusion():
