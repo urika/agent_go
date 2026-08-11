@@ -154,7 +154,7 @@ M1 实现：delivery branch 在 pipeline 完成后保留在仓库中；`agent_go
 - PR 创建失败后只重试交付。✅
 - merge 冲突明确阻断并保留现场。✅
 
-## 7. 真实 GitHub PR 端到端验证记录（2026-08-09）
+## 7. 真实 GitHub PR 端到端验证记录（2026-08-09 / 2026-08-11 规模化）
 
 在 agent_go 自身仓库（`git@github.com:urika/agent_go.git`，`gh` 已登录）跑通完整交付链路。
 
@@ -205,3 +205,40 @@ M1 实现：delivery branch 在 pipeline 完成后保留在仓库中；`agent_go
 3. **同步的 base**：本地 main 与 `origin/main` 对齐（PR base=main 反映最新代码）。
 
 若缺少任一要素（如无 remote、gh 未登录、main 落后远程），`agent_go pr` 会给出明确错误（推送失败 / gh 未安装 / mergeability 预检失败），不会静默产生错误交付。
+
+### 7.5 M1 规模化验证（2026-08-11）：2 个异构真实仓库
+
+在 agent_go 自身仓库之外，选择 2 个用户自有、可推送、测试干净的真实仓库跑通端到端交付，验证 delivery branch 生成、PR 创建、pr/merge 互斥在异构仓库的表现。
+
+**目标仓库（异构度）：**
+
+| 仓库 | 结构 | 任务 | 验证命令 |
+|------|------|------|----------|
+| `urika/vibe-astock` | Python + React 混合（FastAPI 后端 + tsx 前端） | `util.py` 新增防御式纯函数 `is_weekend_safe`（非法日期返回 False 不抛异常）+ 4 个单测 | `python3 -c "from duanxian.util import is_weekend_safe; ..."` 单行断言 |
+| `urika/llama-defender` | 纯 Python 代理（anthropic_proxy 变体） | 修复 `tool_parser.py` `_is_truncated_json` 第 101 行括号笔误（`("{","[","{")` 第三个 `{` 应为 `]`）+ 单测 | worker 自主选择 `python3 -m unittest discover -s test/unit` |
+
+**关键结果：**
+
+| 环节 | 任务 A（vibe-astock） | 任务 B（llama-defender） |
+|------|----------------------|--------------------------|
+| 任务 | `task-20260811-220438-059-1c77` | `task-20260811-220821-792-ec2a` |
+| 执行 | 单 subtask，58s，+45/-0（2 文件） | 单 subtask，42s，+15/-1（2 文件） |
+| pipeline 状态 | `DELIVERY_READY` → delivery branch 生成 | `DELIVERY_READY` → delivery branch 生成 |
+| PR 创建 | `agent_go pr --push` → **PR #1** | `agent_go pr --push` → **PR #8** |
+| GitHub 状态 | `MERGEABLE`，+45/-0，base=main | `MERGEABLE`，+15/-1，base=main |
+| meta 写回 | `pr_url`/`pr_head`/`pr_base`，`ACCEPTED_DELIVERY` | 同上，`ACCEPTED_DELIVERY` |
+| pr/merge 互斥 | OPEN PR 时 `agent_go merge` **被阻断**（提示走 PR 路径） | PR #8 在 GitHub 合并后 `agent_go merge` **同步** `explicit_merge_commit=2f6fe455994f` |
+
+**验证结论：**
+
+1. **异构仓库交付链路全部闭环**。delivery branch 生成（worktree 隔离 + `--no-ff` merge）、`agent_go pr --push`（check_mergeability 预检 + PR head/base 校验 + 推送 + PR 创建）、meta 写回与 `ACCEPTED_DELIVERY` 判定在 Python+React 混合与纯 Python 两类仓库均正常工作，无需仓库特化配置。
+2. **pr/merge 互斥两个方向都验证通过**：
+   - OPEN PR 时 `agent_go merge` 阻断（互斥的「pr 优先」方向）；
+   - 已合并 PR 时 `agent_go merge` 调用 `_fetch_merged_pr_commit` 同步 GitHub 的 merge commit，消除 7.3-问题 1 中「两个不同 merge commit」的隐患（正是该建议的落地验证）。
+3. **验证命令的仓库适配由 worker 自主完成**。任务 B 未用任务描述给出的 `python3 -c` 断言，而是识别仓库用 unittest 后选择 `python3 -m unittest discover`，说明验证命令选择具备 LLM 自适应，不依赖 planner 显式指定。
+4. **确认 7.4 三要素普适性**：真实 PR 链路的三要素（远程仓库 / gh 认证 / 同步 base）在非 agent_go 仓库同样适用，缺少任一要素时 `agent_go pr` 明确报错而非静默错误交付。
+
+**遗留观察（非阻断）：**
+
+- 任务 A 的 PR #1 保持 OPEN（作为 OPEN-PR 互斥的活样本），未走 merge 收尾；如需收尾可 GitHub 侧合并后 `agent_go merge` 同步。
+- 本地 llama-defender clone 的 delivery branch 落后 origin/main 1 个 commit（GitHub 侧 merge 产生 `2f6fe45`），属正常现象——交付由 GitHub PR 完成，本地 delivery branch 无需再同步。
