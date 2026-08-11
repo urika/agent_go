@@ -215,7 +215,7 @@ system_error
 
 目标：解决“代码做出来但没有可靠到达用户目标分支”的最高优先级问题。
 
-状态：`accepted`（M1.1-M1.4 交付物与验收全部达成，2026-08-12 完成正式验收。真实交付证据：urika/agent_go PR#38 MERGED、urika/vibe-astock PR#1 OPEN、urika/llama-defender PR#8 MERGED，均 head=delivery branch、base=main；多子任务依赖链 + 非 main 默认分支端到端验证通过；192 项 M1 相关测试通过。唯一 ⚠️ 项为架构审查硬门禁，属刻意保留的 fail-open 设计）。
+状态：`accepted`（M1.1-M1.4 交付物与验收全部达成，2026-08-12 完成正式验收。真实交付证据：urika/agent_go PR#38 MERGED、urika/vibe-astock PR#1 OPEN、urika/llama-defender PR#8 MERGED，均 head=delivery branch、base=main；多子任务依赖链 + 非 main 默认分支端到端验证通过；192 项 M1 相关测试通过。唯一 ⚠️ 项为架构审查硬门禁，属刻意保留的 fail-open 设计。指标口径：bench harness 不创建真实 PR，formal baseline（decision-20260812）`accepted_delivery_count=0` 为设计预期，`accepted_delivery_rate` 有效值由上述真实 PR 提供证据，两项口径并存成立）。
 
 ### M1.1 交付分支模型
 

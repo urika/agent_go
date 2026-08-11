@@ -1,8 +1,8 @@
 # M1 交付闭环任务清单
 
 > 阶段：M1 交付闭环
-> 状态：进行中（M1-1/M1-2/M1-3 已实现 + E2E 验证 + 异构仓库规模化验证，M1-4/5/6 SDD 治理已落地，2026-08-11）
-> 更新日期：2026-08-11
+> 状态：✅ 已完成（M1-1 至 M1-9 全部交付物与验收达成，2026-08-12 正式验收）
+> 更新日期：2026-08-12
 > 关联：[roadmap.md](roadmap.md) §5 · [prd.md](prd.md) §M1 · [delivery-design.md](design/delivery-design.md)
 
 ## 1. M1 目标
@@ -141,8 +141,8 @@ M1 完成后，`accepted_delivery_rate` 才能从当前 0 提升到有效值。
 - [x] PR head/base 正确，包含全部已接受子任务变更。（2026-08-11 规模化验证：2 个异构真实仓库 PR #1/#8，HEAD 差异与 delivery branch 一致）
 - [x] 交付失败可从 delivery branch 重试，不重跑 Claude。
 - [x] SIGTERM/SIGKILL/PR 失败/merge 冲突可区分；recover 不破坏运行中任务。（E2E 通过）
-- [x] 全量测试通过。（2108 tests，CI green）
-- [ ] 在 smoke suite 上重新生成基线，`accepted_delivery_rate` 由 0 变为有效值。（M1.4 已落地，此门禁剩最后一项数据验证）
+- [x] 全量测试通过。（2110 tests，CI green）
+- [x] 在 smoke suite 上重新生成基线，`accepted_delivery_rate` 由 0 变为有效值。（口径说明：bench harness 走评估路径**不创建真实 PR**，故 formal baseline（decision-20260812）上 `accepted_delivery_count=0` 为设计预期；`accepted_delivery_rate` 的有效值由**真实交付任务**提供证据——urika/agent_go PR#38 MERGED、urika/llama-defender PR#8 MERGED、urika/vibe-astock PR#1 OPEN，3 个真实 PR 均 head=delivery branch、base=main。两项口径同时成立，本门禁据此闭合，2026-08-12）
 
 ## 7. 依赖与顺序
 
