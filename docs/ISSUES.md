@@ -650,3 +650,15 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 - bash -c 包裹**不放行**（default-deny 原则）：任意 shell 代码会绕过逐 token 白名单，改由 prompt 提示避免。
 
 **影响**：修正后这 6 个任务从 infra 归为 verification_failure，基线 first_pass/infra 统计更准确；`python -m <模块>` 场景（CLI 命令验证）不再被误拒。
+
+**针对性回归验证**（2026-08-12，用 6 个任务的真实原始被拒命令逐一测试）：
+
+| 任务 | 原始命令 | 修复后 | 结论 |
+|------|----------|--------|------|
+| add-stats-command | `python -m src.cli stats` | ✅ 放行 | **直接救回**（白名单扩展命中） |
+| add-simple-caching | `python -c "...@cached\ndef f():..."` | ❌ 仍拒（装饰器/换行） | 预期：单行约束保留，靠 prompt 预防 |
+| safe-file-reader | `python -c "\n...换行..."` | ❌ 仍拒（无闭合引号） | 预期：同上 |
+| integration-tests-datapipeline | `Check fixtures...: python -c "..."` | ❌ 仍拒（未知命令前缀） | 预期：同上 |
+| list-tools | `bash -c 'python -c "..."'` | ❌ 仍拒（bash 不在白名单） | 预期：default-deny 刻意保留 |
+
+**结论**：修复**部分有效**——`python -m <模块>` 场景直接救回（add-stats-command），统计口径修正（6 个任务不再污染 infra）。剩余 4 个任务的命令仍被拒属**刻意保留的防御**（装饰器/换行/自然语言前缀/bash 包裹），根治依赖 prompt 生成规范预防，而非放宽安全门禁。**已确认不改变 G8 短路语义**（executor.py:1289-1296：被拒命令直接失败不进入修复重试），归类修正仅影响统计口径，不影响执行路径。
