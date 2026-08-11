@@ -330,6 +330,13 @@ def _build_parser():
     governance_parser.add_argument("--json", action="store_true", dest="json_mode",
                                    help="Output as JSON")
 
+    # deviation 子命令（M2.5 Spec/Architecture 偏差反馈：偏差记录查询与聚合）
+    deviation_parser = subparsers.add_parser("deviation", help="Show Spec/Architecture/acceptance deviation records")
+    deviation_parser.add_argument("task_id", nargs="?", default=None,
+                                  help="Task ID（缺省时聚合全部任务）")
+    deviation_parser.add_argument("--json", action="store_true", dest="json_mode",
+                                  help="Output as JSON")
+
     # mcp 子命令
     mcp_parser = subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)")
     mcp_parser.add_argument("--http", action="store_true",
@@ -2776,6 +2783,59 @@ def cmd_governance(args) -> None:
     _con.sep("─", 60)
 
 
+def cmd_deviation(args) -> None:
+    """M2.5: 展示 Spec/架构/验收偏差记录与聚合。"""
+    from .console import _LazyConsole
+    from .deviation import aggregate_deviations, load, load_all
+
+    _con = _LazyConsole()
+    task_id = getattr(args, "task_id", None)
+    if task_id:
+        task_dir = AGENT_GO_DIR / task_id
+        if not task_dir.exists():
+            _con.error(f"任务不存在: {task_id}")
+            return
+        events = load(task_dir)
+        scope_title = f"偏差记录: {task_id}"
+    else:
+        events = load_all(AGENT_GO_DIR)
+        scope_title = f"偏差记录: 全部任务（{len(events)} 条）"
+
+    agg = aggregate_deviations(events)
+
+    if getattr(args, "json_mode", False):
+        _con.force(json.dumps({
+            "task_id": task_id,
+            "aggregate": agg,
+            "events": [e.__dict__ for e in events],
+        }, indent=2, ensure_ascii=False))
+        return
+
+    if not events:
+        _con.print(f"{scope_title} — 无偏差记录")
+        return
+
+    _con.sep("─", 60)
+    _con.title(f"📊 {scope_title}")
+    _con.print(f"  总数: {agg['total']}  需人工决策: {agg['require_approval']}  "
+               f"已处理: {agg['resolved']}  待回写 Spec: {agg['spec_rewrite_pending']}")
+    if agg["by_type"]:
+        _con.print(f"  类型分布: {', '.join(f'{k}={v}' for k, v in sorted(agg['by_type'].items()))}")
+    if agg["by_root_cause"]:
+        _con.print(f"  根因分布: {', '.join(f'{k}={v}' for k, v in sorted(agg['by_root_cause'].items()))}")
+    if agg["by_failure_class"]:
+        _con.print(f"  失败类分布: {', '.join(f'{k}={v}' for k, v in sorted(agg['by_failure_class'].items()))}")
+    _con.sep("─", 60)
+    for e in events:
+        flag = "🔴" if e.requires_approval else "⚪"
+        _con.print(f"  {flag} {e.subtask_id:<8} [{e.deviation_type}] {e.summary}")
+        if e.evidence:
+            _con.print(f"      证据: {e.evidence[:120]}")
+        if e.human_decision:
+            _con.print(f"      人工决策: {e.human_decision}")
+    _con.sep("─", 60)
+
+
 def cmd_router(args=None) -> None:
     """角色感知模型路由配置管理。"""
     from .config import CONFIG_PATH
@@ -3107,6 +3167,8 @@ def main() -> None:
             cmd_checkpoint(args)
         elif args.command == "governance":
             cmd_governance(args)
+        elif args.command == "deviation":
+            cmd_deviation(args)
         elif args.command == "mcp":
             cmd_mcp(args)
         elif args.command == "web":

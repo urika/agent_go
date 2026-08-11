@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
-          pip install pytest pytest-mock ruff mypy
+          pip install pytest pytest-mock ruff mypy pyyaml
 
       - name: Run tests
         run: |

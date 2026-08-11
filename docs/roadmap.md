@@ -286,70 +286,72 @@ system_error
 
 目标：在交付闭环成立后，降低失败和人工恢复成本。
 
+状态：`accepted`（M2.1-M2.5 交付物与验收达成，2026-08-12 完成正式验收。M2.5 偏差反馈为本轮补齐实现（deviation.py + `agent_go deviation` CLI + executor 集成），M2.2 failure_analysis/effective_strategy 持久化补全到 verify_state.json。全量 2127 测试通过。CI yaml 依赖阻塞已修复。两处 ⚠️ 属刻意保守：有界 Reflexion 每次 retry 触发（非阈值后）、`/goal` 保持默认关闭）。
+
 ### M2.1 验证与失败阻断
 
 交付物：
 
-- shell、lint/type/test、semantic evaluator 的职责边界。
-- 验证失败上下文和 repair retry 记录。
-- 上游失败时下游明确 blocked。
+- shell、lint/type/test、semantic evaluator 的职责边界。✅（executor 验证循环：shell 命令确定性检查 + evaluator.py LLM 语义评估分层，失败上下文注入 `_build_repair_prompt` executor.py:640-703）
+- 验证失败上下文和 repair retry 记录。✅（`results[].verification_results` 记录 exit_code/stdout/stderr tail/retry_count；metering 记录 retry 成本）
+- 上游失败时下游明确 blocked。✅（pipeline.py:442-448 依赖链级联：upstream failed/blocked → downstream blocked）
 - 无进展检测，避免重复 retry 消耗预算。
   - ✅ 已落地（2026-08-11）：回退/振荡检测 `diff_stat_hash` + `verification.revert_threshold`（默认 2），同一累积状态出现 ≥ 阈值即终止并标记 `verify_revert`；打地鼠检测 `diverge_similarity_threshold`。见 [workflow-vs-subagent-review.md](design/workflow-vs-subagent-review.md)。
-- 循环状态埋点：`diff_stat_hash`、`failure_pattern`、`effective_strategy`、`no_progress`。
-- 有界 Reflexion：仅在 retry 达到阈值后分析根因，不改变默认成功语义。
+- 循环状态埋点：`diff_stat_hash`、`failure_pattern`、`effective_strategy`、`no_progress`。✅（diff_stat_hash 随 retry 记录；`verify_revert`/diverge 终止信号映射为 failure_pattern=no_progress*，写入 deviation.jsonl（deviation.py）；`effective_strategy` 由 readonly_review 写入 verify_state.json，M2.2 补全）
+- 有界 Reflexion：仅在 retry 达到阈值后分析根因，不改变默认成功语义。⚠️（readonly_review 独立模型黑盒分析，结果仅注入 repair prompt 不改变任务状态；但默认每次 retry 触发，非严格"达到阈值后"——reflexion_threshold 未实现）
 
 验收：
 
-- 注入验证失败后，系统能自动修复或明确阻断。
-- 重试次数、成本、失败原因可查询。
-- 连续无进展不会无限消耗 token。
-- 循环状态可供后续 KnowledgeStore 消费，但不会在 M2 自动修改历史知识。
+- 注入验证失败后，系统能自动修复或明确阻断。✅（修复重试 + blocked 阻断 + G8 拒绝短路；`test_verification_failure_marks_failed`/`test_revert_detection_terminates_early`）
+- 重试次数、成本、失败原因可查询。✅（`results[].retry_count/total_cost_usd/failure_reason`；metering.jsonl）
+- 连续无进展不会无限消耗 token。✅（revert_threshold=2 提前终止 + diverge 检测 + L2 子任务成本上限）
+- 循环状态可供后续 KnowledgeStore 消费，但不会在 M2 自动修改历史知识。✅（verify_state.json + deviation.jsonl 持久化，只读消费）
 
 ### M2.2 Goal/Loop 受控增强
 
 调研结论表明，当前系统已有硬迭代上限、资源预算和程序化验证，但缺少无进展检测、根因分析和策略升级。M2 只实现低风险、可观测的部分：
 
-- retry 间记录 diff/stat 哈希。
-- 连续两次无实质变化时提前终止，标记 `no_progress`。
-- retry 达到阈值后，可调用独立 evaluator 生成 `failure_analysis`。
-- Reflexion 结果只用于下一次 repair prompt，不直接改变任务状态。
-- 每次额外分析必须受 token、次数和任务预算约束。
-- `/goal` 继续默认关闭，直到语义 goal 通过独立实验验证。
+- retry 间记录 diff/stat 哈希。✅（`_diff_stat_hash` executor.py:987 + `_diff_stat_hashes` 累积）
+- 连续两次无实质变化时提前终止，标记 `no_progress`。✅（revert_threshold=2 检测同态终止，kill_reason=verify_revert → failure_pattern=no_progress，deviation.py 映射）
+- retry 达到阈值后，可调用独立 evaluator 生成 `failure_analysis`。✅（readonly_review 独立模型生成 root_cause；M2.2 补全后写入 verify_state.json 的 failure_analysis 字段）
+- Reflexion 结果只用于下一次 repair prompt，不直接改变任务状态。✅（`_build_repair_prompt` 注入 readonly_review，status 判定不受影响）
+- 每次额外分析必须受 token、次数和任务预算约束。✅（readonly_review timeout_ms/max_tokens 配置；metering role=reviewer 单独计费，受 L2/L3 成本控制约束）
+- `/goal` 继续默认关闭，直到语义 goal 通过独立实验验证。✅（config.goal.enabled 默认 false，--goal 显式开启）
 
 验收：
 
-- 无进展任务不会跑满全部 retry 上限。
-- `failure_analysis` 和 `effective_strategy` 写入 `verify_state.json`。
-- Reflexion 失败或超时会降级为普通 repair，不阻塞主流程。
-- 额外 Reflexion 成本可单独计量。
+- 无进展任务不会跑满全部 retry 上限。✅（revert/diverge 检测提前终止；`test_revert_detection_terminates_early`/`test_divergence_early_terminates`）
+- `failure_analysis` 和 `effective_strategy` 写入 `verify_state.json`。✅（`_persist_verify_state` 新增参数，readonly_review 结果持久化；`test_verify_state_persists_failure_analysis`）
+- Reflexion 失败或超时会降级为普通 repair，不阻塞主流程。✅（`_safe_optional_call` fail-open，executor.py:1626-1642）
+- 额外 Reflexion 成本可单独计量。✅（metering role=reviewer 事件，`test_review_enabled_parses_response` 断言）
 
 ### M2.3 成本与进程边界
 
 交付物：
 
-- 单次调用、子任务、任务级预算的统一语义。
-- 并发启动前 reservation。
-- metering 不可用时 fail-safe。
-- Claude 及其子进程整体回收。
+- 单次调用、子任务、任务级预算的统一语义。✅（L1 `claude --max-budget-usd` per difficulty subtask.py:288；L2 子任务累计 `_meter_cost_for_sub` executor.py；L3 任务级 `max_budget_usd`/动态默认预算 pipeline.py:474-529）
+- 并发启动前 reservation。✅（`_subtask_budget_reservation` pipeline.py:156，波前预检）
+- metering 不可用时 fail-safe。✅（pipeline.py:495 metering_unavailable → infrastructure_failure，不误判模型）
+- Claude 及其子进程整体回收。✅（`_terminate_process_group` SIGTERM→SIGKILL subtask.py:332-342）
 
 验收：
 
-- 并发任务不会在预算检查竞态下无限超支。
-- `cost_censored` 不重复计费。
-- timeout、budget abort 和 infrastructure failure 可区分。
+- 并发任务不会在预算检查竞态下无限超支。✅（reservation + 波前原子检查；`--budget-mode` strict/degrade/ignore）
+- `cost_censored` 不重复计费。✅（pipeline.py:112-113 控制审计事件不计入累计消费）
+- timeout、budget abort 和 infrastructure failure 可区分。✅（failure.py KILL_REASON_CLASS 映射 + classify_failure 优先级）
 
 ### M2.4 人工审查与恢复体验
 
 交付物：
 
-- 失败摘要、保留 worktree、review、resume 指引统一。
-- `inspect -> review -> resume -> delivery` 形成闭环。
-- CLI 和 MCP 返回同样的核心状态和修复建议。
+- 失败摘要、保留 worktree、review、resume 指引统一。✅（`cmd_inspect` 列保留 worktree + `cmd_review` 汇总 + resume 指引，cli.py:1091/1250）
+- `inspect -> review -> resume -> delivery` 形成闭环。✅（inspect 现场查看 → review 批准 → resume 重跑失败子任务 → pr/merge 交付）
+- CLI 和 MCP 返回同样的核心状态和修复建议。✅（MCP tools run/resume/inspect/review/governance + diagnose_failure 与 CLI 共享 `task_status`/meta 读取）
 
 验收：
 
-- 用户无需阅读完整日志即可判断下一步动作。
-- 失败任务的人工恢复时间可以测量。
+- 用户无需阅读完整日志即可判断下一步动作。✅（review CLI 输出批准/拒绝/建议 + inspect 状态摘要；cli.py:1503 给出明确下一步命令）
+- 失败任务的人工恢复时间可以测量。✅（meta 记录 created/finished 时间戳 + elapsed；`agent_go status` 汇总）
 
 ### M2.5 Spec/Architecture 偏差反馈
 
@@ -357,18 +359,20 @@ system_error
 
 交付物：
 
-- `spec_deviation`：需求、范围或验收标准与实现的偏差。
-- `architecture_deviation`：模块边界、依赖方向或架构约束偏差。
-- `acceptance_gap`：未满足的验收标准及其验证证据。
-- 偏差根因分类：Spec 不完整、Plan 误解、拆解错误、实现错误、验证不足、交付汇总错误。
-- 偏差修复状态、人工决策和是否需要回写 Spec 的记录。
-- 偏差数据与 `failure_pattern`、`effective_strategy` 关联。
+- `spec_deviation`：需求、范围或验收标准与实现的偏差。✅（deviation.py `DeviationEvent.deviation_type`，支持 spec_deviation 类型）
+- `architecture_deviation`：模块边界、依赖方向或架构约束偏差。✅（scope_violation 检测 → architecture_deviation，executor L1 范围合规）
+- `acceptance_gap`：未满足的验收标准及其验证证据。✅（semantic_fail/failed_cmds → acceptance_gap + evidence）
+- 偏差根因分类：Spec 不完整、Plan 误解、拆解错误、实现错误、验证不足、交付汇总错误。✅（`ROOT_CAUSE_CATEGORIES` 6 类 + `classify_deviation` 确定性启发式）
+- 偏差修复状态、人工决策和是否需要回写 Spec 的记录。✅（`human_decision`/`spec_rewrite_required`/`requires_approval` 字段）
+- 偏差数据与 `failure_pattern`、`effective_strategy` 关联。✅（kill_reason→failure_pattern=no_progress 映射；effective_strategy 从 readonly_review 传入）
 
 验收：
 
-- 每个未通过的真实任务都能区分执行失败、Spec 偏差、架构偏差和交付失败。
-- 偏差记录能进入下一次 repair prompt，但不会未经批准修改全局 Plan 或知识库。
-- 偏差的人工处理时间和重复发生率可统计。
+- 每个未通过的真实任务都能区分执行失败、Spec 偏差、架构偏差和交付失败。✅（classify_deviation：infra→非能力偏差 requires_approval=False；scope→architecture_deviation；semantic/失败命令→acceptance_gap；delivery_failure 单列）
+- 偏差记录能进入下一次 repair prompt，但不会未经批准修改全局 Plan 或知识库。✅（deviation 记录只持久化供查询，修复仍走验证循环，无自动回写）
+- 偏差的人工处理时间和重复发生率可统计。✅（`aggregate_deviations` 输出 resolved/require_approval/spec_rewrite_pending + by_root_cause/by_failure_class 分布，`agent_go deviation` CLI 查询）
+
+状态：`accepted`（M2.5 于 2026-08-12 补齐实现，见阶段二状态行；deviation.py 数据层 + `agent_go deviation` CLI + executor 失败集成）。
 
 ## 7. 阶段三：M3 真实任务验证
 

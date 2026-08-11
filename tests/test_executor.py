@@ -589,6 +589,55 @@ class TestRunSubtask:
         assert result["verify_ok"] is False
         assert result["status"] == "failed"
 
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor.collect_change_stats")
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
+    def test_failure_writes_deviation_jsonl(self, mock_wt_create, mock_subprocess,
+                                            mock_headless, mock_metrics, mock_load_agent,
+                                            temp_repo, task_dir, fast_logger):
+        """M2.5: 验证失败的子任务应写入 deviation.jsonl（能力偏差记录）。"""
+        mock_wt_create.return_value = (True, "")
+        mock_headless.return_value = make_subprocess_mock(returncode=0)
+        mock_metrics.return_value = {
+            "files_changed": 1, "insertions": 1, "deletions": 1,
+            "new_files": 0, "modified_files": 1, "actual_files": ["src/main.py"],
+        }
+
+        subtask = {
+            "id": "sub-1",
+            "title": "验证失败任务",
+            "description": "执行并验证",
+            "agent_prompt": "do work",
+            "verification": "pytest tests/",
+            "risks": [], "depends_on": [], "skills": [], "agent_type": "developer",
+        }
+
+        def subprocess_side_effect(args, **kwargs):
+            cmd_str = " ".join(args) if isinstance(args, list) else str(args)
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return make_subprocess_mock(stdout="M  src/main.py\n")
+            if "pytest" in cmd_str:
+                return make_subprocess_mock(returncode=1, stderr="FAIL test_foo")
+            return make_subprocess_mock()
+
+        mock_subprocess.side_effect = subprocess_side_effect
+
+        with patch("shutil.which", return_value=None), \
+             patch("agent_go.executor.safe_input", return_value="C"):
+            result = run_subtask("test-task", subtask, temp_repo, task_dir,
+                                 fast_logger, headless=False)
+
+        assert result["status"] == "failed"
+        deviation_file = task_dir / "deviation.jsonl"
+        assert deviation_file.exists(), "失败子任务应写入 deviation.jsonl"
+        events = json.loads(deviation_file.read_text(encoding="utf-8").strip().split("\n")[0])
+        assert events["task_id"] == "test-task"
+        assert events["subtask_id"] == "sub-1"
+        assert events["deviation_type"] == "acceptance_gap"
+        assert events["root_cause_category"] == "implementation_error"
+
     @patch("agent_go.executor.load_agent_type")
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
@@ -2878,6 +2927,19 @@ class TestReadonlyReview:
                 "diff", {"verification": {"readonly_review": {"enabled": True}}}, logger,
             )
         assert result is None
+
+    def test_verify_state_persists_failure_analysis(self, tmp_path, logger):
+        """M2.2: readonly_review 的根因与策略应持久化到 verify_state.json。"""
+        from agent_go.executor import _persist_verify_state
+        _persist_verify_state(
+            tmp_path, "sub-1", "pytest", 1, 3,
+            [{"attempt": 1}], [{"command": "pytest", "exit_code": 1}],
+            failure_analysis="实现缺陷：遗漏 None 保护",
+            effective_strategy="在 load() 开头加 None 守卫",
+        )
+        state = json.loads((tmp_path / "sub-1" / "verify_state.json").read_text(encoding="utf-8"))
+        assert state["failure_analysis"] == "实现缺陷：遗漏 None 保护"
+        assert state["effective_strategy"] == "在 load() 开头加 None 守卫"
 
     def test_review_skill_injected_into_prompt(self, tmp_path, logger):
         """配置 skill → skill body 注入为「领域审查维度指引」段落。"""

@@ -824,8 +824,15 @@ def _persist_verify_state(
     max_retries: int,
     history: list[dict],
     results: list[dict],
+    *,
+    failure_analysis: str = "",
+    effective_strategy: str = "",
 ) -> None:
-    """持久化验证状态到 verify_state.json。"""
+    """持久化验证状态到 verify_state.json。
+
+    M2.2：failure_analysis（根因分析）与 effective_strategy（生效策略）作为
+    有界 Reflexion 的产物写入，供下游 KnowledgeStore 消费。
+    """
     from datetime import datetime
     path = _verify_state_path(task_dir, sub_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -836,6 +843,8 @@ def _persist_verify_state(
         "max_retries": max_retries,
         "history": history,
         "verification_results": results,
+        "failure_analysis": failure_analysis,
+        "effective_strategy": effective_strategy,
         "last_updated": datetime.now().isoformat(),
     }
     try:
@@ -1636,6 +1645,15 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         "sub_id": sub_id, "attempt": retry_count,
                         "root_cause": (readonly_review.get("root_cause") or "")[:120],
                     })
+                    # M2.2 有界 Reflexion 持久化：根因分析 + 生效策略写入 verify_state.json，
+                    # 供 KnowledgeStore 消费；只影响下次 repair，不改变任务状态。
+                    if task_dir:
+                        _persist_verify_state(
+                            task_dir, sub_id, verification,
+                            retry_count, max_retries,
+                            verification_history, verification_results,
+                            failure_analysis=readonly_review.get("root_cause", ""),
+                            effective_strategy=readonly_review.get("suggestions", ""))
 
             fix_prompt = _build_repair_prompt(
                 task_md, failed_cmds, failed_outputs,
@@ -2293,6 +2311,25 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         "crash_but_verified": verify_results.get("crash_but_verified", False),
         "verification_results": verification_results,
     })
+
+    # M2.5 偏差反馈：失败子任务生成 DeviationEvent 持久化到 deviation.jsonl。
+    # 只记录能力相关失败（不记录 blocked/no_changes），供 CLI/MCP 查询与聚合。
+    if status == "failed" and verify_ok is False and task_dir:
+        try:
+            from .deviation import classify_deviation, write as write_deviation
+            _dev_evt = classify_deviation(
+                task_id=task_id, subtask_id=sub_id,
+                result={
+                    "failure_class": failure_class,
+                    "verification_results": verification_results,
+                    "failed_cmds": [vr.get("command", "") for vr in verification_results
+                                    if vr.get("exit_code", 0) not in (0, -1) and not vr.get("rejected")],
+                    "kill_reason": verify_results.get("kill_reason"),
+                },
+            )
+            write_deviation(task_dir / "deviation.jsonl", _dev_evt)
+        except Exception:
+            logger.debug("deviation 事件写入失败（非关键）", exc_info=True)
 
     console.emit("subtask_complete", {
         "sub_id": sub_id,
