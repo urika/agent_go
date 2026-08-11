@@ -1689,11 +1689,39 @@ def _recommend_roles(models: dict[str, Any]) -> dict[str, Optional[dict]]:
     return {"planner": planner, "worker": worker, "reviewer": reviewer}
 
 
-def _apply_roles(roles_proposal: dict[str, Optional[dict]]) -> list[str]:
-    """把角色路由推荐写入 config.json 的 router.roles（原子写：tmp + rename）。
+def build_recommendation(models: dict[str, Any]) -> dict[str, Any]:
+    """统一推荐入口：从模型生产力指标一次产出 worker_models + router.roles 全套推荐。
 
-    保留现有 config 其余部分；仅更新 router.roles 三个角色。provider 推断失败
-    （None）的角色跳过不写（避免写入无 provider 的坏配置），返回跳过列表说明。
+    整合 CR-G5（eval recommend）与 P1（router recommend）：两者此前各写一份
+    config（worker_models / router.roles），本函数把推荐计算收敛到一处，供两个
+    CLI 入口共享展示与写入，避免重复计算与两次 config 读写的互相覆盖风险。
+
+    Returns:
+        {"worker_models": {"easy","medium","hard": {slot 详情}|None},
+         "roles": {"planner","worker","reviewer": {role 详情}|None},
+         "note": str|None}
+    """
+    _wm = _recommend_worker_models(models)
+    _roles = _recommend_roles(models)
+    _note = _roles.get("note")
+    return {"worker_models": _wm, "roles": {k: _roles[k] for k in ("planner", "worker", "reviewer")},
+            "note": _note}
+
+
+def apply_recommendation(rec: dict[str, Any], apply_roles: bool = True,
+                         apply_worker_models: bool = True) -> list[str]:
+    """一次原子写：把推荐写入 config.json 的 router.roles 与/或 worker_models。
+
+    整合 _apply_roles + _apply_worker_models 的重复读写——两者此前各自读一次
+    config 再写回，若被先后调用存在互相覆盖风险；本函数单次读+单次写保证一致性。
+
+    Args:
+        rec: build_recommendation 的输出。
+        apply_roles: 是否写入 router.roles（planner/worker/reviewer + fallback）。
+        apply_worker_models: 是否写入 worker_models（easy/medium/hard）。
+
+    Returns:
+        skipped 角色列表（provider 无法推断或 None 而跳过）。
     """
     cfg: dict[str, Any] = {}
     if CONFIG_PATH.exists():
@@ -1701,41 +1729,46 @@ def _apply_roles(roles_proposal: dict[str, Optional[dict]]) -> list[str]:
             cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             cfg = {}
-    _router = cfg.setdefault("router", {})
-    _roles = _router.setdefault("roles", {})
-    _skipped = []
-    for _role in ("planner", "worker", "reviewer"):
-        _p = roles_proposal.get(_role)
-        if not _p or not _p.get("provider") or not _p.get("model"):
-            _skipped.append(_role)
-            continue
-        _role_cfg = {"provider": _p["provider"], "model": _p["model"]}
-        _fb = _p.get("fallback")
-        if _fb and _fb.get("provider") and _fb.get("model"):
-            _role_cfg["fallback"] = {"provider": _fb["provider"], "model": _fb["model"]}
-        _roles[_role] = _role_cfg
+    _skipped: list[str] = []
+
+    if apply_worker_models:
+        _wm = rec.get("worker_models") or {}
+        cfg["worker_models"] = {
+            "easy": (_wm.get("easy") or {}).get("model", ""),
+            "medium": (_wm.get("medium") or {}).get("model", ""),
+            "hard": (_wm.get("hard") or {}).get("model", ""),
+        }
+
+    if apply_roles:
+        _router = cfg.setdefault("router", {})
+        _roles = _router.setdefault("roles", {})
+        for _role in ("planner", "worker", "reviewer"):
+            _p = (rec.get("roles") or {}).get(_role)
+            if not _p or not _p.get("provider") or not _p.get("model"):
+                _skipped.append(_role)
+                continue
+            _role_cfg = {"provider": _p["provider"], "model": _p["model"]}
+            _fb = _p.get("fallback")
+            if _fb and _fb.get("provider") and _fb.get("model"):
+                _role_cfg["fallback"] = {"provider": _fb["provider"], "model": _fb["model"]}
+            _roles[_role] = _role_cfg
+
     _tmp = CONFIG_PATH.with_suffix(".json.tmp")
     _tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     _tmp.replace(CONFIG_PATH)
     return _skipped
 
 
+def _apply_roles(roles_proposal: dict[str, Optional[dict]]) -> list[str]:
+    """[deprecated 薄委托] 写 router.roles。请改用 apply_recommendation（整合原子写）。"""
+    return apply_recommendation({"worker_models": {}, "roles": roles_proposal},
+                                apply_roles=True, apply_worker_models=False)
+
+
 def _apply_worker_models(proposal: dict[str, Optional[dict]]) -> None:
-    """把推荐写入 config.json 的 worker_models（原子写：tmp + rename）。"""
-    cfg: dict[str, Any] = {}
-    if CONFIG_PATH.exists():
-        try:
-            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            cfg = {}
-    cfg["worker_models"] = {
-        "easy": (proposal.get("easy") or {}).get("model", ""),
-        "medium": (proposal.get("medium") or {}).get("model", ""),
-        "hard": (proposal.get("hard") or {}).get("model", ""),
-    }
-    _tmp = CONFIG_PATH.with_suffix(".json.tmp")
-    _tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-    _tmp.replace(CONFIG_PATH)
+    """[deprecated 薄委托] 写 worker_models。请改用 apply_recommendation（整合原子写）。"""
+    apply_recommendation({"worker_models": proposal, "roles": {}},
+                         apply_roles=False, apply_worker_models=True)
 
 
 def cmd_recommend(args=None) -> None:
@@ -1751,7 +1784,8 @@ def cmd_recommend(args=None) -> None:
         console.warning(f"{data['error']} → 先跑 agent_go eval bench --output {results_path}")
         return
 
-    proposal = _recommend_worker_models(data["models"])
+    rec = build_recommendation(data["models"])
+    proposal = rec["worker_models"]
 
     # dry-run 展示
     console.print(f"\n🎯 worker_models 推荐（基于 {data['total_runs']} 次执行）")
@@ -1782,7 +1816,7 @@ def cmd_recommend(args=None) -> None:
     if _tier_issues and not getattr(args, "force", False):
         console.error("tier 错配，拒绝写入。复查 bench 数据或用 --force 覆盖。")
         sys.exit(1)
-    _apply_worker_models(proposal)
+    apply_recommendation(rec, apply_roles=False, apply_worker_models=True)
     console.print(f"✅ 已写入 {CONFIG_PATH} 的 worker_models：{_proposed_wm}")
 
 

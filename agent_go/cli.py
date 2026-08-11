@@ -2752,14 +2752,15 @@ def cmd_router(args=None) -> None:
 
 
 def _cmd_router_recommend(args) -> None:
-    """router recommend：基于 bench 结果推荐角色路由（planner/worker/reviewer + fallback）。
+    """router recommend：基于 bench 结果推荐完整路由（roles + worker_models + mapping）。
 
     P1（docs/design/model-evaluation-and-tiering.md §5）：闭环到配置——读
-    analyze_model_productivity 结果 → _recommend_roles（铁律：planner 不降级、
-    reviewer 不同源）→ dry-run 展示 / --apply 写 config.json 的 router.roles。
+    analyze_model_productivity 结果 → build_recommendation（roles 铁律：planner
+    不降级、reviewer 不同源；worker_models 难度槽）→ dry-run 展示 / --apply
+    一次原子写 config.json 的 router.roles + worker_models。
     provider 推断失败的角色跳过写入（advisory，不静默写坏配置）。
     """
-    from .bench import analyze_model_productivity, _recommend_roles, _apply_roles
+    from .bench import analyze_model_productivity, build_recommendation, apply_recommendation
     from .config import CONFIG_PATH
 
     results_path = Path(getattr(args, "results", "eval_suite/results.jsonl") or "eval_suite/results.jsonl")
@@ -2768,11 +2769,11 @@ def _cmd_router_recommend(args) -> None:
         console.warning(f"{data['error']} → 先跑 agent_go eval bench")
         return
 
-    proposal = _recommend_roles(data["models"])
+    rec = build_recommendation(data["models"])
     console.print(f"\n🔀 角色路由推荐（基于 {data['total_runs']} 次执行）")
     console.print("─" * 88)
     for _role in ("planner", "worker", "reviewer"):
-        _p = proposal.get(_role)
+        _p = (rec["roles"] or {}).get(_role)
         if not _p:
             console.print(f"  {_role:<9} → （无合格候选）")
             continue
@@ -2781,30 +2782,44 @@ def _cmd_router_recommend(args) -> None:
         _fb_str = (f" → fallback: {_fb['provider']}:{_fb['model']}" if _fb else "（不降级）")
         _dpp = _p.get("dollar_per_pass")
         console.print(f"  {_role:<9} → {_p.get('provider')}:{_p['model']}{_fb_str}{_low}")
-        console.print(f"             (通过率 {_p.get('avg_pass_rate', 0):.0%}, $/pass ${_dpp or 0:.4f}; {_p.get('reason')})")
+        console.print(f"             (通过率 {_p.get('avg_pass_rate', 0):.0%}, "
+                      f"$/pass ${_dpp or 0:.4f}; {_p.get('reason')})")
+    _wm = rec["worker_models"]
+    console.print("  " + "─" * 84)
+    for _slot in ("hard", "medium", "easy"):
+        _p = _wm.get(_slot)
+        if not _p:
+            console.print(f"  {_slot:<7} → （无合格候选，留空）")
+            continue
+        _dpp = _p["dollar_per_pass"]
+        console.print(f"  {_slot:<7} → {_p['model']}  (通过率 {_p['avg_pass_rate']:.0%}, "
+                      f"$/pass ${_dpp or 0:.4f}, {_p['criterion']})")
     console.print("─" * 88)
-    _note = proposal.get("note")
+    _note = rec.get("note")
     if _note:
         console.warning(_note)
 
     if not getattr(args, "apply", False):
-        console.print("（dry-run，未写入。用 --apply 写入 config.json 的 router.roles）")
+        console.print("（dry-run，未写入。用 --apply 一次写入 config.json 的 router.roles + worker_models）")
         return
 
     # CR-P1-1：小样本（n<5 低置信）不自动路由——--apply 默认跳过，--force 覆盖。
     _force = getattr(args, "force", False)
-    _apply_proposal = dict(proposal)
+    _roles = dict(rec.get("roles") or {})
     if not _force:
         for _role in ("planner", "worker", "reviewer"):
-            _p = proposal.get(_role)
+            _p = _roles.get(_role)
             if _p and _p.get("low_confidence"):
                 console.warning(f"{_role}: 低置信（n<5），--apply 跳过（--force 覆盖）")
-                _apply_proposal[_role] = None
-    _skipped = _apply_roles(_apply_proposal)
+                _roles[_role] = None
+    _rec2 = dict(rec)
+    _rec2["roles"] = _roles
+    _skipped = apply_recommendation(_rec2, apply_roles=True, apply_worker_models=True)
     if _skipped:
         for _role in _skipped:
             console.warning(f"{_role}: provider 无法推断或已跳过，未写入（用 set-role 手动配置）")
-    console.success(f"✅ 已写入 {CONFIG_PATH} 的 router.roles；router.enabled 请用 'agent_go router enable' 启用")
+    console.success(f"已写入 {CONFIG_PATH} 的 router.roles + worker_models；"
+                    f"router.enabled 请用 'agent_go router enable' 启用")
 
 
 def _atomic_write_config(config: dict, config_path) -> None:

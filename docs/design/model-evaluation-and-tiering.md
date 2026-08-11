@@ -415,7 +415,7 @@ qwen3.6-27b-local 65%        $0.08    185s    15%     90/50/20             ⚠ c
 | **P0** | 扩充 `MODEL_PRICES` 表（规划 20，实际 48 个模型）+ `MODEL_TIER` 元数据 | 修复 ISSUE-26 根因，$/pass 可信 |
 | **P0** | 标准任务集种子（规划 8，实际 22 任务 + ground truth）+ `eval bench` 编排器 + `analyze_model_productivity` + `eval models` | 评估机制可用 |
 | **P1** | 交叉评判矩阵（N 模型互评，**P1 简化版**：四维评分退化为单一 semantic_score，P2 升级结构化 rubric）+ 人工抽检校准 | 第 2 层，假阳性检测 |
-| **P1** | `router recommend`（基于评估结果自动推荐路由，**已实施** 2026-08-11：`agent_go router recommend [--results FILE] [--apply] [--force]`）+ `config.example.json` 三套预设 | 闭环到配置 |
+| **P1** | `router recommend`（基于评估结果自动推荐路由，**已实施** 2026-08-11：`agent_go router recommend [--results FILE] [--apply] [--force]`，一次产出并原子写入 `router.roles` + `worker_models`；`eval recommend` 委托同一 `build_recommendation` 逻辑）+ `config.example.json` 三套预设 | 闭环到配置 |
 | **P2** | 任务集扩充（社区贡献）+ 难度自动校准 | 长期演进 |
 
 ### 改动文件清单（P0）

@@ -1517,8 +1517,18 @@ def test_prune_fixture_worktrees_active_kept(tmp_path):
 
 def _role_model(name, pass_rate, dpp, best_value=False, rec="recommended", low=False):
     """构造 _recommend_roles 消费的 models 项（与 analyze_model_productivity 输出对齐）。"""
+    _roles = []
+    if pass_rate >= 0.80:
+        _roles = ["worker_easy", "worker_medium", "worker_hard"]
+    elif pass_rate >= 0.75:
+        _roles = ["worker_easy", "worker_medium", "worker_hard"]
+    elif pass_rate >= 0.70:
+        _roles = ["worker_easy", "worker_medium"]
+    elif pass_rate >= 0.60:
+        _roles = ["worker_easy"]
     return {name: {"avg_pass_rate": pass_rate, "dollar_per_pass": dpp,
                    "sample_size": 10, "recommendation": rec,
+                   "recommended_roles": _roles,
                    "best_value": best_value, "low_confidence": low}}
 
 
@@ -1621,3 +1631,74 @@ def test_apply_roles_atomic_preserves_unknown_keys(tmp_path):
     assert saved["api_key"] == "k"
     assert saved["router"]["enabled"] is False
     assert saved["router"]["roles"]["planner"] == {"provider": "anthropic", "model": "claude-opus-4-8"}
+
+
+def test_build_recommendation_combines_worker_models_and_roles():
+    """整合：build_recommendation 一次产出 worker_models + roles 两套推荐。"""
+    from agent_go.bench import build_recommendation
+    models = {
+        **_role_model("deepseek-chat", 0.75, 0.008, best_value=True, rec="conditional"),
+        **_role_model("claude-opus-4-8", 0.88, 0.25),
+        **_role_model("gemini-3.1-pro", 0.90, 0.30),
+        **_role_model("kimi-k2", 0.82, 0.05),
+    }
+    rec = build_recommendation(models)
+    assert set(rec.keys()) == {"worker_models", "roles", "note"}
+    # worker_models 槽来自 _recommend_worker_models
+    assert rec["worker_models"]["hard"]["model"] == "gemini-3.1-pro"   # 通过率最高
+    assert "medium" in rec["worker_models"] and "easy" in rec["worker_models"]
+    # roles 来自 _recommend_roles（铁律）
+    assert rec["roles"]["planner"]["model"] == "gemini-3.1-pro"
+    assert "fallback" not in rec["roles"]["planner"]
+    assert rec["roles"]["reviewer"]["provider"] != rec["roles"]["worker"]["provider"]
+
+
+def test_build_recommendation_note_propagates():
+    """整合：无合格模型时 note 透传。"""
+    from agent_go.bench import build_recommendation
+    models = _role_model("weak", 0.50, 0.001, rec="discouraged")
+    rec = build_recommendation(models)
+    assert rec["note"]  # 来自 _recommend_roles
+    assert rec["worker_models"]["hard"] is None
+
+
+def test_apply_recommendation_writes_both_blocks_once(tmp_path):
+    """整合：一次原子写 worker_models + router.roles，保留其余 config。"""
+    from agent_go.bench import apply_recommendation
+    import json as _j
+    cfg = tmp_path / "config.json"
+    cfg.write_text(_j.dumps({"api_key": "k", "router": {"enabled": False}}, ensure_ascii=False))
+    rec = {
+        "worker_models": {"easy": {"model": "claude-haiku-4-5"}, "medium": {"model": "deepseek-chat"},
+                          "hard": {"model": "claude-opus-4-8"}},
+        "roles": {"planner": {"provider": "google", "model": "gemini-3.1-pro"},
+                  "worker": {"provider": "deepseek", "model": "deepseek-chat"},
+                  "reviewer": {"provider": "anthropic", "model": "claude-opus-4-8"}},
+    }
+    from unittest.mock import patch
+    with patch("agent_go.bench.CONFIG_PATH", cfg):
+        skipped = apply_recommendation(rec, apply_roles=True, apply_worker_models=True)
+    assert skipped == []
+    saved = _j.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["api_key"] == "k"
+    assert saved["router"]["enabled"] is False
+    assert saved["worker_models"]["easy"] == "claude-haiku-4-5"
+    assert saved["router"]["roles"]["planner"] == {"provider": "google", "model": "gemini-3.1-pro"}
+
+
+def test_apply_recommendation_roles_only_flag(tmp_path):
+    """整合：apply_worker_models=False 时不动 worker_models。"""
+    from agent_go.bench import apply_recommendation
+    import json as _j
+    cfg = tmp_path / "config.json"
+    cfg.write_text(_j.dumps({"worker_models": {"easy": "keep-me"}}, ensure_ascii=False))
+    rec = {"worker_models": {"easy": {"model": "overwrite"}, "medium": None, "hard": None},
+           "roles": {"planner": {"provider": "anthropic", "model": "claude-opus-4-8"},
+                     "worker": None, "reviewer": None}}
+    from unittest.mock import patch
+    with patch("agent_go.bench.CONFIG_PATH", cfg):
+        skipped = apply_recommendation(rec, apply_roles=True, apply_worker_models=False)
+    saved = _j.loads(cfg.read_text(encoding="utf-8"))
+    assert saved["worker_models"]["easy"] == "keep-me"      # 未动
+    assert saved["router"]["roles"]["planner"] == {"provider": "anthropic", "model": "claude-opus-4-8"}
+    assert skipped == ["worker", "reviewer"]
