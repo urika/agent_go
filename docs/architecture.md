@@ -163,6 +163,39 @@ LLM 生成的验证命令必经 4 阶段校验：shlex 解析 → 6 类 shell �
         └── result.json      ← 单子任务结果
 ```
 
+## 交付数据流与 meta 交付字段
+
+M1 交付闭环（详见 [design/delivery-design.md](design/delivery-design.md)）在任务执行后把全部成功子任务汇总成单个 delivery branch，再经 PR 或显式 merge 交付。`meta.json` 中的交付相关字段：
+
+| 字段 | 写入点 | 含义 |
+|------|--------|------|
+| `base_commit` / `base_branch` / `target_branch` | `cli.py:769-771`（执行前） | 交付基线：PR/merge 的 base |
+| `delivery_branch` | `pipeline.py:913`（pipeline 收尾） | `agent_go/{task_id}/delivery`，全部成功子任务 commit 经 `git merge --no-ff` 汇总 |
+| `delivery_attempted` / `delivery_failed` / `delivery_error` | `cli.py:1928-1930`（pr/merge 后） | 交付尝试标记与失败原因 |
+| `pr_url` / `pr_head` / `pr_base` | `cli.py:1925-1927`（PR 创建后） | 真实 GitHub PR 引用 |
+| `explicit_merge_commit` | `cli.py`（merge 路径 / 已合并 PR 同步） | 交付 merge commit；PR 已合并时由 `_fetch_merged_pr_commit` 同步为 GitHub 实际 merge commit |
+| `accepted_delivery` | `delivery.py apply_delivery_result` | Accepted Delivery 判定快照 |
+
+**数据流**（M1 交付闭环，2026-08-11 已在 2 个异构真实仓库端到端验证）：
+
+```text
+pipeline 收尾
+  └─ create_delivery_branch()   → delivery_branch (meta.delivery_branch)
+       └─ 临时 worktree 将成功子任务 commit 按序 --no-ff merge
+  ├─ agent_go pr --push
+  │    ├─ check_mergeability()  → mergeable/conflicts/ahead 预检
+  │    ├─ git push delivery_branch
+  │    ├─ gh pr create --head {delivery} --base {base}
+  │    └─ meta 写回 pr_url/pr_head/pr_base → ACCEPTED_DELIVERY
+  └─ agent_go merge
+       ├─ meta 无 pr_url → 本地 merge 到 target_branch
+       └─ meta 有 pr_url → _fetch_merged_pr_commit 查 GitHub 状态
+            ├─ 已 MERGED → 同步 explicit_merge_commit → ACCEPTED_DELIVERY
+            └─ OPEN     → 阻断（PR 与 merge 互斥交付路径）
+```
+
+**pr/merge 互斥**：同一任务 `agent_go pr` 与 `agent_go merge` 是互斥交付路径（`cli.py:1804`）。PR 已创建时 merge 被阻断或同步 GitHub merge commit，杜绝 7.3-问题 1 的「两个不同 merge commit」隐患。
+
 ## 测试
 
 ```bash

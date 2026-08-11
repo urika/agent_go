@@ -1,8 +1,8 @@
 # M1 交付闭环任务清单
 
 > 阶段：M1 交付闭环
-> 状态：进行中（M1-1/M1-2/M1-3 已实现 + E2E 验证，2026-08-09）
-> 更新日期：2026-08-09
+> 状态：进行中（M1-1/M1-2/M1-3 已实现 + E2E 验证 + 异构仓库规模化验证，2026-08-11）
+> 更新日期：2026-08-11
 > 关联：[roadmap.md](roadmap.md) §5 · [prd.md](prd.md) §M1 · [delivery-design.md](design/delivery-design.md)
 
 ## 1. M1 目标
@@ -62,7 +62,7 @@ M1 完成后，`accepted_delivery_rate` 才能从当前 0 提升到有效值。
 
 **验收**：
 - [x] 生成的 PR head/base 正确。（E2E 通过：pr_head=delivery, pr_base=main/develop）
-- [ ] PR 包含全部已接受子任务变更（需真实远程 PR 验证）。
+- [x] PR 包含全部已接受子任务变更。（2026-08-11 规模化验证：vibe-astock PR #1 +45/-0、llama-defender PR #8 +15/-1 均为真实远程 PR，HEAD 差异与 delivery branch 一致）
 - [x] 交付失败时可以从 delivery branch 重试，不重跑 Claude。
 
 ### M1-3 交付状态与恢复（M1.3）
@@ -126,18 +126,19 @@ M1 完成后，`accepted_delivery_rate` 才能从当前 0 提升到有效值。
 ### M1-9 文档同步
 
 - [x] 更新 `delivery-design.md`：记录实际实现（delivery branch 命名/聚合/merge 命令）。
-- [ ] 更新 `architecture.md`：交付数据流 + `meta` 字段。（待补）
+- [x] 更新 `delivery-design.md` §7.5：M1 规模化验证（2 个异构真实仓库端到端交付闭环）。（2026-08-11）
+- [x] 更新 `architecture.md`：交付数据流 + `meta` 交付字段。（2026-08-11）
 - [x] 更新 `spec.md`：`cmd_pr`/`cmd_merge`/delivery 接口签名。
 - [x] 更新 `module-catalog.md`：delivery.py 职责。
-- [ ] 更新 `m0-accepted-delivery-contract.md`：M1 后判定条件实际生效说明。（待补）
-- [ ] 更新 runbook：交付失败排查流程。（待补）
+- [x] 更新 `m0-accepted-delivery-contract.md`：M1 后判定条件实际生效说明。（2026-08-11）
+- [x] 更新 runbook：交付失败排查流程。（2026-08-11）
 
 ## 6. M1 完成门禁
 
 - [x] 单子任务真实 Git 仓库端到端通过（delivery branch + PR）。（E2E 通过）
 - [x] 多子任务依赖链真实 Git 仓库端到端通过（commit 汇总 + PR 完整）。（E2E 通过 2026-08-09）
 - [x] 非 `main` 默认分支可正确执行。（E2E 通过，develop 分支）
-- [ ] PR head/base 正确，包含全部已接受子任务变更。（需真实远程 PR 验证）
+- [x] PR head/base 正确，包含全部已接受子任务变更。（2026-08-11 规模化验证：2 个异构真实仓库 PR #1/#8，HEAD 差异与 delivery branch 一致）
 - [x] 交付失败可从 delivery branch 重试，不重跑 Claude。
 - [x] SIGTERM/SIGKILL/PR 失败/merge 冲突可区分；recover 不破坏运行中任务。（E2E 通过）
 - [x] 全量测试通过。（1948 tests，CI green）

@@ -353,9 +353,50 @@ git config gc.auto 1
     ├─ 想清理旧任务?
     │   └─ agent_go clean --older-than 7
     │
-    └─ 想查看执行回放?
-        └─ agent_go replay <id>
+     └─ 想查看执行回放?
+         └─ agent_go replay <id>
 ```
+
+---
+
+## 6.5 交付失败排查（M1 delivery / pr / merge）
+
+交付环节（delivery branch 生成 → PR 创建 → merge）失败的排查路径：
+
+```
+交付失败
+    │
+    ├─ meta.delivery_attempted 为 False，且 DELIVERY_READY?
+    │   └─ 交付尚未执行 → 查看 pipeline 收尾日志的 delivery_error
+    │       ├─ "no base_commit"       → 执行前未记录 base_commit（cli.py:769）→ 检查目标仓库有效性
+    │       └─ 其他                   → 读 meta.delivery_error / execution.log
+    │
+    ├─ agent_go pr --push 失败?
+    │   ├─ "gh CLI 未安装 / 未登录"    → gh auth status；需 repo scope
+    │   ├─ push 失败                  → 检查 origin 指向真实仓库、本地 main 是否同步
+    │   ├─ check_mergeability 冲突     → delivery branch 与 base 有冲突，需人工解决后重试
+    │   └─ PR 创建失败                → meta.delivery_failed=true，可修正后重新 agent_go pr --push
+    │
+    └─ agent_go merge 失败?
+        ├─ "已走 PR 交付路径（互斥）"   → PR 与 merge 互斥：在 GitHub 合并 PR 或移除 meta.pr_url
+        ├─ "PR 已合并，同步 merge commit" → 正常同步，meta.explicit_merge_commit 已写回（非失败）
+        └─ 本地 merge 冲突            → worktree 保留现场，人工解决后重试
+```
+
+**交付状态速查**：
+
+| 现象 | 含义 | 处理 |
+|------|------|------|
+| `status=DELIVERY_READY` | 全部子任务完成，交付待执行 | `agent_go pr --push` 或 `agent_go merge` |
+| `status=ACCEPTED_DELIVERY` | 交付门通过（pr_url 或 explicit_merge_commit 生效） | 无需操作 |
+| `meta.delivery_failed=true` | 交付尝试失败 | 读 `delivery_error`，修正后重试 |
+| `meta.delivery_attempted=false` | 尚未尝试交付 | 按 pipeline 日志排查 base_commit / delivery_branch |
+
+**交付链路三要素**（缺一即报错，不静默错误交付）：
+
+1. 远程仓库：`origin` 指向真实 GitHub 仓库（可 push）。
+2. GitHub 认证：`gh auth status` 已登录（含 `repo` scope）。
+3. 同步的 base：本地 main 与 `origin/main` 对齐（PR base=main 反映最新代码）。
 
 ---
 
