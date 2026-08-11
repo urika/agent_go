@@ -1,0 +1,29 @@
+id: add-stats-command
+difficulty: easy
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 src/cli.py 中实现 cmd_stats 命令（统计任务）：
+
+  - 使用模块级 DATA_FILE 构造 TaskStorage，加载所有任务，统计三种状态数量：todo / done / total
+  - 打印格式（无任务时仍打印 0）：
+    ```
+    todo: 2
+    done: 3
+    total: 5
+    ```
+  - 返回 0
+
+  Task 的 status 字段只有 "todo"/"done" 两种取值；存储中若混入未知状态（历史数据），
+  计入 total 但不算入 todo/done。
+
+  verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"import sys; sys.path.insert(0, 'src'); from pathlib import Path; from src.storage import TaskStorage; from src.models import Task; import src.cli as cli; import io; p=Path('/tmp/test_stats.json'); p.unlink(missing_ok=True); cli.DATA_FILE=p; s=TaskStorage(p); s.save(Task('a', task_id='t1')); s.save(Task('b', task_id='t2', status='done')); buf=io.StringIO(); _old=sys.stdout; sys.stdout=buf; rc=cli.cmd_stats(); sys.stdout=_old; out=buf.getvalue(); assert rc==0; assert 'todo: 1' in out; assert 'done: 1' in out; assert 'total: 2' in out; p.unlink(missing_ok=True); print('OK')\""
+timeout: 444
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.15
+  per_subtask_budget_usd: 0.1
+  on_exceed: stop

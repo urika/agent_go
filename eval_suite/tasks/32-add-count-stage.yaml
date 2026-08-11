@@ -1,0 +1,29 @@
+id: add-count-stage
+difficulty: medium
+repo: eval_suite/fixtures/data-pipeline
+task: |
+  在 src/stages/transform.py 中新增 CountStage（统计 records 数量到 context）：
+
+  ```python
+  class CountStage(Stage):
+      def __init__(self, output_key: str = "count", name: str = "count") -> None
+  ```
+
+  - inputs = ["records"]；outputs = [output_key]
+  - process: 把 len(records) 写入 context 的 output_key
+  - records 缺失时视为 0
+
+  并在 src/core/pipeline.py 的 Pipeline 中支持动态注册（可选加分项）：
+  - Pipeline 已有 stages 列表机制；确保 CountStage 可直接作为 stage 使用（继承 Stage 即可，无需改 pipeline）
+
+  verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"import sys; sys.path.insert(0, '.'); from src.stages.transform import CountStage; from src.core.context import Context; s=CountStage(); assert s.name=='count'; ctx=Context(); ctx.set('records',[{'a':1},{'a':2},{'a':3}]); s.process(ctx); assert ctx.get('count')==3; c2=Context(); c2.set('records',[]); CountStage('n').process(c2); assert c2.get('n')==0; c3=Context(); CountStage().process(c3); assert c3.get('count')==0; print('OK')\""
+timeout: 700
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.25
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

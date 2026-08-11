@@ -1,0 +1,28 @@
+id: add-unique-stage
+difficulty: medium
+repo: eval_suite/fixtures/data-pipeline
+task: |
+  在 src/stages/transform.py 中新增 UniqueStage（按字段去重）：
+
+  ```python
+  class UniqueStage(Stage):
+      def __init__(self, key: str, name: str = "unique") -> None
+  ```
+
+  - inputs/outputs 均为 ["records"]
+  - process: 按指定 key 去重（保留首次出现），records 中缺该 key 的元素视为 key=None 去重
+  - 保持原始顺序
+
+  验证场景：重复 key 的记录只保留第一条，非重复 key 全部保留，缺 key 的记录按 None 去重。
+
+  verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"import sys; sys.path.insert(0, '.'); from src.stages.transform import UniqueStage; from src.core.context import Context; s=UniqueStage('id'); ctx=Context(); ctx.set('records',[{'id':1,'v':'a'},{'id':2,'v':'b'},{'id':1,'v':'dup'},{'id':2,'v':'dup2'}]); s.process(ctx); out=ctx.get('records'); assert [r['id'] for r in out]==[1,2], out; assert out[0]['v']=='a'; c2=Context(); c2.set('records',[{'x':1},{'x':2},{'y':3}]); UniqueStage('id').process(c2); assert len(c2.get('records'))==1, '缺 key 视为 None 去重后应只剩 1 条'; print('OK')\""
+timeout: 700
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.25
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

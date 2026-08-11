@@ -1,0 +1,32 @@
+id: math-helpers
+difficulty: easy
+repo: eval_suite/fixtures/fp-sandbox
+task: |
+  在文件 solution.py 中实现以下函数：
+
+  1. clamp(value: float, low: float, high: float) -> float
+     - 将 value 限制在 [low, high] 区间
+     - 例: clamp(5, 0, 10) == 5; clamp(-1, 0, 10) == 0; clamp(99, 0, 10) == 10
+
+  2. percentile(values: list[float], p: float) -> float
+     - 计算第 p 百分位数（0 <= p <= 100），采用线性插值
+     - 例: percentile([1,2,3,4], 50) == 2.5（中位数）
+     - 空列表返回 None；p 越界返回 None
+     - 排序在函数内完成，不修改输入
+
+  3. gcd(a: int, b: int) -> int
+     - 欧几里得算法求最大公约数，支持负数（取绝对值）与零
+     - 例: gcd(48, 18) == 6; gcd(0, 5) == 5; gcd(-4, 6) == 2
+
+  这是一个单文件小任务：直接在 solution.py 中实现三个函数即可，
+  一步完成。verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"from solution import clamp, percentile, gcd; import inspect; assert callable(clamp); assert callable(percentile); assert callable(gcd); assert clamp(5,0,10)==5; assert clamp(-1,0,10)==0; assert clamp(99,0,10)==10; assert percentile([1,2,3,4],50)==2.5; assert percentile([1,2,3,4],0)==1; assert percentile([1,2,3,4],100)==4; assert percentile([],50) is None; assert percentile([1],-1) is None; assert gcd(48,18)==6; assert gcd(0,5)==5; assert gcd(-4,6)==2; print('OK')\""
+timeout: 400
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.15
+  per_subtask_budget_usd: 0.1
+  on_exceed: stop

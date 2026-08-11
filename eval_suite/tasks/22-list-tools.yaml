@@ -1,0 +1,32 @@
+id: list-tools
+difficulty: easy
+repo: eval_suite/fixtures/fp-sandbox
+task: |
+  在文件 solution.py 中实现以下函数：
+
+  1. flatten(items: list) -> list
+     - 展开一层嵌套列表（列表元素若是 list，则并入外层；非 list 元素保留）
+     - 例: flatten([1, [2, 3], 4]) == [1, 2, 3, 4]
+     - 不递归深展（flatten([[1, [2]]]) == [1, [2]]）
+
+  2. unique(items: list) -> list
+     - 去重并保持首次出现顺序
+     - 例: unique([3, 1, 3, 2, 1]) == [3, 1, 2]
+
+  3. chunk(items: list, size: int) -> list[list]
+     - 将列表按 size 分块，最后一块可以不足 size
+     - size <= 0 时返回空列表
+     - 例: chunk([1,2,3,4,5], 2) == [[1,2],[3,4],[5]]
+
+  这是一个单文件小任务：直接在 solution.py 中实现三个函数即可，
+  一步完成。verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"from solution import flatten, unique, chunk; import inspect; assert callable(flatten); assert callable(unique); assert callable(chunk); assert flatten([1,[2,3],4])==[1,2,3,4]; assert flatten([[1,[2]]])==[1,[2]]; assert flatten([])==[]; assert unique([3,1,3,2,1])==[3,1,2]; assert unique([])==[]; assert chunk([1,2,3,4,5],2)==[[1,2],[3,4],[5]]; assert chunk([1],10)==[[1]]; assert chunk([1,2],0)==[]; print('OK')\""
+timeout: 400
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.15
+  per_subtask_budget_usd: 0.1
+  on_exceed: stop

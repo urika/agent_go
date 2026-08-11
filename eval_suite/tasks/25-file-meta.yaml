@@ -1,0 +1,33 @@
+id: file-meta
+difficulty: easy
+repo: eval_suite/fixtures/fp-sandbox
+task: |
+  在文件 solution.py 中实现以下函数：
+
+  1. file_size_str(num_bytes: int) -> str
+     - 将字节数格式化为人类可读字符串（B / KB / MB / GB，1 KB = 1024 B）
+     - 保留 1 位小数（数值 < 1024 时返回整数 + "B"）
+     - 例: file_size_str(500) == "500B"; file_size_str(2048) == "2.0KB"
+     - 负数返回 "0B"
+
+  2. extension(filename: str) -> str
+     - 返回文件扩展名（不含点，小写）
+     - 无扩展名返回空字符串；点开头的隐藏文件视为无扩展名
+     - 例: extension("a.TXT") == "txt"; extension("a.b.c") == "c"; extension(".gitignore") == ""
+
+  3. safe_readlines(path: str) -> list[str]
+     - 读取文本文件所有行（含换行符，同 readlines），文件不存在或读取失败返回 []
+     - 不抛异常
+
+  这是一个单文件小任务：直接在 solution.py 中实现三个函数即可，
+  一步完成。verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"from solution import file_size_str, extension, safe_readlines; import inspect, tempfile, os; assert callable(file_size_str); assert callable(extension); assert callable(safe_readlines); assert file_size_str(500)=='500B'; assert file_size_str(2048)=='2.0KB'; assert file_size_str(5*1024*1024)=='5.0MB'; assert file_size_str(-1)=='0B'; assert extension('a.TXT')=='txt'; assert extension('a.b.c')=='c'; assert extension('.gitignore')==''; assert extension('noext')==''; f=tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False); f.write('line1\\nline2\\n'); f.close(); assert safe_readlines(f.name)==['line1\\n','line2\\n']; os.unlink(f.name); assert safe_readlines('/nonexistent/path')==[]; print('OK')\""
+timeout: 400
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.15
+  per_subtask_budget_usd: 0.1
+  on_exceed: stop

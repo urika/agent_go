@@ -1,0 +1,23 @@
+id: add-edit-command
+difficulty: medium
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 src/cli.py 中实现 cmd_edit 命令（修改任务描述）：
+
+  - 接收 task_id 与新的 description（如 `edit t1 'new text'`）
+  - 使用模块级 DATA_FILE 构造 TaskStorage，找到对应任务，更新 description，写回存储
+  - TaskStorage 需提供 find_by_id + update（若 batch-done 已实现可直接复用；否则新增）
+  - 任务不存在时打印 `Task #<id> not found` 并返回 1
+  - 更新 main() 注册 "edit" 子命令，参数格式 `edit <task_id> <description>`
+
+  verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"import sys; sys.path.insert(0, 'src'); from pathlib import Path; from src.storage import TaskStorage; from src.models import Task; import src.cli as cli; p=Path('/tmp/test_edit.json'); p.unlink(missing_ok=True); cli.DATA_FILE=p; s=TaskStorage(p); s.save(Task('old text', task_id='t1')); assert cli.cmd_edit('t1', 'new text')==0; loaded=s.load_all(); assert loaded[0].description=='new text'; assert cli.cmd_edit('nope', 'x')==1; p.unlink(missing_ok=True); print('OK')\""
+timeout: 700
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.25
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

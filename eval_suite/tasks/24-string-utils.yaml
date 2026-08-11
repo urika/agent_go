@@ -1,0 +1,33 @@
+id: string-utils
+difficulty: easy
+repo: eval_suite/fixtures/fp-sandbox
+task: |
+  在文件 solution.py 中实现以下函数：
+
+  1. is_palindrome(text: str) -> bool
+     - 忽略大小写、空格和标点符号，判断是否为回文
+     - 例: is_palindrome("A man, a plan, a canal: Panama") == True
+     - 空字符串视为 True
+
+  2. reverse_words(sentence: str) -> str
+     - 反转单词顺序（非字符顺序），单词间保持单空格
+     - 例: reverse_words("hello world") == "world hello"
+     - 多余空白（首尾/连续空格）应被规整
+     - 空字符串返回空字符串
+
+  3. count_vowels(text: str) -> int
+     - 统计 a/e/i/o/u 出现次数（不区分大小写，含 A/E/I/O/U）
+     - 例: count_vowels("Hello World") == 3
+
+  这是一个单文件小任务：直接在 solution.py 中实现三个函数即可，
+  一步完成。verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"from solution import is_palindrome, reverse_words, count_vowels; import inspect; assert callable(is_palindrome); assert callable(reverse_words); assert callable(count_vowels); assert is_palindrome('A man, a plan, a canal: Panama')==True; assert is_palindrome('racecar')==True; assert is_palindrome('hello')==False; assert is_palindrome('')==True; assert reverse_words('hello world')=='world hello'; assert reverse_words('  a  b  ')=='a b'; assert reverse_words('')==''; assert count_vowels('Hello World')==3; assert count_vowels('AEIOU')==5; assert count_vowels('xyz')==0; print('OK')\""
+timeout: 400
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.15
+  per_subtask_budget_usd: 0.1
+  on_exceed: stop

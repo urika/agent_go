@@ -1,0 +1,26 @@
+id: add-limit-stage
+difficulty: easy
+repo: eval_suite/fixtures/data-pipeline
+task: |
+  在 src/stages/transform.py 中新增 LimitStage（截断 records）：
+
+  ```python
+  class LimitStage(Stage):
+      def __init__(self, limit: int, name: str = "limit") -> None
+  ```
+
+  - limit <= 0 时保留空列表（不抛异常）
+  - inputs/outputs 均为 ["records"]
+  - process: 把 records 截断为前 limit 条，写回 context
+
+  verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"import sys; sys.path.insert(0, '.'); from src.stages.transform import LimitStage; from src.core.context import Context; s=LimitStage(2); assert s.name=='limit'; ctx=Context(); ctx.set('records',[{'i':0},{'i':1},{'i':2}]); s.process(ctx); assert len(ctx.get('records'))==2; c2=Context(); c2.set('records',[{'a':1}]); LimitStage(0).process(c2); assert c2.get('records')==[]; print('OK')\""
+timeout: 400
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.15
+  per_subtask_budget_usd: 0.1
+  on_exceed: stop

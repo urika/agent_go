@@ -1,0 +1,33 @@
+id: text-processing
+difficulty: easy
+repo: eval_suite/fixtures/fp-sandbox
+task: |
+  在文件 solution.py 中实现以下函数：
+
+  1. truncate_words(text: str, max_words: int = 10) -> str
+     - 按空白切分单词，保留前 max_words 个单词并用单空格连接
+     - 不足 max_words 个单词时原样返回
+     - max_words <= 0 返回空字符串
+     - 空字符串返回空字符串
+
+  2. title_case(text: str) -> str
+     - 每个单词首字母大写、其余小写，单词间保持单空格
+     - 空字符串返回空字符串
+
+  3. camel_to_snake(name: str) -> str
+     - 将 camelCase 转为 snake_case（如 "myVariableName" -> "my_variable_name"）
+     - 连续大写视为一个词（如 "parseXML" -> "parse_xml"）
+     - 开头大写允许（如 "HelloWorld" -> "hello_world"）
+
+  这是一个单文件小任务：直接在 solution.py 中实现三个函数即可，
+  一步完成。verification 命令中的断言即为全部验收标准。
+verification:
+  - "python3 -c \"from solution import truncate_words, title_case, camel_to_snake; import inspect; assert callable(truncate_words); assert callable(title_case); assert callable(camel_to_snake); assert truncate_words('a b c d e', 2)=='a b'; assert truncate_words('only one', 10)=='only one'; assert truncate_words('', 3)==''; assert truncate_words('a b c', 0)==''; assert title_case('hello world')=='Hello World'; assert title_case('')==''; assert camel_to_snake('myVariableName')=='my_variable_name'; assert camel_to_snake('parseXML')=='parse_xml'; assert camel_to_snake('HelloWorld')=='hello_world'; print('OK')\""
+timeout: 400
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.15
+  per_subtask_budget_usd: 0.1
+  on_exceed: stop
