@@ -616,3 +616,37 @@ subtasks = plan_to_subtasks(confirmed_plan, logger, repo=repo)  # confirmed_plan
 2. `agent_go clean --fixture-worktrees` 一次性兜底：扫描 `eval_suite/fixtures/*` 与所有任务 `meta.repo` 引用的本地仓库，逐一 `git worktree prune`，输出清理后注册数。
 
 **验证**：单测覆盖 `_prune_fixture_worktrees`（失效注册清除 / 活跃 worktree 保留 / 非 git no-op）+ `cmd_clean --fixture-worktrees` 分支。
+
+---
+
+### ISSUE-39 验证命令被安全门禁拒绝误归为 infrastructure_failure；`python -m <模块>` 被白名单误拒
+
+- **严重度**：P1（统计污染 + 可修复失败被归为不可控基础设施）
+
+**问题**（2026-08-12 decision-20260812 基线分析发现）：
+
+decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条（add-simple-caching / safe-file-reader / integration-tests-datapipeline / db-performance-optimization / list-tools / add-stats-command）kill_reason=interrupted_or_unknown。逐个检查 verification_results 发现全部是**验证命令被安全门禁拒绝**，属 LLM 生成质量 / 白名单覆盖问题，而非基础设施故障：
+
+| 任务 | 被拒命令 | 拒绝原因 |
+|------|----------|----------|
+| add-simple-caching | `python -c "from src.utils import cached; @cached\ndef f():..."` | `python -c` 含装饰器/换行，单行无法编译 |
+| safe-file-reader | `python -c "import os,tempfile\nfrom solution import safe_read..."` | `python -c` 含换行/with 块 |
+| integration-tests-datapipeline | `Check fixtures exist...: python -c "..."` | 命令前自然语言前缀 |
+| list-tools | `bash -c 'python -c "..."'` | bash 不在白名单 |
+| add-stats-command | `python -m src.cli stats` | `-m` 只允许 `-m pytest` |
+| db-performance-optimization | 子任务链 sub-1 失败 → 下游 blocked | 同上游 |
+
+**修复**（2026-08-12，两部分）：
+
+1. **归类修复**（failure.py）：`classify_failure` 中验证命令被拒（`any(v.get("rejected")...)`）由 `infrastructure_failure` 改为 `verification_failure`——命令被拒是生成质量问题，与 status=failed 且 verify_ok=False 的既有路径一致，不再污染 infra 统计。
+
+2. **白名单扩展**（utils.py）：`python`/`python3` 新增通用 `-m <模块>` 子命令规则，支持 `python -m src.cli stats` 这类项目内模块运行（此前仅 `-m pytest`）。模块名 + 参数受 positionals 白名单约束（`(?!.*\.\.)[\w./\-_]+` 禁点穿越），shell 注入扫描不变；`-m pytest` 最长前缀优先仍走 pytest 别名，向后兼容。
+
+3. **生成质量提示**（api.py plan prompt）：新增「验证命令生成规范」——禁止 `bash -c`/`sh -c` 包裹、`python -c` 必须单行（不能含 def/装饰器/with）、命令前不加自然语言前缀、项目内模块用 `python -m <模块>`。
+
+**验证**：
+- 单测：test_safe_verification_command.py 新增 6 用例（项目模块/带 flags/unittest/点穿越拒绝/注入拒绝）；test_failure.py 断言改为 verification_failure。相关 153 passed，全量 2131 passed（1 个独立失败为并行会话产物干扰，单独运行通过）。
+- `python -m ..evil` / `python -m src.cli; rm -rf /` / 重定向 / 命令替换均被拒绝，安全不降级。
+- bash -c 包裹**不放行**（default-deny 原则）：任意 shell 代码会绕过逐 token 白名单，改由 prompt 提示避免。
+
+**影响**：修正后这 6 个任务从 infra 归为 verification_failure，基线 first_pass/infra 统计更准确；`python -m <模块>` 场景（CLI 命令验证）不再被误拒。

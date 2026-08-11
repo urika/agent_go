@@ -181,6 +181,28 @@ class TestValidCommands:
         ok, _ = _is_safe_verification_command("python3 -m pytest tests/ -v")
         assert ok
 
+    def test_python_m_project_module(self):
+        ok, _ = _is_safe_verification_command("python -m src.cli stats")
+        assert ok
+
+    def test_python3_m_project_module_with_flags(self):
+        ok, _ = _is_safe_verification_command("python3 -m src.cli --config conf.json run")
+        assert ok
+
+    def test_python_m_unittest_discover(self):
+        ok, _ = _is_safe_verification_command("python -m unittest discover -s test/unit")
+        assert ok
+
+    def test_python_m_rejects_dotdot_module(self):
+        ok, _ = _is_safe_verification_command("python -m ..evil")
+        assert not ok
+
+    def test_python_m_rejects_injection(self):
+        ok, _ = _is_safe_verification_command("python -m src.cli; rm -rf /")
+        assert not ok
+        ok, _ = _is_safe_verification_command("python -m src.cli > /etc/passwd")
+        assert not ok
+
     def test_black_check(self):
         ok, _ = _is_safe_verification_command("black --check src/")
         assert ok

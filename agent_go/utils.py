@@ -105,11 +105,18 @@ _CMD_ARG_RULES = {
                              "--rootdir", "--override-ini", "--ignore", "--durations", "--cache-show"]},
     },
     "python": {"-m pytest": "pytest",
+               "-m": {"flags": r'^(-[\w@./_=]+|--[\w@./_-]+(?:=\S+)?)$',
+                      # 通用 -m <模块>：模块名+参数。禁止 .. 穿越、禁止 shell 注入符号。
+                      # 项目内模块（如 src.cli stats）合法；-m pytest/-m unittest 等
+                      # 标准工具也放行（模块名受 positionals 约束）。
+                      "positionals": r'^(?!.*\.\.)[\w./\-_]+$'},
                "-c": {"flags": r'^(--help|-h)$', "positionals": r'^[\s\S]*$'},
                "manage.py": "manage.py",
                "": {"flags": r'^(--help|-h|-V|--version|-B|-O|-OO|-u|-W=\S+)$',
                     "positionals": r'^(?!.*\.\./)[\w./\-_]+$'}},
     "python3": {"-m pytest": "pytest",
+                "-m": {"flags": r'^(-[\w@./_=]+|--[\w@./_-]+(?:=\S+)?)$',
+                       "positionals": r'^(?!.*\.\.)[\w./\-_]+$'},
                 "-c": {"flags": r'^(--help|-h)$', "positionals": r'^[\s\S]*$'},
                 "manage.py": "manage.py",
                 "": {"flags": r'^(--help|-h|-V|--version|-B|-O|-OO|-u|-W=\S+)$',

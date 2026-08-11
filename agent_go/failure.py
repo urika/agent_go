@@ -79,8 +79,12 @@ def classify_failure(
         return "delivery_failure"
     if result.get("crash_but_verified"):
         return "infrastructure_failure"
+    # 验证命令被安全门禁拒绝 = 生成/验证质量问题（LLM 生成的命令不合规），
+    # 不是外部基础设施故障。归 verification_failure（与 status=failed 且
+    # verify_ok=False 的路径一致），避免污染 infrastructure_failure 统计。
+    # 2026-08-12 修复：decision-20260812 基线 6 个任务因此误标 infra。
     if any(v.get("rejected") for v in result.get("verification_results", []) if isinstance(v, dict)):
-        return "infrastructure_failure"
+        return "verification_failure"
     kill_reason = result.get("kill_reason") or meta.get("kill_reason")
     if kill_reason in KILL_REASON_CLASS:
         return KILL_REASON_CLASS[kill_reason]

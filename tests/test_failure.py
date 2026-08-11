@@ -22,12 +22,19 @@ def test_verification_and_model_failures_are_distinct():
     assert classify_failure({"status": "failed", "verify_ok": True, "exit_code": 1}) == "model_failure"
 
 
-def test_rejected_verification_is_infrastructure_failure():
+def test_rejected_verification_is_verification_failure():
+    """验证命令被安全门禁拒绝 = 生成质量问题，不是基础设施故障（2026-08-12 修复）。
+
+    决策基线 decision-20260812 中 6 个任务（add-simple-caching/safe-file-reader/
+    integration-tests-datapipeline/list-tools/add-stats-command 等）因 LLM 生成的
+    验证命令不合规（python -c 含装饰器/换行/bash -c 包裹/未知前缀）被拒绝，原归类
+    infrastructure_failure 使「infra 失败」统计失真。修正为 verification_failure。
+    """
     assert classify_failure({
         "status": "failed",
         "verify_ok": False,
         "verification_results": [{"rejected": True}],
-    }) == "infrastructure_failure"
+    }) == "verification_failure"
 
 
 def test_aggregate_prefers_explicit_delivery_failure():
