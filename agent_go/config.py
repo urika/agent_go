@@ -61,6 +61,19 @@ DEFAULT_CONFIG = {
             "max_tokens": 2048,
             "timeout_ms": 90000,
         },
+        # M1.4 架构审查（SDD 最小治理闭环）：执行前生成最小 Architecture Decision
+        # （边界 / 依赖方向 / 关键约束），由独立 LLM 审查产生
+        # approved / rejected / changes_requested 决策。结果持久化到
+        # meta.architecture_review。默认关闭（fail-open：未启用或失败不阻断执行）。
+        # model 空 = 复用 plan_api.model。
+        "architecture_review": {
+            "enabled": False,
+            "model": "",
+            "provider": "",
+            "base_url": "",
+            "max_tokens": 2048,
+            "timeout_ms": 90000,
+        },
     },
     "goal": {
         "enabled": False,               # 是否在 TASK.md 注入 goal 指令（--goal 开启）

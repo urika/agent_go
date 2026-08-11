@@ -1122,3 +1122,62 @@ class TestCleanupStaleTasks:
 
         assert cleaned == 0
         assert json.loads((td / "meta.json").read_text(encoding="utf-8"))["status"] == "completed"
+
+
+class TestCmdGovernance:
+    """M1.4 governance 命令：traceability + architecture compliance 展示"""
+
+    def _make_args(self, task_id, json_mode=False):
+        from argparse import Namespace
+        return Namespace(task_id=task_id, json_mode=json_mode)
+
+    def test_governance_json_output(self, tmp_path):
+        from agent_go.cli import cmd_governance
+        task_dir = tmp_path / "task-gov"
+        task_dir.mkdir()
+        (task_dir / "meta.json").write_text(json.dumps({
+            "task_id": "task-gov", "task": "测试",
+            "subtasks": [{
+                "id": "sub-1", "title": "实现",
+                "requirement_ids": ["REQ-001"], "acceptance_criteria_ids": ["AC-001"],
+                "verification": "pytest", "verification_results": [{"passed": True}],
+            }],
+            "plan_quality": {"requirement_ids": ["REQ-001"]},
+            "delivery_branch": "agent_go/task-gov/delivery",
+            "accepted_delivery": True,
+        }), encoding="utf-8")
+
+        with patch("agent_go.cli.AGENT_GO_DIR", tmp_path):
+            with patch("builtins.print") as mock_print:
+                cmd_governance(self._make_args("task-gov", json_mode=True))
+        output = mock_print.call_args[0][0]
+        assert '"traceability"' in output
+        assert '"assessment"' in output
+
+    def test_governance_missing_task_errors(self, tmp_path):
+        from agent_go.cli import cmd_governance
+        with patch("agent_go.cli.AGENT_GO_DIR", tmp_path):
+            with patch("builtins.print") as mock_print:
+                cmd_governance(self._make_args("task-none"))
+        joined = "\n".join(c[0][0] for c in mock_print.call_args_list if c[0])
+        assert "任务不存在" in joined
+
+    def test_governance_text_output_has_assessment(self, tmp_path):
+        from agent_go.cli import cmd_governance
+        task_dir = tmp_path / "task-gov2"
+        task_dir.mkdir()
+        (task_dir / "meta.json").write_text(json.dumps({
+            "task_id": "task-gov2", "task": "测试",
+            "subtasks": [{
+                "id": "sub-1", "title": "实现",
+                "requirement_ids": ["REQ-001"],
+                "verification": "pytest", "verification_results": [],
+            }],
+            "plan_quality": {"requirement_ids": ["REQ-001"]},
+        }), encoding="utf-8")
+
+        with patch("agent_go.cli.AGENT_GO_DIR", tmp_path):
+            with patch("builtins.print") as mock_print:
+                cmd_governance(self._make_args("task-gov2"))
+        joined = "\n".join(c[0][0] for c in mock_print.call_args_list if c[0])
+        assert "追踪状态" in joined

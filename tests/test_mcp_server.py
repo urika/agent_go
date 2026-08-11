@@ -24,11 +24,11 @@ def server(tmp_path):
 # ── Tool schemas ──────────────────────────────────────────────────
 
 class TestToolSchemas:
-    def test_six_tools(self):
-        assert len(TOOLS) == 6
+    def test_seven_tools(self):
+        assert len(TOOLS) == 7
         names = [t["name"] for t in TOOLS]
         assert names == ["run_task", "resume_task", "inspect_task", "review_task",
-                         "list_tasks", "cancel_task"]
+                         "governance_task", "list_tasks", "cancel_task"]
 
     def test_list_tasks_schema(self):
         t = next(x for x in TOOLS if x["name"] == "list_tasks")
@@ -411,6 +411,40 @@ class TestInspectTask:
         assert len(preserved) == 1
         assert preserved[0]["id"] == "sub-2"
         assert preserved[0]["failure_reason"] == "编译错误"
+
+
+# ── Governance report (M1.4) ─────────────────────────────────────
+
+class TestGovernanceTask:
+    def _setup(self, tmp_path, task_id, meta):
+        td = tmp_path / task_id
+        td.mkdir(parents=True)
+        (td / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        return td
+
+    def test_governance_report(self, server, tmp_path):
+        task_id = "task-gov-mcp"
+        self._setup(tmp_path, task_id, {
+            "task_id": task_id, "task": "测试", "status": "completed",
+            "subtasks": [{
+                "id": "sub-1", "title": "实现",
+                "requirement_ids": ["REQ-001"], "acceptance_criteria_ids": ["AC-001"],
+                "verification": "pytest", "verification_results": [{"passed": True}],
+            }],
+            "plan_quality": {"requirement_ids": ["REQ-001"]},
+            "delivery_branch": "agent_go/task-gov-mcp/delivery",
+            "accepted_delivery": True,
+        })
+        result = server._tool_governance({"task_id": task_id})
+        assert result["task_id"] == task_id
+        assert "traceability_matrix" in result
+        assert result["traceability_matrix"]["delivery"]["accepted_delivery"] is True
+        assert result["architecture_compliance"]["reviewed"] is False
+        assert result["assessment"]["status"] == "complete"
+
+    def test_governance_missing_task(self, server, tmp_path):
+        with pytest.raises(Exception):
+            server._tool_governance({"task_id": "task-missing"})
 
 
 # ── Cost aggregation ──────────────────────────────────────────────

@@ -1,7 +1,7 @@
 # M1 交付闭环任务清单
 
 > 阶段：M1 交付闭环
-> 状态：进行中（M1-1/M1-2/M1-3 已实现 + E2E 验证 + 异构仓库规模化验证，2026-08-11）
+> 状态：进行中（M1-1/M1-2/M1-3 已实现 + E2E 验证 + 异构仓库规模化验证，M1-4/5/6 SDD 治理已落地，2026-08-11）
 > 更新日期：2026-08-11
 > 关联：[roadmap.md](roadmap.md) §5 · [prd.md](prd.md) §M1 · [delivery-design.md](design/delivery-design.md)
 
@@ -29,7 +29,7 @@ M1 完成后，`accepted_delivery_rate` 才能从当前 0 提升到有效值。
 | 显式 merge 命令 | ✅ 已实现（M1-2，`cmd_merge`） | 需 E2E 验证 |
 | 交付失败重试 | ✅ 已实现（PR/merge 失败标 delivery_failed，可从 delivery branch 重试） | 需 E2E 验证 |
 | 交付状态与恢复 | ⚠️ 部分（recover 已用 base_commit） | 三层状态分离 |
-| traceability / 架构审查 | ❌ | M1.4 全新 |
+| traceability / 架构审查 | ✅ 已实现（M1.4，governance.py + CLI/MCP） | 无 |
 
 ## 3. P0 必须完成（M1.1-M1.3）
 
@@ -83,27 +83,27 @@ M1 完成后，`accepted_delivery_rate` 才能从当前 0 提升到有效值。
 
 > 仅建设最小可追踪和可审查闭环，不建设完整 KnowledgeStore、活文档或自动架构决策。
 
-### M1-4 Spec 追踪
+### M1-4 Spec 追踪（2026-08-11 ✅）
 
-- [ ] 为 Spec requirement 和 acceptance criterion 分配稳定 ID。
-- [ ] Plan step、subtask、verification 和 delivery record 支持引用 requirement ID。
+- [x] 为 Spec requirement 和 acceptance criterion 分配稳定 ID。
+- [x] Plan step、subtask、verification 和 delivery record 支持引用 requirement ID。
 
-### M1-5 架构审查
+### M1-5 架构审查（2026-08-11 ✅）
 
-- [ ] 执行前生成最小 Architecture Decision（边界、依赖方向、关键约束）。
-- [ ] Architecture Review 产生 `approved` / `rejected` / `changes_requested` 决策。
-- [ ] 未通过的架构审查不得进入执行，除非用户明确覆盖并留下审计记录。
+- [x] 执行前生成最小 Architecture Decision（边界、依赖方向、关键约束）。
+- [x] Architecture Review 产生 `approved` / `rejected` / `changes_requested` 决策。
+- [x] 未通过的架构审查不得进入执行，除非用户明确覆盖并留下审计记录。
 
-### M1-6 追踪输出
+### M1-6 追踪输出（2026-08-11 ✅）
 
-- [ ] 生成任务级 `traceability_matrix` 和 `architecture_compliance` 摘要。
-- [ ] 缺少 requirement/acceptance criterion 映射的任务标记为追踪不完整，而不是静默通过。
-- [ ] 架构审查结果持久化，并在 CLI、MCP 和报告中可见。
+- [x] 生成任务级 `traceability_matrix` 和 `architecture_compliance` 摘要。
+- [x] 缺少 requirement/acceptance criterion 映射的任务标记为追踪不完整，而不是静默通过。
+- [x] 架构审查结果持久化，并在 CLI、MCP 和报告中可见。
 
 **验收**：
-- [ ] 一个真实任务可以从 requirement 追踪到 Plan、测试和 PR。
-- [ ] 架构审查结果持久化到任务产物，CLI/MCP/报告可见。
-- [ ] 该能力不自动替代人工做复杂架构决策。
+- [x] 一个真实任务可以从 requirement 追踪到 Plan、测试和 PR。（`agent_go governance <task-id>`）
+- [x] 架构审查结果持久化到任务产物，CLI/MCP/报告可见。（`governance` CLI + `governance_task` MCP tool）
+- [x] 该能力不自动替代人工做复杂架构决策。（architecture_review 默认 enabled=false，fail-open）
 
 ## 5. P2 测试与文档
 
@@ -141,8 +141,8 @@ M1 完成后，`accepted_delivery_rate` 才能从当前 0 提升到有效值。
 - [x] PR head/base 正确，包含全部已接受子任务变更。（2026-08-11 规模化验证：2 个异构真实仓库 PR #1/#8，HEAD 差异与 delivery branch 一致）
 - [x] 交付失败可从 delivery branch 重试，不重跑 Claude。
 - [x] SIGTERM/SIGKILL/PR 失败/merge 冲突可区分；recover 不破坏运行中任务。（E2E 通过）
-- [x] 全量测试通过。（1948 tests，CI green）
-- [ ] 在 smoke suite 上重新生成基线，`accepted_delivery_rate` 由 0 变为有效值。
+- [x] 全量测试通过。（2108 tests，CI green）
+- [ ] 在 smoke suite 上重新生成基线，`accepted_delivery_rate` 由 0 变为有效值。（M1.4 已落地，此门禁剩最后一项数据验证）
 
 ## 7. 依赖与顺序
 

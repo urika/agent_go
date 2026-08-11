@@ -1,7 +1,7 @@
 # agent_go 模块职责目录
 
 > 状态：As-Built 模块映射
-> 更新日期：2026-08-08
+> 更新日期：2026-08-11
 
 | 模块 | 主要职责 | 关键输出 |
 |---|---|---|
@@ -13,6 +13,7 @@
 | `executor.py` | 单子任务 worktree、Claude、验证和 commit | result/commit/tag |
 | `subtask.py` | Claude headless、watchdog、进程控制 | subprocess result/metering |
 | `delivery.py` | delivery branch 创建与 commit 汇总、Accepted Delivery 判定、mergeability 预检 | delivery branch / delivery result |
+| `governance.py` | M1.4 SDD 治理：spec requirement 提取、架构审查决策、traceability_matrix / architecture_compliance | governance report |
 | `recover.py` | 从 worktree 重建中断状态 | recovered meta |
 | `git_utils.py` | Git 仓库、worktree 和 gc 操作 | Git operation result |
 | `failure.py` | 失败分类和 kill reason 映射 | failure class |

@@ -262,23 +262,23 @@ system_error
 
 ### M1.4 SDD 最小治理闭环
 
-目标：在交付闭环中建立最小的“规范可追踪、架构可审查”能力，避免 SDD 只停留在输入格式和 Prompt 注入层。
+目标：在交付闭环中建立最小的"规范可追踪、架构可审查"能力，避免 SDD 只停留在输入格式和 Prompt 注入层。
 
 交付物：
 
-- 为 Spec requirement 和 acceptance criterion 分配稳定 ID。
-- Plan step、subtask、verification 和 delivery record 支持引用 requirement ID。
-- 执行前生成最小 Architecture Decision，记录边界、依赖方向和关键约束。
-- Architecture Review 产生 `approved`、`rejected` 或 `changes_requested` 决策。
-- 生成任务级 `traceability_matrix` 和 `architecture_compliance` 摘要。
-- 未通过的架构审查不得进入执行，除非用户明确覆盖并留下审计记录。
+- 为 Spec requirement 和 acceptance criterion 分配稳定 ID。✅（`governance.extract_spec_requirements`，REQ-xxx/AC-xxx + 变体归一化 + 编号条款兜底）
+- Plan step、subtask、verification 和 delivery record 支持引用 requirement ID。✅（plan `requirement_ids`/`acceptance_criteria_ids` 透传 + `validate_plan_quality` 覆盖率检查）
+- 执行前生成最小 Architecture Decision，记录边界、依赖方向和关键约束。✅（`governance.architecture_review`，LLM 审查，fail-open）
+- Architecture Review 产生 `approved`、`rejected` 或 `changes_requested` 决策。✅（决策持久化到 `meta.architecture_review`）
+- 生成任务级 `traceability_matrix` 和 `architecture_compliance` 摘要。✅（`governance.build_traceability_matrix`）
+- 未通过的架构审查不得进入执行，除非用户明确覆盖并留下审计记录。⚠️（决策已生成并持久化；`architecture_review.enabled` 默认 false，未作为硬门禁）
 
 验收：
 
-- 一个真实任务可以从 requirement 追踪到 Plan、测试和 PR。
-- 架构审查结果持久化到任务产物，并在 CLI、MCP 和报告中可见。
-- 缺少 requirement/acceptance criterion 映射的任务被标记为追踪不完整，而不是静默通过。
-- 该能力不自动替代人工做复杂架构决策。
+- 一个真实任务可以从 requirement 追踪到 Plan、测试和 PR。✅（`agent_go governance <task-id>`）
+- 架构审查结果持久化到任务产物，并在 CLI、MCP 和报告中可见。✅（`governance` CLI + `governance_task` MCP tool）
+- 缺少 requirement/acceptance criterion 映射的任务被标记为追踪不完整，而不是静默通过。✅（`assess_traceability` status=incomplete）
+- 该能力不自动替代人工做复杂架构决策。✅（默认关闭，fail-open）
 
 ## 6. 阶段二：M2 核心可靠性
 

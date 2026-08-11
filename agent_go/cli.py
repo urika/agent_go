@@ -324,6 +324,12 @@ def _build_parser():
     chk_delete.add_argument("task_id", help="Task ID")
     chk_delete.add_argument("--name", "-n", required=True, help="Checkpoint name to delete")
 
+    # governance 子命令（M1.4 SDD 治理闭环：traceability + architecture compliance）
+    governance_parser = subparsers.add_parser("governance", help="Show traceability matrix & architecture compliance")
+    governance_parser.add_argument("task_id", help="Task ID")
+    governance_parser.add_argument("--json", action="store_true", dest="json_mode",
+                                   help="Output as JSON")
+
     # mcp 子命令
     mcp_parser = subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)")
     mcp_parser.add_argument("--http", action="store_true",
@@ -734,6 +740,15 @@ def cmd_run(args=None):
         _plan_requirements = confirmed_plan.get("acceptance_criteria_ids") or confirmed_plan.get("requirements") or []
     plan_quality = validate_plan_quality(confirmed, _plan_requirements)
 
+    # M1.5 架构审查：执行前生成最小 Architecture Decision（fail-open，默认关闭）。
+    # 结果写入 meta.architecture_review，供 traceability / architecture_compliance 消费。
+    architecture_review = None
+    try:
+        from .governance import architecture_review as _arch_review
+        architecture_review = _arch_review(task, confirmed, config, logger)
+    except Exception as _ae:
+        logger.debug(f"[governance] 架构审查接入失败（忽略）: {_ae}")
+
     meta = {
         "task_id": task_id, "task": task, "repo": str(repo),
         "created": ts, "status": "EXECUTING",
@@ -756,6 +771,7 @@ def cmd_run(args=None):
         "plan_acceptance_coverage": plan_quality["plan_acceptance_coverage"],
         "plan_conflict_count": plan_quality["plan_conflict_count"],
         "plan_warning_count": plan_quality["plan_warning_count"],
+        "architecture_review": architecture_review,
     }
     # recover 必须基于本次运行的确切基准提交，不能依赖默认分支名或提交时间窗口。
     if (repo / ".git").exists():
@@ -2690,6 +2706,76 @@ def cmd_checkpoint(args) -> None:
         _con.print(f"未知操作: {subcmd}。可用: list | restore | delete")
 
 
+def cmd_governance(args) -> None:
+    """M1.4: 展示任务级 traceability_matrix 与 architecture_compliance 摘要。"""
+    from .console import _LazyConsole
+    from .governance import build_traceability_matrix
+
+    _con = _LazyConsole()
+    task_id = args.task_id
+    task_dir = AGENT_GO_DIR / task_id
+    if not task_dir.exists():
+        _con.error(f"任务不存在: {task_id}")
+        return
+
+    try:
+        with open(task_dir / "meta.json", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError) as _ge:
+        _con.error(f"读取 meta.json 失败: {_ge}")
+        return
+
+    report = build_traceability_matrix(meta)
+
+    if getattr(args, "json_mode", False):
+        _con.force(json.dumps(report, indent=2, ensure_ascii=False))
+        return
+
+    assessment = report["assessment"]
+    status_icon = {"complete": "✅", "incomplete": "⚠️", "no_spec_ids": "ℹ️"}.get(
+        assessment["status"], "❓")
+
+    _con.sep("─", 60)
+    _con.title(f"📋 治理报告: {task_id}")
+    _con.print(f"  追踪状态: {status_icon} {assessment['status']}")
+    if assessment["requirement_count"]:
+        _con.print(f"  Spec 需求/验收 ID 数: {assessment['requirement_count']}")
+        if assessment["missing_requirement_ids"]:
+            _con.warning(f"  未覆盖: {', '.join(assessment['missing_requirement_ids'])}")
+        if assessment["unmapped_subtask_ids"]:
+            _con.warning(f"  无需求映射的子任务: {', '.join(assessment['unmapped_subtask_ids'])}")
+    _con.print(f"  验证覆盖: {assessment['verification_coverage']:.0%}  "
+               f"  交付记录: {'✓' if assessment['delivery_coverage'] else '✗'}")
+
+    arch = report["architecture_compliance"]
+    if arch["reviewed"]:
+        _con.print(f"  架构审查: {arch['decision']} — {arch['summary']}")
+        for c in arch["constraints"]:
+            _con.print(f"    · 约束: {c}")
+        for r in arch["risks"]:
+            _con.warning(f"    · 风险: {r}")
+    else:
+        _con.print(f"  架构审查: {arch['summary']}")
+
+    _con.sep("─", 60)
+    _con.print("  Requirements → Subtasks:")
+    if report["traceability"]["requirements"]:
+        for r in report["traceability"]["requirements"]:
+            _con.print(f"    {r['id']} → {', '.join(r['subtasks'])}")
+    else:
+        _con.print("    (无 requirement → subtask 映射)")
+
+    _con.sep("─", 60)
+    for st in report["traceability"]["subtasks"]:
+        vmark = "✓" if st["verification_passed"] else "·"
+        reqs = ",".join(st["requirements"]) or "-"
+        _con.print(f"    {st['id']:<8} [{vmark}] reqs={reqs}  {st['title'][:50]}")
+
+    for issue in assessment["issues"]:
+        _con.warning(f"  ⚠️ {issue}")
+    _con.sep("─", 60)
+
+
 def cmd_router(args=None) -> None:
     """角色感知模型路由配置管理。"""
     from .config import CONFIG_PATH
@@ -3019,6 +3105,8 @@ def main() -> None:
             cmd_replay(args)
         elif args.command == "checkpoint":
             cmd_checkpoint(args)
+        elif args.command == "governance":
+            cmd_governance(args)
         elif args.command == "mcp":
             cmd_mcp(args)
         elif args.command == "web":

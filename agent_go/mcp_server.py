@@ -186,6 +186,18 @@ TOOLS = [
         }
     },
     {
+        "name": "governance_task",
+        "description": "查询任务治理报告（M1.4 SDD 闭环）：traceability_matrix（requirement→subtask→verification→delivery）、architecture_compliance、追踪完整性评估。只读。",
+        "annotations": {"title": "Task governance report", "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {
+                "task_id": {"type": "string"},
+            }
+        }
+    },
+    {
         "name": "list_tasks",
         "description": "列出任务概要（ID/状态/进度/成本/描述）。按状态过滤 + 分页。只读。",
         "annotations": {"title": "List tasks", "readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
@@ -719,6 +731,8 @@ class MCPServer:
                 r = self._tool_inspect(args)
             elif name == "review_task":
                 r = self._tool_review(args)
+            elif name == "governance_task":
+                r = self._tool_governance(args)
             elif name == "list_tasks":
                 r = self._tool_list_tasks(args)
             elif name == "cancel_task":
@@ -1040,6 +1054,28 @@ class MCPServer:
                 lines = lp.read_text(encoding="utf-8").strip().split("\n")
                 rv["log_tail"] = lines[-args.get("log_lines", 30):]
         return rv
+
+    def _tool_governance(self, args: dict) -> dict:
+        """M1.4: 返回任务治理报告（traceability + architecture compliance）。只读。"""
+        from .governance import build_traceability_matrix
+
+        task_id = args["task_id"]
+        td = self._ensure_task_dir(task_id)
+        meta_path = td / "meta.json"
+        if not meta_path.exists():
+            raise MCPError("AGENT_GO_TASK_NOT_FOUND", f"meta.json 不存在: {task_id}")
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except ValueError as _ge:
+            raise MCPError("AGENT_GO_META_CORRUPT", f"meta.json 无法解析: {_ge}")
+        report = build_traceability_matrix(meta)
+        return {
+            "task_id": task_id,
+            "status": task_status(meta),
+            "traceability_matrix": report["traceability"],
+            "architecture_compliance": report["architecture_compliance"],
+            "assessment": report["assessment"],
+        }
 
     def _tool_review(self, args: dict) -> dict:
         task_id = args["task_id"]

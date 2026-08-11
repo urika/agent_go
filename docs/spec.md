@@ -22,8 +22,9 @@ cmd_agents()             → 列出 Agent 类型
 cmd_cache(args)          → Plan 缓存管理 (list/clean/clear/stats)
 cmd_inspect(args)        → 查看保留的 worktree 现场 (failed/blocked)
 cmd_router(args)         → 角色感知模型路由配置 (show/enable/disable/set-role)
-cmd_checkpoint(args)     → 检查点快照管理 (list/restore/delete)
-cmd_eval(args)           → 离线评估 (quality/perf/cost/reliability/ux/gate/bench/models/judge/all)
+ cmd_checkpoint(args)     → 检查点快照管理 (list/restore/delete)
+ cmd_governance(args)     → M1.4 SDD 治理报告 (traceability_matrix + architecture_compliance, --json)
+ cmd_eval(args)           → 离线评估 (quality/perf/cost/reliability/ux/gate/bench/models/judge/all)
 plan-history(args)       → Plan 版本历史
 plan-diff(args)          → Plan 版本对比 (--v1/--v2)
 replay(args)             → 执行回放时间线 (--json)

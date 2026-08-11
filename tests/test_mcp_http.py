@@ -154,7 +154,7 @@ class TestAuth:
         status, data = _post(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                              headers={"Authorization": "Bearer secret-token"})
         assert status == 200
-        assert len(data["result"]["tools"]) == 6
+        assert len(data["result"]["tools"]) == 7
 
     def test_ok_with_x_api_key(self, secured_server):
         srv, port = secured_server
