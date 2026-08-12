@@ -653,8 +653,9 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             evaluator_cfg = dict(user_config["evaluator"])
             evaluator_cfg["enabled"] = True  # bench 强制启用语义评估
             config["evaluator"] = evaluator_cfg
-        # 继承用户的 skills / agent_loop / verification 配置（skill 自动发现等），否则 bench 默认关闭
-        for _k in ("skills", "agent_loop", "verification"):
+        # 继承用户的 skills / agent_loop / verification / goal 配置（skill 自动发现等），
+        # 否则 bench 默认关闭
+        for _k in ("skills", "agent_loop", "verification", "goal"):
             if user_config.get(_k):
                 config[_k] = dict(user_config[_k])
         # S10 成本控制：透传任务 YAML 的 cost_control（每任务开关，默认 enabled=false）
