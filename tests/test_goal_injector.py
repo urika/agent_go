@@ -143,6 +143,34 @@ class TestExecutorGoalIntegration:
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
+    def test_goal_prefix_degrades_when_prompt_too_long(
+        self, mock_wt, mock_subprocess, mock_headless, mock_agent,
+        temp_repo, task_dir, logger,
+    ):
+        """TASK.md 超 4000 字符（Claude /goal 上限）时降级：去掉 /goal 前缀、保留 Goal Context。
+
+        实测复现（2026-08-12 弱模型困难任务实验）：force 模式下 json 任务 TASK.md
+        6553 字节 ≈4423 字符，Claude CLI 把整个 prompt 当作 goal condition 并拒绝
+        （"Goal condition is limited to 4000 characters"），exit 0 零产出假失败。
+        """
+        mock_wt.return_value = (True, "")
+        mock_headless.return_value = _mock_cp(returncode=0)
+        mock_subprocess.side_effect = _git_ok
+
+        long_task = _subtask()
+        long_task["agent_prompt"] = "详细说明。" * 900  # 使总 prompt > 3800 字符
+        run_subtask("test-task", long_task, temp_repo, task_dir,
+                    logger, headless=True, config={"goal": {"enabled": True}})
+
+        task_md = mock_headless.call_args_list[0][0][0]
+        assert not task_md.startswith('/goal "')
+        assert "Goal Context" in task_md
+        assert "详细说明" in task_md
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
     def test_goal_not_injected_by_default(
         self, mock_wt, mock_subprocess, mock_headless, mock_agent,
         temp_repo, task_dir, logger,

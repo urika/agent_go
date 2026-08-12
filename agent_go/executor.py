@@ -530,6 +530,17 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
             logger.warning(f"Skill 未找到: \"{sn}\"，已跳过。已安装: {installed_names[:10]}")
 
     # 将 Agent Prompt 中的源项目路径替换为 worktree 路径，确保隔离
+    # Goal 长度门禁：Claude CLI 会把 /goal 之后的整个 prompt 当作 goal condition
+    # （上限 4000 字符，按字符数而非字节）。超长时 CLI 静默拒绝并以 exit 0 零产出
+    # 退出（实测复现：json force 6553 字节 ≈4423 字符 → 无文件变更假失败）。
+    # 超长时降级为纯文本 Goal Context（移除 /goal slash 前缀），保证任务指令完整传递。
+    if task_md_parts and str(task_md_parts[0]).startswith('/goal "'):
+        _goal_preview = "\n".join(task_md_parts)
+        if len(_goal_preview) > 3800:
+            task_md_parts = task_md_parts[2:]
+            logger.warning(
+                f"[goal] TASK.md {len(_goal_preview)} 字符超过 Claude /goal 4000 字符上限，"
+                f"降级为纯文本 Goal Context（原生 slash command 未启用）")
     task_md_text = "\n".join(task_md_parts)
     task_md = re.sub(
         rf'{_BOUNDARY_BEFORE}{re.escape(str(repo))}{_BOUNDARY_AFTER}',
