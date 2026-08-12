@@ -1248,6 +1248,34 @@ class TestUsageAggregation:
         assert ev["is_local"] is True
 
     @patch("subprocess.Popen")
+    def test_metering_local_zero_tokens_still_written(self, mock_popen, logger, tmp_path):
+        """2026-08-12 修复：本地 worker 即使 token/cost 全 0 也写 metering 事件。
+
+        mlx/Qwen 本地代理可能不返回 usage tokens（claude -p 解析失败 → 全 0）。
+        此前 658 行条件要求 token/cost 非零，导致本地 worker 事件缺失 →
+        analyze_cost 无法识别本地事件折算 TCO。AGENT_GO_IS_LOCAL=1 时强制写。
+        """
+        metering = tmp_path / "metering.jsonl"
+        events = [json.dumps({
+            "type": "result", "subtype": "success",
+            "total_cost_usd": 0.0,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        }) + "\n"]
+        mock_popen.return_value = _make_proc(events)
+        _run_headless(
+            "task", Path("/tmp/work"),
+            {"AGENT_GO_METERING_PATH": str(metering),
+             "AGENT_GO_CLAUDE_MODEL": "claude-sonnet-4-6",
+             "AGENT_GO_IS_LOCAL": "1",
+             "AGENT_GO_LOCAL_MODEL": "unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"},
+            logger, "sub-u10"
+        )
+        ev = self._read_metering(metering)
+        assert ev["actual_model"] == "unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
+        assert ev["cost_usd"] == 0.0
+        assert ev["is_local"] is True
+
+    @patch("subprocess.Popen")
     def test_metering_legacy_local_models_config(self, mock_popen, logger, tmp_path):
         """兼容旧配置：AGENT_GO_LOCAL_MODELS 列出的模型成本清零"""
         metering = tmp_path / "metering.jsonl"

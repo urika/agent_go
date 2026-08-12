@@ -655,7 +655,13 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
 
     # Phase 1 配套：记录 Claude 执行的 token/cost 到 metering.jsonl
     metering_path = env.get("AGENT_GO_METERING_PATH", "")
-    if metering_path and (claude_usage_total["prompt_tokens"] or claude_usage_total["completion_tokens"] or claude_usage_total["cost_usd"]):
+    _is_local_flag = env.get("AGENT_GO_IS_LOCAL", "") == "1"
+    if metering_path and (
+        claude_usage_total["prompt_tokens"]
+        or claude_usage_total["completion_tokens"]
+        or claude_usage_total["cost_usd"]
+        or _is_local_flag
+    ):
         from .config import meter_event
         from .pricing import MODEL_PRICES
         _model = env.get("AGENT_GO_CLAUDE_MODEL", "") or "claude-code-executor"
