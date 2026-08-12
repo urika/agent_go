@@ -227,6 +227,169 @@ class _DefaultEvalStrategy:
         return _default_semantic_eval(subtask, worktree, verification, previous_attempts, config, logger)
 
 
+# ═══════════════════════════════════════════════════════════════
+# 视觉评估策略（M3 P1）—— 截图 + 多模态 LLM 评估 UI 是否满足需求
+# ═══════════════════════════════════════════════════════════════
+
+_VISUAL_TEMPLATE = """你是前端 UI 审查员。请根据以下任务要求和页面截图，判断页面是否满足任务要求。
+
+## 任务信息
+
+**标题:** {title}
+
+**描述:**
+{description}
+
+**验证标准:**
+{verification}
+
+请从以下维度评估：
+1. 页面是否渲染了任务要求的核心元素/组件
+2. 布局/结构是否符合描述
+3. 是否有明显的渲染错误、空白、错位
+
+**仅回复 JSON：**
+```json
+{{"passed": true/false, "confidence": 0.0-1.0, "reason": "判断理由（简短）", "suggestions": "改进建议（如未通过）"}}
+```"""
+
+
+def _capture_screenshot(url: str, output_path: Path, config: dict, logger: logging.Logger) -> bool:
+    """通过 playwright 截图。失败返回 False（fail-open）。"""
+    import shutil
+    import subprocess
+    if not shutil.which("npx"):
+        return False
+    eval_cfg = config.get("evaluator", {})
+    viewport = eval_cfg.get("visual_viewport", "1280,720")
+    wait = eval_cfg.get("visual_wait", "2000")
+    cmd = [
+        "npx", "playwright", "screenshot",
+        "--wait-for-timeout", str(wait),
+        "--viewport-size", str(viewport),
+        url, str(output_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                                cwd=str(output_path.parent))
+        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            return True
+        logger.debug(f"视觉截图失败: rc={result.returncode} err={result.stderr[:200]}")
+        return False
+    except Exception as e:
+        logger.debug(f"视觉截图异常: {e}")
+        return False
+
+
+def _build_visual_message(screenshot_path: Path, prompt: str, provider: str) -> list[dict]:
+    """构建多模态消息（provider 适配 Anthropic/OpenAI 图片格式）。"""
+    import base64
+    img_data = base64.b64encode(screenshot_path.read_bytes()).decode("utf-8")
+    if provider == "anthropic":
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_data}},
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        content = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_data}"}},
+            {"type": "text", "text": prompt},
+        ]
+    return [{"role": "user", "content": content}]
+
+
+class _VisualEvalStrategy:
+    """视觉评估策略 — 截图 + 多模态 LLM 评估 UI 是否满足需求（fail-open）。"""
+    name = "visual"
+    description = "截图 + 多模态 LLM 视觉评估（需配置 evaluator.visual_url + playwright）"
+
+    def __call__(self, subtask, worktree, verification, previous_attempts, config, logger):
+        return _visual_eval(subtask, worktree, verification, previous_attempts, config, logger)
+
+
+def _visual_eval(subtask, worktree, verification, previous_attempts, config, logger):
+    """视觉评估：截图 → 多模态 LLM → 解析。无 visual_url/playwright 时 fail-open 降级为 default。"""
+    start = time.time()
+    eval_cfg = config.get("evaluator", {})
+    url = eval_cfg.get("visual_url", "")
+
+    # 无 URL 配置 → 降级 default 文本评估
+    if not url:
+        logger.debug("[visual] 未配置 evaluator.visual_url，降级 default 策略")
+        return _default_semantic_eval(subtask, worktree, verification, previous_attempts, config, logger)
+
+    # 截图（fail-open：playwright/浏览器/dev server 不可用则降级）
+    import tempfile
+    screenshot_path = Path(tempfile.mktemp(suffix=".png", dir=str(worktree)))
+    if not _capture_screenshot(url, screenshot_path, config, logger):
+        logger.warning(f"[visual] 截图失败（{url}），降级 default 策略")
+        _fallback = _default_semantic_eval(subtask, worktree, verification, previous_attempts, config, logger)
+        _fallback["reason"] = "[视觉评估降级] " + _fallback.get("reason", "")
+        return _fallback
+
+    try:
+        # 构建 API 配置（复用 evaluator 的 provider/model 选择）
+        eval_api_cfg = dict(config.get("plan_api", {}))
+        for key in ("provider", "model", "base_url", "api_key"):
+            if eval_cfg.get(key):
+                eval_api_cfg[key] = eval_cfg[key]
+        eval_api_cfg["timeout_ms"] = 90_000
+        eval_config = dict(config)
+        eval_config["plan_api"] = eval_api_cfg
+        eval_config.pop("_metering_path", None)
+        provider = eval_api_cfg.get("provider", "anthropic")
+
+        prompt = _VISUAL_TEMPLATE.format(
+            title=subtask.get("title", ""),
+            description=(subtask.get("description", "") or "")[:2000],
+            verification=verification or "（无验证命令）",
+        )
+        messages = _build_visual_message(screenshot_path, prompt, provider)
+
+        try:
+            content = call_api(eval_config, messages, logger)
+        except Exception as e:
+            logger.warning(f"[visual] 视觉评估 API 调用失败: {e}")
+            return {
+                "passed": True, "confidence": 0.5,
+                "reason": f"视觉评估 API 失败（已跳过）: {e}",
+                "suggestions": "", "cost_usd": 0.0,
+                "latency_ms": round((time.time() - start) * 1000, 2),
+                "evaluator_skipped": True,
+            }
+
+        parsed = _parse_eval_response(content)
+        latency_ms = round((time.time() - start) * 1000, 2)
+        cost_usd = 0.0
+        try:
+            cost_usd = estimate_cost(
+                eval_api_cfg.get("provider", "anthropic"),
+                eval_api_cfg.get("model", ""),
+                max(1, _estimate_tokens(prompt) + 1000),  # 图片 token 粗估
+                max(1, _estimate_tokens(content)),
+            )
+        except Exception:
+            pass
+        return {
+            "passed": parsed.get("passed", True),
+            "confidence": parsed.get("confidence", 0.8 if parsed.get("passed", True) else 0.2),
+            "reason": "[视觉] " + parsed.get("reason", ""),
+            "suggestions": parsed.get("suggestions", ""),
+            "cost_usd": cost_usd,
+            "latency_ms": latency_ms,
+            "visual_url": url,
+        }
+    finally:
+        try:
+            screenshot_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+# 注册视觉策略
+register(_VisualEvalStrategy())
+
+
 def _default_semantic_eval(subtask, worktree, verification, previous_attempts, config, logger):
     """内置评估逻辑：调用 LLM → 解析响应 → 写 metering → 返回。"""
     start = time.time()

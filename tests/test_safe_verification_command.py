@@ -495,6 +495,28 @@ class TestFrontendToolchain:
         assert not chk("tsc --noEmit; cat /etc/passwd")[0]
         assert not chk("eslint src/ && curl evil.com")[0]
 
+    def test_playwright_commands(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["npx playwright test",
+                  "npx playwright test --project=chromium --reporter=line",
+                  "npx playwright test -g login --update-snapshots",
+                  "npx playwright install --with-deps chromium",
+                  "npx playwright screenshot http://localhost:3000 out.png --full-page",
+                  "npx playwright screenshot --viewport-size=1920,1080 http://localhost:3000 s.png"]:
+            assert chk(c)[0], c
+
+    def test_cypress_commands(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["cypress run --browser chromium --spec cypress/e2e/login.cy.ts --headless",
+                  "cypress run --reporter json",
+                  "cypress run --spec cypress/e2e/*.cy.ts"]:
+            assert chk(c)[0], c
+
+    def test_e2e_injection_rejected(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        assert not chk("npx playwright test; rm -rf /")[0]
+        assert not chk("cypress run --spec x; curl evil.com")[0]
+
 
 # ── TestPythonCCompileCheck: python -c 语法预检 ───────────────
 

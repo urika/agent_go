@@ -644,3 +644,95 @@ class TestAssessmentPersistence:
                      config, logger, assessment_path=str(tmp_path))
         data = json.loads((tmp_path / "assessment.jsonl").read_text())
         assert data["trigger_source"] == "manual"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 视觉评估策略（M3 P1）
+# ═══════════════════════════════════════════════════════════════
+
+class TestVisualEvalStrategy:
+    """视觉评估策略：截图 + 多模态 LLM 评估。"""
+
+    def test_no_visual_url_degrades_to_default(self, tmp_path, logger):
+        """未配置 evaluator.visual_url → 降级 default 文本评估。"""
+        from agent_go.evaluator import _VisualEvalStrategy
+        strategy = _VisualEvalStrategy()
+        with patch("agent_go.evaluator._default_semantic_eval", return_value={
+            "passed": True, "confidence": 0.8, "reason": "文本评估通过",
+            "suggestions": "", "cost_usd": 0.0, "latency_ms": 10.0,
+        }) as mock_default:
+            result = strategy(
+                {"id": "s1", "title": "t"}, tmp_path, "npm run build", [],
+                {"evaluator": {}, "plan_api": {}}, logger,
+            )
+        mock_default.assert_called_once()
+        assert result["passed"] is True
+
+    def test_screenshot_failure_fails_open(self, tmp_path, logger):
+        """截图失败（无 playwright/dev server）→ fail-open 降级 default。"""
+        from agent_go.evaluator import _VisualEvalStrategy
+        strategy = _VisualEvalStrategy()
+        config = {"evaluator": {"visual_url": "http://localhost:9999"},
+                  "plan_api": {"provider": "anthropic"}}
+        with patch("agent_go.evaluator._capture_screenshot", return_value=False), \
+             patch("agent_go.evaluator._default_semantic_eval", return_value={
+                 "passed": True, "confidence": 0.5, "reason": "降级",
+                 "suggestions": "", "cost_usd": 0.0, "latency_ms": 5.0,
+             }):
+            result = strategy(
+                {"id": "s1", "title": "t"}, tmp_path, "npm run build", [],
+                config, logger,
+            )
+        assert result["passed"] is True
+        assert "视觉评估降级" in result["reason"]
+
+    def test_visual_eval_success(self, tmp_path, logger):
+        """截图成功 + LLM 返回 → 视觉评估结果。"""
+        from agent_go.evaluator import _VisualEvalStrategy
+        strategy = _VisualEvalStrategy()
+        config = {"evaluator": {"visual_url": "http://localhost:3000"},
+                  "plan_api": {"provider": "anthropic", "model": "claude-sonnet-4"}}
+        # 创建假截图文件
+        screenshot = tmp_path / "shot.png"
+        screenshot.write_bytes(b"fake-png-data")
+        with patch("agent_go.evaluator._capture_screenshot", return_value=True), \
+             patch("agent_go.evaluator.call_api", return_value=(
+                 '{"passed": false, "confidence": 0.7, '
+                 '"reason": "按钮缺失", "suggestions": "添加提交按钮"}')), \
+             patch("agent_go.evaluator.estimate_cost", return_value=0.001), \
+             patch("agent_go.evaluator._VisualEvalStrategy.__call__",
+                   wraps=strategy.__call__):
+            # _capture_screenshot 写文件到 worktree 临时路径，mock 它返回 True
+            # 但需要截图文件存在 — 直接 mock _build_visual_message 避免文件依赖
+            with patch("agent_go.evaluator._build_visual_message", return_value=[{
+                "role": "user", "content": "mock"
+            }]):
+                result = strategy(
+                    {"id": "s1", "title": "登录页", "description": "登录表单"},
+                    tmp_path, "npx playwright test", [], config, logger,
+                )
+        assert result["passed"] is False
+        assert "视觉" in result["reason"]
+        assert "按钮缺失" in result["reason"]
+
+    def test_build_visual_message_anthropic(self, tmp_path):
+        """Anthropic provider → image source base64 格式。"""
+        from agent_go.evaluator import _build_visual_message
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNGfake")
+        msgs = _build_visual_message(img, "评估这个页面", "anthropic")
+        assert len(msgs) == 1
+        content = msgs[0]["content"]
+        assert content[0]["type"] == "image"
+        assert content[0]["source"]["type"] == "base64"
+        assert content[1]["type"] == "text"
+
+    def test_build_visual_message_openai(self, tmp_path):
+        """OpenAI provider → image_url data URI 格式。"""
+        from agent_go.evaluator import _build_visual_message
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNGfake")
+        msgs = _build_visual_message(img, "评估这个页面", "openai")
+        content = msgs[0]["content"]
+        assert content[0]["type"] == "image_url"
+        assert "data:image/png;base64," in content[0]["image_url"]["url"]
