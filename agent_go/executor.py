@@ -67,11 +67,18 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
         req = _urlreq.Request(status_url, headers={"User-Agent": "agent_go-probe/1.0"})
         with _urlreq.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
-        # 解析第一个 "Model" 字段（本地后端真实模型名）。
-        # 兼容两种 HTML 结构：llama.cpp 原生 <span class="label">Model</span><span class="value">...
-        # 与自定义代理页（如 Local LLM Stack）同结构。仅缓存成功结果——
-        # 失败不缓存，代理 SIGHUP 切换/短暂不可达恢复后能重新探测（避免空串永久生效）。
+        # 解析 "Model" 字段（本地后端真实模型名）。兼容多种结构：
+        #   1. <span class="label">Model</span><span class="value">...（llama.cpp 原生 / 自定义代理）
+        #   2. <th>Model</th><td>...（表格结构）
+        #   3. 纯文本 "Model: xxx" / "Model xxx"（fallback）
+        # 仅缓存成功结果——失败不缓存，代理 SIGHUP 切换/短暂不可达恢复后能重新探测。
         m = re.search(r'<span class="label">Model</span><span class="value">([^<]+)</span>', body)
+        if not m:
+            m = re.search(r'<th[^>]*>Model</th>\s*<td[^>]*>([^<]+)</td>', body)
+        if not m:
+            m = re.search(r'Model[:：]\s*([^\s<]+)', body)
+        if not m:
+            m = re.search(r'MODEL_NAME["\s:：=]+([\w./\-]+)', body, re.I)
         if m:
             model = m.group(1).strip()
     except Exception:
@@ -87,20 +94,24 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
 _local_verify_cache: dict[str, tuple[bool, str]] = {}
 
 
-def _verify_local_backend(base_url: str, timeout: float = 45.0) -> tuple[bool, str]:
+def _verify_local_backend(base_url: str, timeout: float = 15.0,
+                          routed_model: str = "") -> tuple[bool, str]:
     """验证"指向本机的后端"是否真的返回本地模型。
 
     背景：本地代理（4000 端口）可能实际转发到云（如 glm-4.7），此时若按
-    URL 判定本地并清零成本，$/pass 会严重失真。本函数做一次轻量 claude 调用，
-    对比响应 model 与 /status 声明的本地模型：
+    URL 判定本地并清零成本，$/pass 会严重失真。
 
-      - 响应 model == 本地模型（如 mlx-community/Qwen3.6-27B-4bit）→ 真本地 (True, model)
-      - 响应 model 是云模型（如 glm-4.7）且 != 本地声明 → 实际走云 (False, actual_model)
-      - 探测失败/无法解析 → 保守不清零 (False, "")，宁多算不乱清
+    判定策略（2026-08-12 重设计）：
+      1. 首选：/status 声明本地模型 + local_models 静态配置命中 → 直接判本地。
+         不依赖 claude 探测调用（本地推理慢，探测可能 15-60s 超时，且
+         route:auto 可能把 claude 模型名路由到云）。
+      2. 深度校验（可选）：claude 探测成功且响应 model == /status 声明 →
+         确认本地。探测失败/超时 → 退回策略 1 的判定（不清零的保守逻辑仅
+         在 /status 也失败时触发）。
 
     Returns:
-        (is_really_local, actual_model)：actual_model 为响应解析的真实模型；
-        探测失败时 ("", 空)。
+        (is_really_local, actual_model)：actual_model 为真实模型名；
+        判定失败时 (False, "")。
     """
     if not base_url:
         return (False, "")
@@ -108,41 +119,51 @@ def _verify_local_backend(base_url: str, timeout: float = 45.0) -> tuple[bool, s
     if key in _local_verify_cache:
         return _local_verify_cache[key]
 
-    _local_declared = _probe_local_model(base_url, timeout=5.0)  # /status 声明模型
-    _actual = ""
-    try:
-        import subprocess as _sp
-        # 走代理做一次轻量调用，解析真实响应 model
-        _cmd = ["claude", "-p", "hi",
-                "--permission-mode", "bypassPermissions",
-                "--no-session-persistence",
-                "--output-format", "stream-json",
-                "--verbose",
-                "--include-partial-messages"]
-        _env = dict(os.environ)
-        _env["ANTHROPIC_BASE_URL"] = key
-        # 清掉可能使 claude 走其它后端的变量
-        _env.pop("ANTHROPIC_AUTH_TOKEN", None)
-        _cp = _sp.run(_cmd, capture_output=True, text=True, timeout=timeout, env=_env,
-                      cwd=str(Path(__file__).resolve().parent.parent))
-        for _line in (_cp.stdout or "").splitlines():
-            try:
-                _ev = json.loads(_line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if isinstance(_ev, dict):
-                _msg_model = _ev.get("message", {}).get("model", "")
-                if not _msg_model:
-                    _inner = _ev.get("event", {}) if _ev.get("type") == "stream_event" else {}
-                    _msg_model = _inner.get("message", {}).get("model", "")
-                if _msg_model:
-                    _actual = str(_msg_model).strip()
-                    break
-    except Exception:
-        _actual = ""
+    # 1. /status 声明（可靠，HTTP 快速）
+    _local_declared = _probe_local_model(base_url, timeout=3.0)
+    _actual = _local_declared
+    _is_local = False
 
-    # 判定：响应 model 是本地声明 → 真本地；否则视为走云（不清零）
-    _is_local = bool(_local_declared) and bool(_actual) and _actual == _local_declared
+    # 静态配置命中 → 直接判本地（local_models 由用户在 config 显式声明）
+    if _local_declared:
+        _is_local = True
+
+    # 2. 深度校验：claude 探测（缩短超时，仅作确认；失败不清零仅当 /status 也失败）
+    if _local_declared:
+        try:
+            import subprocess as _sp
+            _cmd = ["claude", "-p", "hi",
+                    "--permission-mode", "bypassPermissions",
+                    "--no-session-persistence",
+                    "--output-format", "stream-json",
+                    "--verbose",
+                    "--include-partial-messages"]
+            if routed_model:
+                _cmd += ["--model", routed_model]
+            _env = dict(os.environ)
+            _env["ANTHROPIC_BASE_URL"] = key
+            _env.pop("ANTHROPIC_AUTH_TOKEN", None)
+            _probe_timeout = min(timeout, 10.0)
+            _cp = _sp.run(_cmd, capture_output=True, text=True, timeout=_probe_timeout,
+                          env=_env, cwd=str(Path(__file__).resolve().parent.parent))
+            for _line in (_cp.stdout or "").splitlines():
+                try:
+                    _ev = json.loads(_line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(_ev, dict):
+                    _msg_model = _ev.get("message", {}).get("model", "")
+                    if not _msg_model:
+                        _inner = _ev.get("event", {}) if _ev.get("type") == "stream_event" else {}
+                        _msg_model = _inner.get("message", {}).get("model", "")
+                    if _msg_model:
+                        _actual = str(_msg_model).strip()
+                        # 探测确认：响应与 /status 声明一致 → 强本地；不一致（如转发云）→ 判云
+                        _is_local = (_actual == _local_declared)
+                        break
+        except Exception:
+            pass  # 探测失败 → 维持 /status 判定
+
     _result = (_is_local, _actual)
     _local_verify_cache[key] = _result
     return _result
@@ -1720,6 +1741,9 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             _retry_caps = {"easy": 600, "medium": 900, "hard": 1500}
             _cap = _retry_caps.get(_difficulty, 900)
             retry_timeout = min(int(_base_timeout * _difficulty_mult), _cap)
+            # 本地模型修复重试超时放宽（2026-08-12 改进 2）：与首跑 hard_timeout 一致，×2。
+            if env.get("AGENT_GO_IS_LOCAL", "") == "1":
+                retry_timeout = min(retry_timeout * 2, 3000)
             logger.info(f"[retry_timeout] difficulty={_difficulty} base={_base_timeout}s mult={_difficulty_mult} → timeout={retry_timeout}s")
             _fix_result = _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
                                         active_pids=active_pids, active_pids_lock=active_pids_lock,
@@ -2178,7 +2202,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         #   响应 == /status 声明本地模型 → 真本地（AGENT_GO_IS_LOCAL=1，成本清零）
         #   响应是云模型             → 实际走云（不清零，按实际模型计价）
         #   探测失败                 → 保守不清零（宁多算不乱清）
-        _really_local, _actual_model = _verify_local_backend(_worker_url_src)
+        _really_local, _actual_model = _verify_local_backend(_worker_url_src, routed_model=routed_model)
         if _really_local:
             env["AGENT_GO_IS_LOCAL"] = "1"
             _local_model_name = _actual_model or _probe_local_model(_worker_url_src)
@@ -2211,6 +2235,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     if _run_base > 0:
         _run_mult = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(difficulty, 1.5)
         _initial_timeout = min(int(_run_base * _run_mult), 7200)
+        # 本地模型超时放宽（2026-08-12 改进 2）：本地推理（mlx/Qwen 等）单请求可达
+        # ~23s，云端基准的 run_timeout 会误杀。env AGENT_GO_IS_LOCAL=1 时自动 ×2。
+        if env.get("AGENT_GO_IS_LOCAL", "") == "1":
+            _initial_timeout = min(_initial_timeout * 2, 14400)
+            logger.info(f"[run_timeout] 本地模型检测，超时放宽 ×2 → {_initial_timeout}s")
         logger.info(f"[run_timeout] {sub_id} difficulty={difficulty} base={_run_base}s mult={_run_mult} → timeout={_initial_timeout}s")
     _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)
     _is_simple = _is_simple_task(subtask)

@@ -2179,6 +2179,30 @@ class TestProbeLocalModel:
         monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=mock_ctx))
         assert _probe_local_model("http://127.0.0.1:4000") == ""
 
+    def test_probe_table_structure(self, monkeypatch):
+        """2026-08-12 增强：<th>Model</th><td> 表格结构解析。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        html = b"<table><tr><th>Model</th><td>mlx-community/Qwen3.6-27B-4bit</td></tr></table>"
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = html
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_resp
+        monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=mock_ctx))
+        assert _probe_local_model("http://127.0.0.1:4000") == "mlx-community/Qwen3.6-27B-4bit"
+
+    def test_probe_plain_text_model_line(self, monkeypatch):
+        """2026-08-12 增强：纯文本 'Model: xxx' 行解析。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        html = b"<html><body>Status OK<br>Model: mlx-community/Qwen3.6-27B-4bit<br></body></html>"
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = html
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_resp
+        monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=mock_ctx))
+        assert _probe_local_model("http://127.0.0.1:4000") == "mlx-community/Qwen3.6-27B-4bit"
+
 
 class TestVerifyLocalBackend:
     """S12 本地判定加固：URL 指向本机但实际走云时不清零成本。"""
@@ -2211,7 +2235,7 @@ class TestVerifyLocalBackend:
         """探测失败 → 保守不清零。"""
         from agent_go import executor
         monkeypatch.setattr(executor, "_local_verify_cache", {})
-        monkeypatch.setattr(executor, "_probe_local_model", lambda *a, **k: "")
+        monkeypatch.setattr(executor, "_probe_local_model", lambda *a, **k: "")  # /status 失败
         fake_cp = MagicMock(stdout="")
         monkeypatch.setattr("subprocess.run", MagicMock(return_value=fake_cp))
         is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
@@ -2223,6 +2247,30 @@ class TestVerifyLocalBackend:
         from agent_go import executor
         monkeypatch.setattr(executor, "_local_verify_cache",
                             {"http://127.0.0.1:4000": (False, "glm-4.7")})
+        is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
+        assert is_local is False
+        assert actual == "glm-4.7"
+
+    def test_status_declared_local_wins(self, monkeypatch):
+        """2026-08-12 重设计：/status 声明本地模型 → 直接判本地（claude 探测失败也保持）。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_verify_cache", {})
+        monkeypatch.setattr(executor, "_probe_local_model",
+                            lambda *a, **k: "mlx-community/Qwen3.6-27B-4bit")
+        # 探测调用抛异常（本地推理卡死/超时）→ 不应推翻 /status 判定
+        monkeypatch.setattr("subprocess.run", MagicMock(side_effect=TimeoutError("slow")))
+        is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
+        assert is_local is True
+        assert actual == "mlx-community/Qwen3.6-27B-4bit"
+
+    def test_status_local_but_probe_cloud(self, monkeypatch):
+        """2026-08-12 重设计：/status 声明本地但 claude 探测返回云模型 → 判云（深度校验胜出）。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_verify_cache", {})
+        monkeypatch.setattr(executor, "_probe_local_model",
+                            lambda *a, **k: "mlx-community/Qwen3.6-27B-4bit")
+        fake_cp = MagicMock(stdout='{"type":"assistant","message":{"model":"glm-4.7"}}\n')
+        monkeypatch.setattr("subprocess.run", MagicMock(return_value=fake_cp))
         is_local, actual = executor._verify_local_backend("http://127.0.0.1:4000")
         assert is_local is False
         assert actual == "glm-4.7"
