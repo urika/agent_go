@@ -199,6 +199,8 @@ def api_task(task_id: str) -> Optional[dict]:
         "repo": meta.get("repo", ""),
         "created_at": meta.get("created", ""),
         "subtasks": items,
+        # U5：本 web 实例是否托管该任务进程（cancel 边界标识数据源）
+        "managed": task_runner.is_running(td.name),
         "meta": {
             k: meta.get(k) for k in ("planner_model", "source_batch")
             if meta.get(k)
@@ -1068,6 +1070,24 @@ def api_worktrees(task_id: str) -> Optional[dict]:
     return {"task_id": task_id, "worktrees": entries}
 
 
+def api_audit(limit: int = 100) -> dict:
+    """写操作审计记录（U6/R16 消费端）：web_audit.jsonl 尾部 limit 行倒序。"""
+    path = AGENT_GO_DIR / "web_audit.jsonl"
+    if not path.exists():
+        return {"records": [], "total": 0}
+    try:
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+    except OSError:
+        return {"records": [], "total": 0}
+    records = []
+    for line in reversed(lines[-limit:]):
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return {"records": records, "total": len(lines)}
+
+
 def api_config() -> dict:
     """只读展示用户配置（config.json + role_skill_map.json + 熔断器状态）。"""
     config = load_config()
@@ -1339,6 +1359,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             if len(parts) == 2 and parts[1] == "local-tco":
                 self._reply_json(200, api_local_tco())
+                return
+            if len(parts) == 2 and parts[1] == "audit":
+                self._reply_json(200, api_audit())
                 return
             if len(parts) == 3 and parts[1] == "config" and parts[2] == "diff":
                 name = next((unquote(p[5:]) for p in query.split("&")
@@ -1832,9 +1855,31 @@ class WebHandler(BaseHTTPRequestHandler):
 
 def serve_web(host: str = "127.0.0.1", port: int = 8091,
               token: Optional[str] = None) -> None:
-    """启动只读观察 Web 服务（阻塞）。"""
+    """启动 Web 操作台服务（阻塞）。
+
+    U4 失控防护：
+      - 启动时扫描疑似孤儿任务（EXECUTING 但无托管句柄）并警告
+      - 关闭时 atexit → task_runner.kill_all()（SIGINT 优雅收尾，超时 SIGKILL）
+    """
+    import atexit
+
     httpd = ThreadingHTTPServer((host, port), WebHandler)
     httpd.token = token or ""  # type: ignore[attr-defined]
+
+    orphans = task_runner.orphan_tasks()
+    if orphans:
+        console.warning(
+            f"⚠️ 检测到 {len(orphans)} 个疑似孤儿任务（状态 EXECUTING 但非本实例托管）: "
+            f"{', '.join(orphans[:5])}{' …' if len(orphans) > 5 else ''}。"
+            "若为残留进程请手工 kill，再用 resume 续跑。"
+        )
+
+    @atexit.register
+    def _kill_children() -> None:
+        n = task_runner.kill_all()
+        if n:
+            console.print(f"🛑 web 关闭：已终止 {n} 个托管任务进程（SIGINT 收尾）")
+
     console.print(f"🌐 agent_go web 观察平台: http://{host}:{port}")
     if token:
         console.print("🔐 token 鉴权已启用（Authorization: Bearer <token>）")
@@ -1979,6 +2024,8 @@ _SPA_HTML = """<!DOCTYPE html>
               border-radius:8px; padding:10px 12px; flex-wrap:wrap; }
   .run-input { background:#0b0d11; border:1px solid var(--border); color:var(--text);
                padding:6px 10px; border-radius:6px; font-size:13px; min-width:120px; }
+  .run-textarea { flex:3; resize:vertical; line-height:1.5;
+                  font-family:inherit; }
   .run-hint { color:var(--dim); font-size:12px; }
   .op-bar { display:flex; gap:8px; align-items:center; margin:8px 0 12px;
             flex-wrap:wrap; }
@@ -2177,7 +2224,7 @@ function renderTasks() {
   const runForm =
     '<div class="run-form">'+
     '<input id="runRepo" class="run-input" style="flex:2" placeholder="仓库绝对路径，如 /Users/me/proj">'+
-    '<input id="runTask" class="run-input" style="flex:3" placeholder="任务描述（自然语言）">'+
+    '<textarea id="runTask" class="run-input run-textarea" rows="3" placeholder="任务描述（自然语言，可多行详细描述需求、验收标准、约束等）"></textarea>'+
     '<select id="runParallel" class="run-input"><option value="1">并发1</option>'+
     '<option value="2">并发2</option><option value="3">并发3</option><option value="4">并发4</option></select>'+
     '<select id="runConfirm" class="run-input">'+
@@ -2262,7 +2309,7 @@ async function toggleTask(id, row) {
   row.after(tr);
   try {
     const data = await api('/api/tasks/'+encodeURIComponent(id));
-    td.innerHTML = '<div id="pendingCard"></div>' + taskOpsBar(id, data.status) +
+    td.innerHTML = '<div id="pendingCard"></div>' + taskOpsBar(id, data.status, data.managed) +
       renderTaskDetail(data) +
       '<div class="review-panel" id="reviewPanel"><div class="loading">加载审批台…</div></div>';
     bindDetailEvents(id, tr);
@@ -2275,12 +2322,16 @@ async function toggleTask(id, row) {
   }
 }
 
-function taskOpsBar(id, status) {
+function taskOpsBar(id, status, managed) {
   const running = (status === 'EXECUTING' || status === 'PLANNING');
+  // U5：cancel 边界标识——运行中但非本实例托管（CLI 启动/孤儿）→ 禁用 + 明示
+  const unmanagedRunning = running && !managed;
   return '<div class="op-bar">'+
     '<button class="btn" data-op="resume" '+(running?'disabled':'')+'>▶️ 恢复</button>'+
-    '<button class="btn" data-op="cancel" '+(running?'':'disabled')+'>⏹ 取消</button>'+
+    '<button class="btn" data-op="cancel" '+(running && !unmanagedRunning ?'':'disabled')+
+      (unmanagedRunning ? ' title="任务非本 web 实例启动（CLI 或孤儿进程），无法用本页取消"' : '')+'>⏹ 取消</button>'+
     '<button class="btn" data-op="clean" '+(running?'disabled':'')+'>🗑 清理</button>'+
+    (unmanagedRunning ? '<span class="tag" style="color:var(--yellow)">👁 外部进程，仅可观测（CLI: agent_go resume/cancel）</span>' : '')+
     '<span class="op-msg" id="opMsg"></span>'+
     '</div>';
 }
@@ -3006,6 +3057,22 @@ async function loadStorage() {
     '<td>'+(t.has_meta?'✓':'<span class="st-failed">✗ 孤儿</span>')+'</td></tr>'
   ).join('');
   html += '<table><thead><tr><th>#</th><th>任务</th><th>大小</th><th>meta</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  // U6：写操作审计（R16 消费端闭环）
+  try {
+    const audit = await api('/api/audit');
+    if (audit.records.length) {
+      const aRows = audit.records.map(r =>
+        '<tr><td style="white-space:nowrap">'+esc((r.ts||'').replace('T',' ').slice(0,19))+'</td>'+
+        '<td>'+esc(r.op||'')+'</td>'+
+        '<td>'+(r.ok ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--red)">✗</span>')+'</td>'+
+        '<td style="font-size:11px;color:var(--dim);max-width:340px;word-break:break-all">'+
+          esc(JSON.stringify(r.params||{}).slice(0,120))+'</td>'+
+        '<td style="font-size:11px">'+esc(r.auth||'-')+'</td></tr>').join('');
+      html += '<div class="section-title">📜 操作审计（最近 '+audit.records.length+' / 共 '+audit.total+' 条）</div>'+
+        '<table><thead><tr><th>时间</th><th>操作</th><th>结果</th><th>参数摘要</th><th>操作者</th></tr></thead>'+
+        '<tbody>'+aRows+'</tbody></table>';
+    }
+  } catch (e) {}
   document.getElementById('mainView').innerHTML = html;
 }
 

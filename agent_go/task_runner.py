@@ -190,6 +190,59 @@ class TaskRunner:
             return False
         return True
 
+    def kill_all(self, grace_timeout: float = 5.0) -> int:
+        """终止全部托管子进程（U4：web 关闭时调用，防孤儿失控）。
+
+        先 SIGINT（pipeline 优雅收尾），超时未退则 SIGKILL。返回终止进程数。
+        """
+        import signal
+        with self._lock:
+            items = [(k, p) for k, p in self._procs.items() if p.poll() is None]
+        for key, p in items:
+            try:
+                p.send_signal(signal.SIGINT)
+                logger.info("kill_all: SIGINT → %s", key)
+            except OSError:
+                pass
+        deadline = time.time() + grace_timeout
+        for key, p in items:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                p.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                try:
+                    p.kill()
+                    logger.warning("kill_all: SIGKILL → %s（SIGINT 超时）", key)
+                except OSError:
+                    pass
+        return len(items)
+
+    def orphan_tasks(self) -> list[str]:
+        """疑似孤儿任务：meta 状态为运行中但不在本实例句柄表（U4/U5 检测）。
+
+        场景：web 重启后原 web 启动的任务进程已失（或 CLI 启动的任务）。
+        返回 task_id 列表（状态读 meta.json，唯一事实源）。
+        """
+        from .status import normalize_task_status
+        orphans = []
+        for td in AGENT_GO_DIR.glob("task-*"):
+            if not td.is_dir():
+                continue
+            meta_path = td / "meta.json"
+            if not meta_path.exists():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            status = normalize_task_status(meta.get("status", ""), meta)
+            # 仅 EXECUTING 视为疑似孤儿（PAUSED 是用户主动暂停的正常状态，不警告）
+            if status == "EXECUTING" and not self.is_running(td.name):
+                orphans.append(td.name)
+        return sorted(orphans)
+
     def is_running(self, key: str) -> bool:
         with self._lock:
             proc = self._procs.get(key)

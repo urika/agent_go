@@ -1,9 +1,10 @@
 # agent_go Roadmap：可靠地产出可合并交付物
 
-> 版本：v3.0
-> 更新日期：2026-08-08
-> 当前阶段：P0 产品契约与交付闭环收敛
+> 版本：v4.0
+> 更新日期：2026-08-13
+> 当前阶段：M4 goal 回溯进行中；M0-M3 已 `accepted`
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
+> 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
 > 当前执行清单：[m0-task-list.md](m0-task-list.md)
 
@@ -70,6 +71,30 @@ SDD 能力按产品关键路径分三层建设，不把所有治理能力一次�
 M1.4 只建设最小可追踪和可审查闭环，不建设完整 KnowledgeStore、活文档或自动架构决策；这些能力必须经过 M3 真实任务验证后再决定。
 
 Bench 在进入正式 decision baseline 前，遵循 [ADR-009 Bench 收敛决策](design/adr/ADR-009-bench-convergence.md) 和 [Bench 收敛计划](design/bench-convergence-plan.md)：先完成数据/状态清理、Plan/Verifier 收敛和 Golden Tasks，再扩大任务矩阵。
+
+### 1.5 全自主交付目标（北极星）
+
+「全自主交付」不是单一维度的静态终点，而是三根支柱同时成熟、且**每升一级自治必须同步增加审计/回滚能力**的渐进过程：
+
+| 支柱 | 含义 | 衡量 |
+|---|---|---|
+| ① 工程闭环 | 产物可靠到达目标分支、可追溯、失败可分类可恢复 | Accepted Delivery Rate / Delivery Failure Rate |
+| ② 智能闭环 | 从失败中学习，不重复同类错误 | 首次验证通过率 / 复发率 / 重试成本 |
+| ③ 人机信任 | 成本可控、可审计、可回滚、不被「虚假控制感」欺骗 | Cost per AD / Human Intervention Minutes / audit 覆盖 |
+
+**关键边界**（源自 SDD 学术综述 `sdd-references-and-frameworks.md`）：
+
+- 当前定位 L2（Spec-First）→ 目标 L3（Spec-Anchored），**不以 L5（Spec-as-Source 全自动）为近期目标**。
+- 同源审查是「回响」（P10）：全自主 merge 前必须有「不同源独立验证」兜底，`judge != candidate` 是铁律。
+- 提高自治度的最高杠杆是 **Spec 质量**（P9：恢复完整 spec 即恢复单 Agent 89% 上限），而非堆更多 Agent。
+
+「全自主交付」的可测量定义：
+
+```text
+Accepted Delivery Rate 逼近 1  ∧  Human Intervention Minutes → 0  ∧  Cost per AD 持续下降
+```
+
+且每个可自动化的环节（Plan 确认、merge 决策、失败审查除外，这三者是「例外点」）都应在无人工介入下闭环。
 
 ## 2. Roadmap 管理规则
 
@@ -422,6 +447,85 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 
 完成 M3 后，基于真实数据设定下一阶段目标，而不是继续沿用未经验证的 `$0.05` 或 `K1 ≥97%` 目标。✅（M3 实测 $/任务 $0.017，$0.05 目标已达成；真实仓库通过率 91.7%）
 
+## 7.5 阶段四：M4 goal 回溯（进行中）
+
+目标：`completed` 不再只是「无 subtask 失败」的否定式判定，而是回看 goal/acceptance/overview 的合规度，避免「执行都过但漏了验收」的假交付。
+
+状态：`implemented/dogfooding`。对应 `business-architecture.md` 缺口 2（goal 回溯断裂）。
+
+### M4.1 交付物
+
+- `completed` 判定回看 goal/acceptance/overview，缺失验收不得静默通过。
+- goal 合规度作为与 `status` 正交的维度记录（不改变 verification 决定 status 的语义，见 A1 决策）。
+- 合规度低的任务在 review/replay/status 中可见，供人判断是否需人工补验收。
+
+### M4.2 验收
+
+- 一个「执行全过但漏了验收标准」的任务被标记为合规度不足，而非 completed。
+- goal 合规度可查询、可追溯。
+
+## 7.6 阶段五：M5-M6 问题跟踪与 issue 联动（可并行）
+
+目标：把失败从「单任务内」升级为「跨任务可聚合」的一等公民（Problem 实体），支撑根因分析和复发率统计。
+
+| M | 内容 | 依赖 |
+|---|------|------|
+| **M5 问题跟踪** | 全局 `~/.agent_go/problems.jsonl`，跨任务累积 Problem 实体（id/状态/生命周期，见 A5 决策） | 无 |
+| **M6 issue 联动** | `--track-issues` 显式开启（默认关，避免 issue 洪水，见 A6 决策）；Problem 状态机 + GitHub issue 联动 | M5 |
+
+状态：`designed`（见 `business-architecture.md` 缺口 3，M5-M6）。
+
+## 7.7 阶段六：智能闭环与自治（决策门后）
+
+目标：从「反应式」升级到「反思式」，再逐步收敛人工介入点，向全自主交付（渐进自治）演进。**此阶段必须先在决策门 B1-B5 拍板后再排期。**
+
+### 决策门（对应 `business-architecture.md` B 类决策）
+
+| 决策 | 问题 | 现状倾向 |
+|------|------|---------|
+| B2 定位 | 交付工具 vs bench 工具 | 交付工具（M1 证据） |
+| B5 循环智能层级 | 反应式 → 反思式？ | 先做最小止血 + 埋点，M3 数据支持后再上 Reflexion |
+| B4 问题跟踪定位 | issue 状态机 vs 聚合 vs Reflexion 记忆源 | 若选反思式，Problem 需承载 `failure_pattern` |
+| B1 merge 策略 | 分叉时 ff-only 失败 vs 自动 merge commit | ff-only 保守提示 + 手动命令兜底 |
+| B3 spec ROI | 0 次使用还做 4 天闭环吗 | 先 M3 冒烟 5+ 任务验证，再决定 |
+
+### 能力清单（按自治度递进，每级设产品价值门禁）
+
+**阶段 A — 补齐工程闭环（最高优先）**
+- A1 文件所有权约束：同一核心文件只允许一个 subtask 负责（规划期 + L1 门禁强制）。
+- A2 函数级验收契约：subtask 验收绑定函数/行为级条件（`_extract_verification_commands` 扩展）。
+- A3 未提交基线处理：启动检测 dirty worktree，`--baseline` 显式提交或强提示。
+- A4 M4 goal 回溯（见 §7.5）。
+
+**阶段 B — spec 闭环验证（ROI 待证）**
+- B1 spec 持久化 + §5 结构化（Markdown checkbox + 反引号命令，见 A2 决策）。
+- B2 AST 冲突检测器（P9，97% 精度零 LLM 成本）加进 Spec Gate。
+- B3 用 5+ 真实任务冒烟，测「填写成本 / Plan 编辑次数 / 追踪完整率 / 交付成功率」。
+
+**阶段 C — 智能闭环（B5 决策后）**
+- C1 数据埋点补全（verify_state schema 前向兼容 KnowledgeStore）。
+- C2 Reflexion 批评层：改「retry≥2 触发」（当前每次 retry 触发，见 M2.2 ⚠️），受 token/次数/预算约束。
+- C3 局部重规划：失败触发一次 Plan 拆分建议，默认人工确认。
+- C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。
+
+**阶段 D — 自治决策（谨慎）**
+- D1 Reviewer 灰度（高风险任务，review cost ≤ 主任务 20% 门禁）。
+- D2 自动 merge 策略落地（B1 决策后）。
+- D3 目标态：人只在「例外点」介入（Plan 确认 + merge 决策 + 失败审查），其余全自动。
+
+**阶段 E — Spec-as-Source 探索（不排期，试点）**
+- 仅在安全/受限域（OpenAPI→stub 类）试点 L5，验证「再生测试」质量门禁。
+
+### 关键路径
+
+```text
+阶段 A（工程闭环）──┬─ A4 goal 回溯（M4，进行中）
+                    └─ A5 问题跟踪（M5-M6，可并行）
+阶段 B（spec 闭环）→ 冒烟 ROI → 阶段 C（智能闭环，依赖 B5 + 埋点）
+                             → 阶段 D（自治，依赖 C + B1）
+                             → 阶段 E（仅试点）
+```
+
 ## 8. 扩展能力决策门
 
 以下能力暂不排入固定实施日期，只在 M3 完成后按实验结果决定。
@@ -512,14 +616,19 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 
 ## 11. 当前决策
 
-当前唯一关键路径为：
+当前关键路径为：
 
 ```text
-M0 产品契约与指标冻结
-  -> M1 交付闭环
-  -> M2 核心可靠性
-  -> M3 真实任务验证
-  -> 扩展能力逐项决策
+M0 产品契约与指标冻结  ✅ accepted
+  -> M1 交付闭环        ✅ accepted
+  -> M2 核心可靠性      ✅ accepted
+  -> M3 真实任务验证    ✅ accepted
+  -> M4 goal 回溯       进行中
+  -> M5-M6 问题跟踪     可并行
+  -> 阶段 B spec 闭环   → 冒烟 ROI 决策
+  -> 阶段 C 智能闭环    → B5 决策后
+  -> 阶段 D 自治决策    → B1 决策后
+  -> 阶段 E Spec-as-Source  仅试点
 ```
 
-在 M3 结束前，不对“年度 K1 ≥97%”“$/pass ≤$0.03”等绝对目标做硬承诺；先建立可信 Accepted Delivery 基线，再根据真实数据制定下一版目标。
+在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017、canonical 35 任务通过率 60%、bench 中 `accepted_delivery=0`（交付闭环自动验证是下一阶段头号硬指标）。

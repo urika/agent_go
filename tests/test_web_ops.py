@@ -733,3 +733,110 @@ class TestArgvContract:
             args = parser.parse_args(argv[3:])
             assert args.command == extra[0]
             assert args.json_mode is True
+
+
+# ── P1：U4 失控防护 / U5 cancel 边界 / U6 审计 UI ──────────────
+
+class TestKillAll:
+    """U4：web 关闭时终止全部托管子进程。"""
+
+    def test_kill_all_sigint(self):
+        import signal
+        from unittest.mock import MagicMock
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.wait.return_value = 0  # SIGINT 后优雅退出
+        runner._procs["k1"] = proc
+        n = runner.kill_all(grace_timeout=1)
+        assert n == 1
+        proc.send_signal.assert_called_once_with(signal.SIGINT)
+        proc.kill.assert_not_called()
+
+    def test_kill_all_escalates_sigkill(self):
+        import subprocess
+        from unittest.mock import MagicMock
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=1)
+        runner._procs["k1"] = proc
+        n = runner.kill_all(grace_timeout=1)
+        assert n == 1
+        proc.kill.assert_called_once()
+
+    def test_kill_all_skips_dead(self):
+        from unittest.mock import MagicMock
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        proc = MagicMock()
+        proc.poll.return_value = 0  # 已退出
+        runner._procs["k1"] = proc
+        assert runner.kill_all() == 0
+        proc.send_signal.assert_not_called()
+
+
+class TestOrphanTasks:
+    """U4：疑似孤儿任务检测（EXECUTING 但无托管句柄）。"""
+
+    def test_detects_orphan(self, ops_env, monkeypatch):
+        import agent_go.task_runner as tr
+        monkeypatch.setattr(tr, "AGENT_GO_DIR", ops_env)
+        _mk_task(ops_env, TID, status="EXECUTING")
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        assert runner.orphan_tasks() == [TID]
+
+    def test_paused_not_orphan(self, ops_env, monkeypatch):
+        import agent_go.task_runner as tr
+        monkeypatch.setattr(tr, "AGENT_GO_DIR", ops_env)
+        _mk_task(ops_env, TID, status="PAUSED")
+        from agent_go.task_runner import TaskRunner
+        assert TaskRunner().orphan_tasks() == []
+
+    def test_managed_not_orphan(self, ops_env, monkeypatch):
+        import agent_go.task_runner as tr
+        monkeypatch.setattr(tr, "AGENT_GO_DIR", ops_env)
+        _mk_task(ops_env, TID, status="EXECUTING")
+        from unittest.mock import MagicMock
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        runner._procs[TID] = proc
+        assert runner.orphan_tasks() == []
+
+
+class TestManagedFlag:
+    """U5：api_task 返回 managed（cancel 边界标识数据源）。"""
+
+    def test_managed_false_by_default(self, ops_server, ops_env):
+        _mk_task(ops_env, TID, status="EXECUTING")
+        d = _get(f"{ops_server}/api/tasks/{TID}")
+        assert d["managed"] is False
+
+    def test_managed_true_when_running(self, ops_server, ops_env, monkeypatch):
+        _mk_task(ops_env, TID, status="EXECUTING")
+        monkeypatch.setattr(ws.task_runner, "is_running", lambda k: k == TID)
+        d = _get(f"{ops_server}/api/tasks/{TID}")
+        assert d["managed"] is True
+
+
+class TestAuditApi:
+    """U6：审计查看端点。"""
+
+    def test_audit_empty(self, ops_server):
+        d = _get(f"{ops_server}/api/audit")
+        assert d["records"] == []
+
+    def test_audit_returns_recent_first(self, ops_server, ops_env, monkeypatch):
+        monkeypatch.setattr(ws.task_runner, "start_run",
+                            lambda *a, **k: TID)
+        _post(f"{ops_server}/api/tasks/run", {"repo": "/tmp", "task": "第一次"})
+        _post(f"{ops_server}/api/tasks/run", {"repo": "/tmp", "task": "第二次"})
+        d = _get(f"{ops_server}/api/audit")
+        assert len(d["records"]) == 2
+        assert d["records"][0]["params"]["task"] == "第二次"  # 倒序（最新在前）
+        assert d["total"] == 2
