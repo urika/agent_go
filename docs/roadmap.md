@@ -469,6 +469,17 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 
 只有存在真实用户场景、端到端验收和独立成功率指标时进入 roadmap。功能接入不等于产品成功，必须能证明对 Accepted Delivery 或人工成本有贡献。
 
+### 本地模型生命周期管理
+
+弱模型 worker 实验（goal_ab，2026-08-12）已证明本地模型（经 llama-defender 代理）可作为生产 worker 后端，但启停/切换/监控依赖人工操作 manage.sh。将本地模型纳入 agent_go 管理，分阶段落地（设计：[local-model-management-design.md](design/local-model-management-design.md)）：
+
+1. **P0 只读管理面**：`agent_go model status/list/current/diagnose`；分级诊断（proxy/backend/模型漂移）。
+2. **P1 启停与切换**：`model start/stop/switch`，切换四步原子序列（switch→stop-backend→reload→start-backend）+ 失败回滚 + 活跃任务并发保护。
+3. **P2 服务保活 + Pipeline 集成**：诊断→修复阶梯（reload→start-backend→restart，逐级幂等升级）；pre-flight readiness；`auto_start`/`auto_repair`；**Plan 前模型感知快照注入 planner**（本地不可达时按云端路由，fail-open）；执行中不打断在途任务。不可达且修复失败时明确归因 `infrastructure_failure`。
+4. **P3 监控**：status 面板 + web 页面展示后端健康与 ttft 指标。
+
+默认 `local_model_manager.enabled=false`，不改变现有 difficulty→worker_models→worker_backends 路由语义。
+
 ### H3 自进化
 
 在 KnowledgeStore、失败分类和指标冻结之前不启动。没有可信历史数据，自进化只会放大测量错误和错误经验。
