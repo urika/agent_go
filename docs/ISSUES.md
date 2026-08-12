@@ -662,3 +662,19 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 | list-tools | `bash -c 'python -c "..."'` | ❌ 仍拒（bash 不在白名单） | 预期：default-deny 刻意保留 |
 
 **结论**：修复**部分有效**——`python -m <模块>` 场景直接救回（add-stats-command），统计口径修正（6 个任务不再污染 infra）。剩余 4 个任务的命令仍被拒属**刻意保留的防御**（装饰器/换行/自然语言前缀/bash 包裹），根治依赖 prompt 生成规范预防，而非放宽安全门禁。**已确认不改变 G8 短路语义**（executor.py:1289-1296：被拒命令直接失败不进入修复重试），归类修正仅影响统计口径，不影响执行路径。
+
+---
+
+### ISSUE-40 Planner 交付物 schema 混淆导致 0 子任务真空 DELIVERY_READY（假成功）
+
+- **严重度**：P1（假交付污染指标——任务未做任何工作却报告成功）
+
+**问题**（2026-08-12 goal_ab 实验发现）：任务文本要求产出 JSON 交付物（如「项目计划 JSON」）时，deepseek planner 把交付物的 JSON schema（project/version/tasks）误当 agent_go 执行计划 schema 返回 → `plan_to_subtasks` 得 0 个 step → 0 子任务的 pipeline 真空通过 → 误报 DELIVERY_READY。
+
+**修复**（2026-08-12）：
+
+1. `planning.py validate_plan_quality` 新增 `empty_plan` 阻断：0 子任务 → `blocking_issues` 含 `empty_plan`，任务标记 BLOCKED 不进入执行。
+2. `empty_plan` 纳入 `PLAN_REPAIRABLE_ISSUE_TYPES`：Plan preflight 可自动修订一次（反馈含 schema 纠正提示「不要把交付物 JSON 当作执行计划」）。
+3. `build_plan_repair_feedback` 新增 empty_plan 提示文案。
+
+**验证**：test_planning.py 新增 2 用例（empty_plan 阻断 + repairable、反馈文案）；全量 2170 passed。

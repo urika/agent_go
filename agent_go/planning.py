@@ -37,6 +37,7 @@ PLAN_REPAIRABLE_ISSUE_TYPES = {
     "unverifiable_upstream",
     "file_overlap_without_dependency",
     "over_decomposition",
+    "empty_plan",
 }
 
 
@@ -59,6 +60,8 @@ def build_plan_repair_feedback(plan_quality: dict[str, Any], max_chars: int = 24
         reason = str(issue.get("reason", ""))
         if issue_type == "verification_command_rejected":
             reason = (reason or "验证命令不在安全白名单") + "；不要使用 bash/sh -c 或自然语言前缀，python -c 必须为单行，优先使用 python -m <模块> 或测试框架。"
+        if issue_type == "empty_plan":
+            reason = (reason or "Plan 产出 0 个执行步骤") + "；steps 不能为空——不要把任务要求的交付物 JSON 当作执行计划，必须输出包含可执行 steps 的 Plan schema。"
         prefix = f"[{issue_type}]"
         if subtask_id:
             prefix += f" subtask={subtask_id}"
@@ -295,6 +298,17 @@ def validate_plan_quality(
     seen_ids: set[str] = set()
     graph: dict[str, list[str]] = {}
     covered: set[str] = set()
+
+    # 0 子任务 = 假成功源（goal_ab 实验实证：planner 把交付物 JSON schema 误当
+    # 执行计划返回 → 0 steps → 真空 DELIVERY_READY）。必须阻断，不得进入执行。
+    if not subtasks:
+        issues.append({
+            "type": "empty_plan",
+            "reason": ("Plan 拆解产出 0 个子任务——通常是 planner 返回了错误的 JSON schema"
+                       "（如把任务要求的交付物数据当作执行计划）。执行计划必须包含 steps "
+                       "列表，每个 step 需有 id/title/description/verification。"),
+        })
+
     for st in subtasks:
         sid = str(st.get("id", ""))
         seen_ids.add(sid)

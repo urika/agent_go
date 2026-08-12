@@ -156,6 +156,25 @@ def test_build_plan_repair_feedback_is_bounded_and_actionable():
     assert "不要使用 bash/sh -c" in feedback
 
 
+def test_validate_plan_quality_empty_plan_is_blocked():
+    """0 子任务必须阻断——goal_ab 实验实证：planner 把交付物 JSON schema 误当执行计划
+    返回 → 0 steps → 真空 DELIVERY_READY 假成功。empty_plan 为 blocking + repairable。"""
+    result = validate_plan_quality([])
+    assert result["status"] == "blocked"
+    assert result["blocking_issues"][0]["type"] == "empty_plan"
+    assert any(i["type"] == "empty_plan" for i in result["repairable_issues"])
+
+
+def test_build_plan_repair_feedback_empty_plan_hint():
+    """empty_plan 的修复反馈须包含 schema 纠正提示。"""
+    from agent_go.planning import build_plan_repair_feedback
+
+    quality = validate_plan_quality([])
+    feedback = build_plan_repair_feedback(quality)
+    assert "empty_plan" in feedback
+    assert "交付物 JSON" in feedback
+
+
 def test_validate_plan_quality_detects_scope_and_requirement_gaps():
     result = validate_plan_quality([
         {"id": "sub-1", "verification": "pytest tests", "files": ["src/a.py"],
