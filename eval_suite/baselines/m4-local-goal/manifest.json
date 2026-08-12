@@ -12,7 +12,7 @@
   "repeat_values": [
     1
   ],
-  "results_sha256": "f40f5f8a74e641e46b5261aebe7f2c029509df6dcf2c3d9a4632396e7d5ec5d8",
+  "results_sha256": "0b0012e7e2635dc6cc08f6cb21989d36eb55740e92fd175afcc33627945b7691",
   "source_batch": "m4-local-goal",
   "suite": "canonical",
   "task_catalog_hash": "7d080b11d012c8bfa1abc2e69d22ccf490e3b93152b8ae96378fb5a38455077a",

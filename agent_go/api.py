@@ -28,7 +28,11 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
     base_url = api_cfg["base_url"]
     api_key = get_api_key(config)
     model = api_cfg["model"]
-    if not api_key:
+    # 本地后端（127.0.0.1/localhost）跳过 api_key 强制检查：本地代理通常无需
+    # key（已实测 localhost:4000 无 key 可用）。纯本地模式（无网络、无云 key）
+    # 下 generate_plan/evaluator 才能正常走本地，否则 api_key 空直接 raise 卡死。
+    _is_local_url = re.search(r"(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])", base_url)
+    if not api_key and not _is_local_url:
         raise RuntimeError("API Key 未配置。请设置 AGENT_GO_API_KEY")
 
     headers = {"Content-Type": "application/json"}
@@ -462,8 +466,18 @@ EXAMPLE (3-step plan):
 
 def decompose_fallback(task: str, repo: Path, config: dict[str, Any], logger: logging.Logger) -> list[dict[str, Any]]:
     logger.warning("Plan Mode 失败，降级")
-    local_url = config.get("fallback", {}).get("local_model_url", "http://localhost:8000/v1/chat/completions")
-    local_name = config.get("fallback", {}).get("local_model_name", "qwen")
+    # 本地模型端点：优先复用 plan_api.base_url 若指向本地（纯本地模式配置一致性），
+    # 否则用 fallback.local_model_url（默认 localhost:4000，此前 8000 为废弃端口）。
+    _plan_api = config.get("plan_api", {}) or {}
+    _plan_base = str(_plan_api.get("base_url", ""))
+    _is_local_plan = bool(re.search(r"(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])", _plan_base))
+    _fallback_cfg = config.get("fallback", {}) or {}
+    if _is_local_plan:
+        local_url = _plan_base
+        local_name = str(_plan_api.get("model", "claude-sonnet-4-6"))
+    else:
+        local_url = _fallback_cfg.get("local_model_url", "http://localhost:4000/v1/chat/completions")
+        local_name = _fallback_cfg.get("local_model_name", "claude-sonnet-4-6")
     try:
         import urllib.request
         payload = json.dumps({

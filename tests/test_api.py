@@ -352,9 +352,11 @@ class TestDecomposeFallback:
         assert len(result) >= 1
 
     def test_fallback_default(self, logger):
-        """无匹配规则时返回单步任务"""
+        """本地模型不可达时返回单步任务（规则兜底）。"""
         from agent_go.api import decompose_fallback
-        config = {"fallback": {"enable_rules": True}}
+        config = {"fallback": {"enable_rules": True,
+                               "local_model_url": "http://localhost:9999/v1/chat/completions",
+                               "local_model_name": "claude-sonnet-4-6"}}
         result = decompose_fallback("do something random", Path("/tmp"), config, logger)
         assert len(result) == 1
         assert result[0]["id"] == "sub-1"
@@ -373,6 +375,24 @@ class TestDecomposeFallback:
         # 本地模型不可达时应降级到 DECOMPOSE_RULES
         result = decompose_fallback("test JWT auth", Path("/tmp"), config, logger)
         assert len(result) >= 1
+
+    def test_local_reachable_uses_llm(self, logger):
+        """本地代理可达（localhost:4000）时用本地 LLM 分解（2026-08-12 修复 2）。"""
+        from unittest.mock import patch
+        from agent_go.api import decompose_fallback
+        config = {"fallback": {"local_model_url": "http://localhost:4000/v1/chat/completions",
+                               "local_model_name": "claude-sonnet-4-6",
+                               "enable_rules": True}}
+        fake_body = b'{"choices": [{"message": {"content": "[{\\"title\\": \\"A\\", \\"description\\": \\"d\\", \\"files_hint\\": \\"*\\", \\"agent_prompt\\": \\"p\\"}, {\\"title\\": \\"B\\", \\"description\\": \\"d2\\", \\"files_hint\\": \\"*\\", \\"agent_prompt\\": \\"p2\\"}]"}}]}'
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = fake_body
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_resp
+        with patch("urllib.request.urlopen", return_value=mock_ctx) as mock_open:
+            result = decompose_fallback("do complex task", Path("/tmp"), config, logger)
+        assert len(result) == 2
+        assert result[0]["title"] == "A"
+        mock_open.assert_called_once()
 
     def test_subtask_id_format(self, logger):
         """子任务 ID 格式 sub-1, sub-2, ..."""
@@ -406,6 +426,32 @@ class TestGeneratePlan:
                                 with patch("agent_go.api.load_role_skill_map", return_value={}):
                                     with pytest.raises(RuntimeError, match="API Key"):
                                         generate_plan("task", Path("/tmp"), config, logger)
+
+    def test_local_url_skips_api_key_check(self, logger):
+        """2026-08-12 纯本地模式：base_url 指向本机时无需 API key。"""
+        import os
+        saved = os.environ.pop("AGENT_GO_API_KEY", None)
+        try:
+            config = {
+                "plan_api": {
+                    "provider": "openai",
+                    "base_url": "http://localhost:4000/v1/chat/completions",
+                    "model": "claude-sonnet-4-6",
+                    "api_key": "",
+                }
+            }
+            fake_body = b'{"choices": [{"message": {"content": "ok"}}]}'
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = fake_body
+            mock_ctx = MagicMock()
+            mock_ctx.__enter__.return_value = mock_resp
+            with patch("urllib.request.urlopen", return_value=mock_ctx) as mock_open:
+                content = call_api(config, [{"role": "user", "content": "hi"}], logger)
+            assert content == "ok"
+            mock_open.assert_called_once()
+        finally:
+            if saved is not None:
+                os.environ["AGENT_GO_API_KEY"] = saved
 
     def test_cache_hit_on_first_iteration(self, logger):
         """第一次迭代且无补充/文档时检查缓存"""

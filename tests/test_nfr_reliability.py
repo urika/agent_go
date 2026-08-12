@@ -221,25 +221,34 @@ class TestFallbackCoverage:
             assert "description" in st, f"subtask 缺少 description: {st}"
 
     def test_matching_jwt_pattern_returns_specific_subtasks(self):
-        """JWT 关键词命中 → 3 个专门子任务"""
+        """JWT 关键词命中 → 3 个专门子任务（本地模型不可达时走规则兜底）"""
         subtasks = decompose_fallback(
             "后端 JWT 签名迁移到 RS256",
-            Path("/tmp"), {}, MagicMock(),
+            Path("/tmp"),
+            {"fallback": {"local_model_url": "http://localhost:9999/v1/chat/completions",
+                          "local_model_name": "claude-sonnet-4-6"}},
+            MagicMock(),
         )
         assert len(subtasks) == 3
 
     def test_matching_test_pattern_returns_specific_subtasks(self):
-        """测试关键词命中 → 2 个专门子任务"""
+        """测试关键词命中 → 2 个专门子任务（本地模型不可达时走规则兜底）"""
         subtasks = decompose_fallback(
-            "补充单元测试覆盖率", Path("/tmp"), {}, MagicMock(),
+            "补充单元测试覆盖率", Path("/tmp"),
+            {"fallback": {"local_model_url": "http://localhost:9999/v1/chat/completions",
+                          "local_model_name": "claude-sonnet-4-6"}},
+            MagicMock(),
         )
         assert len(subtasks) == 2
 
     def test_no_pattern_match_returns_single_fallback(self):
-        """无规则匹配 → 单个兜底子任务"""
+        """无规则匹配 → 单个兜底子任务（本地模型不可达时走规则兜底）"""
         subtasks = decompose_fallback(
             "do something completely random",
-            Path("/tmp"), {}, MagicMock(),
+            Path("/tmp"),
+            {"fallback": {"local_model_url": "http://localhost:9999/v1/chat/completions",
+                          "local_model_name": "claude-sonnet-4-6"}},
+            MagicMock(),
         )
         assert len(subtasks) == 1
         assert subtasks[0]["id"] == "sub-1"

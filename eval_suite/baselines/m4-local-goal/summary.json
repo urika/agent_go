@@ -1,14 +1,14 @@
 {
   "bench_schema_version": 1,
   "config_hash": "1d556f6adfc241dbc0e7d4d5810a62360b281148b7e86b111f4c6ba956bb0471",
-  "generated_at": "2026-08-12T12:50:57.296836+00:00",
+  "generated_at": "2026-08-12T12:58:20.539292+00:00",
   "metric_freeze_version": 1,
   "metrics": {
     "accepted_delivery_count": 0,
     "accepted_delivery_rate": 0.0,
     "cost_per_accepted_delivery_usd": null,
     "delivery_failure_rate": 0.0,
-    "dollar_per_pass_diagnostic_usd": 0.0,
+    "dollar_per_pass_diagnostic_usd": 0.0005,
     "excluded_reasons": {},
     "excluded_task_count": 0,
     "failure_class_counts": {
@@ -61,7 +61,7 @@
     "retry_rate": 0.0,
     "time_to_accepted_delivery_sec": null,
     "timeout_rate": 0.0,
-    "valid_cost_usd": 0.0,
+    "valid_cost_usd": 0.001,
     "valid_task_count": 2
   },
   "models": [

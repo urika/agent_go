@@ -110,6 +110,9 @@ def auto_config():
     config["behavior"]["auto_confirm_plan"] = True
     config["behavior"]["auto_confirm_subtasks"] = True
     config["behavior"]["auto_verify_subtask"] = True
+    # 集成测试不依赖外部本地代理：fallback 指向不可达 URL，锁定规则兜底行为
+    config["fallback"]["local_model_url"] = "http://localhost:9999/v1/chat/completions"
+    config["fallback"]["local_model_name"] = "claude-sonnet-4-6"
     return config
 
 

@@ -1,7 +1,7 @@
 {
   "bench_schema_version": 1,
   "config_hash": "1d556f6adfc241dbc0e7d4d5810a62360b281148b7e86b111f4c6ba956bb0471",
-  "generated_at": "2026-08-12T12:50:57.298277+00:00",
+  "generated_at": "2026-08-12T12:58:20.540001+00:00",
   "metric_freeze_version": 1,
   "metrics": {
     "accepted_delivery_count": 0,

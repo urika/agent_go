@@ -100,8 +100,8 @@ DEFAULT_CONFIG = {
         "prompt_template": "default",   # 可扩展 prompt 模板名
     },
     "fallback": {
-        "local_model_url": "http://localhost:8000/v1/chat/completions",
-        "local_model_name": "qwen",
+        "local_model_url": "http://localhost:4000/v1/chat/completions",
+        "local_model_name": "claude-sonnet-4-6",
         "enable_rules": True
     },
     # 本地模型 TCO 成本口径（2026-08-12）：本地模型 metering 成本清零（$0），
