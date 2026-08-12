@@ -1,18 +1,27 @@
 # M3 小样任务 1: llama-defender 新增功能（medium）
-# 场景：新增功能——为 message_converter.py 增加工具块文本估计的边界处理
+# 场景：新增功能——为 message_converter.py 增加消息列表字符统计
+# 2026-08-12 修订：修复"假通过"缺陷——明确不修改已有函数 + 验证含调用方回归
 id: ld-add-message-char-estimator
 difficulty: medium
 repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/llama-defender
 task: |
   在 message_converter.py 中新增函数 `estimate_message_chars(messages: list) -> int`：
-  - 遍历消息列表，用 `_estimate_message_chars` 的语义统计每个消息的字符数并求和
+  - 统计整个消息列表的字符数总和
   - 对 None/空列表返回 0
   - 对包含 thinking 块的消息，只统计非 thinking 部分（与 `_strip_thinking_from_msg` 语义一致）
   - 加 docstring 说明参数和返回
+
+  ## 重要约束（防止破坏已有代码）
+  - **不得修改已有函数** `_estimate_message_chars` 的签名或语义（它在仓库中接收**消息列表**并返回总字符数，
+    被 lifecycle.py / truncation.py / pipeline.py 等十几处调用方按列表语义调用）。
+  - 新函数 `estimate_message_chars` 必须**独立实现**字符统计逻辑（或在内部复用 `_estimate_message_chars`
+    的列表语义），不得改变 `_estimate_message_chars` 的行为。
+  - 完成后检查 `_estimate_message_chars` 的调用方（lifecycle.py:84、truncation.py 等）仍按列表语义正常工作。
 verification:
   - "python -m pytest test/unit/test_message_converter.py -q -k 'estimate or chars or thinking'"
-  - "python -c \"from message_converter import estimate_message_chars; assert estimate_message_chars([]) == 0; assert estimate_message_chars(None) == 0; print('OK')\""
-timeout: 600
+  - "python -m pytest test/unit/test_lifecycle.py test/unit/test_truncation_edge.py -q"
+  - "python -c \"from message_converter import estimate_message_chars, _estimate_message_chars; assert estimate_message_chars([]) == 0; assert estimate_message_chars(None) == 0; msgs = [{'content': 'abc'}]; assert estimate_message_chars(msgs) == 3; assert _estimate_message_chars(msgs) == 3; print('OK')\""
+timeout: 900
 
 # S10 成本控制
 cost_control:
