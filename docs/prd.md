@@ -1,9 +1,10 @@
 # agent_go 产品需求文档
 
-> 版本：v3.0
-> 更新日期：2026-08-08
+> 版本：v4.0
+> 更新日期：2026-08-13
 > 配套路线图：[roadmap.md](roadmap.md)
-> 当前阶段：M0 产品契约与指标冻结
+> 当前阶段：M4 goal 回溯进行中；M0-M3 已 `accepted`
+> 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
 > 当前执行清单：[m0-task-list.md](m0-task-list.md)
 
@@ -27,6 +28,30 @@ agent_go 的核心差异不是提供新的模型，而是提供跨模型可复�
 - 自动验证和失败阻断。
 - 成本、状态和恢复控制。
 - 可审查的最终交付。
+
+### 1.1a 北极星：全自主交付（渐进自治）
+
+agent_go 的长期目标是**全自主交付**，但定义为三根支柱同时成熟、且每升一级自治必须同步增加审计/回滚能力的渐进过程，而非「无审查自动 merge」的静态终点：
+
+| 支柱 | 含义 | 衡量 |
+|---|---|---|
+| ① 工程闭环 | 产物可靠到达目标分支、可追溯、失败可分类可恢复 | Accepted Delivery Rate |
+| ② 智能闭环 | 从失败中学习，不重复同类错误 | 首次验证通过率 / 复发率 / 重试成本 |
+| ③ 人机信任 | 成本可控、可审计、可回滚、不被「虚假控制感」欺骗 | Cost per AD / Human Intervention Minutes |
+
+可测量定义：
+
+```text
+Accepted Delivery Rate 逼近 1  ∧  Human Intervention Minutes → 0  ∧  Cost per AD 持续下降
+```
+
+三个「例外点」长期保留人工决策：**Plan 确认、merge 决策、失败审查**。其余环节逐步收敛为全自动。
+
+关键边界（源自 SDD 学术综述 `design/sdd-references-and-frameworks.md`）：
+
+- 当前 L2（Spec-First）→ 目标 L3（Spec-Anchored），**不以 L5（Spec-as-Source 全自动）为近期目标**。
+- 同源审查是「回响」（P10）：`judge != candidate` 是铁律，全自主 merge 前必须有「不同源独立验证」兜底。
+- 最高杠杆是 **Spec 质量**（P9），而非堆更多 Agent。
 
 ### 1.2 核心用户
 
@@ -515,34 +540,36 @@ system_error
 
 ## 7. 当前差距
 
-### P0
+> 状态说明：P0 已随 M0-M3 验收大部分关闭，以下为 M4 之后、面向「全自主交付」的剩余差距。
 
-- 交付 branch、目标 branch 和 PR head/base 需要统一并完成真实 Git 验收。
-- PR 创建失败必须独立标记为 `delivery_failed`。
-- CLI、MCP、meta 和 recover 的状态语义需要统一。
-- 可信指标基线尚未冻结。
-- 任务级 Accepted Delivery 和 Cost per Accepted Delivery 尚未成为正式门禁。
+### P0（阻断渐进自治的工程闭环缺口）
 
-### P1
+- 文件所有权不清：自动拆解会让多个 subtask 修改同一核心文件，互相重写、冲突（评估文档头号问题）。
+- 无函数级验收契约：局部测试通过 ≠ 功能接入真实执行路径。
+- 不继承未提交基线：worktree 从 HEAD 建，看不到主工作树未提交改动。
+- `accepted_delivery` 在 bench 流水线中尚未自动验证（bench 不建 PR，交付闭环只在人工引导的 M1 验证跑通过）。
+- goal 回溯未闭合：`completed` 仍可能「执行全过但漏了验收」（M4 进行中）。
 
-- 无进展检测和局部重规划仍不完整。
-- Goal Contract/Policy 已完成设计，当前 Goal Loop 仍默认关闭；Claude/Kimi provider adapter、auto 策略和默认开启条件需要真实任务 A/B 验证。
-- Reflexion 失败分析和循环状态埋点尚未形成稳定产品契约。
-- recover/resume、checkpoint、进程树清理需要更多故障注入测试。
-- MCP 工具成功率和产物完整率尚未完整聚合。
-- Spec 的真实使用率和收益尚未验证。
-- KnowledgeStore 的收益尚未通过 A/B 实验验证。
-- Reviewer 成本和质量收益尚未验证。
+### P1（智能闭环缺口，B5 决策后）
 
-### P2
+- Reflexion 每次 retry 触发（非阈值后），且无 KnowledgeStore 支撑。
+- 局部重规划（执行中）仍是实验能力，无「无进展 → 重规划」自动触发。
+- 问题跨任务不累积：无全局 Problem 实体（M5-M6）。
+- spec 闭环历史 0 次使用，ROI 未验证（阶段 B 冒烟）。
+- Reviewer 成本与质量收益未验证（阶段 D 灰度）。
 
-- IDE、CI、Office 和多 Runtime 扩展缺少明确的真实用户需求证据。
+### P2（扩展与行为指标）
+
+- IDE、CI、Office 和多 Runtime 扩展缺少真实用户需求证据。
 - 缺少 PR 接受率、人工介入时间和用户重复使用率等行为指标。
-- 缺少稳定的用户 dogfood 任务集。
+- 缺少稳定的用户 dogfood 任务集（M3 的 12 任务是首批，需持续扩充）。
+- canonical 35 任务通过率仅 60%，难任务成功率是硬任务集天花板。
 
 ## 8. 版本计划
 
 ### M0：产品契约与指标冻结
+
+状态：`accepted`（decision-20260812 基线：pass_rate_diagnostic=0.924、first_pass_rate=0.864、$/pass=$0.0193）。
 
 目标：明确什么算成功、多少钱、多久、为什么失败。
 
@@ -562,6 +589,8 @@ system_error
 - 模型、验证、timeout、预算、基础设施和交付失败可区分。
 
 ### M1：交付闭环
+
+状态：`accepted`（真实 PR 证据：urika/agent_go#38 MERGED、urika/vibe-astock#1 OPEN、urika/llama-defender#8 MERGED；192 项 M1 测试通过）。
 
 目标：用户能够拿到完整、正确、可合并的 PR。
 
@@ -583,6 +612,8 @@ system_error
 - 交付失败后不需要重新运行 Agent 即可重试交付。
 
 ### M2：核心可靠性
+
+状态：`accepted`（M2.1-M2.5 达成；deviation.py 数据层 + `agent_go deviation` + executor 失败集成；2134 测试通过）。
 
 目标：降低失败率、恢复成本和无效 token 消耗。
 
@@ -610,6 +641,8 @@ system_error
 
 ### M3：真实任务验证
 
+状态：`accepted`（12 任务 × 2 真实仓库，通过率 91.7%，总成本 $0.20；0 人工介入；归档基线 m3-dogfood-20260812）。
+
 目标：用真实产品证据替代单元测试数量。
 
 使用 10-20 个真实工程任务，覆盖新增功能、Bug 修复、跨文件重构、测试补充、迁移和恢复场景。
@@ -634,9 +667,30 @@ system_error
 
 M3 完成后，基于真实数据设定下一阶段目标，不继续沿用未经验证的 `$0.05` 或 `K1 >= 97%` 硬目标。
 
-### M4：扩展能力决策
+### M4：goal 回溯（进行中）
 
-M3 通过后，再逐项评估：
+状态：`implemented/dogfooding`。
+
+目标：`completed` 不再只是「无 subtask 失败」的否定式判定，而是回看 goal/acceptance/overview 的合规度，避免「执行全过但漏了验收」的假交付。goal 合规度作为与 `status` 正交的维度记录（见 A1 决策），不改变 verification 决定 status 的语义。
+
+### M5-M6：问题跟踪与 issue 联动（可并行）
+
+状态：`designed`。
+
+- M5：全局 `~/.agent_go/problems.jsonl`，跨任务累积 Problem 实体（id/状态/生命周期，见 A5 决策）。
+- M6：`--track-issues` 显式开启（默认关，避免 issue 洪水，见 A6 决策）。
+
+### M7+：智能闭环与自治（决策门后）
+
+状态：`proposed`，须先拍板 B1-B5 决策（见 `design/business-architecture.md`）。
+
+- **阶段 A 工程闭环**：文件所有权约束、函数级验收契约、未提交基线处理。
+- **阶段 B spec 闭环**：spec 持久化 + §5 结构化 + AST 冲突检测器；5+ 真实任务冒烟验证 ROI。
+- **阶段 C 智能闭环**：Reflexion 阈值化（retry≥2）、局部重规划（默认人工确认）、KnowledgeStore A/B。
+- **阶段 D 自治决策**：Reviewer 灰度（review cost ≤ 20%）、自动 merge 策略（B1）、人只在例外点介入。
+- **阶段 E Spec-as-Source**：仅安全/受限域试点 L5（不排期）。
+
+逐项评估（原 M4 扩展能力决策，保留）：
 
 - KnowledgeStore：先做 A/B 实验。
 - Spec：先验证用户使用意愿和交付收益。
@@ -656,3 +710,6 @@ M3 通过后，再逐项评估：
 - 失败必须可解释、可恢复、可审计。
 - 新功能必须证明不损害 Accepted Delivery。
 - 代码实现、测试通过、真实使用和产品验收必须分开记录。
+- 自治度与审计同步：每升一级自治，必须同步增加审计/回滚能力，否则不做。
+- 同源审查铁律：`judge != candidate`，全自主 merge 前必须有「不同源独立验证」兜底。
+- 自治是渐进目标，不是静态终点：三个例外点（Plan 确认、merge 决策、失败审查）长期保留人工决策。
