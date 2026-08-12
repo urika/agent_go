@@ -140,6 +140,20 @@ def test_validate_plan_quality_warns_rejected_verification_command():
     assert result["status"] == "warning"
     assert len(result["blocking_issues"]) == 0
     assert result["warnings"][0]["type"] == "verification_command_rejected"
+    assert result["repairable_issues"][0]["type"] == "verification_command_rejected"
+
+
+def test_build_plan_repair_feedback_is_bounded_and_actionable():
+    from agent_go.planning import build_plan_repair_feedback
+
+    quality = validate_plan_quality([{
+        "id": "sub-1",
+        "verification": "bash -c 'python -c \"print(1)\"'",
+    }])
+    feedback = build_plan_repair_feedback(quality, max_chars=500)
+    assert len(feedback) <= 500
+    assert "Plan 预检修复反馈" in feedback
+    assert "不要使用 bash/sh -c" in feedback
 
 
 def test_validate_plan_quality_detects_scope_and_requirement_gaps():
@@ -201,6 +215,7 @@ def test_verification_command_rejected_is_warning_not_blocked():
     assert len(result["blocking_issues"]) == 0
     warning_types = {w["type"] for w in result["warnings"]}
     assert "verification_command_rejected" in warning_types
+    assert {i["type"] for i in result["repairable_issues"]} == {"verification_command_rejected"}
 
 
 def test_valid_commands_no_warning():
@@ -612,3 +627,42 @@ def test_parallel_import_relation_no_match(tmp_path):
     assert not any(w["type"] == "parallel_import_relation" for w in warnings)
     # 无 repo → 不检测
     assert check_parallel_import_relations(subtasks, None) == []
+
+
+# ═══════════════════════════════════════════════════════════════
+# Goal Contract
+# ═══════════════════════════════════════════════════════════════
+
+def test_build_goal_contract_collects_evidence_and_constraints():
+    from agent_go.planning import build_goal_contract
+    subtasks = [
+        {"id": "sub-1", "verification": "pytest tests/auth", "do_not_touch": ["migrations/"]},
+        {"id": "sub-2", "verification": "ruff check src/", "scope_boundary": "只修改 checkout/ 目录"},
+    ]
+    contract = build_goal_contract("实现 checkout 重试", subtasks)
+    assert contract["goal_description"] == "实现 checkout 重试"
+    assert contract["delivery_required"] is True
+    assert "pytest tests/auth" in contract["completion_evidence"]
+    assert "ruff check src/" in contract["completion_evidence"]
+    assert any("migrations/" in c for c in contract["constraints"])
+    assert any("checkout/" in c for c in contract["constraints"])
+    assert contract["missing_verification_subtasks"] == []
+
+
+def test_build_goal_contract_detects_missing_verification():
+    from agent_go.planning import build_goal_contract
+    subtasks = [
+        {"id": "sub-1", "verification": ""},
+        {"id": "sub-2", "verification": "pytest tests"},
+    ]
+    contract = build_goal_contract("task", subtasks)
+    assert "sub-1" in contract["missing_verification_subtasks"]
+    assert "sub-2" not in contract["missing_verification_subtasks"]
+    assert contract["completion_evidence"] == ["pytest tests"]
+
+
+def test_build_goal_contract_empty_subtasks():
+    from agent_go.planning import build_goal_contract
+    contract = build_goal_contract("task", [], delivery_required=False)
+    assert contract["delivery_required"] is False
+    assert contract["completion_evidence"] == []

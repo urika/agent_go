@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
         "show_agent_prompt": True,          # 展示给 Agent 的 Prompt
         "show_resource_map": True,           # 展示共享资源清单
         "max_plan_iterations": 5,            # 最大 Plan 重生成次数
+        "plan_preflight_repair_enabled": True,  # 执行前确定性 Plan 修订（最多一次）
+        "max_plan_repairs": 1,                # Plan preflight 自动修订上限
         "notify_on_complete": True,          # 任务完成时发桌面通知（macOS osascript）
         "notify_command": "",                # 自定义通知命令，如 "curl -X POST ..."
     },

@@ -15,8 +15,8 @@ from typing import Any, Optional
 __all__ = ["estimate_task_duration", "check_under_decomposition",
            "check_over_decomposition", "check_difficulty_mismatch", "difficulty_hint",
            "check_agent_prompt_functions", "validate_plan_quality",
-           "check_subtask_file_overlap", "check_parallel_import_relations",
-           "_subtask_file_scope"]
+           "build_plan_repair_feedback", "check_subtask_file_overlap", "check_parallel_import_relations",
+           "build_goal_contract", "_subtask_file_scope"]
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,46 @@ _DEFAULT_SUBTASK_SEC = 240
 
 # S12-P2 G5 V1：hard 任务的最小合理子任务数阈值（硬编码，V2 从 verify_state.json 历史学习）
 DIFFICULTY_BASE_SUBTASKS = {"easy": 1, "medium": 2, "hard": 3}
+
+# These issues are deterministic Plan defects. They may be sent back to the
+# planner once before execution; unresolved issues still block the task.
+PLAN_REPAIRABLE_ISSUE_TYPES = {
+    "verification_command_rejected",
+    "verification_file_mismatch",
+    "scope_conflict",
+    "dependency_cycle",
+    "requirement_coverage_incomplete",
+    "unverifiable_upstream",
+    "file_overlap_without_dependency",
+    "over_decomposition",
+}
+
+
+def build_plan_repair_feedback(plan_quality: dict[str, Any], max_chars: int = 2400) -> str:
+    """Build bounded, deterministic feedback for one Plan repair attempt.
+
+    This feedback is deliberately not an LLM diagnosis. It describes only
+    deterministic gate failures so a repaired Plan can be validated again.
+    """
+    issues = plan_quality.get("repairable_issues", [])
+    if not issues:
+        return ""
+    lines = [
+        "===== Plan 预检修复反馈 =====",
+        "上一版 Plan 未通过确定性预检。请只修复以下问题，不删除或放宽 requirement、acceptance criterion、架构约束或验证责任。",
+    ]
+    for issue in issues[:8]:
+        issue_type = str(issue.get("type", "plan_quality"))
+        subtask_id = issue.get("subtask_id", "")
+        reason = str(issue.get("reason", ""))
+        if issue_type == "verification_command_rejected":
+            reason = (reason or "验证命令不在安全白名单") + "；不要使用 bash/sh -c 或自然语言前缀，python -c 必须为单行，优先使用 python -m <模块> 或测试框架。"
+        prefix = f"[{issue_type}]"
+        if subtask_id:
+            prefix += f" subtask={subtask_id}"
+        lines.append(f"- {prefix}: {reason}")
+    lines.append("请输出完整的新 Plan，而不是只输出修改说明。修订后必须再次通过所有确定性预检。")
+    return "\n".join(lines)[:max_chars]
 
 
 def _subtask_file_scope(st: dict) -> set[str]:
@@ -381,15 +421,22 @@ def validate_plan_quality(
     if repo:
         warnings.extend(check_parallel_import_relations(subtasks, repo))
 
+    repairable_issues = [
+        issue for issue in [*issues, *warnings]
+        if issue.get("type") in PLAN_REPAIRABLE_ISSUE_TYPES
+    ]
+
     return {
         "status": "blocked" if issues else ("warning" if warnings else "passed"),
         "blocking_issues": issues,
+        "repairable_issues": repairable_issues,
         "warnings": warnings,
         "plan_conflict_count": sum(1 for issue in issues if issue["type"] in {
             "scope_conflict", "dependency_cycle", "file_overlap_without_dependency",
             "unverifiable_upstream",
         }),
         "plan_warning_count": len(warnings),
+        "plan_repairable_issue_count": len(repairable_issues),
         "plan_requirement_coverage": coverage,
         "plan_acceptance_coverage": coverage,
     }
@@ -799,4 +846,44 @@ def estimate_task_duration(subtasks: list[dict], parallel: int, tasks_dir: Path)
         "estimated_sec": round(est_sec),
         "sample_size": sample_size,
         "confidence": confidence,
+    }
+
+
+def build_goal_contract(
+    task_text: str,
+    confirmed_subtasks: list[dict],
+    delivery_required: bool = True,
+) -> dict[str, Any]:
+    """Derive a Goal Contract from task description and confirmed Subtask verifications.
+
+    The contract is deterministic: it collects acceptance criteria and verification
+    commands already present in the Plan. It does not call any LLM.
+    """
+    evidence: list[str] = []
+    constraints: list[str] = []
+    missing_verification: list[str] = []
+    for st in confirmed_subtasks:
+        sid = str(st.get("id", ""))
+        vcmd = str(st.get("verification", "") or "").strip()
+        if vcmd:
+            evidence.append(vcmd)
+        else:
+            missing_verification.append(sid)
+        do_not_touch = st.get("do_not_touch", []) or []
+        if do_not_touch:
+            constraints.append(f"subtask-{sid}: 不得修改 {', '.join(do_not_touch)}")
+        scope = st.get("scope_boundary", "")
+        if scope:
+            constraints.append(f"subtask-{sid}: {scope}")
+
+    return {
+        "goal_description": task_text[:500],
+        "acceptance_criteria_ids": sorted({
+            str(aid) for st in confirmed_subtasks
+            for aid in (st.get("acceptance_criteria_ids", []) or [])
+        }),
+        "completion_evidence": sorted(evidence),
+        "constraints": sorted(constraints),
+        "missing_verification_subtasks": sorted(missing_verification),
+        "delivery_required": delivery_required,
     }

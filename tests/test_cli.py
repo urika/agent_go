@@ -33,6 +33,8 @@ class TestBuildParser:
         args = parser.parse_args(["run", "/tmp/repo"])
         assert args.command == "run"
         assert args.repo == "/tmp/repo"
+
+
         assert args.task == "请根据项目情况完成改进"  # 默认值
         assert args.parallel == 1
 
@@ -115,6 +117,45 @@ class TestBuildParser:
         parser = _build_parser()
         args = parser.parse_args(["eval", "bench"])
         assert getattr(args, "source_batch", "") == ""
+
+
+class TestPlanPreflightRepair:
+    def test_repairs_invalid_verification_before_execution(self, tmp_path):
+        from agent_go.cli import _preflight_repair_plan
+
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        initial = {
+            "overview": "test",
+            "steps": [{"id": "s1", "title": "test", "verification": "grep OK out.txt"}],
+        }
+        repaired = {
+            "overview": "test",
+            "steps": [{"id": "s1", "title": "test", "verification": "pytest tests -q"}],
+        }
+        config = {
+            "behavior": {"plan_preflight_repair_enabled": True, "max_plan_repairs": 1},
+            "skills": {"auto_discover": False},
+        }
+        with patch("agent_go.cli.generate_plan", return_value=repaired) as mock_generate:
+            result, iteration, history, quality = _preflight_repair_plan(
+                initial,
+                task="test task",
+                repo=tmp_path,
+                config=config,
+                logger=MagicMock(),
+                task_dir=task_dir,
+                skill_plan_context="",
+                spec_context="",
+                initial_docs="",
+                iteration=1,
+            )
+
+        assert result == repaired
+        assert iteration == 2
+        assert len(history) == 1
+        assert quality["status"] == "passed"
+        assert "Plan 预检修复反馈" in mock_generate.call_args.args[4]
 
 
 class TestCmdList:

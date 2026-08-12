@@ -394,6 +394,95 @@ def _build_spec_context(spec_obj) -> str:
     return "\n\n".join(parts)
 
 
+def _preflight_repair_plan(
+    plan: dict,
+    *,
+    task: str,
+    repo: Path,
+    config: dict,
+    logger: logging.Logger,
+    task_dir: Path,
+    skill_plan_context: str,
+    spec_context: str,
+    initial_docs: str,
+    iteration: int,
+) -> tuple[dict, int, list[dict], dict]:
+    """Run one bounded Plan preflight repair loop before user confirmation.
+
+    The worker never sees a Plan with a repairable deterministic defect. A
+    second failed validation is returned to the normal Plan blocking path.
+    """
+    from .planning import build_plan_repair_feedback, validate_plan_quality
+
+    behavior = config.get("behavior", {})
+    if not behavior.get("plan_preflight_repair_enabled", True):
+        return plan, iteration, [], {}
+
+    max_repairs = max(0, int(behavior.get("max_plan_repairs", 1)))
+    repair_history: list[dict] = []
+    current = plan
+    current_iteration = iteration
+
+    for repair_index in range(max_repairs + 1):
+        # Plan steps already contain the fields consumed by the deterministic
+        # quality checks; avoid materializing skills/subtasks before approval.
+        probe_subtasks = current.get("steps") or []
+        requirements = current.get("acceptance_criteria_ids") or current.get("requirements") or []
+        quality = validate_plan_quality(probe_subtasks, requirements, repo=repo)
+        repairable = quality.get("repairable_issues", [])
+        if not repairable:
+            return current, current_iteration, repair_history, quality
+        if repair_index >= max_repairs:
+            logger.warning(
+                "[plan_preflight] 修订次数已用尽: %s 个可修复问题仍存在",
+                len(repairable),
+            )
+            return current, current_iteration, repair_history, quality
+
+        feedback = build_plan_repair_feedback(quality)
+        previous_iteration = current_iteration
+        _save_plan_snapshot(task_dir, current, previous_iteration)
+        logger.warning(
+            "[plan_preflight] Plan v%s 有 %s 个确定性问题，启动第 %s 次修订",
+            previous_iteration,
+            len(repairable),
+            repair_index + 1,
+        )
+        try:
+            current = generate_plan(
+                task,
+                repo,
+                config,
+                logger,
+                feedback,
+                initial_docs,
+                current_iteration + 1,
+                skill_plan_context,
+                no_cache=True,
+                spec_context=spec_context,
+            )
+            current["_original_task"] = task
+            current_iteration += 1
+            repair_history.append({
+                "from_iteration": previous_iteration,
+                "to_iteration": current_iteration,
+                "issue_types": sorted({str(i.get("type", "")) for i in repairable}),
+                "issue_count": len(repairable),
+            })
+        except Exception as exc:
+            logger.warning("[plan_preflight] Plan 修订失败，保留当前版本: %s", exc)
+            repair_history.append({
+                "from_iteration": previous_iteration,
+                "to_iteration": None,
+                "issue_types": sorted({str(i.get("type", "")) for i in repairable}),
+                "issue_count": len(repairable),
+                "error": str(exc)[:300],
+            })
+            return current, current_iteration, repair_history, quality
+
+    return current, current_iteration, repair_history, quality
+
+
 def cmd_run(args=None):
     if args is None:
         parser = _build_parser()
@@ -622,6 +711,7 @@ def cmd_run(args=None):
     max_iter = config.get("behavior", {}).get("max_plan_iterations", 5)
     iteration = 1
     last_error = None
+    preflight_repair_history: list[dict] = []
 
     for attempt in range(3):
         try:
@@ -633,8 +723,30 @@ def cmd_run(args=None):
             logger.error(f"Plan 失败 (尝试 {attempt+1}): {e}")
 
     if plan is not None:
+        # API 成功 → 执行前 Plan 预检。确定性问题最多自动修订一次，
+        # 修订后的 Plan 仍需经过 confirm_plan；未解决问题在最终门禁阻断。
+        try:
+            plan, iteration, preflight_repair_history, _preflight_quality = _preflight_repair_plan(
+                plan,
+                task=task,
+                repo=repo,
+                config=config,
+                logger=logger,
+                task_dir=task_dir,
+                skill_plan_context=skill_plan_context,
+                spec_context=spec_context,
+                initial_docs=initial_docs,
+                iteration=iteration,
+            )
+        except Exception as _pe:
+            # 预检本身不是外部增强依赖；异常时保留原 Plan，最终质量门继续兜底。
+            logger.warning(f"[plan_preflight] 预检失败，保留原 Plan: {_pe}")
         # API 成功 → Plan 确认流程
-        confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration=1, task=task, plan_dir=task_dir)
+        # --yes must remain non-interactive even when preflight produced Plan v2;
+        # the repair version is still shown/persisted separately in plan snapshots.
+        _confirm_iteration = 1 if auto_yes else iteration
+        confirmed_plan, final_doc_paths = confirm_plan(
+            plan, config, repo, logger, iteration=_confirm_iteration, task=task, plan_dir=task_dir)
         # 检查降级信号
         if confirmed_plan == "__FALLBACK__":
             console.print(f"\n⚠️ 降级到本地规则拆解...")
@@ -778,8 +890,18 @@ def cmd_run(args=None):
         "plan_acceptance_coverage": plan_quality["plan_acceptance_coverage"],
         "plan_conflict_count": plan_quality["plan_conflict_count"],
         "plan_warning_count": plan_quality["plan_warning_count"],
+        "plan_repair_count": len(preflight_repair_history),
+        "plan_repair_attempted": bool(preflight_repair_history),
+        "plan_repair_history": preflight_repair_history,
+        "plan_repairable_issue_count": plan_quality.get("plan_repairable_issue_count", 0),
         "architecture_review": architecture_review,
     }
+    # Goal Contract: 从 Task + Plan + Subtask 提取完成契约（确定性，不调 LLM）
+    try:
+        from .planning import build_goal_contract
+        meta["goal_contract"] = build_goal_contract(task, confirmed, delivery_required=True)
+    except Exception as _gce:
+        logger.debug(f"[goal_contract] 构建失败（忽略）: {_gce}")
     # recover 必须基于本次运行的确切基准提交，不能依赖默认分支名或提交时间窗口。
     if (repo / ".git").exists():
         try:
@@ -796,7 +918,11 @@ def cmd_run(args=None):
             logger.warning("无法记录 base_commit，recover 将降级为兼容模式")
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    if plan_quality["blocking_issues"]:
+    _unresolved_plan_issues = [
+        *plan_quality["blocking_issues"],
+        *plan_quality.get("repairable_issues", []),
+    ]
+    if _unresolved_plan_issues:
         if dry_run:
             _print_dry_run_summary(confirmed_plan, confirmed, plan_quality, {}, console, task_id, task_dir)
             try:
@@ -805,14 +931,18 @@ def cmd_run(args=None):
                 pass
             return
         console.error("Plan 预检未通过，任务标记为 BLOCKED（约束阻断），未进入执行。")
-        for issue in plan_quality["blocking_issues"]:
+        for issue in _unresolved_plan_issues:
             console.error(f"  [{issue['type']}] subtask={issue.get('subtask_id', '?')} {issue.get('reason', '')}")
         meta["status"] = "BLOCKED"
-        meta["failure_class"] = "infrastructure_failure"
+        # A Plan defect is not an external infrastructure outage. Keep
+        # verification-generation defects separate from orchestration blocks.
+        meta["failure_class"] = (
+            "verification_failure" if plan_quality.get("repairable_issues") else "system_error"
+        )
         meta["failure_reason"] = "plan_quality_blocked"
         meta["blocked_without_result"] = True
         meta["plan_quality_status"] = plan_quality.get("status", "blocked")
-        meta["blocking_issues"] = plan_quality.get("blocking_issues", [])
+        meta["blocking_issues"] = _unresolved_plan_issues
         (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         return
 

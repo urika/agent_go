@@ -10,6 +10,7 @@
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +25,8 @@ class GoalInjector:
     """在 worktree 中注入 /goal 所需的配置文件和脚本。"""
 
     GOAL_HOOK_SCRIPT = "scripts/verify-goal.sh"
+    GOAL_SETTINGS_FILE = ".claude/settings.local.json"
+    BACKUP_DIR = ".agent_go_goal_backup"
 
     @staticmethod
     def build_goal_condition(verification_cmds: list[str], custom_condition: str = "") -> str:
@@ -60,17 +63,29 @@ class GoalInjector:
         claude_dir.mkdir(parents=True, exist_ok=True)
         settings = {
             "hooks": {
-                "Stop": {
-                    "command": GoalInjector.GOAL_HOOK_SCRIPT,
-                    "type": "script",
-                }
+                "Stop": [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": GoalInjector.GOAL_HOOK_SCRIPT,
+                    }],
+                }]
             }
         }
-        (claude_dir / "settings.json").write_text(
+        settings_path = worktree / GoalInjector.GOAL_SETTINGS_FILE
+        backup_dir = worktree / GoalInjector.BACKUP_DIR
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        if settings_path.exists():
+            shutil.copy2(settings_path, backup_dir / "settings.local.json")
+        script_path = worktree / GoalInjector.GOAL_HOOK_SCRIPT
+        if script_path.exists():
+            shutil.copy2(script_path, backup_dir / "verify-goal.sh")
+        settings_path.write_text(
             json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
 
         scripts_dir = worktree / "scripts"
         scripts_dir.mkdir(exist_ok=True)
+        script_path = worktree / GoalInjector.GOAL_HOOK_SCRIPT
         # set -e：任一命令失败即非零退出 → Stop Hook 判定 goal 未达成，Claude 继续循环
         script_lines = [
             "#!/bin/bash",
@@ -80,7 +95,6 @@ class GoalInjector:
             *safe_cmds,
             "",
         ]
-        script_path = scripts_dir / "verify-goal.sh"
         script_path.write_text("\n".join(script_lines), encoding="utf-8")
         script_path.chmod(0o755)
 
@@ -89,11 +103,24 @@ class GoalInjector:
 
     @staticmethod
     def cleanup(worktree: Path) -> None:
-        """清理注入的文件（保留现场除外——worktree 删除时天然清理）。"""
-        for p in (worktree / ".claude" / "settings.json",
-                  worktree / GoalInjector.GOAL_HOOK_SCRIPT):
-            try:
-                if p.exists():
-                    p.unlink()
-            except OSError as e:
-                logger.debug(f"[goal] 清理失败 {p}: {e}")
+        """清理注入的文件并恢复备份（保留现场除外——worktree 删除时天然清理）。"""
+        backup_dir = worktree / GoalInjector.BACKUP_DIR
+        settings_path = worktree / GoalInjector.GOAL_SETTINGS_FILE
+        script_path = worktree / GoalInjector.GOAL_HOOK_SCRIPT
+        try:
+            settings_backup = backup_dir / "settings.local.json"
+            if settings_backup.exists():
+                settings_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(settings_backup, settings_path)
+            elif settings_path.exists():
+                settings_path.unlink()
+            script_backup = backup_dir / "verify-goal.sh"
+            if script_backup.exists():
+                script_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(script_backup, script_path)
+            elif script_path.exists():
+                script_path.unlink()
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
+        except OSError as e:
+            logger.debug(f"[goal] 清理失败 {worktree}: {e}")

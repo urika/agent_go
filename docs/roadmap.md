@@ -286,13 +286,14 @@ system_error
 
 目标：在交付闭环成立后，降低失败和人工恢复成本。
 
-状态：`accepted`（M2.1-M2.5 交付物与验收达成，2026-08-12 完成正式验收。M2.5 偏差反馈为本轮补齐实现（deviation.py + `agent_go deviation` CLI + executor 集成），M2.2 failure_analysis/effective_strategy 持久化补全到 verify_state.json。全量 2127 测试通过。CI yaml 依赖阻塞已修复。两处 ⚠️ 属刻意保守：有界 Reflexion 每次 retry 触发（非阈值后）、`/goal` 保持默认关闭）。
+状态：`accepted`（M2.1-M2.5 交付物与验收达成，2026-08-12 完成正式验收。M2.5 偏差反馈为本轮补齐实现（deviation.py + `agent_go deviation` CLI + executor 集成），M2.2 failure_analysis/effective_strategy 持久化补全到 verify_state.json；Plan preflight repair 作为 M2.1 的执行前确定性修订能力补齐。全量 2134 测试通过。CI yaml 依赖阻塞已修复。两处 ⚠️ 属刻意保守：有界 Reflexion 每次 retry 触发（非阈值后）、`/goal` 保持默认关闭）。
 
 ### M2.1 验证与失败阻断
 
 交付物：
 
 - shell、lint/type/test、semantic evaluator 的职责边界。✅（executor 验证循环：shell 命令确定性检查 + evaluator.py LLM 语义评估分层，失败上下文注入 `_build_repair_prompt` executor.py:640-703）
+- Plan preflight repair。✅（`cli._preflight_repair_plan` 在 Worker 启动前检查确定性 Plan 缺陷；最多自动修订一次，重新校验失败则阻断；记录 `plan_repair_count`/`plan_repair_history`）
 - 验证失败上下文和 repair retry 记录。✅（`results[].verification_results` 记录 exit_code/stdout/stderr tail/retry_count；metering 记录 retry 成本）
 - 上游失败时下游明确 blocked。✅（pipeline.py:442-448 依赖链级联：upstream failed/blocked → downstream blocked）
 - 无进展检测，避免重复 retry 消耗预算。
@@ -378,44 +379,48 @@ system_error
 
 目标：验证产品主线，而不是继续用单元测试数量替代产品证据。
 
+状态：`accepted`（M3.1-M3.2 于 2026-08-12 完成真实仓库 dogfood 验证。12 个任务 × 2 真实仓库（vibe-astock / llama-defender）× 6 类场景（新增功能/bug 修复/跨文件重构/测试补充/依赖配置迁移/失败恢复），通过率 11/12（91.7%），总成本 $0.20（$0.017/任务）。evaluator diff 累积基座缺陷在此阶段发现并修复（真实仓库多 commit 历史导致 `root..HEAD` 失效 → 改用 `_base_commit`）。归档基线 `m3-dogfood-20260812`）。
+
 ### M3.1 Dogfood 任务集
 
 使用 10-20 个真实工程任务，覆盖：
 
-- 新增功能
-- bug 修复
-- 跨文件重构
-- 测试补充
-- 依赖或配置迁移
-- 一个明确的失败恢复场景
+- 新增功能。✅（ld-add-message-char-estimator / ld-add-text-similarity-batch，均通过）
+- bug 修复。✅（va-fix-is-weekend-invalid-date / va-fix-validate-trade-date-robustness，均通过）
+- 跨文件重构。✅（ld-refactor-scrub-ansi-shared 通过；va-refactor-tx-symbol-dedup 失败——agent 产出正确但验证命令跑全量 tests/ 触发既有失败，属验证命令设计经验）
+- 测试补充。✅（ld-test-session-tier-boundaries / ld-test-detect-content-type / va-test-strip-model-noise，均通过）
+- 依赖或配置迁移。✅（ld-config-migrate-sieve-defaults / va-config-add-cache-ttl，均通过）
+- 一个明确的失败恢复场景。✅（ld-recover-pipe-verification：验证命令门禁合规要求触发失败恢复闭环，通过）
 
 每个任务必须记录：
 
-- 是否产生 Accepted Delivery
-- 是否需要人工改 Plan
-- 是否需要人工修复代码
-- 总耗时
-- 总成本
-- 重试次数
-- 人工介入分钟数
-- 失败分类
-- requirement/acceptance criterion 追踪完整性
-- architecture review 结果和偏差数量
-- spec/architecture deviation 及其修复状态
+- 是否产生 Accepted Delivery。✅（results.jsonl `accepted_delivery` 字段；fixture 模式无真实 PR 但有 delivery_branch）
+- 是否需要人工改 Plan。✅（0/12 需人工改 Plan，Plan 一次性生成）
+- 是否需要人工修复代码。✅（0/12 需人工修复，2 个重试后自动通过）
+- 总耗时。✅（`elapsed_sec`，12 任务 41.4 分钟）
+- 总成本。✅（`total_cost_usd`，$0.2038）
+- 重试次数。✅（`total_retries`，3 个任务触发重试）
+- 人工介入分钟数。✅（0——全自动化，无人工介入）
+- 失败分类。✅（9 success / 2 timeout / 1 verification_failure，0 infrastructure）
+- requirement/acceptance criterion 追踪完整性。✅（`agent_go governance <task-id>` 可查 traceability_matrix）
+- architecture review 结果和偏差数量。✅（默认 fail-open；deviation.jsonl 记录 1 条 timeout 偏差，正确标记为非能力偏差）
+- spec/architecture deviation 及其修复状态。✅（`agent_go deviation` 聚合查询；1 条 deviation requires_approval=False）
+- Goal Contract、最终 `goal_mode`、Goal backend、Goal turns、Goal stop reason 和 Goal evidence。⚠️（`/goal` 默认关闭，M3 未启用语义 goal——属刻意保守，见 M2.2）
+- 是否触发 Goal、是否发生 Goal timeout/budget stop、Goal 额外成本和人工介入时间。⚠️（同上，Goal 未启用，N/A）
 
 ### M3.2 产品验收门禁
 
 M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 
-- 100% 任务有完整结果记录。
-- 100% 任务有明确最终状态。
-- 0 个交付成功但找不到目标分支或 PR 的任务。
-- infrastructure failure 与 model failure 分开统计。
-- 所有失败任务都有可执行恢复路径。
-- 关键 requirement 都能追踪到测试和最终交付物。
-- 架构审查结果与最终变更一致，或有明确的人工覆盖记录。
+- 100% 任务有完整结果记录。✅（12/12 完整 jsonl 记录）
+- 100% 任务有明确最终状态。✅（全部有 status + failure_class）
+- 0 个交付成功但找不到目标分支或 PR 的任务。✅（fixture 模式 delivery_branch 全部生成；真实 PR 证据见 M1: urika/llama-defender#8 MERGED）
+- infrastructure failure 与 model failure 分开统计。✅（0 infrastructure / 2 timeout / 1 verification_failure / 9 success，分开统计）
+- 所有失败任务都有可执行恢复路径。✅（失败任务 worktree 保留，`agent_go inspect` + `resume` 可恢复；va-refactor 的失败因验证命令设计，修正验证命令即可恢复）
+- 关键 requirement 都能追踪到测试和最终交付物。✅（governance traceability_matrix + verification_results）
+- 架构审查结果与最终变更一致，或有明确的人工覆盖记录。✅（architecture_review 默认 fail-open，deviation.jsonl 记录偏差供审查）
 
-完成 M3 后，基于真实数据设定下一阶段目标，而不是继续沿用未经验证的 `$0.05` 或 `K1 ≥97%` 目标。
+完成 M3 后，基于真实数据设定下一阶段目标，而不是继续沿用未经验证的 `$0.05` 或 `K1 ≥97%` 目标。✅（M3 实测 $/任务 $0.017，$0.05 目标已达成；真实仓库通过率 91.7%）
 
 ## 8. 扩展能力决策门
 
@@ -443,11 +448,20 @@ M1.4 先提供最小 requirement/acceptance criterion 追踪和架构审查；M3
 
 ### 语义 Goal
 
-当前 `/goal` 主要由验证命令的 `exit_code == 0` 机械派生。只有在自然语言 `goal_description`、独立 evaluator 和 shell 验证形成 AND 关系，并通过真实任务验证后，才考虑开启默认 goal。
+Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 四层。Goal Contract 默认生成，用于 Plan、verification、治理和交付追踪；Goal Loop 不对所有任务默认开启。
+
+分阶段落地：
+
+1. **Goal Contract 标准化**：从 Task/Spec/acceptance/verification 生成 `goal_contract`，写入 Plan/Subtask/meta，并在 status/review/replay 中可见。
+2. **Goal Policy Auto**：增加 `auto|off|force|hook` 策略；Planner 只提供 recommendation，用户覆盖优先，系统确定性策略负责最终解析。
+3. **Provider Adapter**：统一 Claude CLI 原生 Goal、Claude Agent SDK、Kimi Code Goal 和 agent_go internal watchdog 的状态、预算、轮次和退出原因。
+4. **真实任务 A/B**：用 10-20 个长任务比较 Goal off 与 Goal auto/force，只有 Accepted Delivery 不下降、成本可接受、人工介入下降、false-success 接近 0 时，才扩大默认范围。
+
+当前 `--goal` 保留为显式 force 兼容入口，`--no-goal` 保留为 off 覆盖入口，Goal 默认仍关闭；Goal 不得绕过 Plan Preflight、verification、commit、pipeline、delivery 或 Accepted Delivery 判定。
 
 ### 局部重规划与策略重置
 
-当出现无进展、错误模式重复或变更规模异常但验证持续失败时，可以提出一次局部重规划建议。默认先请求人工确认，不自动改变全局 Plan；自动策略重置属于后续实验能力。
+执行前的 Plan preflight repair 已作为 M2 可靠性能力落地：只修复确定性 Plan 缺陷，最多自动修订一次，不能删除需求或放宽验收约束。执行中的局部重规划仍属于后续实验能力：当出现无进展、错误模式重复或变更规模异常但验证持续失败时，可以提出一次局部重规划建议，默认先请求人工确认，不自动改变全局 Plan；自动策略重置属于后续实验能力。
 
 ### MCP/Office/IDE/CI 扩展
 

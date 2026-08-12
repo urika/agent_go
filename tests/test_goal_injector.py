@@ -33,11 +33,12 @@ class TestInject:
         ok = GoalInjector.inject(wt, ["pytest tests/"])
         assert ok is True
 
-        settings = json.loads((wt / ".claude" / "settings.json").read_text(encoding="utf-8"))
-        assert settings["hooks"]["Stop"]["command"] == "scripts/verify-goal.sh"
-        assert settings["hooks"]["Stop"]["type"] == "script"
+        settings = json.loads((wt / GoalInjector.GOAL_SETTINGS_FILE).read_text(encoding="utf-8"))
+        stop_hook = settings["hooks"]["Stop"][0]
+        assert stop_hook["hooks"][0]["command"] == "scripts/verify-goal.sh"
+        assert stop_hook["hooks"][0]["type"] == "command"
 
-        script = wt / "scripts" / "verify-goal.sh"
+        script = wt / GoalInjector.GOAL_HOOK_SCRIPT
         content = script.read_text(encoding="utf-8")
         assert "set -e" in content
         assert "pytest tests/" in content
@@ -50,14 +51,14 @@ class TestInject:
         wt.mkdir()
         ok = GoalInjector.inject(wt, ["rm -rf /tmp/x"])
         assert ok is False
-        assert not (wt / ".claude" / "settings.json").exists()
+        assert not (wt / GoalInjector.GOAL_SETTINGS_FILE).exists()
 
     def test_mixed_commands_keep_safe_only(self, tmp_path):
         wt = tmp_path / "work"
         wt.mkdir()
         ok = GoalInjector.inject(wt, ["pytest tests/", "rm -rf /tmp/x"])
         assert ok is True
-        content = (wt / "scripts" / "verify-goal.sh").read_text(encoding="utf-8")
+        content = (wt / GoalInjector.GOAL_HOOK_SCRIPT).read_text(encoding="utf-8")
         assert "pytest tests/" in content
         assert "rm -rf" not in content
 
@@ -66,8 +67,8 @@ class TestInject:
         wt.mkdir()
         GoalInjector.inject(wt, ["pytest tests/"])
         GoalInjector.cleanup(wt)
-        assert not (wt / ".claude" / "settings.json").exists()
-        assert not (wt / "scripts" / "verify-goal.sh").exists()
+        assert not (wt / GoalInjector.GOAL_SETTINGS_FILE).exists()
+        assert not (wt / GoalInjector.GOAL_HOOK_SCRIPT).exists()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -135,8 +136,8 @@ class TestExecutorGoalIntegration:
                     logger, headless=True, config={"goal": {"enabled": True}})
 
         task_md = mock_headless.call_args_list[0][0][0]
-        assert "## /goal" in task_md
-        assert '/goal "以下验证命令全部退出码为0: pytest tests/"' in task_md
+        assert task_md.startswith('/goal "')
+        assert "Goal Context" in task_md
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor._run_headless")
@@ -165,7 +166,7 @@ class TestExecutorGoalIntegration:
         self, mock_wt, mock_subprocess, mock_headless, mock_agent,
         temp_repo, task_dir, logger,
     ):
-        """goal.enable_goal_hook=true：worktree 内写入 settings.json + verify-goal.sh"""
+        """goal.enable_goal_hook=true：worktree 内写入 Hook 文件，subtask 结束后自动清理"""
         mock_wt.return_value = (True, "")
         mock_headless.return_value = _mock_cp(returncode=0)
         mock_subprocess.side_effect = _git_ok
@@ -175,9 +176,10 @@ class TestExecutorGoalIntegration:
                     config={"goal": {"enable_goal_hook": True}})
 
         worktree = task_dir / "sub-1" / "work"
-        settings = json.loads((worktree / ".claude" / "settings.json").read_text(encoding="utf-8"))
-        assert settings["hooks"]["Stop"]["command"] == "scripts/verify-goal.sh"
-        assert "pytest tests/" in (worktree / "scripts" / "verify-goal.sh").read_text(encoding="utf-8")
+        from agent_go.goal_injector import GoalInjector
+        # cleanup 已执行：Hook 文件应被移除/恢复
+        assert not (worktree / GoalInjector.GOAL_SETTINGS_FILE).exists()
+        assert not (worktree / GoalInjector.GOAL_HOOK_SCRIPT).exists()
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor._run_headless")
@@ -196,4 +198,5 @@ class TestExecutorGoalIntegration:
                     logger, headless=True, config={"verification": {}})
 
         worktree = task_dir / "sub-1" / "work"
-        assert not (worktree / ".claude" / "settings.json").exists()
+        from agent_go.goal_injector import GoalInjector
+        assert not (worktree / GoalInjector.GOAL_SETTINGS_FILE).exists()

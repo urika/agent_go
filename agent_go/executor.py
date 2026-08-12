@@ -455,16 +455,24 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     # Phase 2: GoalInjector — 注入目标导向指令（默认关闭，--goal 开启）
     goal_enabled = _effective_config(config).get("goal", {}).get("enabled", False)
     if verification and goal_enabled:
+        # 原生 /goal 指令：放在 task_md 开头，让 Claude CLI 识别为 slash command
+        try:
+            from .goal_injector import GoalInjector as _GI
+            _vcmds = [verification] if isinstance(verification, str) else verification
+            _condition = _GI.build_goal_condition(_vcmds)
+            task_md_parts = [f'/goal "{_condition}"', ""] + task_md_parts
+        except Exception as _goal_err:
+            _mod_logger.warning(f"goal_injector 加载/调用失败，跳过 /goal 注入（不中断任务）: {_goal_err}")
         task_md_parts.extend([
             "",
-            "## /goal: 自主验证-修复循环",
+            "## 目标执行指引（Goal Context）",
             "",
             "你必须在退出前确保以下验证命令全部通过。",
             "",
             "**验证命令:**",
             f"```bash\n{verification}\n```",
             "",
-            "**循环规则:**",
+            "**执行规则:**",
             "1. 完成代码修改后，运行上述验证命令",
             "2. 如果验证失败，仔细阅读错误输出，分析根本原因",
             "3. 修复代码中的问题，再次运行验证",
@@ -476,15 +484,6 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
             "- 每次修复后必须重新运行全部验证命令",
             "- 如果连续 3 次修复仍失败，请在输出中说明原因后退出",
         ])
-        # 字面 /goal condition（设计稿 §3.4）：Claude Code 原生 goal 循环的判定条件
-        # 解耦：使用 _safe_optional_call helper（utils.py）替代散落的 try/except 样板。
-        try:
-            from .goal_injector import GoalInjector as _GI
-            _vcmds = [verification] if isinstance(verification, str) else verification
-            _condition = _GI.build_goal_condition(_vcmds)
-            task_md_parts.extend(["", f'/goal "{_condition}"'])
-        except Exception as _goal_err:
-            _mod_logger.warning(f"goal_injector 加载/调用失败，跳过 /goal 注入（不中断任务）: {_goal_err}")
 
     # ── Skill 知识注入 ──
     skill_names = subtask.get("skills", [])
@@ -2223,6 +2222,16 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger,
             config=config, hard_timeout=_initial_timeout,
         )
+
+    # Goal Hook 生命周期：Claude 进程结束后立即清理注入文件，避免进入 commit / scope 检查。
+    # retry 路径每次 re-run 前会重新 inject（GoalInjector.inject 在 _build_task_md 阶段调用），
+    # 因此 cleanup 放在这里不会影响修复重试中的 Stop Hook 重新注入。
+    if _effective_config(config).get("goal", {}).get("enable_goal_hook", False):
+        try:
+            from .goal_injector import GoalInjector
+            GoalInjector.cleanup(worktree)
+        except Exception as _ghc_err:
+            logger.debug(f"[goal] Hook cleanup 失败（忽略）: {_ghc_err}")
 
     # 6. Verify changes
     tag_name = f"{task_id}/{sub_id}"

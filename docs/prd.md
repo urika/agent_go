@@ -125,7 +125,26 @@ Plan 至少包含：
 
 Headless 模式必须保留确定性准入检查，不能因为 `--yes` 静默跳过硬门禁。
 
-#### F-PLAN-3 DAG 调度
+#### F-PLAN-3 Plan 预检与一次性修复
+
+Plan 在用户确认和 Worker 启动前，必须经过确定性预检，至少覆盖：
+
+- 验证命令安全白名单。
+- requirement/acceptance criterion 覆盖。
+- 文件范围、禁止修改范围和子任务之间的冲突。
+- 依赖环和不可验证的上游步骤。
+
+对于可由确定性规则判断的 Plan 缺陷，系统可以自动向 Planner 注入结构化修复反馈并重新生成一次 Plan。该机制必须满足：
+
+- 默认最多自动修订一次。
+- 修订前后保存 Plan 版本和 diff。
+- 不得删除或放宽 requirement、acceptance criterion、架构约束、验证责任或目标分支。
+- 修订后必须重新执行完整预检；仍不通过则阻断执行或请求人工确认。
+- 修订调用计入任务预算，并记录 `plan_repair_count`、`plan_repair_attempted` 和 `plan_repair_history`。
+
+Plan 预检修复发生在执行前，不改变 G8 验证拒绝短路语义，也不等同于执行中的局部或全局自动重规划。
+
+#### F-PLAN-4 DAG 调度
 
 系统应根据依赖关系按 wave 调度子任务，并满足：
 
@@ -133,6 +152,42 @@ Headless 模式必须保留确定性准入检查，不能因为 `--yes` 静默�
 - 上游失败时下游明确 blocked。
 - 并发任务之间不共享可变执行状态。
 - 循环依赖必须明确报告。
+
+#### F-PLAN-5 Goal Contract 与 Goal Policy
+
+详细设计见：[Goal 机制设计](design/goal-mechanism-design.md)。
+
+系统应为有明确目标的任务生成结构化 Goal Contract，至少包含：
+
+- `goal_description`。
+- acceptance criteria。
+- completion evidence（verification 命令和必要的语义证据）。
+- 适用约束和是否要求 delivery。
+
+Goal Contract 默认存在，但不代表 Goal Loop 默认开启。系统应根据 Plan 的难度、可验证性、是否 headless、预算和风险生成 `goal_recommendation`，并通过 Goal Policy 解析最终执行策略：
+
+- `off`：不启用持续 Goal，保留普通执行和验证。
+- `auto`：根据确定性策略自动选择。
+- `force`：用户明确要求持续自主执行。
+- `hook`：启用 Goal continuation 和确定性 Stop Hook。
+
+决策优先级为：
+
+```text
+用户覆盖 > 配置策略 > 系统确定性策略 > Planner recommendation > 默认策略
+```
+
+Goal Policy 必须记录 `goal_mode`、`goal_backend`、决策原因和风险码。Goal 不能绕过 Plan Preflight、verification、commit、pipeline、delivery 或 Accepted Delivery 判定。
+
+Goal 机制约束：
+
+- 默认不对所有任务强制开启 Goal Loop。
+- 必须有安全且可执行的 completion evidence 才能进入 `auto/force/hook`。
+- 必须有 max turns、timeout 和 budget 上限。
+- Goal evaluator 的完成结果不能单独标记 Task/Subtask completed。
+- Goal 状态至少支持 `ACTIVE`、`COMPLETED`、`BLOCKED`、`PAUSED`、`CANCELLED`、`TIMED_OUT`、`BUDGET_EXCEEDED`。
+
+Goal Contract、Goal Policy 和 Goal Evidence 应在 meta、status、review、replay 和 metering 中可查询。
 
 ### 4.2 隔离执行与变更管理
 
@@ -212,7 +267,7 @@ commit、verification 和 delivery 不得被压缩为单一状态。
 
 #### F-VERIFY-6 受控策略升级
 
-当前版本不允许失败后自动递归修改全局 Plan。后续可在明确触发信号下提出一次局部重规划，但必须：
+当前版本不允许执行失败后自动递归修改全局 Plan。执行前的 Plan 预检修复属于 F-PLAN-3；执行中的局部重规划仍是后续实验能力，必须：
 
 - 最多触发一次。
 - 继承父任务预算和权限。
@@ -471,7 +526,7 @@ system_error
 ### P1
 
 - 无进展检测和局部重规划仍不完整。
-- goal 当前主要由验证命令机械派生，语义 goal 和默认开启条件尚未验证。
+- Goal Contract/Policy 已完成设计，当前 Goal Loop 仍默认关闭；Claude/Kimi provider adapter、auto 策略和默认开启条件需要真实任务 A/B 验证。
 - Reflexion 失败分析和循环状态埋点尚未形成稳定产品契约。
 - recover/resume、checkpoint、进程树清理需要更多故障注入测试。
 - MCP 工具成功率和产物完整率尚未完整聚合。
