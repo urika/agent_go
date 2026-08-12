@@ -459,6 +459,8 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 
 当前 `--goal` 保留为显式 force 兼容入口，`--no-goal` 保留为 off 覆盖入口，Goal 默认仍关闭；Goal 不得绕过 Plan Preflight、verification、commit、pipeline、delivery 或 Accepted Delivery 判定。
 
+**A/B 实验结论（2026-08-12，3 任务 × 2 模式小样本）**：6/6 全部 DELIVERY_READY，两臂成功率无差异；force 模式平均成本高 ~30%（仅在实际触发多轮继续时）；goal_turns 计量正确（5/0/8）。小样本不支持默认启用，`goal_policy.policy` 保持 `off`。详见 [goal-ab-experiment-2026-08-12.md](design/goal-ab-experiment-2026-08-12.md)。
+
 ### 局部重规划与策略重置
 
 执行前的 Plan preflight repair 已作为 M2 可靠性能力落地：只修复确定性 Plan 缺陷，最多自动修订一次，不能删除需求或放宽验收约束。执行中的局部重规划仍属于后续实验能力：当出现无进展、错误模式重复或变更规模异常但验证持续失败时，可以提出一次局部重规划建议，默认先请求人工确认，不自动改变全局 Plan；自动策略重置属于后续实验能力。
