@@ -1030,8 +1030,19 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     metering = _read_jsonl(td / "metering.jsonl") if td else []
     meta = _read_json(td / "meta.json") if td else {}
 
-    # cost 聚合
+    # cost 聚合：本地模型事件（is_local=True 且 cost=0）按 local_model_cost TCO 折算，
+    # 使 metric-freeze/gate 的本地基线 $/pass 含真实 TCO（电费+折旧），不视为免费。
     total_cost = sum(ev.get("cost_usd", 0) or 0 for ev in metering)
+    try:
+        from .metrics import local_tco_usd as _tco
+    except Exception:
+        _tco = None
+    if _tco is not None:
+        for ev in metering:
+            if ev.get("is_local") and not (ev.get("cost_usd") or 0):
+                _tco_amt = _tco(ev.get("actual_model", "") or "")
+                if _tco_amt > 0:
+                    total_cost += _tco_amt
     total_latency = sum(ev.get("latency_ms", 0) or 0 for ev in metering)
 
     # S10-P1：从 metering 提取 Planner / Judge 模型（跨层归因基础）

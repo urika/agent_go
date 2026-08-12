@@ -272,8 +272,7 @@ def test_collect_result_has_s10_p1_schema_fields(tmp_path):
         {"role": "worker", "actual_model": "claude-haiku-4-5"},
         {"role": "evaluator", "actual_model": "gpt-5"},
     ])
-    result = _collect_result(
-        "s10-task", "claude-haiku-4-5", 100.0, 0, "",
+    result = _collect_result("s10-task", "claude-haiku-4-5", 100.0, 0, "",
         exact_td=td, expected_task="Some task",
         timed_out=True, source_batch="smoke-20260801",
     )
@@ -288,6 +287,26 @@ def test_collect_result_has_s10_p1_schema_fields(tmp_path):
     assert result2["source_batch"] == ""
     assert result2["planner_model"] == "deepseek-v4-flash"
     assert result2["judge_model"] == "gpt-5"
+
+
+def test_collect_result_local_tco_included(tmp_path, monkeypatch):
+    """本地模型事件（is_local + cost=0）按 local_model_cost TCO 折算进 total_cost。"""
+    td = tmp_path / "task-tco"
+    _write_meta_metering(td, "TCO task", [
+        {"role": "worker", "actual_model": "mlx-community/Qwen3.6-27B-4bit",
+         "is_local": True, "cost_usd": 0.0},
+        {"role": "worker", "actual_model": "mlx-community/Qwen3.6-27B-4bit",
+         "is_local": True, "cost_usd": 0.0},
+        {"role": "worker", "actual_model": "deepseek-v4-flash",
+         "is_local": False, "cost_usd": 0.05},
+    ])
+    monkeypatch.setattr("agent_go.metrics._local_tco_loaded", True)
+    monkeypatch.setattr("agent_go.metrics._local_tco_cost",
+                        {"mlx-community/Qwen3.6-27B-4bit": 0.0007})
+    result = _collect_result("tco-task", "claude-sonnet-4-6", 10.0, 0, "",
+                             exact_td=td, expected_task="TCO task")
+    # 2 次本地调用 × $0.0007 + 云端 $0.05 = $0.0514
+    assert abs(result["total_cost_usd"] - 0.0514) < 1e-6
 
 
 def test_collect_result_no_metering_models_empty(tmp_path):

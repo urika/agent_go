@@ -304,8 +304,8 @@ class TestLocalModelTco:
              "is_local": True, "cost_usd": 0.0, "prompt_tokens": 100, "completion_tokens": 20,
              "actual_provider": "claude-code"},
         ])
-        monkeypatch.setattr("agent_go.eval._local_tco_loaded", True)
-        monkeypatch.setattr("agent_go.eval._local_tco_cost",
+        monkeypatch.setattr("agent_go.metrics._local_tco_loaded", True)
+        monkeypatch.setattr("agent_go.metrics._local_tco_cost",
                             {"mlx-community/Qwen3.6-27B-4bit": 0.0007})
         result = analyze_cost(tmp_path)
         # 2 次调用 × $0.0007 = $0.0014
@@ -320,8 +320,8 @@ class TestLocalModelTco:
              "is_local": True, "cost_usd": 0.0, "prompt_tokens": 100, "completion_tokens": 20,
              "actual_provider": "claude-code"},
         ])
-        monkeypatch.setattr("agent_go.eval._local_tco_loaded", True)
-        monkeypatch.setattr("agent_go.eval._local_tco_cost", {})
+        monkeypatch.setattr("agent_go.metrics._local_tco_loaded", True)
+        monkeypatch.setattr("agent_go.metrics._local_tco_cost", {})
         result = analyze_cost(tmp_path)
         assert result["estimated_cost_usd"] == 0.0
         assert result["cost_source_breakdown"]["local_tco"] == 0.0
@@ -333,8 +333,8 @@ class TestLocalModelTco:
              "is_local": False, "cost_usd": 0.05, "prompt_tokens": 1000, "completion_tokens": 200,
              "actual_provider": "claude-code"},
         ])
-        monkeypatch.setattr("agent_go.eval._local_tco_loaded", True)
-        monkeypatch.setattr("agent_go.eval._local_tco_cost",
+        monkeypatch.setattr("agent_go.metrics._local_tco_loaded", True)
+        monkeypatch.setattr("agent_go.metrics._local_tco_cost",
                             {"deepseek-v4-flash": 0.0007})
         result = analyze_cost(tmp_path)
         # 云端事件用真实 cost_usd，不叠加 TCO

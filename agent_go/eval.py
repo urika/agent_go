@@ -377,28 +377,10 @@ from .pricing import (
 )
 
 
-_local_tco_cost: dict = {}
-_local_tco_loaded = False
-
-
 def _local_tco_usd(model: str) -> float:
-    """本地模型 TCO 成本（每次调用估算）。从 config.local_model_cost 读取。
-
-    本地模型 metering cost_usd=0，直接进 $/pass 会让 gate 视为"免费"失真。
-    配置 local_model_cost[model] 后，返回该模型每次调用的 TCO 估算成本
-    （电费 + 硬件折旧）。未配置返回 0（保持原语义）。
-    """
-    global _local_tco_loaded, _local_tco_cost
-    if not _local_tco_loaded:
-        _local_tco_loaded = True
-        try:
-            from .config import load_config
-            _local_tco_cost = load_config().get("local_model_cost", {}) or {}
-        except Exception:
-            _local_tco_cost = {}
-    if not _local_tco_cost:
-        return 0.0
-    return float(_local_tco_cost.get(model, 0.0) or 0.0)
+    """本地模型 TCO 成本（每次调用估算）。委托 metrics.local_tco_usd 共享实现。"""
+    from .metrics import local_tco_usd as _shared_tco
+    return _shared_tco(model)
 
 
 def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
