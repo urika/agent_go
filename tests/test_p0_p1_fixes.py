@@ -278,6 +278,71 @@ class TestCostPricing:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 本地模型 TCO 成本口径（2026-08-12）
+# ═══════════════════════════════════════════════════════════════
+
+class TestLocalModelTco:
+    """本地模型 metering 成本清零后按 local_model_cost 折算，纳入 $/pass/gate。"""
+
+    def _write_metering(self, base: Path, task_name: str, events: list[dict]) -> Path:
+        td = base / task_name
+        td.mkdir(parents=True)
+        (td / "meta.json").write_text(json.dumps({"task_id": task_name, "results": []}),
+                                      encoding="utf-8")
+        (td / "metering.jsonl").write_text(
+            "\n".join(json.dumps(e, separators=(",", ":")) for e in events) + "\n",
+            encoding="utf-8")
+        return td
+
+    def test_local_tco_aggregated(self, tmp_path, monkeypatch):
+        """is_local 事件成本为 0，但 local_model_cost 配置后按调用折算。"""
+        self._write_metering(tmp_path, "task-local-1", [
+            {"role": "worker", "actual_model": "mlx-community/Qwen3.6-27B-4bit",
+             "is_local": True, "cost_usd": 0.0, "prompt_tokens": 100, "completion_tokens": 20,
+             "actual_provider": "claude-code"},
+            {"role": "worker", "actual_model": "mlx-community/Qwen3.6-27B-4bit",
+             "is_local": True, "cost_usd": 0.0, "prompt_tokens": 100, "completion_tokens": 20,
+             "actual_provider": "claude-code"},
+        ])
+        monkeypatch.setattr("agent_go.eval._local_tco_loaded", True)
+        monkeypatch.setattr("agent_go.eval._local_tco_cost",
+                            {"mlx-community/Qwen3.6-27B-4bit": 0.0007})
+        result = analyze_cost(tmp_path)
+        # 2 次调用 × $0.0007 = $0.0014
+        assert abs(result["estimated_cost_usd"] - 0.0014) < 1e-6
+        assert result["cost_source_breakdown"]["local_tco"] == pytest.approx(0.0014)
+        assert result["by_model"]["mlx-community/Qwen3.6-27B-4bit"] == pytest.approx(0.0014)
+
+    def test_local_tco_zero_when_unconfigured(self, tmp_path, monkeypatch):
+        """未配置 local_model_cost → 本地成本保持 0（不折算）。"""
+        self._write_metering(tmp_path, "task-local-2", [
+            {"role": "worker", "actual_model": "mlx-community/Qwen3.6-27B-4bit",
+             "is_local": True, "cost_usd": 0.0, "prompt_tokens": 100, "completion_tokens": 20,
+             "actual_provider": "claude-code"},
+        ])
+        monkeypatch.setattr("agent_go.eval._local_tco_loaded", True)
+        monkeypatch.setattr("agent_go.eval._local_tco_cost", {})
+        result = analyze_cost(tmp_path)
+        assert result["estimated_cost_usd"] == 0.0
+        assert result["cost_source_breakdown"]["local_tco"] == 0.0
+
+    def test_cloud_event_not_affected_by_tco(self, tmp_path, monkeypatch):
+        """云端事件（is_local=False）不因 local_model_cost 配置而折算。"""
+        self._write_metering(tmp_path, "task-local-3", [
+            {"role": "worker", "actual_model": "deepseek-v4-flash",
+             "is_local": False, "cost_usd": 0.05, "prompt_tokens": 1000, "completion_tokens": 200,
+             "actual_provider": "claude-code"},
+        ])
+        monkeypatch.setattr("agent_go.eval._local_tco_loaded", True)
+        monkeypatch.setattr("agent_go.eval._local_tco_cost",
+                            {"deepseek-v4-flash": 0.0007})
+        result = analyze_cost(tmp_path)
+        # 云端事件用真实 cost_usd，不叠加 TCO
+        assert abs(result["estimated_cost_usd"] - 0.05) < 1e-6
+        assert result["cost_source_breakdown"]["local_tco"] == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════
 # D3: cmd_clean 按 repo→task_ids 清理 tags
 # ═══════════════════════════════════════════════════════════════
 

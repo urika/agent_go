@@ -104,6 +104,12 @@ DEFAULT_CONFIG = {
         "local_model_name": "qwen",
         "enable_rules": True
     },
+    # 本地模型 TCO 成本口径（2026-08-12）：本地模型 metering 成本清零（$0），
+    # 若直接进 $/pass 会让 gate 把它当"免费"失真。这里按"每次调用"估算本地推理
+    # 的显式成本（电费 + 硬件折旧），键为本地模型名（actual_model 匹配）：
+    #   "mlx-community/Qwen3.6-27B-4bit": 0.0007   # ~0.5$/h 硬件 TCO ÷ 平均调用时长
+    # 留空 = 不折算（本地成本保持 0，用户配置后才纳入 TCO 评估）。
+    "local_model_cost": {},
     "cost_control": {
         # S10/S12 成本控制三层。
         # 冷启动策略（无基线时）：

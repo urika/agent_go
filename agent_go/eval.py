@@ -377,6 +377,30 @@ from .pricing import (
 )
 
 
+_local_tco_cost: dict = {}
+_local_tco_loaded = False
+
+
+def _local_tco_usd(model: str) -> float:
+    """本地模型 TCO 成本（每次调用估算）。从 config.local_model_cost 读取。
+
+    本地模型 metering cost_usd=0，直接进 $/pass 会让 gate 视为"免费"失真。
+    配置 local_model_cost[model] 后，返回该模型每次调用的 TCO 估算成本
+    （电费 + 硬件折旧）。未配置返回 0（保持原语义）。
+    """
+    global _local_tco_loaded, _local_tco_cost
+    if not _local_tco_loaded:
+        _local_tco_loaded = True
+        try:
+            from .config import load_config
+            _local_tco_cost = load_config().get("local_model_cost", {}) or {}
+        except Exception:
+            _local_tco_cost = {}
+    if not _local_tco_cost:
+        return 0.0
+    return float(_local_tco_cost.get(model, 0.0) or 0.0)
+
+
 def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     total_calls = 0
     total_prompt = 0
@@ -388,6 +412,8 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     cache_checks = 0
     # D1/D2 修复：成本双轨——真实 metering cost_usd（主）+ token 重算（仅补缺 cost_usd 的事件）
     cost_from_metering = 0.0
+    cost_from_local_tco = 0.0
+    local_tco_by_model: dict[str, float] = {}
     # 缺 cost_usd 且模型在价目表的事件，按 token 重算（旧日志/fallback 用）
     rebuild_usage: dict[str, dict[str, int]] = {}
     unknown_model_events = 0   # 既无 cost_usd 又不在 MODEL_PRICES 的事件（监控价目表覆盖度）
@@ -424,7 +450,17 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
                by_role[role]["cost_usd"] += ev.get("cost_usd", 0.0) or 0.0
                # D1/D2：优先用真实 cost_usd；缺则留待 token 重算
                ev_cost = ev.get("cost_usd", 0.0) or 0.0
-               if ev_cost > 0:
+               # 本地 TCO（2026-08-12）：本地模型 metering 成本为 0，若配置了
+               # local_model_cost[model] 则按每次调用折算，让本地模型纳入 $/pass/gate
+               _local_tco = 0.0
+               if ev_cost <= 0 and ev.get("is_local"):
+                   _local_tco = _local_tco_usd(model)
+               if _local_tco > 0:
+                   cost_from_local_tco += _local_tco
+                   local_tco_by_model[model] = local_tco_by_model.get(model, 0.0) + _local_tco
+                   # 计入 by_role 的成本（TCO 口径）
+                   by_role[role]["cost_usd"] += _local_tco
+               elif ev_cost > 0:
                    cost_from_metering += ev_cost
                elif model and model in MODEL_PRICES:
                    # 缺 cost_usd 但模型已知 → 按 token 重算补
@@ -434,6 +470,7 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
                else:
                    # 既无 cost_usd 又不在价目表（如 claude-code-executor 缺 cost_usd）→ 无法计价，计为未知
                    unknown_model_events += 1
+
                # D5 可观测：降级事件（PRD §line 173 留痕字段终于被读）
                if ev.get("result") == "fallback" or (ev.get("fallback_reason") or ""):
                    fallback_events += 1
@@ -484,7 +521,10 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
        model_costs[model] = round(pc + cc, 4)
        cost_from_rebuild += pc + cc
     cost_from_rebuild = round(cost_from_rebuild, 4)
-    cost = round(cost_from_metering + cost_from_rebuild, 4)
+    # 本地 TCO 按模型并入 model_costs（不覆盖已有重算值）
+    for model, tco in local_tco_by_model.items():
+        model_costs[model] = round((model_costs.get(model, 0.0) or 0.0) + tco, 4)
+    cost = round(cost_from_metering + cost_from_rebuild + cost_from_local_tco, 4)
 
     tasks = list(_scan_task_dirs(tasks_dir))
     subtask_total = 0
@@ -505,7 +545,8 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
        "total_calls": total_calls, "total_prompt_tokens": total_prompt, "total_completion_tokens": total_completion,
        "estimated_cost_usd": cost,
        # 成本来源透明化：metering（真实）+ rebuild（token 重算补缺）
-       "cost_source_breakdown": {"metering": round(cost_from_metering, 6), "rebuilt": cost_from_rebuild},
+       "cost_source_breakdown": {"metering": round(cost_from_metering, 6), "rebuilt": cost_from_rebuild,
+                             "local_tco": round(cost_from_local_tco, 6)},
        "unknown_model_events": unknown_model_events,
        "fallback_events": fallback_events,
        "policy_violations": policy_violations,
