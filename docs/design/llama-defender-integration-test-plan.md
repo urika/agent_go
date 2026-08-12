@@ -137,3 +137,32 @@ python3 tools/check_llama_defender_contract.py --json
 **过程发现**：对方部署重启代理期间（~13:33-13:37）曾出现短暂 404（`/api/*` 未加载），代理重启完成后端点全部生效——验证了新端点需代理进程重启加载（代码级变更不能 SIGHUP 热重载）。
 
 **待执行**：C/D 组故障注入与并发用例（`--full`），因需停止后端（35B 重载数十秒），待服务空闲窗口执行。
+
+## 12. C/D 组场景测试结果（2026-08-12 已实测）
+
+前置：无活跃 agent_go 任务（2 个 EXECUTING meta 为 52h stale，无活进程）；基线快照 profile=rapid-mlx-35b-opt、proxy_pid=50606、backend_pid=50261。每场景后恢复基线并复验。
+
+| 场景 | 步骤 | 结果 | 判定 |
+|---|---|---|---|
+| D2 start 幂等 | 连续 2 次 `manage.sh start` | exit=0×2，proxy/backend PID 不变（50606/50261） | ✅ PASS |
+| D3 reload 幂等 | 连续 2 次 `manage.sh reload` | exit=0×2，proxy PID 不变（SIGHUP 不重启进程），healthy | ✅ PASS |
+| D1 锁互斥 | `shlock` 持 `.manage.lock`，期间调 `start` | exit=1，5s 超时快速失败，报「无法获取 manage.sh 互斥锁」（macOS 无 flock，对方用 shlock 轮询实现） | ✅ PASS |
+| C1 backend_down | `stop-backend` → `start-backend` | 注入后 `state=backend_down`、`ready=false`、`backend.alive=false`、`proxy.alive=true`、HTTP 503；修复 10s 后 healthy（新 backend_pid=74469） | ✅ PASS |
+| C2 proxy_down | `kill <proxy_pid>` → `manage.sh start` | 注入后 API 不可达（HTTP:000）、`manage.sh status` 显示「代理未运行」、后端存活；`start` 只补代理（新 proxy_pid=78783），**backend_pid 不变** | ✅ PASS |
+| C3 model_drift | `switch qwen3.6-27b-4bit` + `reload`（后端仍跑 35B） | **注入后 `state=healthy`（应为 `model_drift`）**：active_profile=qwen3.6-27b-4bit 但 backend.model_name=unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit | ❌ **FAIL**（见缺陷 R-C3-1） |
+| C4 全停全启 | `manage.sh stop` → `manage.sh start` | stop 后全部进程退出、HTTP:000；start 11s 恢复 healthy（新 proxy 82806 / backend 81690），profile 不变 | ✅ PASS |
+| 推理冒烟 | `POST /v1/messages`（claude-haiku-4-5） | 真实推理返回正常 | ✅ PASS |
+
+### 缺陷 R-C3-1：model_drift 同族不同尺寸漏报
+
+- **现象**：active_profile 切到 27b 配置，后端实际加载 35B，`/api/status` 仍报 `state=healthy`。
+- **根因**（`admin_server.py::_model_slugs_compatible`）：按 token 集合比较，`intersection={Qwen3.6,4bit}`（2 个）≥ 阈值 `max(2, min_len//2)`（2）→ 判 compatible。同族不同尺寸（27B vs 35B）共享族名与量化后缀 token → 漏报。双向均漏。
+- **影响**：agent_go 会把「配置期望 27B、实际 35B」（或反向）误判为健康，按错误能力档路由任务——反向场景（期望强模型、实际弱模型）会静默降级任务质量。
+- **修复建议**：尺寸 token（`\d+B`）与专家规模 token（如 A3B）必须作为强制判别项——actual 与 expected 的尺寸 token 不一致即判 drift，再叠加族名比较容忍 org/量化后缀差异。
+- **回归用例**：profile=27b + backend=35B → `state=model_drift`；profile=35b + backend=27B → `state=model_drift`；profile 与 backend 一致 → `healthy`。
+
+### 汇总
+
+- **C/D 组 7 场景：6 PASS / 1 FAIL（C3）**。FAIL 为对方 drift 检测逻辑缺陷，非集成协议问题。
+- 故障注入恢复路径（stop-backend/stop/kill proxy → start/start-backend）全部可靠，恢复后状态与基线一致。
+- 服务当前处于 healthy 基线（proxy 82806 / backend 81690 / rapid-mlx-35b-opt）。
