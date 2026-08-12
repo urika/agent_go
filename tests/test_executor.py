@@ -2507,6 +2507,35 @@ class TestCheckScopeCompliance:
         assert result["compliant"] is False
         assert "src/storage.py" in result["missing"]
 
+    def test_out_of_scope_revert_via_checkout(self, tmp_path):
+        """M3 harness 修复：越界改动可通过 git checkout 撤销，范围内改动保留。"""
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        subprocess.run(["git", "init"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(worktree), capture_output=True)
+        (worktree / "src").mkdir()
+        (worktree / "src" / "cli.py").write_text("# cli", encoding="utf-8")
+        (worktree / "frontend").mkdir()
+        (worktree / "frontend" / "app.ts").write_text("// app", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(worktree), capture_output=True)
+        # 模拟 agent 越界：改了 src/cli.py（范围内）和 frontend/app.ts（越界）
+        (worktree / "src" / "cli.py").write_text("# cli updated", encoding="utf-8")
+        (worktree / "frontend" / "app.ts").write_text("// app hacked", encoding="utf-8")
+        # scope 检查发现越界
+        result = _check_scope_compliance(worktree, "src/cli.py")
+        assert "frontend/app.ts" in result["out_of_scope"]
+        # 自动撤销越界文件
+        subprocess.run(["git", "checkout", "--"] + result["out_of_scope"],
+                       cwd=str(worktree), capture_output=True)
+        # 撤销后：frontend/app.ts 恢复原样，src/cli.py 保留改动
+        assert (worktree / "frontend" / "app.ts").read_text(encoding="utf-8") == "// app"
+        assert (worktree / "src" / "cli.py").read_text(encoding="utf-8") == "# cli updated"
+        # 重新 scope 检查应 compliant
+        result2 = _check_scope_compliance(worktree, "src/cli.py")
+        assert result2["compliant"] is True
+
 
 class TestBuildRepairPromptWithScope:
     """_build_repair_prompt: 范围偏差注入"""

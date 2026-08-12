@@ -184,6 +184,20 @@ def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, lo
         result_entry["reject_reason"] = reason
         return result_entry
 
+    # ── pytest -k nodeid 诊断（M3 发现：planner 可能生成 -k "Class::method"，
+    # pytest -k 不认 nodeid 语法会导致排除静默失效，引发假失败重试）──
+    if " -k " in vcmd and "::" in vcmd:
+        logger.warning(
+            f"[verify] {sub_id} 验证命令 -k 参数含 '::' nodeid 语法（pytest -k 不支持，"
+            f"排除将静默失效）: {vcmd[:120]}。建议改用测试函数名关键字。")
+        try:
+            from .config import log_event
+            log_event(logger, "verify_k_nodeid_warning", {
+                "sub_id": sub_id, "command": vcmd[:200], "task_id": task_id,
+            })
+        except Exception:
+            pass
+
     # ── 执行命令 ──
     try:
         v_start = time.time()
@@ -1624,6 +1638,31 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 
             # ── L1 范围合规检查：比对实际改动文件 vs files_hint 预期范围 ──
             scope_violation = _check_scope_compliance(worktree, subtask.get("files_hint", ""))
+
+            # M3 发现的确定性保护：越界改动自动撤销。
+            # 场景：hard 任务 agent 可能在 fix 阶段越界改无关文件（如 frontend/），
+            # 既浪费 turn 又可能撞 hard_timeout。验证失败触发 retry 时，先撤销
+            # out_of_scope 文件的改动（git checkout），让 agent 的修复聚焦在范围内。
+            # 仅撤销未提交的越界改动；已 commit 的越界改动保留（commit 是边界，不回退）。
+            _oos_files = scope_violation.get("out_of_scope", []) if scope_violation else []
+            if _oos_files:
+                try:
+                    _checkout_result = subprocess.run(
+                        ["git", "checkout", "--"] + _oos_files[:20],
+                        cwd=str(worktree), capture_output=True, text=True, timeout=15)
+                    if _checkout_result.returncode == 0:
+                        logger.warning(
+                            f"[scope] {sub_id} retry 前撤销 {_oos_files.__len__()} 个越界文件改动: "
+                            f"{', '.join(_oos_files[:5])}{'...' if len(_oos_files) > 5 else ''}")
+                        log_event(logger, "scope_out_of_scope_reverted", {
+                            "sub_id": sub_id, "attempt": retry_count,
+                            "files": _oos_files[:20], "task_id": task_id,
+                        })
+                        # 撤销后重新计算 scope_violation（repair prompt 用更新后的状态）
+                        scope_violation = _check_scope_compliance(
+                            worktree, subtask.get("files_hint", ""))
+                except Exception as _scope_e:
+                    logger.debug(f"越界文件撤销失败（非关键）: {_scope_e}")
 
             # 两阶段审查（改进方向 2）：独立只读审查 subagent——不参与实现、
             # 只做黑盒分析失败根因，消除「实现者盲区」。默认关闭（readonly_review.enabled）。
