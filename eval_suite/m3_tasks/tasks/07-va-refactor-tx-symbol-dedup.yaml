@@ -9,9 +9,16 @@ task: |
   - 要求：将权威实现保留在 util.py 中（新增 `tx_symbol(code: str) -> str`），emotion_metrics.py 和 reflection.py 改为从 util 导入
   - 保持行为完全一致（沪市 sh/深市 sz/北交所 bj 前缀规则）
   - 不改对外接口（两个模块的 _tx_symbol 仍可被调用，但内部委托 util.tx_symbol）
-  - 所有现有测试必须通过
+  - 范围限制：只改 duanxian/ 下的 3 个 Python 文件（util.py/emotion_metrics.py/reflection.py）。
+    禁止修改 frontend/、tests/、.gitignore 及任何无关文件。
+    如果首次产出已正确（3 文件 + 验证通过），不要继续修复无关的既有失败。
+  - 验证范围：只跑 tests/test_core_logic.py（不要跑 tests/ 全量目录）。
+  - 既有失败：tests/test_core_logic.py 有 2 个与本任务无关的既有失败
+    (spa_fallback、error_says_which)，验证时必须用 -k "not (spa_fallback or error_says_which)"
+    排除。注意：-k 只支持测试函数名关键字，不支持 Class::method nodeid 语法。
+    不要尝试修复这 2 个既有失败，不要跑 tests/ 全量目录。
 verification:
-  - "python -m pytest tests/test_core_logic.py -q"
+  - "python -m pytest tests/test_core_logic.py -q -k \"not (spa_fallback or error_says_which)\""
   - "python -c \"from duanxian import util, emotion_metrics, reflection; assert util.tx_symbol('600519')=='sh600519'; assert emotion_metrics._tx_symbol('000001')==util.tx_symbol('000001'); assert reflection._tx_symbol('300750')==util.tx_symbol('300750'); print('OK')\""
 timeout: 900
 cost_control:
