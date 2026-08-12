@@ -81,7 +81,8 @@ DEFAULT_CONFIG = {
         "enabled": False,               # 是否在 TASK.md 注入 goal 指令（--goal 开启）
         "max_turns": 20,                # 单个 goal 循环最大 tool-call 轮数
         "timeout_seconds": 600,          # goal 循环全局超时（秒）
-        "enable_goal_hook": False,      # 是否注入 Stop Hook（.claude/settings.json + verify-goal.sh）
+        "enable_goal_hook": False,      # 是否注入 Stop Hook（.claude/settings.local.json + verify-goal.sh）
+        "policy": "off",                # Goal Policy 默认方向：off|auto|force|hook（用户 CLI 覆盖优先）
     },
     "agent_loop": {
         "enabled": False,               # 默认关闭，--agent-loop 开启

@@ -83,9 +83,11 @@ def _build_parser():
     run_parser.add_argument("--no-verify-block", action="store_true", dest="no_verify_block",
                             help="验证失败不阻断下游依赖（默认阻断）")
     run_parser.add_argument("--goal", action="store_true",
-                            help="启用 goal 指令注入（TASK.md 追加 /goal 循环，默认关闭）")
+                            help="启用 goal 指令注入（TASK.md 追加 /goal 循环，默认关闭；等价 --goal-mode force）")
     run_parser.add_argument("--goal-hook", action="store_true", dest="goal_hook",
-                            help="注入 Stop Hook（.claude/settings.json + verify-goal.sh，默认关闭）")
+                            help="注入 Stop Hook（.claude/settings.local.json + verify-goal.sh，默认关闭；等价 --goal-mode hook）")
+    run_parser.add_argument("--goal-mode", choices=["auto", "off", "force", "hook"], default=None,
+                            help="Goal 执行策略：auto=系统按任务特征判断（默认关闭方向）、off=关闭、force=强制持续执行、hook=force+Stop Hook")
     run_parser.add_argument("--agent-loop", action="store_true",
                             help="启用混合策略：简单任务走直接 API，复杂任务保留 claude -p（默认关闭）")
     run_parser.add_argument("--interactive", action="store_true",
@@ -553,10 +555,14 @@ def cmd_run(args=None):
         config.setdefault("evaluator", {})["enabled"] = False
     if getattr(args, "no_verify_block", False):
         config.setdefault("verification", {})["block_on_failure"] = False
-    if getattr(args, "goal", False):
-        config.setdefault("goal", {})["enabled"] = True
-    if getattr(args, "goal_hook", False):
-        config.setdefault("goal", {})["enable_goal_hook"] = True
+    # Goal Policy：--goal-mode 归一化用户覆盖（--goal=force、--no-goal=off、--goal-hook=hook）
+    _goal_mode_flag = getattr(args, "goal_mode", None)
+    if getattr(args, "goal", False) and not _goal_mode_flag:
+        _goal_mode_flag = "force"
+    if no_goal and not _goal_mode_flag:
+        _goal_mode_flag = "off"
+    if getattr(args, "goal_hook", False) and not _goal_mode_flag:
+        _goal_mode_flag = "hook"
     if getattr(args, "agent_loop", False):
         config.setdefault("agent_loop", {})["enabled"] = True
     if getattr(args, "artifact_dir", None):
@@ -859,6 +865,24 @@ def cmd_run(args=None):
         _plan_requirements = confirmed_plan.get("acceptance_criteria_ids") or confirmed_plan.get("requirements") or []
     plan_quality = validate_plan_quality(confirmed, _plan_requirements)
 
+    # Goal Policy Resolver（goal-mechanism-design.md §3.3/§4）：
+    # 用户覆盖 > config.goal.policy > 系统确定性策略 > 默认 off。
+    # 决议应用到运行时 config，并写入 meta 供审计。
+    try:
+        from .goal_policy import resolve_goal_policy
+        goal_policy = resolve_goal_policy(
+            _goal_mode_flag,
+            config_policy=(config.get("goal") or {}).get("policy"),
+            subtasks=confirmed,
+            headless=headless,
+        )
+        config.setdefault("goal", {})["enabled"] = goal_policy["enabled"]
+        config["goal"]["enable_goal_hook"] = goal_policy["enable_hook"]
+    except Exception as _gpe:
+        logger.debug(f"[goal_policy] 解析失败（忽略，保留默认关闭）: {_gpe}")
+        goal_policy = {"mode": "off", "enabled": False, "enable_hook": False,
+                       "reason_codes": ["resolver_error"], "backend": "internal"}
+
     # M1.5 架构审查：执行前生成最小 Architecture Decision（fail-open，默认关闭）。
     # 结果写入 meta.architecture_review，供 traceability / architecture_compliance 消费。
     architecture_review = None
@@ -902,6 +926,9 @@ def cmd_run(args=None):
         meta["goal_contract"] = build_goal_contract(task, confirmed, delivery_required=True)
     except Exception as _gce:
         logger.debug(f"[goal_contract] 构建失败（忽略）: {_gce}")
+    meta["goal_mode"] = goal_policy["mode"]
+    meta["goal_backend"] = goal_policy["backend"]
+    meta["goal_policy_reason_codes"] = goal_policy["reason_codes"]
     # recover 必须基于本次运行的确切基准提交，不能依赖默认分支名或提交时间窗口。
     if (repo / ".git").exists():
         try:
