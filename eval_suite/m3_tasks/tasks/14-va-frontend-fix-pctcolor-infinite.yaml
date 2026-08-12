@@ -1,0 +1,34 @@
+# M4 前端任务 2: vibe-astock 前端 bug 修复（medium）
+# 场景：bug 修复——pctColor 对 Infinity/NaN 边界处理缺陷
+id: va-frontend-fix-pctcolor-infinite
+difficulty: medium
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/vibe-astock
+task: |
+  修复 frontend/src/lib/colors.ts 中 `pctColor` 的边界缺陷。
+
+  当前实现：
+  ```ts
+  export function pctColor(v: number | null | undefined): string {
+    if (v == null || Number.isNaN(v)) return FLAT_TEXT;
+    return v > 0 ? UP_TEXT : v < 0 ? DOWN_TEXT : FLAT_TEXT;
+  }
+  ```
+
+  缺陷：`Number.isNaN(v)` 只拦截 NaN，但 `Infinity` / `-Infinity` 会溜过——
+  `pctColor(Infinity)` 返回 `UP_TEXT`（红色）、`pctColor(-Infinity)` 返回 `DOWN_TEXT`（绿色），
+  把无效数据渲染成涨/跌颜色。这与 agent.ts 的 `finite()` 语义（用 `Number.isFinite`）不一致。
+
+  要求：
+  - 用 `Number.isFinite(v)` 替代 `Number.isNaN(v)` 做有效性检查
+  - 行为不变：有效有限数按正/负/零返回 UP_TEXT/DOWN_TEXT/FLAT_TEXT；null/undefined/NaN/±Infinity 返回 FLAT_TEXT
+  - 只改 frontend/src/lib/colors.ts 的 pctColor 函数，禁止修改其他任何文件
+  - 加注释说明为何用 Number.isFinite
+verification:
+  - "npm install && npm run build"
+  - "node --experimental-strip-types -e \"import { pctColor, UP_TEXT, DOWN_TEXT, FLAT_TEXT } from './frontend/src/lib/colors.ts'; if (pctColor(Infinity)!==FLAT_TEXT) process.exit(1); if (pctColor(-Infinity)!==FLAT_TEXT) process.exit(1); if (pctColor(NaN)!==FLAT_TEXT) process.exit(1); if (pctColor(null)!==FLAT_TEXT) process.exit(1); if (pctColor(undefined)!==FLAT_TEXT) process.exit(1); if (pctColor(5)!==UP_TEXT) process.exit(1); if (pctColor(-5)!==DOWN_TEXT) process.exit(1); if (pctColor(0)!==FLAT_TEXT) process.exit(1); console.log('OK')\""
+timeout: 900
+cost_control:
+  enabled: false
+  max_budget_usd: 0.5
+  per_subtask_budget_usd: 0.3
+  on_exceed: stop
