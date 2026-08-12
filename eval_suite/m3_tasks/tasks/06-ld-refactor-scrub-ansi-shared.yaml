@@ -10,6 +10,12 @@ task: |
   - 在 proxy_logging.py 中（若有重复 ANSI 清洗），改为调用 content_compressor._scrub_ansi 或引用其正则，消除重复
   - 若 proxy_logging.py 无 ANSI 逻辑，则新增 `proxy_logging.scrub_for_log(text)` 调用 content_compressor._scrub_ansi
   - 不改变任何函数的对外行为，所有现有测试必须通过
+
+  验证命令规范（重要）：
+  - 本仓库测试目录是 `test/unit/`（单数 test），**不是** `tests/`（复数）——不要用 `pytest tests/`（目录不存在会 rc=4）
+  - 全量验证用 `python -m pytest`（无参数，pytest.ini testpaths 已限定 test/unit）
+  - 指定文件验证用 `python -m pytest test/unit/<file>.py`（单数 test）
+  - 不要用管道 | / 重定向 / 命令链
 verification:
   - "python -m pytest test/unit/test_content_compressor.py test/unit/test_utils.py -q"
   - "python -c \"from content_compressor import _scrub_ansi; from proxy_logging import scrub_for_log; assert _scrub_ansi('\\x1b[31mred\\x1b[0m')=='red'; assert scrub_for_log('\\x1b[31mred\\x1b[0m')=='red'; print('OK')\""

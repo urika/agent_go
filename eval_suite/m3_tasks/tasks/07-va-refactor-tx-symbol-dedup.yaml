@@ -17,6 +17,12 @@ task: |
     (spa_fallback、error_says_which)，验证时必须用 -k "not (spa_fallback or error_says_which)"
     排除。注意：-k 只支持测试函数名关键字，不支持 Class::method nodeid 语法。
     不要尝试修复这 2 个既有失败，不要跑 tests/ 全量目录。
+
+  验证命令规范（重要）：
+  - 用 `python -m pytest tests/test_core_logic.py -k "not (spa_fallback or error_says_which)"` 形式
+    （python -m 会把 cwd 加入 sys.path，避免裸 pytest 时 No module named 'duanxian'）
+  - 不要用裸 `pytest`（无 python -m）——cwd 不在 sys.path 会导致 duanxian 包无法导入
+  - 不要用管道 | / 重定向 / 命令链
 verification:
   - "python -m pytest tests/test_core_logic.py -q -k \"not (spa_fallback or error_says_which)\""
   - "python -c \"from duanxian import util, emotion_metrics, reflection; assert util.tx_symbol('600519')=='sh600519'; assert emotion_metrics._tx_symbol('000001')==util.tx_symbol('000001'); assert reflection._tx_symbol('300750')==util.tx_symbol('300750'); print('OK')\""
