@@ -1,0 +1,24 @@
+# M4 前端任务 1: vibe-astock 前端新增纯函数（easy）
+# 场景：新增功能——前端纯逻辑工具函数（验证 P0 tsc/build + node TS 断言链路）
+id: va-frontend-add-format-utils
+difficulty: easy
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/vibe-astock
+task: |
+  在 frontend/src/lib/format.ts 中新增 2 个纯函数（新建文件，不 import 任何模块）：
+  - `clampNumber(v: unknown, min = 0, max = 100): number`
+    返回 v 在 [min, max] 内的值；v 非有限数（NaN/Infinity/非 number）返回 0
+  - `truncateMiddle(text: string, maxLen = 20): string`
+    长度 ≤ maxLen 原样返回；超过则保留首尾各一半用 "…" 连接（如 "abcdefghijklmnop" → "abcdefgh…klmnop"）
+  要求：
+  - 文件必须放在 frontend/src/lib/format.ts，不得 import 任何其他模块（保持纯函数可独立验证）
+  - 加 JSDoc 注释说明参数和返回
+  - 范围限制：只允许改 frontend/src/lib/format.ts，禁止修改其他任何文件
+verification:
+  - "npm install && npm run build"
+  - "node --experimental-strip-types -e \"import { clampNumber, truncateMiddle } from './frontend/src/lib/format.ts'; if (clampNumber(150,0,100)!==100||clampNumber(NaN)!==0||clampNumber(-5,0,100)!==0||clampNumber(50,0,100)!==50) process.exit(1); const s='abcdefghijklmnopqrstuvwxyz'; const t=truncateMiddle(s,20); if (t.length>20||!t.includes('…')||t[0]!=='a'||t[t.length-1]!=='z') process.exit(1); console.log('OK', t)\""
+timeout: 900
+cost_control:
+  enabled: false
+  max_budget_usd: 0.5
+  per_subtask_budget_usd: 0.3
+  on_exceed: stop
