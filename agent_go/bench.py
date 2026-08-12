@@ -245,7 +245,8 @@ def _run_baseline_one(task: dict, repo: Path, model: str, task_id: str,
     work = tmp_dir / "repo"
     try:
         # 复制 fixture 到临时目录（不复制 .git，避免污染原 repo / 依赖 git 状态）
-        shutil.copytree(repo, work, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache"))
+        shutil.copytree(repo, work, ignore=shutil.ignore_patterns(
+            ".git", "__pycache__", ".pytest_cache", "node_modules", "dist", ".vite"))
 
         # 1. claude -p 裸跑（stream-json 提取 total_cost_usd / elapsed）
         claude_cmd = [

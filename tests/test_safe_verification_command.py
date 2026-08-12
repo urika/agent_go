@@ -512,6 +512,18 @@ class TestFrontendToolchain:
                   "cypress run --spec cypress/e2e/*.cy.ts"]:
             assert chk(c)[0], c
 
+    def test_npx_tool_alias_routing(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        # npx 应路由到 tsc/vite/eslint/webpack 规则（portal 任务验证命令）
+        for c in ["npx tsc --noEmit",
+                  "npx tsc -b --noEmit",
+                  "npx vite build",
+                  "npx vite build --outDir dist",
+                  "npx eslint src/ --ext .ts"]:
+            assert chk(c)[0], c
+        # vite/tsc 命令管道仍被拒
+        assert not chk("npx vite build | tail")[0]
+
     def test_e2e_injection_rejected(self):
         from agent_go.utils import _is_safe_verification_command as chk
         assert not chk("npx playwright test; rm -rf /")[0]

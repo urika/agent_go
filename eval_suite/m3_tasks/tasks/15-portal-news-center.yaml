@@ -1,0 +1,50 @@
+# M4 前端任务 3: 企业门户新闻中心完整功能（hard）
+# 场景：企业门户网站开发——新闻中心(筛选+搜索+排序+分页+标签云)多文件协作
+id: portal-news-center
+difficulty: hard
+repo: /Users/jinsongwang/workspace/agent_go/eval_suite/fixtures/corp-portal
+task: |
+  实现企业门户的"新闻中心"完整功能。这是一个真实的前端功能开发任务，涉及纯逻辑库 + React 组件 + 页面集成。
+
+  ## 背景
+  corp-portal 是 Vite + React + TS 企业门户。新闻中心当前是空壳（NewsPage 只渲染 `<h1>新闻中心</h1>`）。
+  已有基础库：
+  - src/lib/news.ts：NewsItem 接口 + filterByCategory/searchItems/sortItems/getFilteredNews/paginate/tagCloud
+  - src/data/news.ts：NEWS_DATA（10 条新闻，类别: 公司动态/行业资讯/产品发布/公告）
+  - src/App.tsx：路由已接 NewsPage（空壳）
+
+  ## 需求
+  1. **组件 src/components/NewsList.tsx**：接收 NewsItem[]，渲染列表（标题/类别徽标/日期/摘要）。空列表渲染"暂无新闻"。
+  2. **组件 src/components/NewsFilters.tsx**：类别筛选下拉（全部/公司动态/行业资讯/产品发布/公告）+ 关键词搜索框 + 排序（最新/最早）。受控组件（props 传当前值 + onChange 回调）。
+  3. **组件 src/components/NewsPagination.tsx**：分页按钮（上一页/下一页 + 页码）。总页数=ceil(total/pageSize)。
+  4. **页面集成**：改写 src/pages/NewsPage.tsx，组合 NewsFilters + NewsList + NewsPagination：
+     - 用 useState 管理 category/keyword/sortBy/page
+     - 用 lib/news.ts 的 getFilteredNews 过滤，再 paginate
+     - 切换筛选/搜索/排序时页码重置为 1
+     - 显示结果总数
+  5. **修复 lib/news.ts 的 bug**：`paginate` 当前对 `page < 1` 返回 []，但页码超出总页数时应返回空数组而非抛错——检查并确保分页边界正确（page 超过总页数返回空数组；pageSize 为 0 返回空数组）。已有逻辑已正确，无需改；重点检查 `sortItems` 对空数组和单元素数组不抛错。
+
+  ## 范围与约束
+  - 允许改：src/components/NewsList.tsx、src/components/NewsFilters.tsx、src/components/NewsPagination.tsx、src/pages/NewsPage.tsx（新建）
+  - 允许改：src/lib/news.ts（仅在确实有 bug 时，否则保持不动）
+  - 禁止改：src/App.tsx、src/data/news.ts、src/lib/format.ts、package.json、tsconfig.json
+  - 不 import 任何 React Router 之外的第三方库（避免额外依赖）
+  - 所有组件用 TypeScript 严格类型（tsconfig noUnusedLocals 开启，未用变量会构建失败）
+
+  ## 验证命令规范（重要）
+  - 验证必须使用 package.json 里的 npm 脚本：`npm install && npm run build`（构建+类型检查）
+  - 不要用 `npx tsc`、`npx vite build`（安全门禁不支持 npx 子命令的复杂参数）
+  - 不要用管道 `|`、重定向、命令链 `&&` 之外的组合（如 `cmd | tail` 会被安全门禁拒绝）
+  - node 断言用 `node --experimental-strip-types -e "..."` 单行形式
+  - 保持 YAML verification 里已有的 3 条命令不变，仅参考其写法
+
+verification:
+  - "npm install && npm run build"
+  - "node --experimental-strip-types -e \"import { getFilteredNews, paginate, sortItems, tagCloud } from './src/lib/news.ts'; import { NEWS_DATA } from './src/data/news.ts'; const f = getFilteredNews(NEWS_DATA, { category: '公告', keyword: '业绩', sortBy: 'date', order: 'desc' }); if (f.length < 1) process.exit(1); const all = getFilteredNews(NEWS_DATA, {}); if (all.length !== 10) process.exit(1); const s = sortItems(all, 'title', 'asc'); if (s[0].title.localeCompare(s[1].title, 'zh-CN') > 0) process.exit(1); const p1 = paginate(all, 1, 4); if (p1.length !== 4) process.exit(1); const pOver = paginate(all, 999, 4); if (pOver.length !== 0) process.exit(1); const pZero = paginate(all, 1, 0); if (pZero.length !== 0) process.exit(1); if (tagCloud(all).length === 0) process.exit(1); console.log('OK')\""
+  - "node --experimental-strip-types -e \"import { getFilteredNews } from './src/lib/news.ts'; import { NEWS_DATA } from './src/data/news.ts'; const kw = getFilteredNews(NEWS_DATA, { keyword: '网关' }); if (kw.length !== 1) process.exit(1); const cat = getFilteredNews(NEWS_DATA, { category: '产品发布' }); if (cat.length !== 2) process.exit(1); const none = getFilteredNews(NEWS_DATA, { keyword: '不存在的关键词xyz' }); if (none.length !== 0) process.exit(1); console.log('OK')\""
+timeout: 1200
+cost_control:
+  enabled: false
+  max_budget_usd: 0.8
+  per_subtask_budget_usd: 0.5
+  on_exceed: stop
