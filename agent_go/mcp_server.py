@@ -415,7 +415,8 @@ class MCPServer:
     # ── Subprocess management ──────────────────────────────────
 
     def _argv(self, *extra: str) -> list[str]:
-        return [sys.executable, "-m", "agent_go"] + list(extra) + ["--yes", "--json"]
+        # --json 是顶层 parser 参数，必须放在子命令之前（argparse 不接受子命令后的顶层 flag）
+        return [sys.executable, "-m", "agent_go", "--json"] + list(extra) + ["--yes"]
 
     def _spawn(self, cmd: list[str]) -> subprocess.Popen:
         env = os.environ.copy()

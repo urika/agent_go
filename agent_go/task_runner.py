@@ -120,15 +120,15 @@ class TaskRunner:
     def start_run(self, repo: str, task: str, parallel: int = 1,
                   goal: Optional[bool] = None, confirm_mode: str = "auto",
                   on_exit: Optional[Callable[[str, int], None]] = None) -> str:
-        """启动新任务（agent_go run ... --yes --json）。
+        """启动新任务（agent_go --json run ... --yes）。
 
         confirm_mode：auto（默认，--yes 跳过计划确认）；
                       web（R5b，--confirm-mode web，Plan/子任务确认走 web 文件协议）。
         返回解析出的 task_id。子进程启动失败/首事件超时抛 TaskRunnerError。
         """
-        argv = [sys.executable, "-m", "agent_go", "run", repo, task,
+        argv = [sys.executable, "-m", "agent_go", "--json", "run", repo, task,
                 "--parallel", str(max(1, min(8, int(parallel)))),
-                "--yes", "--json"]
+                "--yes"]
         if confirm_mode == "web":
             argv += ["--confirm-mode", "web"]
         if goal is True:
@@ -149,10 +149,10 @@ class TaskRunner:
 
     def start_resume(self, task_id: str, parallel: int = 1,
                      on_exit: Optional[Callable[[str, int], None]] = None) -> str:
-        """恢复任务（agent_go resume <id> --yes --json）。"""
-        argv = [sys.executable, "-m", "agent_go", "resume", task_id,
+        """恢复任务（agent_go --json resume <id> --yes）。"""
+        argv = [sys.executable, "-m", "agent_go", "--json", "resume", task_id,
                 "--parallel", str(max(1, min(8, int(parallel)))),
-                "--yes", "--json"]
+                "--yes"]
         try:
             proc = self._spawn(argv)
         except OSError as e:
@@ -164,10 +164,10 @@ class TaskRunner:
 
     def start_review_deep(self, task_id: str,
                           on_exit: Optional[Callable[[str, int], None]] = None) -> str:
-        """触发深层审查（agent_go review --task <id> --deep --yes），独立模型逐子任务分析。"""
+        """触发深层审查（agent_go --json review --task <id> --deep --yes），独立模型逐子任务分析。"""
         key = f"review:{task_id}"
-        argv = [sys.executable, "-m", "agent_go", "review", "--task", task_id,
-                "--deep", "--yes", "--json"]
+        argv = [sys.executable, "-m", "agent_go", "--json", "review", "--task", task_id,
+                "--deep", "--yes"]
         try:
             proc = self._spawn(argv)
         except OSError as e:

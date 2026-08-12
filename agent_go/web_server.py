@@ -1491,7 +1491,11 @@ class WebHandler(BaseHTTPRequestHandler):
     def _op_run(self, body: dict, token: str) -> None:
         repo = str(body.get("repo") or "").strip()
         task = str(body.get("task") or "").strip()
-        parallel = int(body.get("parallel") or 1)
+        try:
+            parallel = int(body.get("parallel") or 1)
+        except (TypeError, ValueError):
+            self._reply_json(400, {"error": "parallel 必须为正整数"})
+            return
         goal = body.get("goal")  # None/True/False
         confirm_mode = str(body.get("confirm_mode") or "auto")
         if confirm_mode not in ("auto", "web"):
@@ -1537,7 +1541,11 @@ class WebHandler(BaseHTTPRequestHandler):
             self._reply_json(409, {"error": f"任务正在运行中（{status}），无法 resume。可先 cancel。",
                                    "status": status})
             return
-        parallel = int(body.get("parallel") or 1)
+        try:
+            parallel = int(body.get("parallel") or 1)
+        except (TypeError, ValueError):
+            self._reply_json(400, {"error": "parallel 必须为正整数"})
+            return
         task_runner.start_resume(task_id, parallel=parallel)
         result = {"task_id": task_id, "status": "resumed"}
         _audit("tasks.resume", {"task_id": task_id}, result, True, token)
@@ -1562,7 +1570,11 @@ class WebHandler(BaseHTTPRequestHandler):
         if body.get("confirm") is not True:
             self._reply_json(400, {"error": "需 confirm: true 二次确认"})
             return
-        days = int(body.get("days") or 0)
+        try:
+            days = int(body.get("days") or 0)
+        except (TypeError, ValueError):
+            self._reply_json(400, {"error": "days 必须为正整数"})
+            return
         if days <= 0:
             self._reply_json(400, {"error": "days 必须为正整数"})
             return
@@ -1739,7 +1751,10 @@ class WebHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
-        raw = self.rfile.read(length) if 0 < length <= 64 * 1024 else b"{}"
+        if length > 64 * 1024:
+            self._reply_json(413, {"error": "body too large"})
+            return
+        raw = self.rfile.read(length) if length else b"{}"
         try:
             body = json.loads(raw.decode("utf-8")) if raw.strip() else {}
         except json.JSONDecodeError:

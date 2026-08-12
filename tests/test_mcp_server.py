@@ -631,15 +631,18 @@ class TestSubprocess:
         assert "agent_go" in argv
         assert "--yes" in argv
         assert "--json" in argv
-        assert argv[3] == "run"
-        assert argv[4] == "/repo"
-        assert argv[5] == "task desc"
-        assert argv[7] == "3"
+        assert argv[3] == "--json"  # 顶层 flag 前置（argparse 不接受子命令后的顶层参数）
+        assert argv[4] == "run"
+        assert argv[5] == "/repo"
+        assert argv[6] == "task desc"
+        assert argv[7] == "--parallel"
+        assert argv[8] == "3"
 
     def test_argv_resume(self, server):
         argv = server._argv("resume", "task-abc")
-        assert argv[3] == "resume"
-        assert argv[4] == "task-abc"
+        assert argv[3] == "--json"
+        assert argv[4] == "resume"
+        assert argv[5] == "task-abc"
 
     def test_parse_jsonl_last(self, server):
         text = '{"a":1}\n{"b":2}\nnot-json\n{"c":3}\n'

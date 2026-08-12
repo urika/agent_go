@@ -331,11 +331,11 @@ class TestTaskRunner:
         tid = runner.start_run("/tmp/repo", "任务x", parallel=3, goal=True)
         assert tid == TID
         argv = spawned[0]
-        assert argv[:4] == [__import__("sys").executable, "-m", "agent_go", "run"]
+        # --json 是顶层 parser 参数，必须位于子命令之前（argparse 不接受子命令后的顶层 flag）
+        assert argv.index("--json") < argv.index("run")
         assert "/tmp/repo" in argv and "任务x" in argv
         assert "--parallel" in argv and "3" in argv
-        assert "--yes" in argv and "--json" in argv and "--goal" in argv
-        assert runner.is_running(TID) is False or True  # reap 线程异步，不断言
+        assert "--yes" in argv and "--goal" in argv
 
     def test_start_run_no_goal_flag(self, monkeypatch):
         from agent_go.task_runner import TaskRunner
