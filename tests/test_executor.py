@@ -1609,6 +1609,57 @@ class TestVerificationLoopE2E:
         assert result["retry_count"] == 1, "应修复 1 次后通过"
         assert mock_fix.call_count == 1, "修复 prompt 应被调用 1 次"
 
+    def test_fix_no_changes_retries_verification(self, temp_repo, task_dir, logger):
+        """2026-08-12 改进：fix 无改动（nothing to commit）不硬停，tag 指向 HEAD 后重新验证。
+
+        场景：语义评估是唯一失败原因且 agent 判定实现已正确（无改动）。
+        git commit 报 "nothing to commit"（rc=1）是合法状态——应允许回到
+        验证循环重新验证，而非误判"Git 提交失败"硬停。
+        """
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        verify_count = [0]
+        commit_called = [False]
+
+        def _run(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout=" M main.py\n", stderr="")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="1 file changed", stderr="")
+            if "git add" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "git commit" in cmd_str:
+                commit_called[0] = True
+                # fix 无改动 → nothing to commit（rc=1，stderr 含标志短语）
+                return MagicMock(returncode=1, stdout="", stderr="nothing to commit, working tree clean")
+            if "git tag" in cmd_str:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "pytest" in cmd_str:
+                verify_count[0] += 1
+                rc = 0 if verify_count[0] >= 2 else 1  # 首次失败 → fix → 二次通过
+                return MagicMock(returncode=rc, stdout="", stderr="test output")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=_run), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+            result = _verify_changes(
+                "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"evaluator": {"enabled": False},
+                        "verification": {"max_retries": 3}},
+            )
+
+        # fix 无改动不硬停：修复后重新验证通过（retry_count=1, verify_ok=True）
+        assert commit_called[0], "fix 重试应尝试 commit"
+        assert result["verify_ok"] is True, "nothing to commit 后应重新验证并通过"
+        assert result["retry_count"] == 1
+        assert mock_fix.call_count == 1
+
     def test_max_retries_then_fail(self, temp_repo, task_dir, logger):
         """始终失败 → 达到 max_retries → verify_ok=False"""
         from threading import Lock

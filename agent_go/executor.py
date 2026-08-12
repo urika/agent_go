@@ -1756,18 +1756,48 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 _latest_kill_reason[0] = _fix_kr
 
             # git add + commit + tag
+            # 2026-08-12 改进：fix 重试中 agent 判定"无需改动"时，git commit 报
+            # "nothing to commit"（rc=1）是合法状态，不应视为提交失败硬停重试。
+            # 场景：语义评估是唯一失败原因且 agent 认为实现已正确（如本地模型
+            # 按常识重写映射被 evaluator 质疑）——此时无改动是合理结论，应允许
+            # 回到验证循环重新验证，而非误判"Git 提交失败"。
             fix_add = subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
             fix_commit = subprocess.run(["git", "commit", "-m",
                                          f"{subtask['id']} (fix-{retry_count}): 验证修复"],
                                         cwd=str(worktree), capture_output=True) if fix_add.returncode == 0 else None
-            fix_tag = subprocess.run(["git", "tag", "-f", tag_name], cwd=str(worktree), capture_output=True) \
-                if fix_commit is not None and fix_commit.returncode == 0 else None
-            if (fix_add.returncode != 0 or fix_commit is None or fix_commit.returncode != 0 or
-                    fix_tag is None or fix_tag.returncode != 0):
+            # "nothing to commit" 检测：无改动是合法状态（agent 判定无需修复）
+            _nothing_to_commit = (
+                fix_commit is not None and fix_commit.returncode != 0
+                and "nothing to commit" in (fix_commit.stderr or "")
+            )
+            if fix_add.returncode != 0 or fix_commit is None:
+                # add 失败 / 无 commit 对象：真错误，硬停
                 git_ok = False
                 verify_ok = False
-                logger.warning("验证修复后的 Git 提交/tag 失败，停止重试")
+                logger.warning("验证修复后的 Git add/commit 失败，停止重试")
                 break
+            if _nothing_to_commit:
+                # 无改动 → 仍打 tag（指向当前 HEAD，保证下游 merge 有合法引用），
+                # 然后回到验证循环顶部重新验证（retry_count 已递增）。
+                fix_tag = subprocess.run(["git", "tag", "-f", tag_name, "HEAD"],
+                                         cwd=str(worktree), capture_output=True)
+                if fix_tag.returncode != 0:
+                    git_ok = False
+                    verify_ok = False
+                    logger.warning("验证修复后 tag 失败，停止重试")
+                    break
+                logger.info(
+                    f"[fix] {sub_id} fix-{retry_count} 无改动（nothing to commit，"
+                    f"agent 判定无需修复），tag 指向 HEAD 并重新验证")
+            else:
+                fix_tag = subprocess.run(["git", "tag", "-f", tag_name],
+                                         cwd=str(worktree), capture_output=True) \
+                    if fix_commit.returncode == 0 else None
+                if fix_tag is None or fix_tag.returncode != 0:
+                    git_ok = False
+                    verify_ok = False
+                    logger.warning("验证修复后的 Git 提交/tag 失败，停止重试")
+                    break
 
             # 记录历史
             failed_summary = "; ".join(f"{cmd[:60]}" for cmd in failed_cmds)
