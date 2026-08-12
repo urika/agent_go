@@ -150,6 +150,8 @@ def api_tasks(include_legacy: bool = False) -> list[dict]:
             "total_retries": retries,
             "created": meta.get("created", ""),
             "mtime": mtime,
+            # U1：web 确认模式待确认标记（pending_confirmation.json 存在 → 列表 🔔）
+            "pending_confirmation": (td / "pending_confirmation.json").exists(),
         })
     return sorted(out, key=lambda x: x["mtime"], reverse=True)
 
@@ -2142,6 +2144,11 @@ function renderStatusFilters() {
   });
   const order = ['executing','planning','delivered','failed','blocked','cancelled'];
   const html = ['<span class="filter-btn'+(statusFilter==='all'?' active':'')+'" data-s="all">全部 ('+tasks.length+')</span>'];
+  // U1：待确认过滤器（有 pending 任务时置最前，高可见）
+  const pendingCount = tasks.filter(t => t.pending_confirmation).length;
+  if (pendingCount) html.push(
+    '<span class="filter-btn'+(statusFilter==='pending-confirm'?' active':'')+'" data-s="pending-confirm" '+
+    'style="color:var(--yellow)">🔔 待确认 ('+pendingCount+')</span>');
   order.forEach(g => {
     if (counts[g]) html.push(
       '<span class="filter-btn'+(statusFilter===g?' active':'')+'" data-s="'+g+'">'+
@@ -2158,6 +2165,7 @@ function renderStatusFilters() {
 function filteredTasks() {
   const q = document.getElementById('searchInput').value.trim().toLowerCase();
   return tasks.filter(t => {
+    if (statusFilter === 'pending-confirm') return !!t.pending_confirmation;
     if (statusFilter !== 'all' && statusGroup(t.status) !== statusFilter) return false;
     if (!q) return true;
     return (t.id+' '+t.task+' '+(t.repo||'')).toLowerCase().includes(q);
@@ -2187,7 +2195,8 @@ function renderTasks() {
   const rows = list.map(t => {
     const statusCls = STATUS_COLORS[t.status] || 'st-pending';
     return '<tr class="task-row" data-id="'+esc(t.id)+'">'+
-      '<td><span class="'+statusCls+'">'+statusIcon(t.status)+' '+esc(t.status)+'</span></td>'+
+      '<td><span class="'+statusCls+'">'+statusIcon(t.status)+' '+esc(t.status)+'</span>'+
+      (t.pending_confirmation ? ' <span title="等待计划确认" style="color:var(--yellow)">🔔</span>' : '')+'</td>'+
       '<td>'+esc(t.id)+'</td>'+
       '<td>'+esc(t.task)+'</td>'+
       '<td>'+t.subtask_count+'</td>'+
@@ -2222,7 +2231,17 @@ function bindRunForm() {
       const d = await postJSON('/api/tasks/run', {repo, task, parallel, confirm_mode: confirmMode});
       msg.textContent = '✅ 已启动: '+d.task_id+'（'+d.note+'）';
       msg.style.color = 'var(--green)';
-      setTimeout(loadTasks, 1200);
+      // U2：web 确认模式 → 自动展开新任务行并滚动定位（用户立即看到确认入口）
+      setTimeout(async () => {
+        await loadTasks();
+        if (confirmMode === 'web') {
+          const row = document.querySelector('.task-row[data-id="'+d.task_id+'"]');
+          if (row) {
+            row.scrollIntoView({block: 'center', behavior: 'smooth'});
+            toggleTask(d.task_id, row);
+          }
+        }
+      }, 1200);
     } catch (e) {
       msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)';
     } finally { btnRun.disabled = false; }
@@ -2410,6 +2429,16 @@ async function loadExtraPanels(id, td) {
 async function loadPendingCard(id, td) {
   const slot = td.querySelector('#pendingCard');
   if (!slot) return;
+  // U3：详情行存活期间每 5s 轮询（Plan 生成 30-60s，pending 出现后自动渲染卡片；
+  // 决策提交后 pending 消失/下一级 pending 出现均靠轮询驱动视图更新）
+  if (!slot.dataset.polling) {
+    slot.dataset.polling = '1';
+    const poll = () => {
+      if (!document.body.contains(slot)) return;  // 详情已关闭 → 停止
+      loadPendingCard(id, td);
+    };
+    setTimeout(poll, 5000);
+  }
   let d;
   try { d = await api('/api/tasks/'+encodeURIComponent(id)+'/pending-confirmation'); }
   catch (e) { return; }

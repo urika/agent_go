@@ -656,3 +656,80 @@ class TestWebConfirm:
         result, _ = _confirm_plan_channel({"title": "p"}, config, None, logging.getLogger("t"),
                                           iteration=1, task="t", plan_dir=td)
         assert result is None  # R → None（外层重生成）
+
+
+class TestArgvContract:
+    """启动链路契约测试：task_runner 构造的 argv 必须被 agent_go argparse 真实接受。
+
+    背景：--json 顶层 flag 曾后置导致 web/MCP 全部子进程启动失败——mock 测试
+    只断言 argv 内容，从未验证其可被真实 argparse 解析（端到端盲区）。
+    本测试在 argparse 层拦截此类回归，不起真实子进程。
+    """
+
+    def _captured_argv(self, runner, monkeypatch):
+        from unittest.mock import MagicMock
+        proc = MagicMock()
+        stdout = MagicMock()
+        stdout.readline.side_effect = ['{"task_id": "%s"}\n' % TID, ""]
+        proc.stdout = stdout
+        proc.stderr = iter([])
+        proc.poll.return_value = None
+        spawned = []
+        monkeypatch.setattr(runner, "_spawn", lambda argv: (spawned.append(argv), proc)[1])
+        return spawned
+
+    def _parse(self, argv):
+        """argv = [python, -m, agent_go, ...] → 剥掉前 3 个 token 后真实 parse。"""
+        from agent_go.cli import _build_parser
+        return _build_parser().parse_args(argv[3:])
+
+    def test_run_argv_auto_parseable(self, monkeypatch):
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        spawned = self._captured_argv(runner, monkeypatch)
+        runner.start_run("/tmp/repo", "任务", parallel=2, goal=True)
+        args = self._parse(spawned[0])
+        assert args.command == "run"
+        assert args.repo == "/tmp/repo"
+        assert args.json_mode is True
+
+    def test_run_argv_web_confirm_parseable(self, monkeypatch):
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        spawned = self._captured_argv(runner, monkeypatch)
+        runner.start_run("/tmp/repo", "任务", confirm_mode="web")
+        args = self._parse(spawned[0])
+        assert args.command == "run"
+        assert args.confirm_mode == "web"
+
+    def test_resume_argv_parseable(self, monkeypatch):
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        spawned = self._captured_argv(runner, monkeypatch)
+        runner.start_resume(TID, parallel=3)
+        args = self._parse(spawned[0])
+        assert args.command == "resume"
+        assert args.task_id == TID
+
+    def test_review_deep_argv_parseable(self, monkeypatch):
+        from agent_go.task_runner import TaskRunner
+        runner = TaskRunner()
+        spawned = self._captured_argv(runner, monkeypatch)
+        runner.start_review_deep(TID)
+        args = self._parse(spawned[0])
+        assert args.command == "review"
+        assert args.task_id == TID
+        assert args.deep is True
+
+    def test_mcp_argv_parseable(self):
+        """MCP _argv 同契约（run/resume/review 三种命令行）。"""
+        from agent_go.mcp_server import MCPServer
+        from agent_go.cli import _build_parser
+        server = MCPServer.__new__(MCPServer)
+        parser = _build_parser()
+        for extra in (("run", "/repo", "任务"), ("resume", TID),
+                      ("review", "--task", TID, "--deep")):
+            argv = server._argv(*extra)
+            args = parser.parse_args(argv[3:])
+            assert args.command == extra[0]
+            assert args.json_mode is True
