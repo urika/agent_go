@@ -194,6 +194,19 @@ DEFAULT_CONFIG = {
         # scope: "worker"(默认，仅执行子任务可见) | "planner_only" | "always"
         # 工具暴露为 mcp__{server_key}__{tool_name}，避免与原生工具重名
         # 详见 docs/design/office-capability-extension.md §2
+        #
+        # Playwright MCP（UI 语义验证，Tier 2 补充，默认关闭）：
+        # 微软官方 @playwright/mcp，用无障碍树（accessibility snapshot）而非 vision 模型，
+        # 确定性高、比截图 LLM 便宜。启用后工具暴露为 mcp__playwright__browser_*。
+        # 前置：worker 环境需有 npx + 网络（首次 npx @playwright/mcp@latest 下载）。
+        # 定位：CLI 快照（Tier 1, npx playwright test）为主，MCP 为交互探索补充。
+        # 详见 docs/design/ui-verification-research-2026-08-12.md §5
+        "playwright": {
+            "command": "npx",
+            "args": ["@playwright/mcp@latest"],
+            "enabled": False,
+            "scope": "worker",
+        },
     },
 }
 
