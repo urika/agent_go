@@ -31,7 +31,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
+import sys
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .status import task_status, normalize_task_status
 from pathlib import Path
@@ -40,6 +43,17 @@ from urllib.parse import unquote, urlparse
 
 from .config import AGENT_GO_DIR, CONFIG_PATH, load_config
 from .console import _LazyConsole
+from .profiles import (
+    ProfileError,
+    activate_cloud,
+    activate_local,
+    activate_profile,
+    health_check,
+    list_profiles,
+    probe_local_models,
+    read_current_profile,
+)
+from .task_runner import TaskRunnerError, task_runner
 # 复用 eval 的 JSONL/JSON 读取（与 bench/cross_judge 同源，避免实现漂移）
 from .eval import _read_jsonl, _read_json
 
@@ -744,6 +758,314 @@ def api_baseline() -> dict:
 # 配置查看（P2-1）+ 磁盘运维（P2-2）
 # ═══════════════════════════════════════════════════════════════
 
+def api_profiles() -> dict:
+    """配置中心数据源：profile 列表 + 当前模式（R3）。"""
+    return list_profiles()
+
+
+def api_health() -> dict:
+    """模型端点健康检查：plan/worker/evaluator/本地代理 + mismatch（R4）。"""
+    return health_check()
+
+
+def _audit(op: str, params: dict, result: Any, ok: bool, token: str = "") -> None:
+    """写操作审计行（R16）：append ~/.agent_go/web_audit.jsonl。
+
+    params 摘要截断（任务描述可能很长）；token 只存 sha256 前 8 位（操作者区分，不存明文）。
+    """
+    import hashlib
+
+    def _clip(v: Any) -> Any:
+        if isinstance(v, str):
+            return v[:200]
+        if isinstance(v, dict):
+            return {k: _clip(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_clip(x) for x in v[:10]]
+        return v
+
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "op": op,
+        "params": _clip(params),
+        "ok": ok,
+        "result": _clip(result) if not isinstance(result, str) else result[:300],
+        "auth": hashlib.sha256(token.encode()).hexdigest()[:8] if token else "",
+    }
+    try:
+        with (AGENT_GO_DIR / "web_audit.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        logger.warning("audit write failed: %s", e)
+
+
+def _run_cli(argv: list[str], timeout: float = 180) -> dict[str, Any]:
+    """同步执行 agent_go 子命令（快操作：clean/review-decision/merge），返回结构化结果。"""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "agent_go"] + argv,
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "exit_code": -1, "stdout": "", "stderr": f"命令超时（{timeout}s）"}
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "stdout": (proc.stdout or "")[-4000:],
+        "stderr": (proc.stderr or "")[-2000:],
+    }
+
+
+def _task_status_of(task_id: str) -> str:
+    """任务当前状态（meta.json 唯一事实源，经 status.py 归一化）。"""
+    td = _task_dir(task_id)
+    if td is None:
+        return ""
+    meta_path = td / "meta.json"
+    if not meta_path.exists():
+        return ""
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ""
+    return normalize_task_status(meta.get("status", ""), meta)
+
+
+_RUNNING_STATES = {"EXECUTING", "PLANNING"}
+
+
+def api_task_review(task_id: str) -> Optional[dict]:
+    """读取任务 review.json（R9 决策持久化结果）。"""
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    rj = td / "review.json"
+    if not rj.exists():
+        return {"task_id": task_id, "decision": None}
+    try:
+        data = json.loads(rj.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    data["task_id"] = task_id
+    return data
+
+
+def api_merge_preview(task_id: str) -> Optional[dict]:
+    """merge 确认弹窗数据（D5）：delivery/target 分支、ahead 数、可合并性、冲突文件。"""
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    try:
+        meta = json.loads((td / "meta.json").read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    repo = meta.get("repo", "")
+    delivery_branch = meta.get("delivery_branch") or ""
+    target = meta.get("target_branch") or meta.get("base_branch") or "main"
+    result: dict[str, Any] = {
+        "task_id": task_id,
+        "repo": repo,
+        "delivery_branch": delivery_branch,
+        "target_branch": target,
+        "pr_url": meta.get("pr_url") or "",
+        "explicit_merge_commit": meta.get("explicit_merge_commit") or "",
+    }
+    if not delivery_branch or not repo or not Path(repo).exists():
+        result["mergeable"] = False
+        result["error"] = "无 delivery_branch 或仓库不存在"
+        return result
+    from .delivery import check_mergeability
+    mc = check_mergeability(repo, delivery_branch, target)
+    result.update({
+        "mergeable": bool(mc.get("mergeable")),
+        "ahead": mc.get("ahead", 0),
+        "conflicts": mc.get("conflicts") or [],
+    })
+    if mc.get("error"):
+        result["error"] = mc["error"]
+    return result
+
+
+def api_deviation(task_id: str) -> Optional[dict]:
+    """任务偏差记录聚合（R12）：类型/根因分布 + 事件列表。"""
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    from .deviation import load as load_deviations, aggregate_deviations
+    from dataclasses import asdict
+    events = load_deviations(td)
+    agg = aggregate_deviations(events)
+    agg["task_id"] = task_id
+    agg["events"] = [
+        {k: d.get(k) for k in ("deviation_type", "root_cause_category", "summary",
+                               "subtask_id", "timestamp", "failure_class")}
+        for e in events[-50:]
+        for d in [asdict(e)]
+    ]
+    return agg
+
+
+def api_local_tco() -> dict:
+    """本地模型 TCO 面板（R13）：is_local metering 调用数 × local_model_cost。
+
+    D1：返回 estimated: true，前端必须显著标注"估算成本，非真实账单"。
+    """
+    from .metrics import local_tco_usd
+    per_model: dict[str, dict[str, Any]] = {}
+    total_calls = 0
+    for mj in AGENT_GO_DIR.glob("task-*/metering.jsonl"):
+        try:
+            with mj.open(encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not rec.get("is_local"):
+                        continue
+                    model = rec.get("actual_model") or rec.get("routed_model") or "unknown"
+                    slot = per_model.setdefault(model, {"calls": 0, "tokens": 0})
+                    slot["calls"] += 1
+                    slot["tokens"] += (rec.get("prompt_tokens") or 0) + (rec.get("completion_tokens") or 0)
+                    total_calls += 1
+        except OSError:
+            continue
+    rows = []
+    total_tco = 0.0
+    for model, slot in sorted(per_model.items(), key=lambda kv: -kv[1]["calls"]):
+        unit = local_tco_usd(model)
+        tco = round(unit * slot["calls"], 6)
+        total_tco += tco
+        rows.append({"model": model, "calls": slot["calls"], "tokens": slot["tokens"],
+                     "unit_cost": unit, "tco_usd": tco,
+                     "configured": unit > 0})
+    unconfigured = [r["model"] for r in rows if not r["configured"]]
+    return {
+        "estimated": True,
+        "total_calls": total_calls,
+        "total_tco_usd": round(total_tco, 6),
+        "by_model": rows,
+        "unconfigured_models": unconfigured,
+        "note": "未配置 local_model_cost 的模型按 0 计（配置中心可编辑 local_model_cost）" if unconfigured else "",
+    }
+
+
+def api_config_diff(name: str) -> Optional[dict]:
+    """当前生效配置 vs 目标 profile 的字段级差异（R15）。"""
+    from .profiles import profile_path
+    path = profile_path(name)
+    if not path.exists():
+        return None
+    try:
+        target_saved = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    current = load_config()
+    # 目标 profile 同样走 DEFAULT merge（与 load_config 语义一致）
+    from .config import DEFAULT_CONFIG
+    target = json.loads(json.dumps(DEFAULT_CONFIG))
+    for k, v in target_saved.items():
+        if isinstance(v, dict) and isinstance(target.get(k), dict):
+            target[k].update(v)
+        else:
+            target[k] = v
+
+    diffs: list[dict[str, Any]] = []
+
+    def _walk(prefix: str, cur: Any, tgt: Any) -> None:
+        if isinstance(cur, dict) and isinstance(tgt, dict):
+            for key in sorted(set(cur) | set(tgt)):
+                _walk(f"{prefix}{key}" if not prefix else f"{prefix}.{key}",
+                      cur.get(key), tgt.get(key))
+            return
+        if cur != tgt:
+            diffs.append({"field": prefix, "current": cur, "target": tgt})
+
+    _walk("", current, target)
+    return {"profile": name, "diff_count": len(diffs), "diffs": diffs[:100]}
+
+
+_CONFIG_EDIT_WHITELIST = {
+    "worker_models": dict, "worker_backends": dict, "local_models": list,
+    "local_model_cost": dict, "goal": dict, "evaluator": dict,
+    "plan_api.worker_base_url": str, "planner_api.base_url": str,
+}
+
+
+def put_config_field(field: str, value: Any) -> dict:
+    """白名单字段编辑（R14）：写入当前生效配置文件（profile 或 config.json）。
+
+    校验：字段在白名单 + 值类型与白名单声明一致；api_key 等敏感字段永不接受。
+    保存后新任务生效（load_config 每次读文件，天然热生效）。
+    """
+    if field not in _CONFIG_EDIT_WHITELIST:
+        raise ProfileError(
+            f"字段不在白名单: {field}（允许: {', '.join(sorted(_CONFIG_EDIT_WHITELIST))}）")
+    expected = _CONFIG_EDIT_WHITELIST[field]
+    if not isinstance(value, expected):
+        raise ProfileError(f"字段 {field} 值类型应为 {expected.__name__}，收到 {type(value).__name__}")
+    from .profiles import active_config_source
+    target = active_config_source()
+    try:
+        data = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+    except json.JSONDecodeError as e:
+        raise ProfileError(f"配置文件损坏: {target}: {e}") from e
+    if "." in field:
+        top, sub = field.split(".", 1)
+        data.setdefault(top, {})[sub] = value
+    else:
+        data[field] = value
+    target.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"field": field, "saved_to": str(target), "effective": "新任务生效"}
+
+
+def api_worktrees(task_id: str) -> Optional[dict]:
+    """保留 worktree 清单（R17，inspect 同逻辑）。"""
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    meta_path = td / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        meta = {}
+    entries = []
+    for st in meta.get("subtasks", []):
+        sid = st.get("id", "")
+        sub_dir = td / sid
+        wt_path = sub_dir / "work"
+        preserved_file = sub_dir / ".preserved"
+        result_file = sub_dir / "result.json"
+        result: dict[str, Any] = {}
+        if result_file.exists():
+            try:
+                result = json.loads(result_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        status = result.get("status", "unknown")
+        worktree_exists = wt_path.exists() and (wt_path / ".git").exists()
+        is_preserved = preserved_file.exists()
+        if not is_preserved and status not in ("failed", "blocked") and not worktree_exists:
+            continue
+        preserved_data: dict[str, Any] = {}
+        if is_preserved:
+            try:
+                preserved_data = json.loads(preserved_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        entries.append({
+            "subtask_id": sid,
+            "status": status,
+            "worktree": str(wt_path) if worktree_exists else "",
+            "branch": preserved_data.get("branch", f"agent_go/{task_id}/{sid}"),
+            "preserved": is_preserved,
+            "failure_reason": result.get("failure_reason", preserved_data.get("failure_reason", "")),
+        })
+    return {"task_id": task_id, "worktrees": entries}
+
+
 def api_config() -> dict:
     """只读展示用户配置（config.json + role_skill_map.json + 熔断器状态）。"""
     config = load_config()
@@ -948,6 +1270,21 @@ class WebHandler(BaseHTTPRequestHandler):
                 data = _extract_subtask_log(parts[2], parts[3])
                 self._reply_json(200, {"lines": data})
                 return
+            # ── 审批/交付数据（M2/R9-R10）──
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "review":
+                data = api_task_review(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "merge-preview":
+                data = api_merge_preview(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
             # ── 全局视图（P0-2）──
             if len(parts) == 2 and parts[1] == "overview":
                 self._reply_json(200, api_overview())
@@ -983,12 +1320,450 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[1] == "storage":
                 self._reply_json(200, api_storage())
                 return
+            # ── 配置中心 + 健康检查（M1/R3-R4）──
+            if len(parts) == 2 and parts[1] == "profiles":
+                self._reply_json(200, api_profiles())
+                return
+            if len(parts) == 2 and parts[1] == "health":
+                self._reply_json(200, api_health())
+                return
+            # ── M3 观测端点（R12/R13/R15/R17）──
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "deviation":
+                data = api_deviation(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 2 and parts[1] == "local-tco":
+                self._reply_json(200, api_local_tco())
+                return
+            if len(parts) == 3 and parts[1] == "config" and parts[2] == "diff":
+                name = next((unquote(p[5:]) for p in query.split("&")
+                             if p.startswith("name=")), "")
+                if not name or not re.match(r"^[A-Za-z0-9_-]+$", name):
+                    self._reply_json(400, {"error": "invalid profile name"})
+                    return
+                data = api_config_diff(name)
+                if data is None:
+                    self._reply_json(404, {"error": "profile not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "worktrees":
+                data = api_worktrees(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "pending-confirmation":
+                td = _task_dir(parts[2])
+                if td is None:
+                    self._reply_json(404, {"error": "task not found"})
+                    return
+                pf = td / "pending_confirmation.json"
+                if not pf.exists():
+                    self._reply_json(200, {"pending": None})
+                    return
+                try:
+                    self._reply_json(200, {"pending": json.loads(pf.read_text(encoding="utf-8"))})
+                except (json.JSONDecodeError, OSError):
+                    self._reply_json(500, {"error": "pending 文件损坏"})
+                return
             if len(parts) == 2 and parts[1] == "events":
                 self._stream_events(query)
                 return
         except Exception as exc:  # pragma: no cover - 防御性
             logger.exception("api error on %s", path)
             self._reply_json(500, {"error": str(exc)})
+            return
+        self._reply_json(404, {"error": f"not found: {path}"})
+
+    # ── 写操作（M1/R3/R8）：token 鉴权 + JSON body 校验 ─────
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if not path.startswith("/api/"):
+            self._reply_json(404, {"error": f"not found: {path}"})
+            return
+        if not self._auth_guard(parsed.query):
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > 64 * 1024:
+            self._reply_json(413, {"error": "body too large"})
+            return
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw.strip() else {}
+        except json.JSONDecodeError:
+            self._reply_json(400, {"error": "invalid JSON body"})
+            return
+        if not isinstance(body, dict):
+            self._reply_json(400, {"error": "JSON body must be an object"})
+            return
+        self._route_write_api(path, body)
+
+    def _route_write_api(self, path: str, body: dict) -> None:
+        parts = [p for p in path.split("/") if p]
+        token = getattr(self.server, "token", None) or ""  # type: ignore[attr-defined]
+        try:
+            # POST /api/profile/local {url?}  一键本地（R3）
+            if len(parts) == 3 and parts[1] == "profile" and parts[2] == "local":
+                url = str(body.get("url") or "http://localhost:4000")
+                result = activate_local(url)
+                _audit("profile.local", {"url": url}, result, True, token)
+                self._reply_json(200, result)
+                return
+            # POST /api/profile/cloud  恢复云端（R3）
+            if len(parts) == 3 and parts[1] == "profile" and parts[2] == "cloud":
+                result = activate_cloud()
+                _audit("profile.cloud", {}, result, True, token)
+                self._reply_json(200, result)
+                return
+            # POST /api/profile/activate {name}  激活任意 profile（R3）
+            if len(parts) == 3 and parts[1] == "profile" and parts[2] == "activate":
+                name = str(body.get("name") or "")
+                if not name or not re.match(r"^[A-Za-z0-9_-]+$", name):
+                    self._reply_json(400, {"error": "invalid profile name"})
+                    return
+                result = activate_profile(name)
+                _audit("profile.activate", {"name": name}, result, True, token)
+                self._reply_json(200, result)
+                return
+            # ── M2 任务生命周期 ──────────────────────────────
+            # POST /api/tasks/run {repo, task, parallel?, goal?}（R5a，confirm_mode=auto）
+            if len(parts) == 3 and parts[1] == "tasks" and parts[2] == "run":
+                self._op_run(body, token)
+                return
+            # POST /api/tasks/<id>/resume（R6）
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "resume":
+                self._op_resume(parts[2], body, token)
+                return
+            # POST /api/tasks/<id>/cancel（R6）
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "cancel":
+                self._op_cancel(parts[2], token)
+                return
+            # POST /api/tasks/clean-old {days, confirm}（R7）
+            if len(parts) == 3 and parts[1] == "tasks" and parts[2] == "clean-old":
+                self._op_clean_old(body, token)
+                return
+            # POST /api/tasks/<id>/review {deep?}（R9 触发审查）
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "review":
+                self._op_review(parts[2], body, token)
+                return
+            # POST /api/tasks/<id>/review/decision {decision, comment?}（R9 审批，D4 必审计）
+            if len(parts) == 5 and parts[1] == "tasks" and parts[3] == "review" and parts[4] == "decision":
+                self._op_review_decision(parts[2], body, token)
+                return
+            # POST /api/tasks/<id>/merge {push?, remote?}（R10）
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "merge":
+                self._op_merge(parts[2], body, token)
+                return
+            # POST /api/tasks/<id>/pr {push?, remote?}（R11）
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "pr":
+                self._op_pr(parts[2], body, token)
+                return
+            # POST /api/tasks/<id>/confirm {stage, decision}（R5b 计划确认回执）
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "confirm":
+                self._op_confirm(parts[2], body, token)
+                return
+        except ProfileError as e:
+            _audit("error", {"path": path}, str(e), False, token)
+            self._reply_json(422, {"error": str(e)})
+            return
+        except TaskRunnerError as e:
+            _audit("error", {"path": path}, str(e), False, token)
+            self._reply_json(422, {"error": str(e)})
+            return
+        except Exception as exc:  # pragma: no cover - 防御性
+            logger.exception("write api error on %s", path)
+            self._reply_json(500, {"error": str(exc)})
+            return
+        self._reply_json(404, {"error": f"not found: {path}"})
+
+    # ── M2 写操作实现 ────────────────────────────────────────
+
+    def _op_run(self, body: dict, token: str) -> None:
+        repo = str(body.get("repo") or "").strip()
+        task = str(body.get("task") or "").strip()
+        parallel = int(body.get("parallel") or 1)
+        goal = body.get("goal")  # None/True/False
+        confirm_mode = str(body.get("confirm_mode") or "auto")
+        if confirm_mode not in ("auto", "web"):
+            self._reply_json(400, {"error": "confirm_mode 须为 auto/web"})
+            return
+        if not repo or not Path(repo).is_absolute() or not Path(repo).is_dir():
+            self._reply_json(400, {"error": f"repo 必须是存在的绝对路径: {repo or '<空>'}"})
+            return
+        if not task:
+            self._reply_json(400, {"error": "task 描述不能为空"})
+            return
+        # D3/R5a：本地模式下代理不可达 → 启动即报错（不放行到任务失败才发现）
+        if read_current_profile() == "local":
+            from .profiles import DEFAULT_LOCAL_URL
+            backends = (load_config().get("worker_backends") or {})
+            local_url = next((v for v in backends.values()
+                              if isinstance(v, str) and ("localhost" in v or "127.0.0.1" in v)),
+                             DEFAULT_LOCAL_URL)
+            try:
+                probe_local_models(local_url)
+            except ProfileError as e:
+                _audit("tasks.run", {"repo": repo, "task": task}, str(e), False, token)
+                self._reply_json(422, {
+                    "error": f"本地模式代理不可达，未启动任务。请先启动代理或检查配置中心健康面板。\n原因: {e}"})
+                return
+        task_id = task_runner.start_run(repo, task, parallel=parallel, goal=goal,
+                                        confirm_mode=confirm_mode)
+        note = ("已跳过计划确认（--yes）" if confirm_mode == "auto"
+                else "Plan 生成后将在本页面请求确认（30 分钟超时自动取消）")
+        result = {"task_id": task_id, "status": "started",
+                  "confirm_mode": confirm_mode, "note": note}
+        _audit("tasks.run", {"repo": repo, "task": task, "parallel": parallel}, result, True, token)
+        self._reply_json(200, result)
+
+    def _op_resume(self, task_id: str, body: dict, token: str) -> None:
+        if _task_dir(task_id) is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        # D3/R6：运行中任务 resume → 409 冲突
+        status = _task_status_of(task_id)
+        if status in _RUNNING_STATES or task_runner.is_running(task_id):
+            _audit("tasks.resume", {"task_id": task_id}, f"冲突: 状态 {status}", False, token)
+            self._reply_json(409, {"error": f"任务正在运行中（{status}），无法 resume。可先 cancel。",
+                                   "status": status})
+            return
+        parallel = int(body.get("parallel") or 1)
+        task_runner.start_resume(task_id, parallel=parallel)
+        result = {"task_id": task_id, "status": "resumed"}
+        _audit("tasks.resume", {"task_id": task_id}, result, True, token)
+        self._reply_json(200, result)
+
+    def _op_cancel(self, task_id: str, token: str) -> None:
+        if _task_dir(task_id) is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        if not task_runner.cancel(task_id):
+            _audit("tasks.cancel", {"task_id": task_id}, "句柄不存在", False, token)
+            self._reply_json(409, {
+                "error": "任务进程不受本 web 实例管理（可能已结束或 web 重启过）。"
+                         "若为孤儿进程，请用 CLI kill；状态以任务页为准。"})
+            return
+        result = {"task_id": task_id, "status": "cancelling",
+                  "note": "已发送 SIGINT（与 Ctrl+C 同义），pipeline 收尾中"}
+        _audit("tasks.cancel", {"task_id": task_id}, result, True, token)
+        self._reply_json(200, result)
+
+    def _op_clean_old(self, body: dict, token: str) -> None:
+        if body.get("confirm") is not True:
+            self._reply_json(400, {"error": "需 confirm: true 二次确认"})
+            return
+        days = int(body.get("days") or 0)
+        if days <= 0:
+            self._reply_json(400, {"error": "days 必须为正整数"})
+            return
+        cutoff = time.time() - days * 86400
+        victims = [t for t in AGENT_GO_DIR.glob("task-*")
+                   if t.is_dir() and t.stat().st_mtime < cutoff]
+        if not victims:
+            self._reply_json(200, {"removed": [], "note": f"无早于 {days} 天的任务"})
+            return
+        from .cli import clean_task_dirs
+        result = clean_task_dirs(victims)
+        _audit("tasks.clean_old", {"days": days}, result, True, token)
+        self._reply_json(200, result)
+
+    def _op_review(self, task_id: str, body: dict, token: str) -> None:
+        if _task_dir(task_id) is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        if body.get("deep"):
+            key = task_runner.start_review_deep(task_id)
+            result = {"task_id": task_id, "status": "review_started", "deep": True, "op_key": key}
+            _audit("tasks.review", {"task_id": task_id, "deep": True}, result, True, token)
+            self._reply_json(200, result)
+            return
+        cli_result = _run_cli(["review", "--task", task_id, "--yes"], timeout=300)
+        _audit("tasks.review", {"task_id": task_id, "deep": False},
+               cli_result["stdout"][-300:] or cli_result["stderr"][-300:], cli_result["ok"], token)
+        self._reply_json(200 if cli_result["ok"] else 422, cli_result)
+
+    def _op_review_decision(self, task_id: str, body: dict, token: str) -> None:
+        if _task_dir(task_id) is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        decision = str(body.get("decision") or "")
+        flag = {"approve": "--approve", "reject": "--reject",
+                "changes-requested": "--changes-requested"}.get(decision)
+        if not flag:
+            self._reply_json(400, {"error": "decision 须为 approve/reject/changes-requested"})
+            return
+        argv = ["review", "--task", task_id, flag, "--yes"]
+        comment = str(body.get("comment") or "").strip()
+        if comment and decision in ("reject", "changes-requested"):
+            argv += ["--comment-text", comment]
+        result = _run_cli(argv, timeout=120)
+        # D4：审批决策必写审计（含决策与评论）
+        _audit("tasks.review.decision", {"task_id": task_id, "decision": decision,
+                                         "comment": comment},
+               result["stdout"][-300:] or result["stderr"][-300:], result["ok"], token)
+        self._reply_json(200 if result["ok"] else 422, result)
+
+    def _op_merge(self, task_id: str, body: dict, token: str) -> None:
+        if _task_dir(task_id) is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        push = bool(body.get("push"))
+        remote = str(body.get("remote") or "origin")
+        argv = ["merge", task_id, "--remote", remote]
+        if push:
+            argv.append("--push")
+        result = _run_cli(argv, timeout=180)
+        # D3：冲突时把冲突信息带给前端（cmd_merge 的 mergeability 预检输出在 stdout/stderr）
+        payload = dict(result)
+        if not result["ok"]:
+            preview = api_merge_preview(task_id)
+            if preview:
+                payload["conflicts"] = preview.get("conflicts") or []
+                payload["mergeable"] = preview.get("mergeable")
+        _audit("tasks.merge", {"task_id": task_id, "push": push, "remote": remote},
+               result["stdout"][-300:] or result["stderr"][-300:], result["ok"], token)
+        self._reply_json(200 if result["ok"] else 422, payload)
+
+    def _op_pr(self, task_id: str, body: dict, token: str) -> None:
+        if _task_dir(task_id) is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        push = bool(body.get("push"))
+        remote = str(body.get("remote") or "origin")
+        argv = ["pr", task_id, "--remote", remote]
+        if push:
+            argv.append("--push")
+        else:
+            argv.append("--offline")  # 默认只生成 PR.md，不实际创建（安全默认）
+        result = _run_cli(argv, timeout=300)
+        payload: dict[str, Any] = dict(result)
+        m = re.search(r"https://\S+/pull/\d+", result["stdout"])
+        if m:
+            payload["pr_url"] = m.group(0)
+        _audit("tasks.pr", {"task_id": task_id, "push": push, "remote": remote},
+               result["stdout"][-300:] or result["stderr"][-300:], result["ok"], token)
+        self._reply_json(200 if result["ok"] else 422, payload)
+
+    def _op_confirm(self, task_id: str, body: dict, token: str) -> None:
+        """R5b 计划确认回执：校验 pending 存在 → 写 decision 文件（子进程轮询读取）。"""
+        td = _task_dir(task_id)
+        if td is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        pending_path = td / "pending_confirmation.json"
+        if not pending_path.exists():
+            self._reply_json(409, {"error": "任务当前无待确认项（pending_confirmation.json 不存在）"})
+            return
+        try:
+            pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            self._reply_json(500, {"error": "pending 文件损坏"})
+            return
+        stage = str(body.get("stage") or "")
+        decision = str(body.get("decision") or "").upper()
+        if stage != pending.get("stage"):
+            self._reply_json(409, {"error": f"stage 不匹配：当前待确认 stage={pending.get('stage')}，"
+                                           f"收到 {stage or '<空>'}"})
+            return
+        allowed = {"plan": {"Y", "N", "R"}, "subtasks": {"Y", "N"}}.get(stage, set())
+        if decision not in allowed:
+            self._reply_json(400, {"error": f"stage={stage} 的 decision 须为 {'/'.join(sorted(allowed))}"})
+            return
+        decision_path = td / "confirmation_decision.json"
+        decision_path.write_text(json.dumps({
+            "stage": stage, "decision": decision,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }, ensure_ascii=False), encoding="utf-8")
+        result = {"task_id": task_id, "stage": stage, "decision": decision, "status": "accepted"}
+        _audit("tasks.confirm", {"task_id": task_id, "stage": stage, "decision": decision},
+               result, True, token)
+        self._reply_json(200, result)
+
+    def do_PUT(self) -> None:
+        """PUT /api/config {field, value}（R14 白名单字段编辑）。"""
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if not path.startswith("/api/"):
+            self._reply_json(404, {"error": f"not found: {path}"})
+            return
+        if not self._auth_guard(parsed.query):
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > 64 * 1024:
+            self._reply_json(413, {"error": "body too large"})
+            return
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw.strip() else {}
+        except json.JSONDecodeError:
+            self._reply_json(400, {"error": "invalid JSON body"})
+            return
+        token = getattr(self.server, "token", None) or ""  # type: ignore[attr-defined]
+        if path == "/api/config":
+            field = str(body.get("field") or "")
+            value = body.get("value")
+            try:
+                result = put_config_field(field, value)
+            except ProfileError as e:
+                _audit("config.put", {"field": field}, str(e), False, token)
+                self._reply_json(422, {"error": str(e)})
+                return
+            _audit("config.put", {"field": field}, result, True, token)
+            self._reply_json(200, result)
+            return
+        self._reply_json(404, {"error": f"not found: {path}"})
+
+    def do_DELETE(self) -> None:
+        """DELETE /api/tasks/<id>  {confirm: true}（R7 单任务清理）。"""
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if not path.startswith("/api/"):
+            self._reply_json(404, {"error": f"not found: {path}"})
+            return
+        if not self._auth_guard(parsed.query):
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if 0 < length <= 64 * 1024 else b"{}"
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw.strip() else {}
+        except json.JSONDecodeError:
+            self._reply_json(400, {"error": "invalid JSON body"})
+            return
+        parts = [p for p in path.split("/") if p]
+        token = getattr(self.server, "token", None) or ""  # type: ignore[attr-defined]
+        if len(parts) == 3 and parts[1] == "tasks":
+            task_id = parts[2]
+            td = _task_dir(task_id)
+            if td is None:
+                self._reply_json(404, {"error": "task not found"})
+                return
+            if body.get("confirm") is not True:
+                self._reply_json(400, {"error": "需 confirm: true 二次确认"})
+                return
+            status = _task_status_of(task_id)
+            if status in _RUNNING_STATES or task_runner.is_running(task_id):
+                self._reply_json(409, {"error": f"任务运行中（{status}），先 cancel 再清理"})
+                return
+            from .cli import clean_task_dirs
+            result = clean_task_dirs([td])
+            _audit("tasks.delete", {"task_id": task_id}, result, True, token)
+            self._reply_json(200, result)
             return
         self._reply_json(404, {"error": f"not found: {path}"})
 
@@ -1159,6 +1934,42 @@ _SPA_HTML = """<!DOCTYPE html>
   .warn-banner { background:rgba(210,153,34,0.1); border:1px solid var(--yellow);
                  border-radius:8px; padding:10px 14px; margin-bottom:16px;
                  color:var(--yellow); }
+  .mode-badge { display:inline-block; padding:4px 14px; border-radius:14px;
+                font-size:13px; font-weight:600; }
+  .mode-badge.local { background:rgba(63,185,80,0.15); color:var(--green);
+                      border:1px solid var(--green); }
+  .mode-badge.cloud { background:rgba(88,166,255,0.12); color:var(--blue);
+                      border:1px solid var(--blue); }
+  .mode-badge.custom { background:rgba(210,153,34,0.12); color:var(--yellow);
+                       border:1px solid var(--yellow); }
+  .btn { background:var(--panel); border:1px solid var(--border); color:var(--text);
+         padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+  .btn:hover { border-color:var(--blue); }
+  .btn.primary { border-color:var(--green); color:var(--green); }
+  .btn:disabled { opacity:0.5; cursor:not-allowed; }
+  .health-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+                 gap:12px; margin:12px 0; }
+  .health-card { background:var(--panel); border:1px solid var(--border);
+                 border-radius:8px; padding:12px 14px; font-size:13px; }
+  .health-card .role { color:var(--dim); font-size:12px; margin-bottom:4px; }
+  .health-card .st-ok { color:var(--green); font-weight:600; }
+  .health-card .st-bad { color:var(--red); font-weight:600; }
+  .health-card .st-skip { color:var(--dim); }
+  .health-card .url { font-size:11px; color:var(--dim); word-break:break-all;
+                      margin-top:4px; font-family:Menlo,Consolas,monospace; }
+  .run-form { display:flex; gap:8px; align-items:center; margin-bottom:14px;
+              background:var(--panel); border:1px solid var(--border);
+              border-radius:8px; padding:10px 12px; flex-wrap:wrap; }
+  .run-input { background:#0b0d11; border:1px solid var(--border); color:var(--text);
+               padding:6px 10px; border-radius:6px; font-size:13px; min-width:120px; }
+  .run-hint { color:var(--dim); font-size:12px; }
+  .op-bar { display:flex; gap:8px; align-items:center; margin:8px 0 12px;
+            flex-wrap:wrap; }
+  .op-msg { font-size:12px; margin-left:6px; }
+  .review-panel { border-top:1px solid var(--border); margin-top:12px;
+                  padding-top:4px; }
+  .pending-card { background:rgba(210,153,34,0.08); border:1px solid var(--yellow);
+                  border-radius:8px; padding:12px 14px; margin-bottom:12px; }
 </style>
 </head>
 <body>
@@ -1232,6 +2043,22 @@ async function api(path) {
     }
     if (!r.ok) throw new Error('HTTP '+r.status);
     return r.json();
+  }
+  throw new Error('HTTP 401');
+}
+
+async function postJSON(path, body) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const headers = {'Content-Type': 'application/json'};
+    if (authToken) headers['Authorization'] = 'Bearer '+authToken;
+    const r = await fetch(path, {method: 'POST', headers, body: JSON.stringify(body || {})});
+    if (r.status === 401 && attempt === 0) {
+      const t = prompt('🔐 服务器启用了 token 鉴权，请输入 token：');
+      if (t) { authToken = t; sessionStorage.setItem('agent_go_token', t); continue; }
+    }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ('HTTP '+r.status));
+    return data;
   }
   throw new Error('HTTP 401');
 }
@@ -1324,9 +2151,22 @@ function filteredTasks() {
 
 function renderTasks() {
   const list = filteredTasks();
+  const runForm =
+    '<div class="run-form">'+
+    '<input id="runRepo" class="run-input" style="flex:2" placeholder="仓库绝对路径，如 /Users/me/proj">'+
+    '<input id="runTask" class="run-input" style="flex:3" placeholder="任务描述（自然语言）">'+
+    '<select id="runParallel" class="run-input"><option value="1">并发1</option>'+
+    '<option value="2">并发2</option><option value="3">并发3</option><option value="4">并发4</option></select>'+
+    '<select id="runConfirm" class="run-input">'+
+    '<option value="auto">auto（跳过计划确认）</option>'+
+    '<option value="web">web（页面确认 Plan）</option></select>'+
+    '<button class="btn primary" id="btnRunStart">🚀 启动任务</button>'+
+    '<span id="runMsg" style="margin-left:8px;font-size:12px"></span>'+
+    '</div>';
   if (!list.length) {
-    document.getElementById('mainView').innerHTML =
+    document.getElementById('mainView').innerHTML = runForm +
       '<div class="loading">暂无匹配任务</div>';
+    bindRunForm();
     return;
   }
   const rows = list.map(t => {
@@ -1341,13 +2181,37 @@ function renderTasks() {
       '<td>'+fmtDur(t.total_elapsed_sec)+'</td>'+
       '</tr>';
   }).join('');
-  document.getElementById('mainView').innerHTML =
+  document.getElementById('mainView').innerHTML = runForm +
     '<table><thead><tr><th>状态</th><th>任务 ID</th><th>描述</th>'+
     '<th>子任务</th><th>完成/失败</th><th>成本</th><th>耗时</th></tr></thead>'+
     '<tbody>'+rows+'</tbody></table>';
   document.querySelectorAll('.task-row').forEach(row => {
     row.addEventListener('click', () => toggleTask(row.dataset.id, row));
   });
+  bindRunForm();
+}
+
+function bindRunForm() {
+  const btnRun = document.getElementById('btnRunStart');
+  if (!btnRun) return;
+  btnRun.onclick = async () => {
+    const repo = document.getElementById('runRepo').value.trim();
+    const task = document.getElementById('runTask').value.trim();
+    const parallel = parseInt(document.getElementById('runParallel').value, 10) || 1;
+    const confirmMode = document.getElementById('runConfirm').value;
+    const msg = document.getElementById('runMsg');
+    if (!repo || !task) { msg.textContent = '⚠️ 请填写仓库路径和任务描述'; msg.style.color = 'var(--yellow)'; return; }
+    btnRun.disabled = true;
+    msg.textContent = '启动中（生成 Plan 约需数十秒）…'; msg.style.color = 'var(--dim)';
+    try {
+      const d = await postJSON('/api/tasks/run', {repo, task, parallel, confirm_mode: confirmMode});
+      msg.textContent = '✅ 已启动: '+d.task_id+'（'+d.note+'）';
+      msg.style.color = 'var(--green)';
+      setTimeout(loadTasks, 1200);
+    } catch (e) {
+      msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)';
+    } finally { btnRun.disabled = false; }
+  };
 }
 
 // ── 任务详情展开 ────────────────────────────────────────────
@@ -1364,11 +2228,236 @@ async function toggleTask(id, row) {
   row.after(tr);
   try {
     const data = await api('/api/tasks/'+encodeURIComponent(id));
-    td.innerHTML = renderTaskDetail(data);
+    td.innerHTML = '<div id="pendingCard"></div>' + taskOpsBar(id, data.status) +
+      renderTaskDetail(data) +
+      '<div class="review-panel" id="reviewPanel"><div class="loading">加载审批台…</div></div>';
     bindDetailEvents(id, tr);
+    bindTaskOps(id, td);
+    loadReviewPanel(id, td);
+    loadPendingCard(id, td);
+    loadExtraPanels(id, td);
   } catch (e) {
     td.innerHTML = '<div class="detail-box"><div class="err">'+esc(e.message)+'</div></div>';
   }
+}
+
+function taskOpsBar(id, status) {
+  const running = (status === 'EXECUTING' || status === 'PLANNING');
+  return '<div class="op-bar">'+
+    '<button class="btn" data-op="resume" '+(running?'disabled':'')+'>▶️ 恢复</button>'+
+    '<button class="btn" data-op="cancel" '+(running?'':'disabled')+'>⏹ 取消</button>'+
+    '<button class="btn" data-op="clean" '+(running?'disabled':'')+'>🗑 清理</button>'+
+    '<span class="op-msg" id="opMsg"></span>'+
+    '</div>';
+}
+
+function bindTaskOps(id, td) {
+  const msg = td.querySelector('#opMsg');
+  const say = (t, color) => { msg.textContent = t; msg.style.color = color || 'var(--dim)'; };
+  td.querySelectorAll('[data-op]').forEach(btn => {
+    btn.onclick = async () => {
+      const op = btn.dataset.op;
+      if (op === 'resume' && !confirm('恢复任务 '+id+'？（从断点续跑剩余子任务）')) return;
+      if (op === 'cancel' && !confirm('取消任务 '+id+'？\\n将发送 SIGINT（与 Ctrl+C 同义），pipeline 收尾后停止。')) return;
+      if (op === 'clean' && !confirm('清理任务 '+id+'？\\n将删除任务数据目录（worktree/tag 一并清理），不可恢复！')) return;
+      btn.disabled = true;
+      say(op+' 执行中…');
+      try {
+        let d;
+        if (op === 'clean') d = await delJSON('/api/tasks/'+encodeURIComponent(id), {confirm: true});
+        else d = await postJSON('/api/tasks/'+encodeURIComponent(id)+'/'+op, {});
+        say('✅ '+(d.note || d.status || (d.removed ? '已清理 '+d.removed.length+' 个目录' : '完成')), 'var(--green)');
+        setTimeout(loadTasks, 1200);
+      } catch (e) {
+        say('❌ '+e.message, 'var(--red)');
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+async function loadReviewPanel(id, td) {
+  const panel = td.querySelector('#reviewPanel');
+  let rv = {};
+  try { rv = await api('/api/tasks/'+encodeURIComponent(id)+'/review'); } catch (e) {}
+  const decision = rv.decision;
+  const decBadge = decision ?
+    {'approved':'<span style="color:var(--green)">✅ 已通过</span>',
+     'rejected':'<span style="color:var(--red)">❌ 已拒绝</span>',
+     'changes-requested':'<span style="color:var(--yellow)">📝 需修改</span>'}[decision] || esc(decision)
+    : '<span style="color:var(--dim)">未审批</span>';
+  panel.innerHTML =
+    '<div class="section-title">⚖️ 交付审批台</div>'+
+    '<div class="op-bar"><span>当前决策: '+decBadge+'</span><span class="vline"></span>'+
+    '<button class="btn" data-rv="review">🔍 聚合审查</button>'+
+    '<button class="btn" data-rv="deep">🔬 深层审查</button><span class="vline"></span>'+
+    '<button class="btn" data-rv="approve">✅ 通过</button>'+
+    '<button class="btn" data-rv="reject">❌ 拒绝</button>'+
+    '<button class="btn" data-rv="changes">📝 需修改</button><span class="vline"></span>'+
+    '<button class="btn primary" data-rv="merge">🔀 Merge</button>'+
+    '<button class="btn" data-rv="pr">🚀 PR</button>'+
+    '<span class="op-msg" id="rvMsg"></span></div>';
+  const msg = panel.querySelector('#rvMsg');
+  const say = (t, color) => { msg.textContent = t; msg.style.color = color || 'var(--dim)'; };
+  panel.querySelectorAll('[data-rv]').forEach(btn => {
+    btn.onclick = async () => {
+      const op = btn.dataset.rv;
+      btn.disabled = true;
+      say('执行中…');
+      try {
+        if (op === 'review' || op === 'deep') {
+          const d = await postJSON('/api/tasks/'+encodeURIComponent(id)+'/review',
+                                   op === 'deep' ? {deep: true} : {});
+          say('✅ '+(d.status === 'review_started' ? '深层审查已启动（后台运行，完成后刷新查看 review.json）' : '审查完成'), 'var(--green)');
+        } else if (op === 'approve' || op === 'reject' || op === 'changes') {
+          const decision = op === 'changes' ? 'changes-requested' : op;
+          let comment = '';
+          if (decision !== 'approve') {
+            comment = prompt('审批意见（可选）：') || '';
+          }
+          if (!confirm('确认决策「'+decision+'」？将写入 review.json 并记录审计。')) { btn.disabled = false; say(''); return; }
+          await postJSON('/api/tasks/'+encodeURIComponent(id)+'/review/decision', {decision, comment});
+          say('✅ 决策已记录: '+decision, 'var(--green)');
+          setTimeout(() => loadReviewPanel(id, td), 800);
+        } else if (op === 'merge') {
+          const pv = await api('/api/tasks/'+encodeURIComponent(id)+'/merge-preview');
+          if (pv.pr_url) { say('⚠️ 已走 PR 交付路径（'+pv.pr_url+'），merge 互斥', 'var(--yellow)'); btn.disabled = false; return; }
+          if (pv.explicit_merge_commit) { say('✅ 已合并过: '+pv.explicit_merge_commit.slice(0,12), 'var(--green)'); btn.disabled = false; return; }
+          if (pv.mergeable === false) {
+            say('❌ 无法 clean merge'+((pv.conflicts||[]).length ? '，冲突: '+pv.conflicts.join(', ') : (pv.error ? ': '+pv.error : '')), 'var(--red)');
+            btn.disabled = false; return;
+          }
+          const text = '确认合并？\\n\\n  delivery 分支: '+pv.delivery_branch+
+            '\\n  目标分支: '+pv.target_branch+'\\n  新增 commit: '+(pv.ahead != null ? pv.ahead : '?')+
+            '\\n\\n确定后选择是否推送 remote。';
+          if (!confirm(text)) { btn.disabled = false; say(''); return; }
+          const push = confirm('合并成功。是否推送到 remote（origin）？\\n确定=推送，取消=仅本地合并');
+          const d = await postJSON('/api/tasks/'+encodeURIComponent(id)+'/merge', {push, remote: 'origin'});
+          say('✅ merge 完成'+(push ? '（已推送）' : ''), 'var(--green)');
+          setTimeout(() => loadReviewPanel(id, td), 800);
+        } else if (op === 'pr') {
+          const push = confirm('创建 PR？\\n确定=推送分支并创建真实 PR\\n取消=仅生成 PR.md（offline 预览）');
+          const d = await postJSON('/api/tasks/'+encodeURIComponent(id)+'/pr', {push, remote: 'origin'});
+          if (d.pr_url) say('✅ PR 已创建: '+d.pr_url, 'var(--green)');
+          else say('✅ '+(push ? 'PR 完成' : 'PR.md 已生成（offline）'), 'var(--green)');
+          setTimeout(() => loadReviewPanel(id, td), 800);
+        }
+      } catch (e) {
+        say('❌ '+e.message, 'var(--red)');
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+async function loadExtraPanels(id, td) {
+  // R12 偏差 + R17 worktree 折叠面板（审批台下方）
+  const anchor = td.querySelector('#reviewPanel');
+  if (!anchor) return;
+  const box = document.createElement('div');
+  box.innerHTML = '<div id="devPanel"></div><div id="wtPanel"></div>';
+  anchor.after(box);
+  try {
+    const dv = await api('/api/tasks/'+encodeURIComponent(id)+'/deviation');
+    if (dv.total > 0) {
+      const typeRows = Object.entries(dv.by_type || {}).map(([k, v]) =>
+        '<tr><td>'+esc(k)+'</td><td>'+v+'</td></tr>').join('');
+      const causeRows = Object.entries(dv.by_root_cause || {}).map(([k, v]) =>
+        '<tr><td>'+esc(k)+'</td><td>'+v+'</td></tr>').join('');
+      const evRows = (dv.events || []).slice(-10).map(e =>
+        '<tr><td>'+esc(e.deviation_type||'')+'</td><td>'+esc(e.root_cause_category||'')+'</td>'+
+        '<td>'+esc((e.summary||'').slice(0,80))+'</td></tr>').join('');
+      box.querySelector('#devPanel').innerHTML =
+        '<div class="section-title">📐 偏差记录（'+dv.total+'）</div>'+
+        '<div style="display:flex;gap:24px;flex-wrap:wrap">'+
+        '<table><thead><tr><th>类型</th><th>数</th></tr></thead><tbody>'+typeRows+'</tbody></table>'+
+        '<table><thead><tr><th>根因</th><th>数</th></tr></thead><tbody>'+causeRows+'</tbody></table></div>'+
+        (evRows ? '<table style="margin-top:8px"><thead><tr><th>类型</th><th>根因</th><th>摘要</th></tr></thead><tbody>'+evRows+'</tbody></table>' : '');
+    }
+  } catch (e) {}
+  try {
+    const wt = await api('/api/tasks/'+encodeURIComponent(id)+'/worktrees');
+    if ((wt.worktrees || []).length) {
+      const rows = wt.worktrees.map(w =>
+        '<tr><td>'+esc(w.subtask_id)+'</td><td>'+esc(w.status)+'</td>'+
+        '<td style="font-family:Menlo,monospace;font-size:11px">'+esc(w.branch)+'</td>'+
+        '<td>'+(w.preserved ? '📌 保留' : '')+'</td>'+
+        '<td style="font-size:11px;color:var(--dim)">'+esc((w.failure_reason||'').slice(0,60))+'</td></tr>').join('');
+      box.querySelector('#wtPanel').innerHTML =
+        '<div class="section-title">🌳 保留 Worktree（'+wt.worktrees.length+'）</div>'+
+        '<table><thead><tr><th>子任务</th><th>状态</th><th>分支</th><th></th><th>失败原因</th></tr></thead>'+
+        '<tbody>'+rows+'</tbody></table>';
+    }
+  } catch (e) {}
+}
+
+async function loadPendingCard(id, td) {
+  const slot = td.querySelector('#pendingCard');
+  if (!slot) return;
+  let d;
+  try { d = await api('/api/tasks/'+encodeURIComponent(id)+'/pending-confirmation'); }
+  catch (e) { return; }
+  if (!d.pending) { slot.innerHTML = ''; return; }
+  const p = d.pending;
+  const age = Math.max(0, Math.round((Date.now() - new Date(p.ts).getTime()) / 60000));
+  const left = Math.max(1, Math.round(p.timeout_sec / 60) - age);
+  let body = '';
+  if (p.stage === 'plan') {
+    const plan = p.payload || {};
+    const steps = (plan.steps || []).map((s, i) =>
+      '<tr><td>'+(i+1)+'</td><td>'+esc(s.title || s.name || '')+'</td>'+
+      '<td>'+esc(s.difficulty || '')+'</td><td>'+esc(s.agent_type || '')+'</td></tr>').join('');
+    body = '<div style="font-weight:600;margin-bottom:6px">'+esc(plan.title || '执行计划')+'</div>'+
+      (plan.summary ? '<div style="color:var(--dim);margin-bottom:8px">'+esc(plan.summary)+'</div>' : '')+
+      '<table><thead><tr><th>#</th><th>步骤</th><th>难度</th><th>角色</th></tr></thead><tbody>'+steps+'</tbody></table>';
+  } else {
+    const subs = (p.payload && p.payload.subtasks) || [];
+    body = '<div style="font-weight:600;margin-bottom:6px">子任务拆解（'+subs.length+' 个）</div>'+
+      '<table><thead><tr><th>ID</th><th>标题</th><th>难度</th></tr></thead><tbody>'+
+      subs.map(s => '<tr><td>'+esc(s.id||'')+'</td><td>'+esc(s.title||'')+'</td><td>'+esc(s.difficulty||'')+'</td></tr>').join('')+
+      '</tbody></table>';
+  }
+  const btns = p.stage === 'plan'
+    ? '<button class="btn primary" data-cf="Y">✅ 确认执行</button>'+
+      '<button class="btn" data-cf="R">🔄 重新生成</button>'+
+      '<button class="btn" data-cf="N">❌ 取消任务</button>'
+    : '<button class="btn primary" data-cf="Y">✅ 确认子任务</button>'+
+      '<button class="btn" data-cf="N">❌ 取消任务</button>';
+  slot.innerHTML =
+    '<div class="pending-card">'+
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'+
+    '<span style="font-size:16px">🔔</span>'+
+    '<span style="font-weight:600">等待确认：'+(p.stage === 'plan' ? '执行计划' : '子任务拆解')+'</span>'+
+    '<span style="color:var(--yellow);font-size:12px">约 '+left+' 分钟后超时自动取消</span></div>'+
+    body+
+    '<div class="op-bar" style="margin-top:10px">'+btns+'<span class="op-msg" id="cfMsg"></span></div>'+
+    '</div>';
+  slot.querySelectorAll('[data-cf]').forEach(btn => {
+    btn.onclick = async () => {
+      const decision = btn.dataset.cf;
+      const msg = slot.querySelector('#cfMsg');
+      if (decision === 'N' && !confirm('取消任务 '+id+'？')) return;
+      btn.disabled = true;
+      try {
+        await postJSON('/api/tasks/'+encodeURIComponent(id)+'/confirm', {stage: p.stage, decision});
+        msg.textContent = '✅ 已提交决策: '+decision; msg.style.color = 'var(--green)';
+        setTimeout(() => loadPendingCard(id, td), 3000);
+      } catch (e) {
+        msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)';
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+async function delJSON(path, body) {
+  const headers = {'Content-Type': 'application/json'};
+  if (authToken) headers['Authorization'] = 'Bearer '+authToken;
+  const r = await fetch(path, {method: 'DELETE', headers, body: JSON.stringify(body || {})});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ('HTTP '+r.status));
+  return data;
 }
 
 function renderTaskDetail(d) {
@@ -1642,6 +2731,25 @@ async function loadCost() {
     '<td>'+(i+1)+'</td><td>'+esc(t.task_id)+'</td><td>'+fmtCost(t.cost)+'</td></tr>'
   ).join('');
   html += '<table><thead><tr><th>#</th><th>任务</th><th>成本</th></tr></thead><tbody>'+topRows+'</tbody></table>';
+  // R13 本地 TCO 面板（D1：显著标注估算）
+  try {
+    const tco = await api('/api/local-tco');
+    if (tco.total_calls > 0) {
+      const rows = (tco.by_model || []).map(r =>
+        '<tr><td>'+esc(r.model)+'</td><td>'+r.calls+'</td>'+
+        '<td>$'+r.unit_cost.toFixed(4)+'</td><td>$'+r.tco_usd.toFixed(4)+'</td>'+
+        '<td>'+(r.configured ? '' : '<span style="color:var(--yellow)">未配置</span>')+'</td></tr>').join('');
+      html += '<div class="section-title">🔌 本地模型 TCO（估算成本）</div>'+
+        '<div class="warn-banner">⚠️ 以下为按 local_model_cost 单价 × 调用次数的<b>估算成本</b>，非真实账单。</div>'+
+        '<div class="kpi-grid">'+
+        kpiCard('本地调用总数', tco.total_calls, '')+
+        kpiCard('估算总成本', '$'+tco.total_tco_usd.toFixed(4), 'yellow')+
+        '</div>'+
+        '<table><thead><tr><th>模型</th><th>调用数</th><th>单价/次</th><th>估算成本</th><th></th></tr></thead>'+
+        '<tbody>'+rows+'</tbody></table>'+
+        (tco.note ? '<div style="color:var(--dim);font-size:12px;margin-top:6px">'+esc(tco.note)+'</div>' : '');
+    }
+  } catch (e) {}
   document.getElementById('mainView').innerHTML = html;
   // 复用任务详情展开：跳转到任务视图并定位到该任务（等待加载完成再填搜索框）
   document.querySelectorAll('#mainView .task-row').forEach(row => {
@@ -1692,8 +2800,59 @@ async function loadModels() {
 }
 
 async function loadConfig() {
-  const d = await api('/api/config');
-  let html = '<div class="section-title">⚙️ 用户配置（config.json，api_key 已脱敏）</div>';
+  const [d, prof, health] = await Promise.all([
+    api('/api/config'), api('/api/profiles'), api('/api/health'),
+  ]);
+  let html = '<div class="section-title">🎛️ 配置中心</div>';
+  // 模式徽标 + 切换按钮
+  const modeLabel = {local: '🟢 纯本地模式', cloud: '☁️ 云端模式', custom: '🔧 自定义: '+esc(prof.current)};
+  html += '<div style="display:flex;align-items:center;gap:14px;margin-bottom:12px">'+
+    '<span class="mode-badge '+esc(prof.mode)+'">'+(modeLabel[prof.mode] || esc(prof.mode))+'</span>'+
+    (prof.mode !== 'local' ? '<button class="btn primary" id="btnLocal">⚡ 一键本地</button>' : '')+
+    (prof.mode !== 'cloud' ? '<button class="btn" id="btnCloud">☁️ 恢复云端</button>' : '')+
+    '</div>';
+  // 健康面板
+  html += '<div class="health-grid">';
+  for (const role of ['plan', 'worker', 'evaluator', 'local_proxy']) {
+    const h = health[role] || {};
+    let st, cls;
+    if (h.skipped) { st = '⏭ '+(h.reason || '跳过'); cls = 'st-skip'; }
+    else if (h.ok) { st = '✅ 可达'+(h.latency_ms != null ? ' · '+h.latency_ms+'ms' : ''); cls = 'st-ok'; }
+    else { st = '❌ '+(h.error || '不可达'); cls = 'st-bad'; }
+    html += '<div class="health-card"><div class="role">'+esc(role)+'</div>'+
+      '<div class="'+cls+'">'+esc(st)+'</div>'+
+      (h.model ? '<div>模型: '+esc(h.model)+'</div>' : '')+
+      (h.url ? '<div class="url">'+esc(h.url)+'</div>' : '')+
+      '</div>';
+  }
+  html += '</div>';
+  if (health.mismatch) {
+    html += '<div class="warn-banner">⚠️ '+esc(health.suggestion || '本地代理模型与 profile 不一致')+
+            ' <button class="btn primary" id="btnLocalFix">重新生成 local profile</button></div>';
+  }
+  // profile 列表（非备份）
+  const userProfiles = (prof.profiles || []).filter(p => !p.is_backup);
+  if (userProfiles.length) {
+    html += '<div class="section-title">📁 Profiles</div><table><thead><tr>'+
+      '<th>名称</th><th>模式</th><th>状态</th><th>操作</th></tr></thead><tbody>'+
+      userProfiles.map(p =>
+        '<tr><td>'+esc(p.name)+'</td><td>'+esc(p.mode)+'</td>'+
+        '<td>'+(p.active ? '<span style="color:var(--green)">● 生效中</span>' : '')+'</td>'+
+        '<td>'+(!p.active ? '<button class="btn" data-activate="'+esc(p.name)+'">激活</button>' : '')+
+        '<button class="btn" data-diff="'+esc(p.name)+'">对比</button></td></tr>'
+      ).join('')+'</tbody></table><div id="diffView"></div>';
+  }
+  // R14 白名单字段编辑
+  html += '<div class="section-title">✏️ 编辑配置（白名单字段，写入当前生效配置文件）</div>'+
+    '<div class="run-form"><select id="editField" class="run-input">'+
+    ['worker_models','worker_backends','local_models','local_model_cost','goal','evaluator',
+     'plan_api.worker_base_url','planner_api.base_url'].map(f => '<option value="'+f+'">'+f+'</option>').join('')+
+    '</select>'+
+    '<input id="editValue" class="run-input" style="flex:3" placeholder="JSON 值，如 {&quot;easy&quot;:&quot;claude-haiku-4-5&quot;} 或 [&quot;m1&quot;]">'+
+    '<button class="btn" id="btnEditSave">💾 保存</button>'+
+    '<span id="editMsg" style="font-size:12px"></span></div>';
+  // 只读配置展示（原有）
+  html += '<div class="section-title">⚙️ 用户配置（生效值，api_key 已脱敏）</div>';
   html += '<div class="json-view">'+esc(JSON.stringify(d.config, null, 2))+'</div>';
   html += '<div class="kv" style="margin-top:10px"><dt>配置路径</dt><dd>'+esc(d.config_path)+'</dd></div>';
   if (d.role_skill_map) {
@@ -1702,6 +2861,86 @@ async function loadConfig() {
     html += '<div class="kv" style="margin-top:10px"><dt>路径</dt><dd>'+esc(d.role_skill_map_path)+'</dd></div>';
   }
   document.getElementById('mainView').innerHTML = html;
+  // 绑定操作
+  const bindOp = (id, fn, confirmMsg) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.onclick = async () => {
+      if (confirmMsg && !confirm(confirmMsg)) return;
+      el.disabled = true;
+      try { await fn(); } catch (e) { alert('❌ 操作失败: '+e.message); }
+      loadConfig();
+    };
+  };
+  bindOp('btnLocal', () => postJSON('/api/profile/local', {}),
+    '切换到纯本地模式？\\n将探测 localhost:4000 代理并生成 local profile（当前配置自动备份）。');
+  bindOp('btnLocalFix', () => postJSON('/api/profile/local', {}),
+    '重新生成 local profile？（当前配置自动备份）');
+  bindOp('btnCloud', () => postJSON('/api/profile/cloud', {}),
+    '恢复云端配置？（当前配置自动备份）');
+  document.querySelectorAll('[data-activate]').forEach(btn => {
+    btn.onclick = async () => {
+      const name = btn.dataset.activate;
+      if (!confirm('激活 profile「'+name+'」？（当前配置自动备份）')) return;
+      btn.disabled = true;
+      try { await postJSON('/api/profile/activate', {name}); }
+      catch (e) { alert('❌ 操作失败: '+e.message); }
+      loadConfig();
+    };
+  });
+  // R15 diff 对比
+  document.querySelectorAll('[data-diff]').forEach(btn => {
+    btn.onclick = async () => {
+      const name = btn.dataset.diff;
+      const slot = document.getElementById('diffView');
+      slot.innerHTML = '<div class="loading">对比中…</div>';
+      try {
+        const d = await api('/api/config/diff?name='+encodeURIComponent(name));
+        if (!d.diff_count) {
+          slot.innerHTML = '<div style="color:var(--green);margin:8px 0">✅ 当前配置与「'+esc(name)+'」无差异</div>';
+          return;
+        }
+        const rows = d.diffs.map(x =>
+          '<tr><td style="font-family:Menlo,monospace;font-size:12px">'+esc(x.field)+'</td>'+
+          '<td class="json-view" style="max-height:120px">'+esc(JSON.stringify(x.current))+'</td>'+
+          '<td class="json-view" style="max-height:120px">'+esc(JSON.stringify(x.target))+'</td></tr>').join('');
+        slot.innerHTML = '<div class="section-title">当前生效 vs「'+esc(name)+'」（'+d.diff_count+' 处差异）</div>'+
+          '<table><thead><tr><th>字段</th><th>当前</th><th>'+esc(name)+'</th></tr></thead><tbody>'+rows+'</tbody></table>';
+      } catch (e) {
+        slot.innerHTML = '<div class="err">'+esc(e.message)+'</div>';
+      }
+    };
+  });
+  // R14 编辑保存
+  const btnSave = document.getElementById('btnEditSave');
+  if (btnSave) btnSave.onclick = async () => {
+    const field = document.getElementById('editField').value;
+    const raw = document.getElementById('editValue').value.trim();
+    const msg = document.getElementById('editMsg');
+    let value;
+    try { value = JSON.parse(raw); }
+    catch (e) { msg.textContent = '⚠️ 值必须是合法 JSON'; msg.style.color = 'var(--yellow)'; return; }
+    if (!confirm('保存字段「'+field+'」到当前生效配置？\\n新任务立即生效。')) return;
+    btnSave.disabled = true;
+    try {
+      const d = await putJSON('/api/config', {field, value});
+      msg.textContent = '✅ 已保存到 '+d.saved_to+'（'+d.effective+'）';
+      msg.style.color = 'var(--green)';
+      setTimeout(loadConfig, 1000);
+    } catch (e) {
+      msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)';
+      btnSave.disabled = false;
+    }
+  };
+}
+
+async function putJSON(path, body) {
+  const headers = {'Content-Type': 'application/json'};
+  if (authToken) headers['Authorization'] = 'Bearer '+authToken;
+  const r = await fetch(path, {method: 'PUT', headers, body: JSON.stringify(body || {})});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ('HTTP '+r.status));
+  return data;
 }
 
 async function loadStorage() {

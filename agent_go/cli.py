@@ -66,6 +66,9 @@ def _build_parser():
 
     run_parser.add_argument("--issue", type=int, dest="issue_ref", help="GitHub issue number to link")
     run_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks (default: 1)")
+    run_parser.add_argument("--confirm-mode", choices=["auto", "web"], default="auto",
+                            dest="confirm_mode",
+                            help="计划确认通道：auto=--yes 全自动；web=写 pending 文件等待 Web 确认（R5b）")
     run_parser.add_argument("--remote", help="Push worktree branches to remote URL")
     run_parser.add_argument("--no-cache", action="store_true", help="Skip plan cache lookup")
     run_parser.add_argument("--max-retries", type=int, default=None,
@@ -154,7 +157,13 @@ def _build_parser():
                                help="只清理 eval_suite/fixtures/ 下 fixture 仓库的失效 worktree 注册（ISSUE-38，不删任务目录）")
 
     # config 子命令
-    subparsers.add_parser("config", help="View current configuration")
+    config_parser = subparsers.add_parser("config", help="View/switch configuration (local/cloud profiles)")
+    config_sub = config_parser.add_subparsers(dest="config_subcommand", help="Config operation")
+    config_local_parser = config_sub.add_parser("local", help="一键生成并激活纯本地 profile")
+    config_local_parser.add_argument("--url", default="http://localhost:4000",
+                                     help="本地 OpenAI 兼容代理地址（默认 http://localhost:4000）")
+    config_sub.add_parser("cloud", help="恢复云端配置（回退默认 config.json）")
+    config_sub.add_parser("status", help="显示当前 profile + 端点健康检查")
 
     # spec 子命令（S11-P0：Task Spec 工具）
     spec_parser = subparsers.add_parser("spec", help="Task Spec 工具（SDD 结构化输入）")
@@ -485,6 +494,39 @@ def _preflight_repair_plan(
     return current, current_iteration, repair_history, quality
 
 
+def _confirm_plan_channel(plan, config, repo, logger, iteration, task, plan_dir):
+    """Plan 确认通道分发（R5b）：web_confirm_plan 时走 web 文件协议，否则 CLI 交互。
+
+    与 confirm_plan 同返回契约：(plan, doc_paths) 确认 / (None, doc_paths) 重新生成 /
+    N 决策时 sys.exit(0)（与 CLI 的 N 一致）。
+    """
+    if config.get("behavior", {}).get("web_confirm_plan") and plan_dir:
+        from .web_confirm import web_confirm
+        decision = web_confirm("plan", plan, plan_dir, logger)
+        if decision == "Y":
+            logger.info("web 确认 Plan：Y")
+            return plan, []
+        if decision == "R":
+            logger.info("web 确认 Plan：R（重新生成）")
+            return None, []
+        console.force("❌ 已取消（web 确认或超时）")
+        sys.exit(0)
+    return confirm_plan(plan, config, repo, logger, iteration=iteration, task=task, plan_dir=plan_dir)
+
+
+def _confirm_subtasks_channel(subtasks, config, logger, task_dir=None):
+    """子任务确认通道分发（R5b）：web_confirm_subtasks 时走 web 文件协议。"""
+    if config.get("behavior", {}).get("web_confirm_subtasks") and task_dir:
+        from .web_confirm import web_confirm
+        decision = web_confirm("subtasks", {"subtasks": subtasks}, task_dir, logger)
+        if decision == "Y":
+            logger.info("web 确认子任务：Y")
+            return subtasks
+        console.force("❌ 已取消（web 确认或超时）")
+        sys.exit(0)
+    return confirm_subtasks(subtasks, config, logger)
+
+
 def cmd_run(args=None):
     if args is None:
         parser = _build_parser()
@@ -572,6 +614,15 @@ def cmd_run(args=None):
         config["behavior"]["auto_confirm_plan"] = True
         config["behavior"]["auto_confirm_subtasks"] = True
         config["behavior"]["auto_verify_subtask"] = True
+
+    # R5b：--confirm-mode web → Plan/子任务确认走 web 文件协议（覆盖 --yes 的自动确认；
+    # 子任务验证仍自动，避免 worker 卡 input()）
+    if getattr(args, "confirm_mode", "auto") == "web":
+        config["behavior"]["auto_confirm_plan"] = False
+        config["behavior"]["auto_confirm_subtasks"] = False
+        config["behavior"]["auto_verify_subtask"] = True
+        config["behavior"]["web_confirm_plan"] = True
+        config["behavior"]["web_confirm_subtasks"] = True
 
     # 生成唯一任务 ID：时间戳(毫秒精度) + 随机后缀，防止碰撞
     for _ in range(5):
@@ -751,7 +802,7 @@ def cmd_run(args=None):
         # --yes must remain non-interactive even when preflight produced Plan v2;
         # the repair version is still shown/persisted separately in plan snapshots.
         _confirm_iteration = 1 if auto_yes else iteration
-        confirmed_plan, final_doc_paths = confirm_plan(
+        confirmed_plan, final_doc_paths = _confirm_plan_channel(
             plan, config, repo, logger, iteration=_confirm_iteration, task=task, plan_dir=task_dir)
         # 检查降级信号
         if confirmed_plan == "__FALLBACK__":
@@ -783,7 +834,7 @@ def cmd_run(args=None):
                     # R-4: 实时 diff——用户知道重新生成改了什么
                     from .ui import show_plan_diff
                     show_plan_diff(_prev_plan, plan)
-                confirmed_plan, final_doc_paths = confirm_plan(plan, config, repo, logger, iteration, task=task, plan_dir=task_dir)
+                confirmed_plan, final_doc_paths = _confirm_plan_channel(plan, config, repo, logger, iteration, task=task, plan_dir=task_dir)
                 if confirmed_plan == "__FALLBACK__":
                     console.print(f"\n⚠️ 降级到本地规则拆解...")
                     subtasks = decompose_fallback(task, repo, config, logger)
@@ -858,7 +909,7 @@ def cmd_run(args=None):
         subtasks = decompose_fallback(task, repo, config, logger)
 
     # 子任务确认
-    confirmed = confirm_subtasks(subtasks, config, logger)
+    confirmed = _confirm_subtasks_channel(subtasks, config, logger, task_dir=task_dir)
     from .planning import validate_plan_quality
     _plan_requirements = []
     if isinstance(confirmed_plan, dict):
@@ -2477,7 +2528,46 @@ def _cmd_status_text(args=None):
             break
         time.sleep(5)
 
-def cmd_config() -> None:
+def cmd_config(args=None) -> None:
+    """config 子命令：无参=打印当前配置；local/cloud 一键切换；status 健康检查（M1/R1-R4）。"""
+    sub = getattr(args, "config_subcommand", None) if args else None
+    if sub == "local":
+        from .profiles import activate_local, ProfileError
+        try:
+            result = activate_local(getattr(args, "url", "http://localhost:4000"))
+        except ProfileError as e:
+            console.error(str(e))
+            sys.exit(EX_ERROR)
+        console.print(f"✅ 已激活纯本地模式（profile: {result['profile']}）")
+        console.print(f"   代理: {result['local_url']}  模型: {result['real_model'] or '(未探测到)'}")
+        console.print(f"   配置: {result['profile_path']}")
+        console.print(f"   备份: {result['backup_path']}（agent_go config cloud 恢复云端）")
+        return
+    if sub == "cloud":
+        from .profiles import activate_cloud
+        result = activate_cloud()
+        console.print("✅ 已恢复云端配置（默认 config.json）")
+        if result["previous_profile"]:
+            console.print(f"   此前 profile: {result['previous_profile']}（备份: {result['backup_path']}）")
+        return
+    if sub == "status":
+        from .profiles import health_check, list_profiles
+        info = list_profiles()
+        mode_label = {"local": "🟢 纯本地", "cloud": "☁️ 云端", "custom": f"🔧 自定义({info['current']})"}.get(info["mode"], info["mode"])
+        console.print(f"当前模式: {mode_label}")
+        health = health_check()
+        for role in ("plan", "worker", "evaluator", "local_proxy"):
+            h = health.get(role, {})
+            if h.get("skipped"):
+                console.print(f"  {role:12s} ⏭ {h.get('reason', '')}")
+                continue
+            mark = "✅" if h.get("ok") else "❌"
+            model = f"  模型: {h['model']}" if h.get("model") else ""
+            err = f"  错误: {h['error']}" if h.get("error") else ""
+            console.print(f"  {role:12s} {mark} {h.get('url', '')}{model}{err}")
+        if health.get("mismatch"):
+            console.print(f"\n⚠️  {health['suggestion']}")
+        return
     config = load_config()
     console.print(json.dumps(config, indent=2, ensure_ascii=False))
 
@@ -2583,8 +2673,41 @@ def _prune_fixture_repo_worktrees(fixtures_base: str = "eval_suite/fixtures") ->
         console.print(f"已处理 {_total} 个仓库（worktree prune）")
 
 
-def cmd_clean(args=None) -> None:
+def clean_task_dirs(tasks: list) -> dict:
+    """删除指定任务目录 + 关联 repo 的 worktree prune + 任务 tag 清理。
+
+    cmd_clean（交互确认后）与 Web 写端点（M2/R7）共用的执行层；
+    返回 {"removed": [task_dir_name...], "repos_pruned": n}。
+    """
     import shutil as _shutil
+
+    repo_task_ids: dict[str, set] = {}
+    for t in tasks:
+        meta_path = t / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                repo_str = meta.get("repo", "")
+                task_id = meta.get("task_id", t.name)
+                if repo_str and Path(repo_str).exists():
+                    repo_task_ids.setdefault(repo_str, set()).add(task_id)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug("Failed to read meta for %s: %s", t.name, e)
+    removed = []
+    for t in tasks:
+        _shutil.rmtree(t, ignore_errors=True)
+        removed.append(t.name)
+    for repo_path, task_ids in repo_task_ids.items():
+        subprocess.run(["git", "worktree", "prune"], cwd=repo_path, capture_output=True)
+        for tid in task_ids:
+            tag_list = subprocess.run(["git", "tag", "-l", f"{tid}/*"], cwd=repo_path, capture_output=True, text=True)
+            for tag in tag_list.stdout.strip().split("\n"):
+                if tag:
+                    subprocess.run(["git", "tag", "-d", tag], cwd=repo_path, capture_output=True)
+    return {"removed": removed, "repos_pruned": len(repo_task_ids)}
+
+
+def cmd_clean(args=None) -> None:
     import time as _time
 
     # ISSUE-38：--fixture-worktrees → 只清理 fixture 仓库的失效 worktree 注册，
@@ -2615,30 +2738,8 @@ def cmd_clean(args=None) -> None:
         console.print(f"{t.name}")
     confirm = safe_input("\n确认删除? [y/N]: ").strip().lower()
     if confirm == "y":
-        # repo → 该仓库关联的 task_id 集合（用于 worktree prune + tag 清理）
-        repo_task_ids: dict[str, set] = {}
-        for t in tasks:
-            meta_path = t / "meta.json"
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    repo_str = meta.get("repo", "")
-                    task_id = meta.get("task_id", t.name)
-                    if repo_str and Path(repo_str).exists():
-                        repo_task_ids.setdefault(repo_str, set()).add(task_id)
-                except (json.JSONDecodeError, OSError) as e:
-                    logger.debug("Failed to read meta for %s: %s", t.name, e)
-        for t in tasks:
-            _shutil.rmtree(t, ignore_errors=True)
-        for repo_path, task_ids in repo_task_ids.items():
-            subprocess.run(["git", "worktree", "prune"], cwd=repo_path, capture_output=True)
-            # 清理该仓库下所有关联任务的 tags
-            for tid in task_ids:
-                tag_list = subprocess.run(["git", "tag", "-l", f"{tid}/*"], cwd=repo_path, capture_output=True, text=True)
-                for tag in tag_list.stdout.strip().split("\n"):
-                    if tag:
-                        subprocess.run(["git", "tag", "-d", tag], cwd=repo_path, capture_output=True)
-        console.print(f"已清理 {len(tasks)} 个任务")
+        result = clean_task_dirs(tasks)
+        console.print(f"已清理 {len(result['removed'])} 个任务")
     else:
         console.print("已取消")
 
@@ -3275,7 +3376,7 @@ def main() -> None:
         elif args.command == "status":
             cmd_status(args)
         elif args.command == "config":
-            cmd_config()
+            cmd_config(args)
         elif args.command == "spec":
             cmd_spec(args)
         elif args.command == "clean":

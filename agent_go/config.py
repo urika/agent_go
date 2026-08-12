@@ -250,9 +250,16 @@ def load_config(config_path: Optional[str] = None) -> dict[str, Any]:
     Profile 支持（R-3）：--profile <name> / AGENT_GO_PROFILE 环境变量 →
     优先读 ~/.agent_go/profiles/<name>.json，其次 ~/.agent_go/config.<name>.json；
     不存在时回退默认配置并警告。--config（config_path）优先级高于 profile。
+    Web 操作台（M1）：env 未设置时读 ~/.agent_go/.current_profile（config local/cloud 写入）。
     """
     if not config_path:
         profile = os.environ.get("AGENT_GO_PROFILE", "")
+        if not profile:
+            marker = AGENT_GO_DIR / ".current_profile"
+            try:
+                profile = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+            except OSError:
+                profile = ""
         if profile:
             candidates = [
                 AGENT_GO_DIR / "profiles" / f"{profile}.json",

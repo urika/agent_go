@@ -621,3 +621,30 @@ class TestStorage:
         d = ws.api_storage()
         assert d["total_size"] == 0
         assert d["task_count"] == 0
+
+
+class TestSpaJsSyntax:
+    """SPA 内嵌 JS 防回归：单/双引号字符串内禁止真实换行。
+
+    背景：Python 三引号会把 \\n 转成真实换行，导致 JS 单引号字符串跨行、
+    整个 <script> 解析失败（页面永远"加载中"）。模板字面量（`...`）允许换行。
+    """
+
+    def test_no_newline_inside_js_strings(self, tmp_path):
+        import re
+        import shutil
+        import subprocess
+        import agent_go.web_server as ws
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node 不可用，跳过 JS 语法校验")
+        m = re.search(r"<script>(.*?)</script>", ws._SPA_HTML, re.S)
+        assert m, "SPA 缺少 <script> 块"
+        script = tmp_path / "spa.js"
+        script.write_text(m.group(1), encoding="utf-8")
+        r = subprocess.run([node, "--check", str(script)],
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, (
+            "SPA 内嵌 JS 语法错误（常见原因：Python 三引号里的 \\n 注入 JS "
+            f"单引号字符串，需写 \\\\n）：\n{r.stderr[:500]}"
+        )

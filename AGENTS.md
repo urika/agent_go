@@ -4,9 +4,9 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (37 modules, ~17,300 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (55 modules, ~30,000 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
-No external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`).
+Runtime has no external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`, `http.server`). Dev/test deps (pytest, pytest-mock, ruff, mypy, pyyaml) are external.
 
 ## Commands
 
@@ -16,7 +16,7 @@ pip install -e .
 
 export AGENT_GO_API_KEY="sk-ant-..."
 
-# Run a task
+# Run a task (also: python3 -m agent_go run, python3 agent_go.py run)
 agent_go run <repo-path> '<task>'
 
 # Headless with concurrency and remote push
@@ -27,6 +27,12 @@ agent_go run <repo-path> '<task>' --skill security-review --agent-type reviewer
 
 # With verification loop and worktree preservation
 agent_go run <repo-path> '<task>' --max-retries 5 --preserve-worktrees
+
+# With structured Task Spec (SDD input contract) — recommended for non-trivial tasks
+agent_go spec template <repo-path> --output docs/tasks/task-xxx.md   # generate spec template
+agent_go spec validate docs/tasks/task-xxx.md <repo-path>            # L1 admission gate
+agent_go run <repo-path> --spec docs/tasks/task-xxx.md --yes         # run with spec
+agent_go run <repo-path> --spec docs/tasks/task-xxx.md --force       # skip admission gate
 
 # Auto git init for non-git target dir (local-only, no remote)
 agent_go run <repo-path> '<task>' --auto-init
@@ -67,6 +73,12 @@ agent_go checkpoint list <task-id>
 agent_go checkpoint restore <task-id> --name <sub-id> [--target <dir>]
 agent_go checkpoint delete <task-id> --name <sub-id>
 
+# SDD governance / delivery (M1.2/M2.5): traceability matrix, deviations, manual merge
+agent_go governance [--json]                      # spec/architecture compliance traceability
+agent_go deviation [task-id] [--json]             # spec/architecture/acceptance deviation records
+agent_go merge <task-id> [--push] [--remote origin]   # merge delivery branch into target
+agent_go migrate failure-metadata [--apply]       # migrate historical task metadata
+
 # MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)
 agent_go mcp
 agent_go mcp --http --host 127.0.0.1 --port 8090   # HTTP transport: POST /mcp + GET /mcp (SSE) + GET /health
@@ -77,14 +89,18 @@ agent_go status --watch
 
 # Model benchmark / cross-judgment / evaluation / gate
 agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3   # 启动前探测实际后端+校验定价（S12）
-agent_go eval bench --source-batch results_v2        # 批次标识（跨批次追溯，S10-P1）
-agent_go eval baseline --candidate-models M1,M2      # 对照基线：claude -p 裸跑（不走 harness，S10-P2）
+agent_go eval bench --suite golden                 # 预设套件: smoke/core/decision/stress/golden/phaseD
+agent_go eval bench --source-batch results_v2      # 批次标识（跨批次追溯）
+agent_go eval baseline --candidate-models M1,M2    # 对照基线：claude -p 裸跑（不走 harness）
 agent_go eval models --results eval_suite/results.jsonl
-agent_go eval cost-baseline --results eval_suite/results_v3.jsonl,eval_suite/results_v4_calib.jsonl   # 删失校正成本基线（排除 timed_out 右删失，P90×tolerance，S10）
+agent_go eval cost-baseline --results eval_suite/results_v3.jsonl,eval_suite/results_v4_calib.jsonl
 agent_go eval judge --results eval_suite/results.jsonl --judge-models M1,M2
-agent_go eval judge calibrate --llm-scores ... --human-scores ...
-agent_go eval calibrate-difficulty --results eval_suite/results.jsonl            # P2：基于 bench 实测校准任务难度标签（dry-run）
-agent_go eval calibrate-difficulty --results eval_suite/results.jsonl --apply     # 写回任务 YAML 的 difficulty
+agent_go eval judge --judge-subcommand calibrate --llm-scores ... --human-scores ...
+agent_go eval calibrate-difficulty --results eval_suite/results.jsonl            # dry-run
+agent_go eval calibrate-difficulty --results eval_suite/results.jsonl --apply     # 写回任务 YAML difficulty
+agent_go eval metric-freeze --results eval_suite/results.jsonl                   # 可复现 Metric Freeze 报告
+agent_go eval batch-manifest                                                    # 批次基线 manifest（M0-10）
+agent_go eval validate-schema --results eval_suite/results.jsonl                # Bench schema 校验
 agent_go eval gate --baseline 0.05
 agent_go eval gate --check-regression --update-baseline
 
@@ -93,22 +109,28 @@ agent_go pr <task-id> --push
 agent_go ci --dry-run
 agent_go cache stats
 agent_go router show
-agent_go router recommend [--results FILE] [--apply] [--force]   # P1：基于 bench 结果一次推荐 router.roles + worker_models（整合 eval recommend）
+agent_go router set-role <role> --provider <p> --model <m> --base-url <url>
+agent_go router recommend [--results FILE] [--apply] [--force]   # 基于 bench 结果推荐 router.roles + worker_models
 agent_go skills list
-agent_go skills show <name>
+agent_go skills show <name> [--json]
+agent_go skills resolve <name>                 # trace a Skill's symlink resolution chain
 agent_go agents
-agent_go config
+agent_go config                          # 查看当前生效配置
+agent_go config local [--url ...]        # 一键生成并激活纯本地 profile（探测代理 + 备份）
+agent_go config cloud                    # 恢复云端配置（备份保留）
+agent_go config status                   # 当前模式 + plan/worker/evaluator/代理健康检查
 
- # List / show / clean
- agent_go list
- agent_go show <task-id>
- agent_go clean                       # 清理全部任务数据
- agent_go clean --older-than 7        # 只清理早于 7 天前的任务（保留期，S12 失败清理）
+# List / show / clean
+agent_go list
+agent_go show <task-id>
+agent_go clean                        # 清理全部任务数据
+agent_go clean --older-than 7         # 只清理早于 7 天前的任务（保留期）
+agent_go clean --fixture-worktrees    # 只清理 eval_suite/fixtures/ 下失效 worktree 注册（ISSUE-38）
 
-# Read-only Web observability (task list / subtask detail / logs / metering / timeline)
+# Web 操作台（观测 + 处置：任务启动/恢复/取消/清理/审批/合并/PR + 配置中心 local⇄cloud + 健康检查）
 agent_go web --host 127.0.0.1 --port 8091   # 打开 http://127.0.0.1:8091
 agent_go web --token xxx                     # 可选 Bearer token 鉴权
- ```
+```
 
 ## Architecture
 
@@ -117,6 +139,7 @@ cmd_run()
   ├── analyze_project()        → git ls-files or find
   ├── get_git_info()           → remote, branch, commit
   ├── get_resource_map()       → directories, config files
+  ├── spec.py                  → optional Task Spec admission gate (--spec / --force skips)
   ├── generate_plan()          → calls LLM API, returns structured JSON
   │     ├── injects skill inventory + role-skill rule summary into prompt
   │     ├── call_api()         → unified Anthropic/OpenAI/DeepSeek/custom
@@ -150,15 +173,17 @@ cmd_run()
 
 recover <task-id>   → rebuild meta.json from worktree state after SIGKILL
 resume <task-id>    → reruns uncompleted subtasks from meta.json state
+status.py           → canonical 8-state task state machine (M0-2)
+delivery.py         → task-level delivery contract (M1.2); `merge` command is the explicit hand-off
 ```
 
 If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuilds `meta.json` from worktree state: commit+verify-pass → completed, commit+verify-fail → failed, no commit+orphan changes → reset (resume reruns it), no commit+no changes → no_changes. It never commits orphan changes itself — commit stays the sole completion boundary for resume correctness.
 
-## Key Modules (37 modules, ~17,300 lines)
+## Key Modules (55 modules, ~30,000 lines)
 
 | Module | Purpose |
 |--------|---------|
-| `cli.py` | CLI commands: run, resume, recover, list, show, status, pr, config, clean, inspect, review, router, cache, eval, ci, skills, agents, plan-history, plan-diff, replay, checkpoint, mcp |
+| `cli.py` | CLI commands: run, resume, recover, list, show, status, pr, merge, config, clean, inspect, review, router, cache, eval, ci, skills, agents, spec, governance, deviation, migrate, plan-history, plan-diff, replay, checkpoint, mcp, web |
 | `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
 | `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
 | `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify loop |
@@ -166,25 +191,37 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `subtask.py` | claude -p headless runner, git merge upstream, worker metering, difficulty env |
 | `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
 | `goal_injector.py` | /goal Stop Hook injection: .claude/settings.json + verify-goal.sh |
+| `goal_policy.py` | Goal Loop final execution policy resolver (goal-mechanism-design §3.3/§4) |
 | `git_utils.py` | Project analysis, worktree create/remove/prune, gc.auto control |
-| `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown) |
-| `agents.py` | Agent type system: developer/architect/reviewer/tester |
+| `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown), symlink resolution |
+| `agents.py` | Agent type system: developer/architect/reviewer/tester; claude/greywall command |
 | `role_skill_map.py` | Config-driven rule matching: keywords, file patterns, agent type |
 | `router.py` | Role-aware model routing: planner/worker/reviewer, fallback + circuit breaker |
 | `evaluator.py` | LLM semantic evaluation + failure summary for verification loop |
 | `metrics.py` | Data collection: timing/change stats, estimate_cost, aggregate_metering |
 | `config.py` | Config loading, logging, API key resolution, meter_event |
-| `utils.py` | Commit formatting, slugify, shell safety, version detection |
+| `utils.py` | Commit formatting, slugify, shell safety, version detection, tool version probing |
+| `spec.py` | Task Spec parsing + L1 admission review (S11-P0) |
+| `delivery.py` | Task-level delivery contract (M1.2) |
+| `governance.py` | SDD traceability matrix + architecture compliance (M1.4) |
+| `deviation.py` | Spec/Architecture/acceptance deviation records: model, persistence, aggregation (M2.5) |
+| `status.py` | Canonical task state machine (M0-2, 8 states) |
+| `exit_codes.py` | Semantic process exit codes for CLI tools |
+| `failure.py` | Stable failure classes and policy (M0-3) |
 | `eval.py` | Quality/perf/cost (per-role)/reliability/UX analysis + eval gate ($/pass baseline + regression) |
 | `planning.py` | Planning helpers: estimate_task_duration |
-| `pricing.py` | Model price table (48 models), MODEL_TIER, provider defaults |
+| `pricing.py` | Model price table (52 models), MODEL_TIER, provider defaults |
 | `replay.py` | Execution replay timeline: load meta/metering/results, ASCII/JSON visualization |
 | `checkpoint.py` | Worktree file snapshot manager: take/restore/delete |
 | `recover.py` | Rebuild meta.json from worktree state after SIGKILL/abnormal interruption |
-| `mcp_server.py` | MCP server over stdio: 6 tools (run/resume/inspect/review/list/cancel) + resources + prompts |
+| `metadata_migration.py` | Auditable failure-metadata migration for historical task dirs (`migrate failure-metadata`) |
+| `mcp_server.py` | MCP server over stdio: 7 tools (run_task/resume_task/inspect_task/review_task/governance_task/list_tasks/cancel_task) + resources + prompts |
 | `mcp_http.py` | MCP server HTTP/SSE transport: POST /mcp + GET /mcp (SSE) + GET /health, Bearer auth |
 | `mcp_client.py` | MCP consumption layer: subtasks call external MCP tools, namespaced `mcp__{server}__{tool}` |
 | `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks |
+| `bench_schema.py` | Versioned Bench record schema + JSONL validator (M0-4) |
+| `batch_governance.py` | Result batch governance + immutable baseline manifests (M0-10) |
+| `metric_report.py` | Reproducible Metric Freeze report generation (M0-9) |
 | `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
 | `assessment.py` | False-positive evaluation data layer: AssessmentEvent model, persistence, aggregation |
 | `artifacts.py` | Artifact export (S9-B): collect worktree/__artifacts__/ into --artifact-dir before cleanup |
@@ -192,8 +229,12 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |
 | `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
 | `tui.py` | Curses status dashboard |
+| `review_agent.py` | Read-only independent review subagent, two-phase review |
 | `workflow_gen.py` | GitHub Actions workflow generation (ci command) |
-| `web_server.py` | Read-only Web observability platform: tasks/overview(cost trend)/cost(by_model/role)/models/config/storage, stdlib http.server + SPA |
+| `web_server.py` | Web 操作台：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ SSE，stdlib http.server + SPA |
+| `profiles.py` | Profile 管理：local⇄cloud 一键切换（config local/cloud/status）、.current_profile、健康检查（mismatch 检测）、本地 profile 模板生成 |
+| `task_runner.py` | Web 子进程任务运行器（Thin shell 同哲学）：spawn agent_go --yes --json，meta.json 唯一事实源，SIGINT cancel |
+| `web_confirm.py` | R5b Web 计划确认协议：pending/decision 文件协议 + 阻塞轮询，30min 超时自动取消 |
 | `lint.py` | AST-based static checks: suspicious for-loop body truncation |
 
 ## Key Design Decisions
@@ -207,29 +248,33 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 - **Verification loop**: Failed subtasks auto-retry with full failure context (stdout/stderr/git diff) injected into fix prompt. Configurable max retries (`--max-retries`). Worktree preserved for manual inspection on final failure.
 - **Worktree preservation**: Failed/blocked subtask worktrees are preserved after pipeline completion. `agent_go inspect <task-id>` lists paths and branch names for manual review.
 - **Result review (M7)**: `agent_go review --task <task-id>` aggregates per-file diff summaries across subtasks with approve/reject/changes-requested decisions; `--deep` runs independent-model per-subtask analysis.
-- **Difficulty routing**: Planner tags subtasks with `difficulty`; `worker_models` config maps difficulty to a model name passed via `claude --model`; `worker_backends` maps model names to API base URLs (per-subtask `ANTHROPIC_BASE_URL` injection, overrides `worker_base_url`); difficulty and actual model recorded in metering. `local_model_names` (optional) maps a routed name to its real local backend name (e.g. `claude-haiku-4-5` → `Qwen3.6-27B-4bit`) as a fallback when `/status` probing fails.
+- **Difficulty routing**: Planner tags subtasks with `difficulty`; `worker_models` config maps difficulty to a model name passed via `claude --model`; `worker_backends` maps model names to API base URLs (per-subtask `ANTHROPIC_BASE_URL` injection, overrides `worker_base_url`); difficulty and actual model recorded in metering. `local_model_names` (optional) maps a routed name to its real local backend name (e.g. `claude-haiku-4-5` → `Qwen3.6-27B-4bit`) as a fallback when `/status` probing fails. `worker_models_fallback` / `worker_models_by_type` / `worker_models_degrades` provide degrade paths.
 - **Planner API isolation**: `planner_api` config block overrides `plan_api` for plan generation only — supports independent model/provider for planning vs execution.
 - **Crash recovery**: commit is the sole completion boundary. `agent_go recover` never commits orphan changes on your behalf — it only classifies worktree state so `resume` knows what to rerun.
-- **MCP dual role**: agent_go is both an MCP server (`mcp_server.py` / `mcp_http.py`, exposing run/resume/inspect/review/list/cancel tools + resources + prompts) and an MCP consumer (`mcp_client.py`, letting subtasks call tools from external MCP servers, namespaced `mcp__{server}__{tool}`). Consumer failures are isolated per-server and degrade to a warning rather than blocking the pipeline.
-- **Config**: `~/.agent_go/config.json` (auto-created). Shallow-merged with `DEFAULT_CONFIG`.
+- **MCP dual role**: agent_go is both an MCP server (`mcp_server.py` / `mcp_http.py`) and an MCP consumer (`mcp_client.py`, letting subtasks call tools from external MCP servers, namespaced `mcp__{server}__{tool}`). Consumer failures are isolated per-server and degrade to a warning rather than blocking the pipeline.
+- **Config**: `~/.agent_go/config.json` (auto-created). Shallow-merged with `DEFAULT_CONFIG`. Field reference: `docs/design/config-schema.md`.
 - **API key**: `AGENT_GO_API_KEY` env var > `config.json` `api_key`. Template vars (`${VAR_NAME}`) resolved from environment.
-- **Local model cost tracking**: `local_models` list marks model names routed to local backends — metering cost is zeroed for matched models. Local backend is auto-detected when `worker_backends` / `worker_base_url` points to `127.0.0.1`/`localhost` (injects `AGENT_GO_IS_LOCAL`); the real backend model name is probed from the proxy's `/status` page (supports hot model switching via SIGHUP) or falls back to `local_model_names` config, then `routed_model`.
-- **Cost recomputation (actual model pricing)**: claude CLI's `total_cost_usd` is billed at Anthropic prices, but `claude-*` route names may resolve to cheaper backends (e.g. `claude-haiku-4-5`/`claude-sonnet-4-6` → `deepseek-v4-flash`, `claude-opus-4-7` → `deepseek-v4-pro`). Worker metering recomputes `cost_usd` from the **actual model** (parsed from claude's `assistant.message.model`) using `MODEL_PRICES`, preventing 10-16x cost inflation; unknown models fall back to claude's reported cost. Local models stay zero-cost.
-- **Cost control (3-layer, cold-start L1 default ON)**: L1 single-call hard cap via `claude --max-budget-usd` (per difficulty from `cost_control.per_subtask_budget_usd`, unknown difficulty falls back to medium); **L1 gated by `l1_enabled` (default True) — cold-start safe, prevents runaway calls with lowest false-kill risk**; L2 subtask cumulative cap across retries (`per_subtask_budget_usd × subtask_multiplier`, read from metering.jsonl); L3 task-level circuit break (`--max-cost`/`--budget` sets `cost_control.max_budget_usd`, pipeline checks cumulative metering before each wave). **L2/L3 gated by `cost_control.enabled` (default False — "判死"机制，基线不可信时误杀率高，须 `eval cost-baseline` 校准后才开)**. `--budget-mode` (S12-P1) selects `strict`(block)/`degrade`(switch cheaper model, `degraded=True`, max_retries→1)/`ignore`(L1/L2 only); dynamic default budget = Σ per_subtask_budget × multiplier × subtask count.
+- **Local model cost tracking**: `local_models` list marks model names routed to local backends — metering cost is zeroed for matched models. Local backend is auto-detected when `worker_backends` / `worker_base_url` points to `127.0.0.1`/`localhost` (injects `AGENT_GO_IS_LOCAL`); the real backend model name is probed from the proxy's `/status` page (supports hot model switching via SIGHUP) or falls back to `local_model_names` config, then `routed_model`. `local_model_cost` (optional) imputes explicit TCO per local call (e.g. `"mlx-community/Qwen3.6-27B-4bit": 0.0007`), included in $/pass/gate.
+- **Cost recomputation (actual model pricing)**: claude CLI's `total_cost_usd` is billed at Anthropic prices, but `claude-*` route names may resolve to cheaper backends (e.g. `claude-haiku-4-5`/`claude-sonnet-4-6` → `deepseek-v4-flash`, `claude-opus-4-7` → `deepseek-v4-pro`). Worker metering recomputes `cost_usd` from the **actual model** (parsed from claude's `assistant.message.model`) using `MODEL_PRICES`, preventing 10-16x cost inflation; unknown models fall back to claude's reported cost. Local models stay zero-cost (unless `local_model_cost` configured).
+- **Cost control (3-layer, all default OFF)**: L1 single-call hard cap via `claude --max-budget-usd` (per difficulty from `cost_control.per_subtask_budget_usd`, unknown difficulty falls back to medium); L2 subtask cumulative cap across retries (`per_subtask_budget_usd × subtask_multiplier`, read from metering.jsonl); L3 task-level circuit break (`--max-cost`/`--budget` sets `cost_control.max_budget_usd`, pipeline checks cumulative metering before each wave). **L2/L3 gated by `cost_control.enabled` (default False — "判死"机制，基线不可信时误杀率高，须 `eval cost-baseline` 校准后才开); L1 gated by `cost_control.l1_enabled` (default False — Claude CLI ≥2.1.224 `--max-budget-usd` semantics are "refuse when near cap", which blocked tasks at $0.13 vs $0.20 budget; enable only after baseline calibration)**. `--budget-mode` selects `strict`(block)/`degrade`(switch cheaper model, `degraded=True`, max_retries→1)/`ignore`(L1/L2 only); dynamic default budget = Σ per_subtask_budget × multiplier × subtask count. `on_exceed` is a legacy no-op key (budget_mode is the real switch).
 - **Measurement/control decoupling**: baseline uses only natural-cost records (timed_out=True excluded — right-censored); circuit-break writes `cost_censored` events to metering.jsonl and keeps accumulating (cost control doesn't stop measurement). `eval cost-baseline` computes P90×tolerance budgets by difficulty×model.
 - **Logging**: Dual-format — INFO human-readable + DEBUG JSON events.
 - **Output abstraction**: `Console` class (quiet/verbose modes) is injected at CLI entry and shared via module-level default. All user-facing output goes through it — no bare `print()` calls.
-- **Sandbox**: Prefers `greywall`, falls back to native `claude`.
-- **CI**: `.github/workflows/test.yml` runs pytest + ruff (E,F,W) + mypy on push/PR to main. Config in `pyproject.toml`.
+- **Sandbox**: Prefers `greywall`, falls back to native `claude` (`get_claude_command` in `agents.py`, double-wrap guarded in `executor.py`).
+- **CI**: `.github/workflows/test.yml` runs pytest + `agent_go eval gate --baseline 0.05` + ruff (E,F,W) + mypy on push/PR to main. Config in `pyproject.toml`.
 
 ## Testing
 
 ```bash
-pytest tests/           # 1569 tests (~60s)
-pytest tests/ -q        # Quiet mode
-pytest tests/ -k "not integration"  # Unit tests only
-pytest tests/ -k "TestFormatCommit" -v  # Run specific test class
+pip3 install pytest pytest-mock
+pytest tests/                       # 2178 tests (83 files); --tb=short via pyproject addopts
+pytest tests/ -q
+pytest tests/ -k "not integration"  # Unit tests only (skips test_integration.py, test_agent_loop_integration.py)
+pytest tests/ -k "TestFormatCommit" -v
+pytest tests/test_format_commit.py::TestFormatCommitChinese::test_feat_add
 ```
+
+Integration tests mock all external deps (generate_plan, run_subtask, `_run_headless`, subprocess.run) — no real LLM/Claude/Git needed. Shared fixtures (logger, temp_dir, sample_plan, minimal_plan) live in `tests/conftest.py`. A `flaky` marker is registered for annotation only (no rerun plugin).
 
 ## Code Review Checklist
 
@@ -277,13 +322,15 @@ for fut in as_completed(futures):
 - **Mock side_effect exhaustion**: When mocking a function with `side_effect=[...]`, ensure the number of expected calls doesn't exceed the list length — otherwise `StopIteration` crashes the test.
 - **Subprocess pipe deadlock**: Always use `capture_output=True` or `stdin=PIPE` with `communicate()`, never `wait()` on a pipe that fills the buffer.
 - **Temp directory leak**: Tests that create directories/files should use `tmp_path` fixture (auto-cleanup) or clean up in a `finally` block.
+- **Codegen/config drift**: `config.example.json` must stay in sync with `DEFAULT_CONFIG` in `config.py`; pricing table additions must update `pricing.py`. `spec validate` gates non-trivial tasks — `--force` bypasses it and should not be the default path.
 
 ## File Organization
 
 ```
-	agent_go/           # 36 Python modules (~16,500 lines)
-	tests/              # 61 test files, 1569 tests
-eval_suite/         # Standard task suite for eval bench (22 tasks + 4 fixtures)
-docs/design/        # Design docs, requirements, product roadmap
+agent_go/           # 55 Python modules (~30,000 lines)
+tests/              # 83 test files, 2178 tests
+eval_suite/         # eval bench suite: tasks/ (35 task YAMLs), fixtures/ (5 fixture repos), results_*.jsonl
+docs/design/        # Design docs: config-schema.md, module-catalog.md, architecture, ADRs
 docs/archive/       # Historical code review records
+tools/              # Dev scripts: bench_split_design.py, check_llama_defender_contract.py, check_markdown_links.py
 ```
