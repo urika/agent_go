@@ -118,3 +118,22 @@ python3 tools/check_llama_defender_contract.py --json
 - 脚本退出码 = 1（P0 FAIL 存在）
 
 该基线用于对方开发完成后的**差异验收**——FAIL/SKIP 全部转 PASS（或 P1/P2 明确 SKIP）即集成完成。
+
+## 11. 验收结果（对方交付后，已实测）
+
+对方交付（2026-08-12，`docs/in/api-and-operations-guide.md`）后实测：
+
+**safe 模式：13 PASS / 0 FAIL / 0 SKIP，P0 全部通过，exit=0。**
+
+| 组 | 结果 |
+|---|---|
+| A1-A6（R1/R2 状态端点） | ✅ 全过：`/api/status` 200、字段齐全、state=healthy、时延 0.06s、ready=true |
+| A7-A9（R3 manage.sh 契约） | ✅ 全过：非交互、退出码、幂等 |
+| A10（R5 watchdog 状态） | ✅ `watchdog-status` + `/api/watchdog` |
+| A11（R6 profiles） | ✅ `/api/profiles` 200 |
+| A12（R7 生命周期事件） | ✅ `logs/lifecycle_events.jsonl` 有样本 |
+| B1（就绪）/B6（metrics） | ✅ |
+
+**过程发现**：对方部署重启代理期间（~13:33-13:37）曾出现短暂 404（`/api/*` 未加载），代理重启完成后端点全部生效——验证了新端点需代理进程重启加载（代码级变更不能 SIGHUP 热重载）。
+
+**待执行**：C/D 组故障注入与并发用例（`--full`），因需停止后端（35B 重载数十秒），待服务空闲窗口执行。

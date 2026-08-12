@@ -71,6 +71,42 @@
 3. **幂等**：`start`/`start-backend`/`reload`/`switch` 重复调用结果一致。
 4. **超时上限**：命令自身应有硬超时（参考现有 `WAIT_HARD_LIMIT=1800`），不得无限挂起。
 
+### R3.1 manage.sh CLI 命令参考（服务启停主路径）
+
+manage.sh 是**服务启停的主路径**，尤其在 HTTP API 生效前或代理不可用时（proxy_down 场景下 `/api/*` 全部不可达，CLI 是唯一控制面）。工作目录：`/Users/jinsongwang/APP/llama.cpp`。
+
+**只读命令（任意频率，零副作用）**：
+
+| 命令 | 说明 |
+|------|------|
+| `status` | 文本状态：后端/代理存活、PID、内存、当前配置（人类可读） |
+| `current` | 当前激活配置详情 |
+| `list` | 列出所有可用 profile |
+| `watchdog-status` | watchdog 结构化状态 JSON（R5） |
+| `logs [N]` | 后端日志 tail |
+| `proxy-logs [N]` | 代理日志 tail |
+
+**幂等启动/恢复命令（重复调用安全）**：
+
+| 命令 | 说明 | 场景 |
+|------|------|------|
+| `start` | 启动后端+代理；已运行则跳过/补启动 | 服务全停后拉起（S4） |
+| `start-backend` | 仅启动本地后端 | backend_down 修复（S4 阶梯 level 1） |
+| `reload` | SIGHUP 热重载代理配置（~0.5s，不断连） | 配置漂移修复（S4 阶梯 level 0） |
+| `switch <name>` | 改 active.conf 软链（非交互自动跳过确认） | 切换序列第一步（S5） |
+
+**变更/停止命令（有副作用，需并发保护）**：
+
+| 命令 | 说明 | 注意 |
+|------|------|------|
+| `stop-backend` | 停本地后端，释放 GPU 内存 | 在途请求失败；执行前查活跃任务 |
+| `stop` | 停 watchdog+代理+后端 | 同上 |
+| `restart` | stop + start（含模型重新加载，35B 需数十秒） | S4 阶梯 level 2，重操作 |
+| `start-cloud` | 仅启云端代理 | **会先停本地后端**，勿当纯加云端用 |
+| `watchdog [--daemon]` / `stop-watchdog` | 启停 watchdog | 保活归服务方，agent_go 不调用 |
+
+**调用约定**（与 R3 契约一致）：工作目录必须为 llama-defender 仓库根目录；`subprocess.run` 收集退出码（0=成功）；非 tty stdin 下不得等待输入；变更命令自动获取 `.manage.lock`（R4），持锁冲突时快速失败。
+
 ### R4（P1）：变更操作互斥锁
 
 **现状缺口**：agent_go pre-flight repair 与 llama-defender watchdog 自动重启可能并发触发（S6）。
