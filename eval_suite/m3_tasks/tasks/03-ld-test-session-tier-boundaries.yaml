@@ -1,0 +1,25 @@
+# M3 小样任务 3: llama-defender 测试补充（easy）
+# 场景：测试补充——为会话层级阈值函数补边界测试
+id: ld-test-session-tier-boundaries
+difficulty: easy
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/llama-defender
+task: |
+  为 loop_detection.py 的 `_effective_session_tier(session_id, total_chars)` 补充边界测试：
+  - 在 test/unit/test_smart_router.py 中新增测试类 `TestEffectiveSessionTierBoundaries`
+  - 覆盖：total_chars 恰好等于 PROXY_LOOP_CHARS_LONG / PROXY_LOOP_CHARS_VERY_LONG 时返回对应层级（含边界等于）
+  - 覆盖：session_id 为空字符串时返回 short（即使 total_chars 很小）
+  - 覆盖：未知 session_id 且请求数为 0 时返回 short
+  - 覆盖：total_chars 为 0 且 session_id 非空但请求数超 PROXY_LOOP_SESSION_LONG_BOUND 时返回 very_long
+  - 使用 loop_detection 中已导出的常量（from proxy_state import PROXY_LOOP_CHARS_LONG 等）
+  - 不修改 loop_detection.py 本身（纯测试补充）
+verification:
+  - "python -m pytest test/unit/test_smart_router.py -q -k 'EffectiveSessionTierBoundaries'"
+  - "python -m pytest test/unit/test_smart_router.py -q"
+timeout: 600
+
+# S10 成本控制
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

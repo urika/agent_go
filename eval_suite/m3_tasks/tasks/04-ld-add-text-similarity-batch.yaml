@@ -1,0 +1,20 @@
+# M3 任务 4: llama-defender 新增功能（medium）
+# 场景：新增功能——text_loop 相似度计算的向量化版本
+id: ld-add-text-similarity-batch
+difficulty: medium
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/llama-defender
+task: |
+  在 loop_detection.py 中新增函数 `text_similarity_batch(text: str, candidates: list, threshold: float = 0.8) -> list`：
+  - 对 candidates 中每个文本，复用 `_compute_text_similarity(text, candidate)` 计算相似度
+  - 返回 [(index, score, is_loop)] 列表，is_loop = score >= threshold
+  - 对空 candidates 返回空列表；对 None candidates 视为空列表
+  - 加 docstring 说明参数和返回
+verification:
+  - "python -m pytest test/unit/test_text_loop.py -q -k 'similarity_batch or batch_similarity'"
+  - "python -c \"from loop_detection import text_similarity_batch; r=text_similarity_batch('hello', ['hello','world'], 0.5); assert len(r)==2; assert r[0][2] is True; print('OK')\""
+timeout: 600
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

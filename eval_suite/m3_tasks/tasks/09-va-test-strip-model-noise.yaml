@@ -1,0 +1,23 @@
+# M3 任务 9: vibe-astock 测试补充（easy）
+# 场景：测试补充——strip_model_noise 鲁棒性测试
+id: va-test-strip-model-noise
+difficulty: easy
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/vibe-astock
+task: |
+  为 duanxian/util.py 的 `strip_model_noise(text: str) -> str` 补充测试：
+  - 在 tests/test_core_logic.py 中新增测试类 `TestStripModelNoise`
+  - 覆盖：空字符串返回空字符串
+  - 覆盖：None 或非字符串输入的行为（当前实现会先判 not text 返回原值）
+  - 覆盖：含方括号噪声（如 "[思考过程]"、"【分析】"）被清除
+  - 覆盖：含完整句式噪声（如特定免责声明句）被清除（需先读源码确认 _NOISE_SENTENCE 正则匹配什么）
+  - 覆盖：正常文本（无噪声）原样返回
+  - 不修改 util.py 本身（纯测试补充）
+verification:
+  - "python -m pytest tests/test_core_logic.py -q -k 'StripModelNoise or strip_noise'"
+  - "python -m pytest tests/test_core_logic.py -q -k 'not Spa and not Preflight'"
+timeout: 600
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

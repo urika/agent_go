@@ -1,0 +1,33 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "3b938e8322bef06959b81d7ea9176a46b2ff83e01eac4aad8be4e04517a2a9cd",
+  "created_at": "2026-08-12T01:02:06.216294+00:00",
+  "immutable": true,
+  "manifest_version": 1,
+  "metric_freeze_version": 1,
+  "models": [
+    "deepseek-v4-flash"
+  ],
+  "record_count": 12,
+  "repeat_values": [
+    1
+  ],
+  "results_sha256": "e0d38a7eb178c3b30b2b8e7140b21c35c24e52d3fb4f4467b4ae39f618c15c7c",
+  "source_batch": "m3-dogfood-20260812",
+  "suite": "canonical",
+  "task_catalog_hash": "7d080b11d012c8bfa1abc2e69d22ccf490e3b93152b8ae96378fb5a38455077a",
+  "task_ids": [
+    "ld-add-message-char-estimator",
+    "ld-add-text-similarity-batch",
+    "ld-config-migrate-sieve-defaults",
+    "ld-recover-pipe-verification",
+    "ld-refactor-scrub-ansi-shared",
+    "ld-test-detect-content-type",
+    "ld-test-session-tier-boundaries",
+    "va-config-add-cache-ttl",
+    "va-fix-is-weekend-invalid-date",
+    "va-fix-validate-trade-date-robustness",
+    "va-refactor-tx-symbol-dedup",
+    "va-test-strip-model-noise"
+  ]
+}

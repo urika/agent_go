@@ -1,0 +1,21 @@
+# M3 任务 10: llama-defender 依赖/配置迁移（medium）
+# 场景：依赖配置迁移——proxy_config 新增配置项的环境变量降级
+id: ld-config-migrate-sieve-defaults
+difficulty: medium
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/llama-defender
+task: |
+  依赖/配置迁移：为 content_compressor 的 JSON sieve 参数新增环境变量覆盖。
+  - content_compressor.py 的 `_sieve_json` 当前从 proxy_state.PROXY_SIEVE_JSON_MAX_ITEMS 等读取默认值
+  - 要求：在 proxy_state.py 中新增 `PROXY_SIEVE_JSON_DEDUPE`（bool，默认 False，环境变量 PROXY_SIEVE_JSON_DEDUPE）
+  - 并在 content_compressor.py 的 `_sieve_json` 调用处，当调用方未显式传 enable_dedupe 时，回退到 proxy_state.PROXY_SIEVE_JSON_DEDUPE
+  - 保持向后兼容：现有 _sieve_json(enable_dedupe=False) 调用行为不变
+  - 加注释说明新增配置项的用途
+verification:
+  - "python -m pytest test/unit/test_content_compressor.py -q"
+  - "python -c \"from proxy_state import PROXY_SIEVE_JSON_DEDUPE; assert PROXY_SIEVE_JSON_DEDUPE in (True, False); from content_compressor import _sieve_json; print('OK')\""
+timeout: 600
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

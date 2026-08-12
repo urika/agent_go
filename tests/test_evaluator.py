@@ -122,6 +122,43 @@ class TestGetWorktreeDiff:
         assert "x='all'" in diff, f"累积 diff 应包含第一次 commit 的签名改动: {diff}"
         assert "return x" in diff, f"累积 diff 应包含第二次 commit 的改动: {diff}"
 
+    def test_base_commit_scopes_diff_for_real_repo(self, tmp_path):
+        """真实仓库有完整历史：显式 base_commit 应只取子任务改动，而非 root..HEAD 全历史。
+
+        复现 M3 真实仓库场景：root..HEAD 会返回整个仓库历史（巨量无关 diff），
+        导致 evaluator 误判「未包含目标文件改动」。显式 base_commit 解决此问题。
+        """
+        import subprocess
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True, check=True)
+        # 模拟真实仓库历史：多个既有 commit（非子任务改动）
+        (repo / "old.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=str(repo), capture_output=True, check=True)
+        (repo / "legacy.py").write_text("y = 2\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "legacy module"], cwd=str(repo), capture_output=True, check=True)
+        # 子任务基座 commit（agent_go worktree 起点）
+        base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True).stdout.strip()
+        # 子任务改动：新增 target.py（工作区干净，已提交）
+        (repo / "target.py").write_text("def new_func():\n    return 42\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: implement new_func"], cwd=str(repo), capture_output=True, check=True)
+
+        # 无 base_commit：root..HEAD 含全历史（old.py/legacy.py/target.py 全出现）
+        diff_no_base = _get_worktree_diff(repo)
+        assert "old.py" in diff_no_base or "legacy.py" in diff_no_base, "无 base 时应回退 root..HEAD 全历史"
+
+        # 有 base_commit：只含 target.py（子任务改动）
+        diff_with_base = _get_worktree_diff(repo, base_commit=base)
+        assert "target.py" in diff_with_base, "base_commit 应限定 diff 到子任务改动"
+        assert "new_func" in diff_with_base
+        assert "old.py" not in diff_with_base, "base_commit 不应包含基座前的历史"
+        assert "legacy.py" not in diff_with_base
+
 
 # ═══════════════════════════════════════════════════════════════
 # evaluate_semantic 主体测试（mock LLM API + git diff）

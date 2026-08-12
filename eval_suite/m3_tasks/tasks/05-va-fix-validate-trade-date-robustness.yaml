@@ -1,0 +1,20 @@
+# M3 任务 5: vibe-astock bug 修复（medium）
+# 场景：bug 修复——validate_trade_date 对闰秒/纳秒格式未防御
+id: va-fix-validate-trade-date-robustness
+difficulty: medium
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/vibe-astock
+task: |
+  修复 duanxian/util.py 中 `validate_trade_date(date: str) -> str` 的健壮性缺陷：
+  - 当前对含空白/不可见字符的输入（如 " 2026-01-01\\t"、"2026-01-01\\x00"）在 strip 后能解析但返回值含潜在污染
+  - 要求：拒绝包含空字节（\\x00）的输入（视为非法，抛 ValueError），其他行为不变
+  - 合法日期（"YYYY-MM-DD"）行为完全不变（包括未来日期拒绝逻辑）
+  - 只改 validate_trade_date，不动其他函数
+verification:
+  - "python -m pytest tests/test_core_logic.py -q -k 'validate_trade_date or trade_date'"
+  - "python -c \"from duanxian.util import validate_trade_date; import pytest;\ntry:\n    validate_trade_date('2026-01-01\\x00'); assert False, '应拒绝空字节'\nexcept ValueError: pass\nassert validate_trade_date('2026-01-01') == '2026-01-01'; print('OK')\""
+timeout: 600
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

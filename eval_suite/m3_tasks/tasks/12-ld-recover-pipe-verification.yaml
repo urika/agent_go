@@ -1,0 +1,24 @@
+# M3 任务 12: llama-defender 失败恢复场景（hard）
+# 场景：失败恢复——验证命令含管道（被门禁拒）后 agent 改用合规验证
+id: ld-recover-pipe-verification
+difficulty: hard
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/llama-defender
+task: |
+  失败恢复场景：实现一个新函数并确保验证命令合规。
+  - 在 loop_detection.py 新增 `classify_loop_risk(session_id: str, total_chars: int, repeat_count: int) -> dict`：
+    返回 {"tier": <_effective_session_tier 结果>, "risk_score": int, "recommend_block": bool}
+    - risk_score = repeat_count * (1 if tier=="short" else 2 if tier=="long" else 3)
+    - recommend_block = risk_score >= 10
+    - 对空 session_id 视为 short tier
+  - 重要：验证命令**必须**使用 python -c 单行形式或 pytest，不得使用管道（|）或命令链（&&），
+    否则会被安全门禁拒绝（infrastructure_failure）→ 触发失败恢复闭环
+  - 加 docstring
+verification:
+  - "python -c \"from loop_detection import classify_loop_risk; r=classify_loop_risk('s1', 50000, 5); assert 'tier' in r; assert 'risk_score' in r; assert 'recommend_block' in r; print(r)\""
+  - "python -m pytest test/unit/test_text_loop.py -q"
+timeout: 900
+cost_control:
+  enabled: false
+  max_budget_usd: 0.5
+  per_subtask_budget_usd: 0.3
+  on_exceed: stop

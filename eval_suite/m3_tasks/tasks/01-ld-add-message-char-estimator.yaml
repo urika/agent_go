@@ -1,0 +1,22 @@
+# M3 小样任务 1: llama-defender 新增功能（medium）
+# 场景：新增功能——为 message_converter.py 增加工具块文本估计的边界处理
+id: ld-add-message-char-estimator
+difficulty: medium
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/llama-defender
+task: |
+  在 message_converter.py 中新增函数 `estimate_message_chars(messages: list) -> int`：
+  - 遍历消息列表，用 `_estimate_message_chars` 的语义统计每个消息的字符数并求和
+  - 对 None/空列表返回 0
+  - 对包含 thinking 块的消息，只统计非 thinking 部分（与 `_strip_thinking_from_msg` 语义一致）
+  - 加 docstring 说明参数和返回
+verification:
+  - "python -m pytest test/unit/test_message_converter.py -q -k 'estimate or chars or thinking'"
+  - "python -c \"from message_converter import estimate_message_chars; assert estimate_message_chars([]) == 0; assert estimate_message_chars(None) == 0; print('OK')\""
+timeout: 600
+
+# S10 成本控制
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

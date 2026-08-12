@@ -1,0 +1,23 @@
+# M3 任务 8: llama-defender 测试补充（easy）
+# 场景：测试补充——_detect_content_type 边界测试
+id: ld-test-detect-content-type
+difficulty: easy
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/llama-defender
+task: |
+  为 content_compressor.py 的 `_detect_content_type(text, mime_hint=None)` 补充测试：
+  - 在 test/unit/test_content_compressor.py 中新增测试类 `TestDetectContentTypeBoundaries`
+  - 覆盖：mime_hint 含 "json"/"html"/"python"/"javascript" 各返回对应类型
+  - 覆盖：text 为 "{...}" 或 "[...]" 结构返回 json
+  - 覆盖：text 为 None（非字符串）返回 text
+  - 覆盖：空字符串返回 text
+  - 覆盖：mime_hint 为 None 时按文本内容判定
+  - 不修改 content_compressor.py 本身（纯测试补充）
+verification:
+  - "python -m pytest test/unit/test_content_compressor.py -q -k 'DetectContentTypeBoundaries'"
+  - "python -m pytest test/unit/test_content_compressor.py -q"
+timeout: 600
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

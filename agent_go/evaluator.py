@@ -245,7 +245,7 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
     eval_config["plan_api"] = eval_api_cfg
     eval_config.pop("_metering_path", None)
 
-    diff = _get_worktree_diff(worktree)
+    diff = _get_worktree_diff(worktree, base_commit=config.get("_base_commit", ""))
     no_truncation = bool(config.get("_no_diff_truncation"))
     prompt = _build_eval_prompt(subtask, verification, diff, previous_attempts, no_truncation)
     messages = [{"role": "user", "content": prompt}]
@@ -396,15 +396,14 @@ def _estimate_tokens(text: str) -> int:
     return cjk_count + max(0, ascii_count // 4)
 
 
-def _get_worktree_diff(worktree: Path) -> str:
+def _get_worktree_diff(worktree: Path, base_commit: str = "") -> str:
     """获取 worktree 中的变更 diff。
 
     累积语义（ISSUE：修复分多次 commit 时语义评估误判）：
     1. 工作区未提交 → `git diff HEAD`（未提交变更）
-    2. 工作区干净 → `git diff <root>..HEAD`（从根 commit 到 HEAD 的**累积** diff，
-       而非 `git show HEAD` 的单次 commit diff）。agent_go 子任务分支从 fixture
-       初始状态（无 parent 的根 commit）创建，root..HEAD 覆盖子任务全部改动；
-       修复分多次 commit 时，评估器能看到此前已提交的签名/结构修改。
+    2. 工作区干净 → 优先用显式 base_commit（子任务基座，真实仓库有效）
+       → 否则 `git diff <root>..HEAD`（根 commit 累积 diff，fixture 有效）。
+    修复分多次 commit 时，评估器能看到此前已提交的签名/结构修改。
     """
     import subprocess
     result = subprocess.run(
@@ -413,18 +412,26 @@ def _get_worktree_diff(worktree: Path) -> str:
     )
     diff = result.stdout
     if not diff.strip():
-        # 定位根 commit（无 parent）作为 base，取累积 diff
-        root_result = subprocess.run(
-            ["git", "rev-list", "--max-parents=0", "HEAD"],
-            cwd=str(worktree), capture_output=True, text=True,
-        )
-        if root_result.returncode == 0 and root_result.stdout.strip():
-            base = root_result.stdout.strip().splitlines()[0]
+        base = base_commit.strip()
+        if base:
             result = subprocess.run(
                 ["git", "diff", f"{base}..HEAD", "--no-renames"],
                 cwd=str(worktree), capture_output=True, text=True,
             )
             diff = result.stdout
+        if not diff.strip():
+            # 定位根 commit（无 parent）作为 base，取累积 diff
+            root_result = subprocess.run(
+                ["git", "rev-list", "--max-parents=0", "HEAD"],
+                cwd=str(worktree), capture_output=True, text=True,
+            )
+            if root_result.returncode == 0 and root_result.stdout.strip():
+                root_base = root_result.stdout.strip().splitlines()[0]
+                result = subprocess.run(
+                    ["git", "diff", f"{root_base}..HEAD", "--no-renames"],
+                    cwd=str(worktree), capture_output=True, text=True,
+                )
+                diff = result.stdout
     return diff if result.returncode == 0 else ""
 
 

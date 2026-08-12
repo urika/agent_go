@@ -1,0 +1,22 @@
+# M3 小样任务 2: vibe-astock bug 修复（medium）
+# 场景：bug 修复——is_weekend 对非法日期抛 ValueError
+id: va-fix-is-weekend-invalid-date
+difficulty: medium
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/vibe-astock
+task: |
+  修复 duanxian/util.py 中 `is_weekend(date: str) -> bool` 的缺陷：
+  - 当前对非法日期（如 "2026/01/01"、"abc"）会抛 ValueError
+  - 要求：非法日期格式返回 False（视为非周末，沿用"非交易日靠数据兜底"语义）
+  - 保持合法日期（"YYYY-MM-DD"）行为不变
+  - 不改变 is_weekend 之外的任何函数
+verification:
+  - "python -m pytest tests/test_core_logic.py -q -k 'is_weekend'"
+  - "python -c \"from duanxian.util import is_weekend; assert is_weekend('2026/01/01') is False; assert is_weekend('abc') is False; assert is_weekend('2026-01-03') is True; print('OK')\""
+timeout: 600
+
+# S10 成本控制
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

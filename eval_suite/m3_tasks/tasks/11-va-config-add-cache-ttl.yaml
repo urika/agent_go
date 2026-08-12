@@ -1,0 +1,20 @@
+# M3 任务 11: vibe-astock 依赖/配置迁移（medium）
+# 场景：依赖配置迁移——config.py 新增配置分组与默认值
+id: va-config-add-cache-ttl
+difficulty: medium
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/vibe-astock
+task: |
+  依赖/配置迁移：在 duanxian/config.py 中新增数据缓存配置项。
+  - 要求：新增配置字典 `CACHE_CONFIG`，包含 `ttl_seconds`（默认 300）、`max_entries`（默认 1000）、`enabled`（默认 True）
+  - 新增 `get_cache_ttl(key: str = "default") -> int` 函数，从 CACHE_CONFIG 读取 ttl_seconds（未知 key 返回默认值）
+  - 保持 config.py 现有配置不变，仅追加
+  - 加 docstring 说明用途（避免重复请求行情接口）
+verification:
+  - "python -m pytest tests/test_core_logic.py -q -k 'config or cache'"
+  - "python -c \"from duanxian.config import CACHE_CONFIG, get_cache_ttl; assert CACHE_CONFIG['ttl_seconds']==300; assert CACHE_CONFIG['max_entries']==1000; assert get_cache_ttl('default')==300; assert get_cache_ttl('unknown')==300; print('OK')\""
+timeout: 600
+cost_control:
+  enabled: false
+  max_budget_usd: 0.3
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

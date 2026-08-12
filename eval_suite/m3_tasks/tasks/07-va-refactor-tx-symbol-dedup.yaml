@@ -1,0 +1,21 @@
+# M3 任务 7: vibe-astock 跨文件重构（hard）
+# 场景：跨文件重构——统一 _tx_symbol 重复实现
+id: va-refactor-tx-symbol-dedup
+difficulty: hard
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/vibe-astock
+task: |
+  跨文件重构：消除 _tx_symbol 的重复实现。
+  - emotion_metrics.py 和 reflection.py 都有 `_tx_symbol(code: str) -> str`（股票代码加交易所前缀，如 600519 → sh600519）
+  - 要求：将权威实现保留在 util.py 中（新增 `tx_symbol(code: str) -> str`），emotion_metrics.py 和 reflection.py 改为从 util 导入
+  - 保持行为完全一致（沪市 sh/深市 sz/北交所 bj 前缀规则）
+  - 不改对外接口（两个模块的 _tx_symbol 仍可被调用，但内部委托 util.tx_symbol）
+  - 所有现有测试必须通过
+verification:
+  - "python -m pytest tests/test_core_logic.py -q"
+  - "python -c \"from duanxian import util, emotion_metrics, reflection; assert util.tx_symbol('600519')=='sh600519'; assert emotion_metrics._tx_symbol('000001')==util.tx_symbol('000001'); assert reflection._tx_symbol('300750')==util.tx_symbol('300750'); print('OK')\""
+timeout: 900
+cost_control:
+  enabled: false
+  max_budget_usd: 0.5
+  per_subtask_budget_usd: 0.3
+  on_exceed: stop

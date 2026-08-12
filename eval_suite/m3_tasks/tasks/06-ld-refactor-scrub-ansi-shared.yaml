@@ -1,0 +1,21 @@
+# M3 任务 6: llama-defender 跨文件重构（hard）
+# 场景：跨文件重构——提取 ANSI 清洗为独立工具函数并跨模块复用
+id: ld-refactor-scrub-ansi-shared
+difficulty: hard
+repo: /private/var/folders/c2/z2ghnzmd4dv9r97cctvd3kyw0000gn/T/opencode/m1_targets/llama-defender
+task: |
+  跨文件重构：统一 ANSI 转义序列清洗逻辑。
+  - 当前 content_compressor.py 有 `_scrub_ansi`，proxy_logging.py 也可能有类似逻辑
+  - 要求：在 content_compressor.py 中保留 `_scrub_ansi` 作为权威实现，并将其正则 `_ANSI_ESCAPE_RE` 导出（若未导出）
+  - 在 proxy_logging.py 中（若有重复 ANSI 清洗），改为调用 content_compressor._scrub_ansi 或引用其正则，消除重复
+  - 若 proxy_logging.py 无 ANSI 逻辑，则新增 `proxy_logging.scrub_for_log(text)` 调用 content_compressor._scrub_ansi
+  - 不改变任何函数的对外行为，所有现有测试必须通过
+verification:
+  - "python -m pytest test/unit/test_content_compressor.py test/unit/test_utils.py -q"
+  - "python -c \"from content_compressor import _scrub_ansi; from proxy_logging import scrub_for_log; assert _scrub_ansi('\\x1b[31mred\\x1b[0m')=='red'; assert scrub_for_log('\\x1b[31mred\\x1b[0m')=='red'; print('OK')\""
+timeout: 900
+cost_control:
+  enabled: false
+  max_budget_usd: 0.5
+  per_subtask_budget_usd: 0.3
+  on_exceed: stop
