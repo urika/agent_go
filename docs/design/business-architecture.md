@@ -1,6 +1,6 @@
 # 业务架构决策登记
 
-> **文档状态**：决策登记版（2026-08-08 初始，2026-08-13 同步至 v0.5）。完整业务架构章节（角色/实体/过程展开）待 B 类待决策问题讨论完后补充。
+> **文档状态**：决策登记版（2026-08-08 初始，2026-08-13 同步至 v0.7）。完整业务架构章节（角色/实体/过程展开）待 B 类待决策问题讨论完后补充。
 >
 > **文档目的**：登记 agent_go SDD 改造与闭环优化相关的决策，防止讨论结论在对话上下文压缩后丢失。本文件是后续实施的决策依据。
 >
@@ -20,12 +20,12 @@
 
 ### 后置业务架构恢复指引
 
-1. **快速定位**：当前进度 = A 类 6 项已决策（不可推翻）+ B 类已定 B2（交付工具为主）+ B5（循环智能 b 最小止血+收口）+ 待定 B1/B3/B4。
-2. **讨论顺序**：B2（已定✅）→ B5（已定✅）→ B4（问题跟踪定位，下一项）→ B1（merge 策略）→ B3（spec ROI）。
+1. **快速定位**：当前进度 = A 类 6 项已决策（不可推翻）+ B 类已定 B1（merge 策略）+ B2（交付工具为主）+ B4（聚合优先+最小状态机）+ B5（循环智能 b 最小止血+收口）+ 待定 B3。
+2. **讨论顺序**：B2（已定✅）→ B5（已定✅）→ B4（已定✅）→ B1（已定✅）→ B3（spec ROI，最后一项）。
 3. **讨论产出怎么处理**：每定一项 B 类决策，① 更新本文件对应行（⏳→✅，倾向→确认选择）；② 全部 B 类定完后，补全完整业务架构章节（角色/实体/过程展开）并升级版本号；③ 再进入对应阶段实施。
 
 **恢复的第一句话建议**：
-> "M0-M3 已 accepted，阶段 A 已落地；B2（交付工具为主）与 B5（循环智能 b 最小止血+收口）已定，下一项 B4（问题跟踪定位）。"
+> "M0-M3 已 accepted，阶段 A 已落地；B1/B2/B4/B5 已定，最后一项 B3（spec ROI）。"
 
 ---
 
@@ -60,10 +60,10 @@
 
 | # | 待决策问题 | 当前倾向 | 需要拍板的关键点 | 状态 |
 |---|----------|---------|----------------|------|
-| B1 | **M1 交付的 merge 策略**：自动 merge-to-base 遇 main 分叉时怎么办 | A+B 都做（自动 merge + `agent_go merge` 手动命令），分叉时 ff-only 失败提示 | 分叉时是 fast-forward 失败提示（保守，让人处理），还是建 merge commit（自动合并，可能引入冲突）？ | ⏳ 待讨论 |
+| B1 | **M1 交付的 merge 策略**：自动 merge-to-base 遇 main 分叉时怎么办 | **未分叉 ff / 分叉 merge commit / 冲突永远人工（已确认）**：target 未分叉（behind=0）→ ff 快进；已分叉（behind>0）→ 能 clean merge 则 `--no-ff` merge commit，有冲突则中止提示人工处理 | 现状已实现 A+B（create_delivery_branch 自动聚合 + `cmd_merge` 手动命令 + check_mergeability 冲突预检）；增量仅补 behind 判定（`git rev-list --count delivery..target`） | ✅ 2026-08-13 |
 | B2 | **agent_go 定位**：交付工具 vs bench 工具 | **交付工具为主，bench 为配套验证**——bench 是「体检仪器」，交付工具是「生产本体」；bench 须补「交付闭环自动验证」（fixture 也能产出并验证 PR），否则测不准交付工具真实水平 | 决定 B3/B4/B5 取舍；M1/M3 已 accepted，交付优先已落地 | ✅ 2026-08-13 |
 | B3 | **spec 闭环 ROI**：0 次使用的功能值得做 4 天闭环吗 | 先 M3 冒烟验证，跑通了再做 M2/M4 | 如果冒烟发现一堆 bug，M2/M4 是否要重新设计？还是干脆砍掉 spec 闭环，把资源投到循环学习（B5 的 c 选项）？ | ⏳ 待讨论 |
-| B4 | **问题跟踪的定位**：GitHub issue 式状态机，还是分析聚合数据，还是 Reflexion 记忆源 | 取决于场景定位 | 真实场景是 bench（问题跟踪=分析模型弱点，只需聚合）还是交付（问题跟踪=跟踪 bug 修复，需状态机+issue 联动）？若选 B5 的 b/c（反思式），Problem 还要服务 Reflexion/KnowledgeStore，需 failure_pattern 分类 | ⏳ 待讨论 |
+| B4 | **问题跟踪的定位**：GitHub issue 式状态机，还是分析聚合数据，还是 Reflexion 记忆源 | **聚合优先 + 最小状态机骨架（已确认）**：Problem 是跨任务失败一等公民（三态 opened/analyzed/resolved + 复发重开），`failure_pattern` 去重，首要消费者=聚合分析（复发率/top 类别/趋势），字段预留 Reflexion/KnowledgeStore；issue 联动默认关（A6） | 详见「B4 决策详情」；受 B2（交付为主）+ B5（b 最小止血）+ A5/A6/IV-4 约束 | ✅ 2026-08-13 |
 | B5 | **循环智能层级**：agent_go 要不要从"反应式"升级到"反思式"？（来自 [research-goal-loop-mechanism](../archive/reference/research-goal-loop-mechanism-2026-08-08.md) 调研） | **b 最小止血+收口（已确认）**：无进展检测（revert）与有界 Reflexion 已在 M2 实现，仅做 ①Reflexion 阈值化（retry≥2，零成本修正）②收口为稳定契约 ③verify_state schema 前向兼容 KnowledgeStore；**暂不上局部重规划与 KnowledgeStore**，等 M4/M5 数据再决定是否跳 c | 前提已变：原「缺 3 项 guardrails」过时——revert（executor.py:1586）+ readonly_review（executor.py:1711）已落地；真实分叉只剩「局部重规划（P2，3-4 天，ROI 未证）」是否现在投 | ✅ 2026-08-13 |
 
 **B 类讨论顺序建议**：B2（定位）→ B5（循环智能层级）→ B4（问题跟踪定位）→ B1（merge 策略）→ B3（spec ROI）。B2 的答案直接决定 B3/B4/B5 的取舍；B5 的答案影响 B4（Problem 实体是否要承载 Reflexion 记忆）。
@@ -74,6 +74,61 @@
 - B5-c（补全 guardrails 反思式）= B5-b 全部 + 局部重规划（P2，3-4 天）+ KnowledgeStore A/B
 
 > 注：原调研建议 2（无进展检测，1-2 天）与建议 1（Reflexion）的骨架已在 M2 落地，因此「最小止血」的增量成本从原估 2-3 天降至 <1 天（仅阈值化+收口）。
+
+---
+
+## B4 决策详情：Problem 实体最小状态机
+
+> 2026-08-13 拍板。Problem 是跨任务失败的一等公民，是「智能闭环（支柱②）」的数据底座。
+
+### 定位
+
+Problem ≠ DeviationEvent：DeviationEvent（deviation.py 已实现）是任务内单次偏差事件；Problem 是它之上的**跨任务去重 + 生命周期**层。现有任务级状态机（status.py 8 态，冻结）与失败分类（failure_class 8 类，冻结）是**正交维度**，Problem 是新增的第三维度，从最小骨架起步。
+
+### 字段（4 组）
+
+| 组 | 字段 | 说明 |
+|---|---|---|
+| 身份与去重 | `id`、`failure_pattern`、`failure_class` | `id` 由 `failure_pattern` 哈希派生，跨任务唯一；`failure_pattern` 复用 deviation.py:172-179 映射；`failure_class` 复用 failure.py 8 类 |
+| 来源与复发 | `task_id`、`subtask_id`、`first_seen_at`、`last_seen_at`、`occurrence_count` | `occurrence_count` 是跨任务聚合的核心价值 |
+| 证据 | `summary`、`evidence`、`root_cause_category` | 复用 DeviationEvent 字段 |
+| 生命周期 | `status`、`root_cause`、`resolved_by`、`github_issue` | `github_issue` 仅 `--track-issues` 时填（A6） |
+
+### 状态机（三态 + 复发重开）
+
+```text
+opened ──分析──> analyzed ──解决──> resolved
+   │               │                  │
+   └──────── recurrence ──────────────┘（occurrence_count++；resolved 复发 → 重开 opened）
+```
+
+- 新 `failure_pattern` → 建 Problem（`opened`，`occurrence_count=1`）
+- 复发 → 不新建，`occurrence_count++`、`last_seen_at` 更新；`resolved` 复发重开 `opened`（说明没修好）
+- `analyzed`：`root_cause` 填上（复用 readonly_review 产物，不新增 LLM 调用）
+- `resolved`：后续同 pattern 通过，或显式标记（`resolved_by` = task_id/commit）
+
+### 注入机制（三类 agent 上下文）
+
+| 注入点 | 代码位置 | 注入内容 | 阶段 |
+|---|---|---|---|
+| Repair prompt | executor.py:656 `_build_repair_prompt` | 命中 Problem 的 `root_cause`+`effective_strategy`+`evidence` | B5=c（自动）；B5=b 仅 review/replay 可查 |
+| TASK.md | executor.py:400 `_build_task_md` | 「本子任务文件历史上易出 X pattern」预防性提示 | B5=c |
+| Plan prompt | api.py:176 `generate_plan` | 仓库高频失败 pattern 摘要（避坑） | B5=c |
+
+**检索**：key = `failure_pattern`（repair）/ 文件路径（TASK.md）/ 仓库（plan）→ 查 `~/.agent_go/problems.jsonl`。
+
+**质量护栏**：只注入 `analyzed`/`resolved`（有 root_cause）；token 预算 top 3 + 截断；带来源+时间戳可回滚。防「历史知识污染」（roadmap 风险表）。
+
+### 增量数据采集需求（M5 实现时补）
+
+| 维度 | 缺口 | 增量 |
+|---|---|---|
+| 归因分析 | `upstream_status` | 失败时记录依赖上游是否已失败/artifact 版本，避免「上游的锅」误归因到本子任务 |
+| 解决方案推荐 | 「策略→结果」闭环断 | `verification_history` per-attempt 记录从固定 `fix_summary` 升级为 `{attempt, strategy, failed_cmds, result}`（strategy 来自 readonly_review.suggestions/semantic_feedback，result=pass/fail），形成「策略→结果」账本 |
+
+### 复用地基
+
+原始事件（`results[].failure_class` + DeviationEvent）→ 去重键（`failure_pattern`）→ 存储（A5 全局 problems.jsonl）→ 状态机模式（复刻 status.py 的「冻结枚举 + 迁移表 + normalize」）。
 
 ---
 
@@ -179,3 +234,5 @@
 | 2026-08-13 | v0.3 决策 B2 定位 | B2 拍板：**交付工具为主，bench 为配套验证**（M3 已 accepted，交付优先已落地）。确认后 B3/B4/B5 均围绕「提升交付率」服务 |
 | 2026-08-13 | v0.4 进度同步 | 按 2026-08-13 实际代码状态复核：缺口 1 已修复（M1 accepted）、缺口 2 进行中（M4）、缺口 5 部分已做（revert + readonly_review 已在 M2 落地）；M1-M6 表补状态列 + 命名冲突警示；B5 前提更新（原「缺 3 项 guardrails」过时） |
 | 2026-08-13 | v0.5 决策 B5 循环智能 | B5 拍板：**b 最小止血+收口**——Reflexion 阈值化（retry≥2）+ 收口稳定契约 + verify_state 前向兼容；暂不上局部重规划与 KnowledgeStore，等 M4/M5 数据再定是否跳 c |
+| 2026-08-13 | v0.6 决策 B4 问题跟踪 | B4 拍板：**聚合优先 + 最小状态机骨架**——Problem 实体（三态 + 复发重开 + failure_pattern 去重），新增「B4 决策详情」章节（字段/状态机/注入机制/增量数据采集：upstream_status + per-attempt strategy→result） |
+| 2026-08-13 | v0.7 决策 B1 merge 策略 | B1 拍板：**未分叉 ff / 分叉 merge commit / 冲突永远人工**——target 未分叉（behind=0）ff 快进，已分叉（behind>0）clean merge 则 --no-ff，冲突永远中止人工处理 |
