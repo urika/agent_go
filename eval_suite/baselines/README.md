@@ -30,6 +30,7 @@ source batch 用于防止跨批次或跨 schema 直接合并。
 | `m4-local-goal` | **有效（本地模型 goal 复验基线）** | 本地 Qwen3.6-35B + goal 重跑 2 个普通模式失败案例：2/2（1.000）——goal 模式能补齐本地模型初始不足。$/pass=$0.0005 |
 | `m4-local-2refactor` | **有效（本地重构对比基线）** | 本地 Qwen3.6-35B + goal 2 个跨文件重构任务：1/2（0.750）——ld-refactor PASS，va-refactor FAIL（本地重写 tx_symbol 映射语义与原实现不一致，被 evaluator 捕获）。$/pass=$0.001333 |
 | `m4-local-hard-goal` | **有效（本地 hard 能力边界基线）** | 本地 Qwen3.6-35B + goal 6 个 canonical hard 任务（跨 task-mgr/data-pipeline/django-blog）：**0/6 通过**（5 个 capability_failure + 1 infrastructure_failure）——失败模式为复杂代码产出不稳定（未写文件/越界）与超时。证明 **hard 难度（功能系统级）超出 35B 本地模型能力边界**：本地适用 medium 及以下（0.792），hard 需 ≥70B 模型或混合路由（hard → 云端）。$/pass=$0（全失败无有效 pass） |
+| `m4-mixed-hard-goal` | **有效（混合路由触发条件验证基线）** | 同 6 个 hard 任务，`--hard-model claude-opus-4-7`（代理 force_fallback→云端 deepseek-v4-flash）：**仍 0/6，且 opus-4-7 从未触发**——per_subtask 显示 **0 个 difficulty=hard 子任务**（本地 planner 拆解时全标 easy/medium）。**关键发现：单纯 `--hard-model` 无效**，瓶颈是 planner 的子任务难度标注质量，不是 worker 模型；混合路由触发链 `子任务 hard → worker_models.hard → opus-4-7` 依赖准确的难度标注，而本地 planner 倾向保守标注。验证结论：要让 hard 走云端，须强制 worker 全用强模型（不分难度）或升级 planner |
 | `m4-portal-local-qwen35b` | **有效（本地门户任务基线）** | 本地 Qwen3.6-35B 企业门户新闻中心任务：1/1（1.000）。$/pass=$0（早期 27B 时代无 metering 数据，无法折算 TCO） |
 
 > **本地模型基线说明**：6 个 m4-local-* 批次均为 `claude-sonnet-4-6` 路由名 → 本地 Qwen3.6-35B（worker_backends 指向 localhost:4000）。$/pass 已按 `config.local_model_cost` TCO 口径折算（电费+硬件折旧），非免费。对比口径：云端 M3 同任务集 pass_rate 0.917、$/pass $0.0185。能力梯度：medium 0.792（goal）> 非 goal 0.600 > hard 0/6。
