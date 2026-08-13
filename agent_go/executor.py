@@ -4,7 +4,7 @@ from typing import Optional, Any
 
 from .console import _LazyConsole
 from .config import log_event, safe_input, meter_event, write_censored_event
-from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call
+from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call, classify_verification_scope
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
@@ -778,6 +778,7 @@ def _assess_verification_confidence(verification: str, has_changes: bool) -> dic
 
     返回 confidence dict:
     - level: "deterministic" | "heuristic" | "manual" | "none"
+    - anchoring: "function" | "file" | "suite" | "static" | "none"（A2 函数级验收契约）
     - reason: 人类可读的评估理由
     - warning: 如果置信度低，给出警告信息
 
@@ -786,18 +787,23 @@ def _assess_verification_confidence(verification: str, has_changes: bool) -> dic
     - heuristic: 仅包含 lint/check/format/build/compile 等静态检查
     - manual: 无验证命令，依赖用户手动确认
     - none: 无变更，无需验证
+
+    A2 附加：即使 deterministic，若验证未锚定到具体函数/文件（suite 级整仓测试），
+    也会给出弱锚定 warning——整仓测试通过可能只是既有测试基线通过，未覆盖本次改动的函数。
     """
     if not has_changes:
-        return {"level": "none", "reason": "无变更，无需验证", "warning": ""}
+        return {"level": "none", "anchoring": "none", "reason": "无变更，无需验证", "warning": ""}
 
     if not verification or not verification.strip():
         return {
             "level": "manual",
+            "anchoring": "none",
             "reason": "未配置验证命令",
             "warning": "⚠️ 无验证命令 — 结果仅经人工确认，可能存在假阳性",
         }
 
     v_lower = verification.lower()
+    anchoring = classify_verification_scope(verification)
 
     # 确定性测试关键字
     DETERMINISTIC_KEYWORDS = [
@@ -820,15 +826,20 @@ def _assess_verification_confidence(verification: str, has_changes: bool) -> dic
         for kw in HEURISTIC_KEYWORDS)
 
     if is_deterministic:
+        warning = ""
+        if anchoring == "suite":
+            warning = "⚠️ 整仓/整目录测试未锚定到具体函数/文件 — 通过可能只是既有测试基线通过，未覆盖本次改动的函数"
         return {
             "level": "deterministic",
+            "anchoring": anchoring,
             "reason": f"验证命令包含测试/断言关键字: {verification[:80]}",
-            "warning": "",
+            "warning": warning,
         }
 
     if is_heuristic:
         return {
             "level": "heuristic",
+            "anchoring": anchoring,
             "reason": f"验证命令仅做静态检查: {verification[:80]}",
             "warning": "⚠️ 仅静态检查 — 未运行测试，可能存在功能假阳性",
         }
@@ -836,6 +847,7 @@ def _assess_verification_confidence(verification: str, has_changes: bool) -> dic
     # 有命令但无法归类
     return {
         "level": "heuristic",
+        "anchoring": anchoring,
         "reason": f"验证命令无法归类: {verification[:80]}",
         "warning": "⚠️ 验证命令类型未知 — 建议使用测试框架（pytest/jest 等）",
     }

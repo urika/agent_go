@@ -1381,11 +1381,20 @@ class TestAssessVerificationConfidence:
         assert result["level"] == "manual"
 
     def test_deterministic_pytest(self):
-        """含测试框架关键字的命令应为 deterministic"""
+        """含测试框架关键字且锚定到具体文件的命令应为 deterministic 且无警告"""
+        result = _assess_verification_confidence("pytest tests/test_x.py -q", has_changes=True)
+
+        assert result["level"] == "deterministic"
+        assert result["anchoring"] == "file"
+        assert result["warning"] == ""
+
+    def test_deterministic_suite_level_warns_not_anchored(self):
+        """A2: 整仓/整目录测试（suite 级）仍 deterministic，但给出弱锚定警告"""
         result = _assess_verification_confidence("pytest tests/ -q", has_changes=True)
 
         assert result["level"] == "deterministic"
-        assert result["warning"] == ""
+        assert result["anchoring"] == "suite"
+        assert "未锚定" in result["warning"]
 
     def test_deterministic_case_insensitive(self):
         """关键字匹配应大小写不敏感"""

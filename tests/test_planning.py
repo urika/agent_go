@@ -189,7 +189,7 @@ def test_validate_plan_quality_detects_scope_and_requirement_gaps():
 def test_validate_plan_quality_files_hint_no_scope_conflict():
     """tester 场景：files_hint 引用 do_not_touch 文件不触发 scope_conflict（仅 files 参与冲突检查）。"""
     result = validate_plan_quality([
-        {"id": "sub-1", "verification": "pytest tests", "files_hint": "src/a.py",
+        {"id": "sub-1", "verification": "pytest tests/test_a.py::test_x", "files_hint": "src/a.py",
          "do_not_touch": ["src/a.py"]},
     ])
     assert result["status"] == "passed"
@@ -513,6 +513,41 @@ def test_is_core_file_classification():
     assert _is_core_file(None) is False
 
 
+def test_verification_not_anchored_suite_level_warning():
+    """A2: 改动核心文件但验证为整仓/整目录级 → verification_not_anchored warning。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests/"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert any(w["type"] == "verification_not_anchored" for w in full["warnings"])
+    # warning 不阻断
+    assert full["status"] in ("passed", "warning")
+
+
+def test_verification_anchored_no_warning():
+    """A2: 核心文件改动但验证锚定到具体函数/文件 → 无 verification_not_anchored。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests/test_storage.py::test_add"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert not any(w["type"] == "verification_not_anchored" for w in full["warnings"])
+    subtasks2 = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests/test_storage.py"},
+    ]
+    full2 = validate_plan_quality(subtasks2)
+    assert not any(w["type"] == "verification_not_anchored" for w in full2["warnings"])
+
+
+def test_verification_not_anchored_skips_non_core_files():
+    """A2: 仅改测试/配置/文档文件时，整仓验证不触发 verification_not_anchored。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["tests/test_storage.py"], "verification": "pytest tests/"},
+        {"id": "sub-2", "files": ["config/settings.json"], "verification": "pytest"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert not any(w["type"] == "verification_not_anchored" for w in full["warnings"])
+
+
 def test_file_overlap_via_files_hint():
     """G7: files_hint 引用同一文件也应被检测（tester 场景不误报 scope_conflict 但需报重叠）。"""
     subtasks = [
@@ -526,8 +561,8 @@ def test_file_overlap_via_files_hint():
 def test_file_overlap_no_common_file():
     """G7: 文件互斥 → 无重叠。"""
     subtasks = [
-        {"id": "sub-1", "files": ["src/cli.py"], "verification": "pytest tests"},
-        {"id": "sub-2", "files": ["src/storage.py"], "verification": "pytest tests"},
+        {"id": "sub-1", "files": ["src/cli.py"], "verification": "pytest tests/test_cli.py::test_main"},
+        {"id": "sub-2", "files": ["src/storage.py"], "verification": "pytest tests/test_storage.py::test_add"},
     ]
     result = check_subtask_file_overlap(subtasks)
     assert result["issues"] == []

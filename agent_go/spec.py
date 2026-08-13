@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .utils import SAFE_VERIFICATION_PREFIXES
+from .utils import SAFE_VERIFICATION_PREFIXES, classify_verification_scope
 
 __all__ = [
     "TaskSpec",
@@ -346,6 +346,32 @@ def _extract_verification_commands(text: str) -> list[str]:
                 cmds.append(line)
     cmds.extend(_CMD_INLINE.findall(text))
     return cmds
+
+
+def extract_verification_scopes(text: str) -> dict:
+    """A2 函数级验收契约：提取验收文本中的验证命令并按锚定粒度分类。
+
+    返回:
+        {
+            "commands": [...],                          # 提取到的验证命令
+            "scopes": {cmd: scope},                     # 每条命令的粒度（function/file/suite/static/none）
+            "has_function_level": bool,                # 是否存在 function 级锚定
+            "has_anchored": bool,                       # 是否存在 function 或 file 级锚定
+        }
+
+    供 Spec 验收契约评估：验收标准若只给出整仓/整目录测试（suite 级），
+    「局部测试通过 ≠ 功能接入真实执行路径」的风险高；应至少有一条 function/file 级
+    锚定命令（如 `pytest tests/test_x.py::test_add` / `-k add`）。
+    """
+    commands = _extract_verification_commands(text)
+    scopes = {cmd: classify_verification_scope(cmd) for cmd in commands}
+    scope_values = set(scopes.values())
+    return {
+        "commands": commands,
+        "scopes": scopes,
+        "has_function_level": "function" in scope_values,
+        "has_anchored": bool(scope_values & {"function", "file"}),
+    }
 
 
 def _cmd_matches_whitelist(cmd: str) -> bool:

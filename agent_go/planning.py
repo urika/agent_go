@@ -349,7 +349,7 @@ def validate_plan_quality(
         requirements: Task Spec 的需求 ID 列表
         repo: 可选的项目根目录（启用 P2 agent_prompt 函数引用检查）
     """
-    from .utils import _is_safe_verification_command
+    from .utils import _is_safe_verification_command, classify_verification_scope
 
     issues: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -483,6 +483,28 @@ def validate_plan_quality(
                                f"{'/'.join(owners)}——若依赖其产物，请补充 depends_on 或将该文件加入 "
                                f"本步骤的 files；否则请改用本步骤相关的验证文件。"),
                 })
+
+    # A2: 函数级验收契约 — 子任务改动核心文件但验证为整仓/整目录级（suite）→ 弱锚定 warning。
+    # 「局部测试通过 ≠ 功能接入真实执行路径」（评估文档发现 #2）：整仓 pytest tests/ 通过
+    # 可能只是既有测试基线通过，未覆盖本次改动的函数。核心文件改动建议用
+    # `pytest tests/test_x.py::test_func` / `-k <函数>` 锚定到具体函数/文件。
+    for st in subtasks:
+        sid = str(st.get("id", ""))
+        command = str(st.get("verification", "") or "")
+        if not command:
+            continue
+        scope = _subtask_file_scope(st)
+        if not any(_is_core_file(f) for f in scope):
+            continue  # 无核心文件改动，整仓测试可接受
+        if classify_verification_scope(command) == "suite":
+            warnings.append({
+                "type": "verification_not_anchored",
+                "subtask_id": sid,
+                "verification": command[:80],
+                "reason": (f"子任务 {sid} 改动核心文件但验证为整仓/整目录级：{command[:60]}——"
+                           f"通过可能只是既有测试基线通过，未锚定到本次改动的函数。"
+                           f"建议用 `pytest <本步骤测试文件>::<测试函数>` 或 `-k <函数名>` 锚定到具体函数/文件。"),
+            })
 
     # P2: agent_prompt 函数引用检查（需要 repo 路径）
     if repo:

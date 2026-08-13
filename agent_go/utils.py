@@ -3,7 +3,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-__all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES", "_safe_optional_call", "slugify_branch_name"]
+__all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES", "_safe_optional_call",
+           "slugify_branch_name", "classify_verification_scope"]
 
 
 def _safe_optional_call(
@@ -289,6 +290,59 @@ def _build_safe_prefixes():
 
 
 SAFE_VERIFICATION_PREFIXES = _build_safe_prefixes()
+
+
+def classify_verification_scope(command: str) -> str:
+    """A2 函数级验收契约：按「锚定粒度」对验证命令分类（确定性，零 LLM）。
+
+    「局部测试通过 ≠ 功能接入真实执行路径」是评估文档发现 #2——整仓
+    ``pytest tests/`` 通过可能只是既有测试基线通过，未覆盖本次改动的函数。
+    本函数区分验证命令是否锚定到具体函数/文件：
+
+    - ``function``: 指向具体测试函数（pytest ``::`` nodeid 或 ``-k`` 选择器）
+    - ``file``:     指向具体测试文件（``pytest tests/test_x.py``、``jest src/x.test.ts``）
+    - ``suite``:    整仓/整目录测试（``pytest``、``pytest tests/``、``npm test``、``cargo test``）
+    - ``static``:   仅静态检查（lint/typecheck/build/format），不运行测试
+    - ``none``:     空或无法归类
+
+    规划期（planning.validate_plan_quality）与执行期（executor._assess_verification_confidence）
+    共享同一分类器，保证「验证是否锚定」的口径一致。
+    """
+    if not command or not str(command).strip():
+        return "none"
+    cmd = str(command).strip()
+    # 剥离冗余前缀：cd <dir> && ... 与 FOO=bar 环境变量赋值（与 _is_safe_verification_command 一致）
+    cmd = re.sub(r'^cd\s+\S+\s*(&&|;|&)\s*', '', cmd).strip()
+    cmd = re.sub(r'^[A-Z_][A-Z0-9_]*=\S+\s+', '', cmd).strip()
+    if not cmd:
+        return "none"
+    lower = cmd.lower()
+
+    # function 级：pytest nodeid（path::func / path::Class::func）或 -k 选择器
+    if "::" in cmd:
+        return "function"
+    if re.search(r'(?<![-\w])-k\s+["\']?[^"\'\s]+', cmd):
+        return "function"
+
+    _static_kw = ("lint", "typecheck", "type-check", "check", "fmt", "format", "build",
+                  "compile", "analyze", "audit", "style", "tsc", "eslint", "mypy", "pylint")
+    _test_kw = ("pytest", "test", "jest", "vitest", "mocha", "rspec", "spec",
+                "unittest", "go test", "cargo test", "mvn test", "gradle test")
+    is_test = any(re.search(r"\b" + re.escape(kw) + r"\b", lower) for kw in _test_kw)
+    is_static = any(re.search(r"\b" + re.escape(kw) + r"\b", lower) for kw in _static_kw)
+
+    if not is_test:
+        return "static" if is_static else "none"
+
+    # 测试命令是否引用了具体测试文件（含源码测试扩展名或 test_ 命名）
+    has_file_target = bool(re.search(
+        r'(?:^|\s)[\w./\-]*(?:\.py|\.tsx?|\.jsx?|\.mjs|\.rb|\.go|\.java|\.rs)\b',
+        cmd,
+    )) or bool(re.search(
+        r'(?:^|\s)[\w./\-]*(?:test_[\w.]+|[\w.]+_test)[\w./\-]*',
+        cmd,
+    ))
+    return "file" if has_file_target else "suite"
 
 # shell 注入特征（精确模式，避免误伤合法的验证参数）
 _SHELL_CHAIN = re.compile(r'(?<![&])&(?![&])|;|\|\|')           # 命令链: 单 & ; ||（&& 安全，允许）

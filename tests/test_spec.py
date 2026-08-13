@@ -12,6 +12,7 @@ from agent_go.spec import (
     TaskSpec,
     parse_spec, validate_spec_l1, render_spec_template,
     extract_file_paths, _match_section_key, _cmd_matches_whitelist,
+    extract_verification_scopes,
 )
 
 
@@ -497,4 +498,39 @@ class TestParseSpecBudget:
         assert parse_spec(self._BASE).budget is None
 
     def test_template_includes_budget(self):
-        assert "budget:" in render_spec_template()
+        tpl = render_spec_template()
+        assert "budget:" in tpl
+
+
+# ═══════════════════════════════════════════════════════════════
+# A2 函数级验收契约：extract_verification_scopes
+# ═══════════════════════════════════════════════════════════════
+
+class TestExtractVerificationScopes:
+    def test_function_level_anchored(self):
+        """验收含 :: nodeid / -k 选择器 → has_function_level=True。"""
+        text = "运行 `pytest tests/test_x.py::test_add` 验证 add 函数"
+        r = extract_verification_scopes(text)
+        assert r["has_function_level"] is True
+        assert r["has_anchored"] is True
+
+    def test_file_level_anchored(self):
+        """验收含具体测试文件 → has_anchored=True，但无 function 级。"""
+        text = "运行 `pytest tests/test_x.py` 验证"
+        r = extract_verification_scopes(text)
+        assert r["has_function_level"] is False
+        assert r["has_anchored"] is True
+
+    def test_suite_level_not_anchored(self):
+        """验收只有整仓测试（suite 级）→ has_anchored=False（弱锚定来源）。"""
+        text = "运行 `pytest tests/` 全部通过"
+        r = extract_verification_scopes(text)
+        assert r["has_function_level"] is False
+        assert r["has_anchored"] is False
+
+    def test_no_commands(self):
+        """无验证命令 → 空列表，全部 False。"""
+        r = extract_verification_scopes("验收标准：功能正常即可")
+        assert r["commands"] == []
+        assert r["has_function_level"] is False
+        assert r["has_anchored"] is False
