@@ -2261,6 +2261,15 @@ def cmd_merge(args=None):
     repo = meta.get("repo", "")
     if not repo or not Path(repo).exists():
         console.error(f"任务 {task_id} 的仓库不存在: {repo}")
+
+    # merge 前快照：当前 checkout 工作区干净度（供 merge 后同步决策，见 _sync_checked_out_worktree）
+    merge_start_clean = False
+    try:
+        _st = subprocess.run(["git", "status", "--porcelain"], cwd=str(Path(repo)),
+                             capture_output=True, text=True, timeout=10)
+        merge_start_clean = _st.returncode == 0 and not _st.stdout.strip()
+    except Exception:
+        pass
         sys.exit(EX_SYSTEM)
     delivery_branch = meta.get("delivery_branch") or ""
     target = meta.get("target_branch") or meta.get("base_branch") or "main"
@@ -2371,6 +2380,10 @@ def cmd_merge(args=None):
             (task_dir / "meta.json").write_text(
                 json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             console.success(f"已合并到 {target}: {merge_commit[:12]}")
+            # 工作区同步：update-ref 推进 target 分支后，若当前 checkout 恰在 target，
+            # 工作区/index 与 HEAD 失配（产物显示 staged deletion）。merge 前工作区
+            # 干净 → reset 同步；脏 → 警告用户手动处理，避免误提交删除产物。
+            _sync_checked_out_worktree(repo, target, merge_start_clean)
             if do_push:
                 push = subprocess.run(
                     ["git", "push", remote, f"{target}:{target}"],
@@ -2705,6 +2718,40 @@ def clean_task_dirs(tasks: list) -> dict:
                 if tag:
                     subprocess.run(["git", "tag", "-d", tag], cwd=repo_path, capture_output=True)
     return {"removed": removed, "repos_pruned": len(repo_task_ids)}
+
+
+def _sync_checked_out_worktree(repo_path: str, target_branch: str,
+                               merge_start_clean: bool = False) -> None:
+    """merge 后工作区同步（update-ref 推进分支不更新已 checkout 的工作区）。
+
+    - 当前 checkout 非 target 分支 → 无操作（checkout 回 target 时 git 自动同步）
+    - 当前 checkout 在 target：
+        - merge 开始前工作区干净 → `git reset --hard HEAD` 同步（status 中 M/D
+          均为 update-ref 推进引入的 index/HEAD 失配，reset 安全）
+        - merge 开始前工作区脏 → 仅警告（不自动 reset，防丢改动）
+    """
+    try:
+        current = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_path, capture_output=True, text=True, timeout=10,
+        )
+        cur_branch = current.stdout.strip() if current.returncode == 0 else ""
+    except Exception:
+        return
+    if not cur_branch or cur_branch != target_branch:
+        return
+    if not merge_start_clean:
+        console.warning(
+            f"当前 checkout 在 {target_branch} 且 merge 前工作区有未提交改动，未自动同步。"
+            "请手动执行 `git reset --hard`（确认不丢改动后）或 `git checkout -f` "
+            "同步工作区，避免后续提交误删 merge 产物。"
+        )
+        return
+    subprocess.run(
+        ["git", "reset", "--hard", "HEAD"],
+        cwd=repo_path, capture_output=True, text=True, timeout=30,
+    )
+    console.success(f"工作区已同步到 {target_branch}（reset --hard）")
 
 
 def cmd_clean(args=None) -> None:

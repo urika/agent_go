@@ -459,10 +459,10 @@ def test_file_overlap_without_dependency_is_blocking():
 
 
 def test_file_overlap_with_dependency_is_warning():
-    """G7: 共享文件的子任务在同一条依赖链上 → warning，不阻断。"""
+    """G7: 共享非核心文件（测试文件）的子任务在同一条依赖链上 → warning，不阻断。"""
     subtasks = [
-        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests"},
-        {"id": "sub-2", "files": ["src/storage.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
+        {"id": "sub-1", "files": ["tests/test_storage.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["tests/test_storage.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
     ]
     result = check_subtask_file_overlap(subtasks)
     assert result["issues"] == []
@@ -471,6 +471,46 @@ def test_file_overlap_with_dependency_is_warning():
     # warning（非 blocked）——但可能有 missing_verification 等 warning 混杂，重点是无 file_overlap blocking
     assert full["status"] in ("passed", "warning")
     assert not any(i["type"] == "file_overlap_without_dependency" for i in full["blocking_issues"])
+
+
+def test_core_file_shared_ownership_is_blocking():
+    """A1: 核心源文件被多个子任务在同一依赖链上先后修改 → blocking。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/storage.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
+    ]
+    result = check_subtask_file_overlap(subtasks)
+    assert any(i["type"] == "core_file_shared_ownership" for i in result["issues"])
+    full = validate_plan_quality(subtasks)
+    assert full["status"] == "blocked"
+    assert any(i["type"] == "core_file_shared_ownership" for i in full["blocking_issues"])
+
+
+def test_core_file_shared_ownership_is_repairable():
+    """A1: core_file_shared_ownership 属于可修复问题类型，进入 preflight 修订。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/storage.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
+    ]
+    full = validate_plan_quality(subtasks)
+    repairable_types = {i["type"] for i in full["repairable_issues"]}
+    assert "core_file_shared_ownership" in repairable_types
+
+
+def test_is_core_file_classification():
+    """A1: 核心文件分类——源码实现为核心，测试/配置/文档为非核心。"""
+    from agent_go.planning import _is_core_file
+    assert _is_core_file("src/storage.py") is True
+    assert _is_core_file("lib/utils.ts") is True
+    assert _is_core_file("app/main.go") is True
+    assert _is_core_file("tests/test_storage.py") is False
+    assert _is_core_file("test_utils.py") is False
+    assert _is_core_file("src/foo.test.ts") is False
+    assert _is_core_file("config/settings.json") is False
+    assert _is_core_file("pyproject.toml") is False
+    assert _is_core_file("docs/README.md") is False
+    assert _is_core_file("") is False
+    assert _is_core_file(None) is False
 
 
 def test_file_overlap_via_files_hint():

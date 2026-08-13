@@ -16,7 +16,7 @@ __all__ = ["estimate_task_duration", "check_under_decomposition",
            "check_over_decomposition", "check_difficulty_mismatch", "difficulty_hint",
            "check_agent_prompt_functions", "validate_plan_quality",
            "build_plan_repair_feedback", "check_subtask_file_overlap", "check_parallel_import_relations",
-           "build_goal_contract", "_subtask_file_scope"]
+           "build_goal_contract", "_subtask_file_scope", "_is_core_file"]
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ PLAN_REPAIRABLE_ISSUE_TYPES = {
     "requirement_coverage_incomplete",
     "unverifiable_upstream",
     "file_overlap_without_dependency",
+    "core_file_shared_ownership",
     "over_decomposition",
     "empty_plan",
 }
@@ -62,6 +63,8 @@ def build_plan_repair_feedback(plan_quality: dict[str, Any], max_chars: int = 24
             reason = (reason or "验证命令不在安全白名单") + "；不要使用 bash/sh -c 或自然语言前缀，python -c 必须为单行，优先使用 python -m <模块> 或测试框架。"
         if issue_type == "empty_plan":
             reason = (reason or "Plan 产出 0 个执行步骤") + "；steps 不能为空——不要把任务要求的交付物 JSON 当作执行计划，必须输出包含可执行 steps 的 Plan schema。"
+        if issue_type == "core_file_shared_ownership":
+            reason = (reason or "核心源文件被多个子任务先后修改") + "；同一核心实现文件只允许一个子任务负责——如需多个改动，合并为一个子任务，不要用 dependencies 串行重写同一源文件。"
         prefix = f"[{issue_type}]"
         if subtask_id:
             prefix += f" subtask={subtask_id}"
@@ -84,6 +87,40 @@ def _subtask_file_scope(st: dict) -> set[str]:
     if hint and hint != "*":
         files.update(part.strip() for part in hint.split(",") if part.strip())
     return files
+
+
+# A1 文件所有权约束：核心实现文件只允许一个子任务负责实现。
+# 核心文件 = 有源码扩展名且非测试文件；测试/配置/文档等辅助文件可被多个子任务
+# 先后触碰（串行合法），但核心源文件被先后重写会导致改动互相覆盖、语义验收
+# 无法对应最终 diff（见 agent-go-execution-capability-assessment-2026-08-09.md 发现 1）。
+_SOURCE_EXTS = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs",
+    ".java", ".kt", ".kts", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx",
+    ".cs", ".rb", ".php", ".swift", ".scala", ".sh", ".bash", ".sql", ".vue", ".svelte",
+}
+
+
+def _is_core_file(path: str) -> bool:
+    """判断文件是否为「核心实现文件」（A1 文件所有权约束）。
+
+    核心文件 = 源码实现文件（扩展名命中 ``_SOURCE_EXTS``），且不是测试文件。
+    ``test/``、``tests/``、``__tests__`` 目录，或 ``test_*`` / ``*_test`` /
+    ``*.test.*`` / ``*.spec.*`` 命名的文件视为测试文件；无源码扩展名的
+    （配置/文档/锁文件等）一律视为非核心。
+    """
+    if not isinstance(path, str) or not path:
+        return False
+    norm = path.replace("\\", "/").lstrip("./").strip()
+    if not norm:
+        return False
+    parts = norm.lower().split("/")
+    if any(p in {"test", "tests", "__tests__"} for p in parts[:-1]):
+        return False
+    base = parts[-1]
+    if base.startswith("test_") or base.endswith("_test") or ".test." in base or ".spec." in base:
+        return False
+    ext = "." + base.rsplit(".", 1)[-1] if "." in base else ""
+    return ext in _SOURCE_EXTS
 
 
 def _has_dependency_path(graph: dict[str, list[str]], start: str, target: str) -> bool:
@@ -112,8 +149,10 @@ def check_subtask_file_overlap(subtasks: list[dict]) -> dict[str, Any]:
     判定：
     - 某文件被 ≥2 个子任务引用，且其中至少一对子任务之间无依赖路径
       （无法保证顺序执行）→ blocking issue（file_overlap_without_dependency）。
-    - 所有共享该文件的子任务都在同一条依赖链上（顺序执行，upstream 会 merge）
-      → warning（file_overlap_with_dependency），有集成风险但不阻断。
+    - 所有共享该文件的子任务都在同一条依赖链上（顺序执行，upstream 会 merge）：
+      - 若为**核心实现文件**（A1）→ blocking issue（core_file_shared_ownership）：
+        即使串行，先后重写同一实现文件仍会互相覆盖、语义验收无法对应最终 diff。
+      - 若为测试/配置/文档等辅助文件 → warning（file_overlap_with_dependency）。
 
     Returns:
         {"issues": [...], "warnings": [...]}
@@ -140,20 +179,39 @@ def check_subtask_file_overlap(subtasks: list[dict]) -> dict[str, Any]:
             for i, a in enumerate(owners)
             for b in owners[i + 1:]
         )
-        entry = {
-            "type": "file_overlap_with_dependency" if all_chained else "file_overlap_without_dependency",
-            "file": file,
-            "subtask_ids": owners,
-            "reason": (
-                f"文件 {file} 被子任务 {'/'.join(owners)} 共同引用" +
-                ("，且无依赖顺序——并行修改同一文件必然交叉污染，建议合并或添加依赖。"
-                 if not all_chained else
-                 "，子任务在同一依赖链上（顺序执行）。仍有集成风险，建议确认改动区域不重叠。")
-            ),
-        }
-        if all_chained:
+        if all_chained and _is_core_file(file):
+            entry = {
+                "type": "core_file_shared_ownership",
+                "file": file,
+                "subtask_ids": owners,
+                "reason": (
+                    f"核心源文件 {file} 被多个子任务 {'/'.join(owners)} 先后修改——"
+                    f"即使依赖串行，先后重写同一实现文件仍会导致改动互相覆盖、"
+                    f"语义验收无法对应最终 diff。建议合并为一个子任务。"
+                ),
+            }
+            issues.append(entry)
+        elif all_chained:
+            entry = {
+                "type": "file_overlap_with_dependency",
+                "file": file,
+                "subtask_ids": owners,
+                "reason": (
+                    f"文件 {file} 被子任务 {'/'.join(owners)} 共同引用"
+                    "，子任务在同一依赖链上（顺序执行）。仍有集成风险，建议确认改动区域不重叠。"
+                ),
+            }
             warnings.append(entry)
         else:
+            entry = {
+                "type": "file_overlap_without_dependency",
+                "file": file,
+                "subtask_ids": owners,
+                "reason": (
+                    f"文件 {file} 被子任务 {'/'.join(owners)} 共同引用"
+                    "，且无依赖顺序——并行修改同一文件必然交叉污染，建议合并或添加依赖。"
+                ),
+            }
             issues.append(entry)
 
     return {"issues": issues, "warnings": warnings}
@@ -447,7 +505,7 @@ def validate_plan_quality(
         "warnings": warnings,
         "plan_conflict_count": sum(1 for issue in issues if issue["type"] in {
             "scope_conflict", "dependency_cycle", "file_overlap_without_dependency",
-            "unverifiable_upstream",
+            "core_file_shared_ownership", "unverifiable_upstream",
         }),
         "plan_warning_count": len(warnings),
         "plan_repairable_issue_count": len(repairable_issues),
