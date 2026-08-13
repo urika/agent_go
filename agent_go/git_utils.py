@@ -4,7 +4,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["analyze_project", "get_git_info", "get_resource_map", "init_git_repo", "resolve_project_id"]
+__all__ = ["analyze_project", "get_git_info", "get_resource_map", "init_git_repo", "resolve_project_id",
+           "get_dirty_files", "commit_baseline"]
 
 def analyze_project(repo: Path) -> str:
     """分析项目结构，返回文件列表和关键目录。"""
@@ -133,6 +134,66 @@ def init_git_repo(repo: Path) -> tuple[bool, str]:
         return True, ""
     except (FileNotFoundError, subprocess.SubprocessError) as e:
         return False, str(e)[:200]
+
+
+def get_dirty_files(repo: Path) -> list[str]:
+    """返回主工作区未提交的改动文件列表（git status --porcelain）。
+
+    仅当 repo 是 git 仓库时有效；非 git 仓库或命令失败返回空列表。
+    路径为相对 repo 的路径，去掉 porcelain 状态前缀（如 ' M src/a.py' → 'src/a.py'）。
+    """
+    if not (repo / ".git").exists():
+        return []
+    try:
+        r = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
+                           capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    files: list[str] = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        # porcelain 格式：前两字符为状态码，其后为路径（重命名为 'old -> new'）
+        path = line[3:] if len(line) > 3 else line.strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        files.append(path.strip())
+    return files
+
+
+def commit_baseline(repo: Path, message: str = "") -> tuple[bool, str, str]:
+    """把主工作区未提交改动提交为基线 commit。返回 (success, commit_hash, error_msg)。
+
+    用于 A3 未提交基线处理：worktree 从 HEAD 建，看不到主工作区未提交改动，
+    显式 commit 让子任务基于正确基线。identity 通过 -c 内联传入，零副作用。
+    若无改动可提交，返回 (True, 当前HEAD, "")（幂等）。
+    """
+    if not (repo / ".git").exists():
+        return False, "", "not a git repo"
+    dirty = get_dirty_files(repo)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                          capture_output=True, text=True)
+    head_hash = head.stdout.strip() if head.returncode == 0 else ""
+    if not dirty:
+        return True, head_hash, ""
+    inline_identity = ["-c", "user.email=agent_go@local", "-c", "user.name=agent_go"]
+    try:
+        add = subprocess.run(["git", "add", "-A"], cwd=str(repo),
+                             capture_output=True, text=True)
+        if add.returncode != 0:
+            return False, "", add.stderr.strip()[:200]
+        msg = message or "chore(baseline): commit uncommitted changes as agent_go baseline"
+        com = subprocess.run(["git"] + inline_identity + ["commit", "-m", msg],
+                             cwd=str(repo), capture_output=True, text=True)
+        if com.returncode != 0:
+            return False, "", com.stderr.strip()[:200]
+        new_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                                  capture_output=True, text=True)
+        return True, (new_head.stdout.strip() if new_head.returncode == 0 else ""), ""
+    except (FileNotFoundError, subprocess.SubprocessError) as e:
+        return False, "", str(e)[:200]
 
 
 def get_resource_map(repo: Path, git_info: dict[str, str]) -> dict[str, Any]:

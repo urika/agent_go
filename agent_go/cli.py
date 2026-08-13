@@ -20,7 +20,7 @@ from .mcp_server import main as cmd_mcp
 from .web_server import main as cmd_web
 from .tui import cmd_status_tui
 from .workflow_gen import cmd_ci
-from .git_utils import init_git_repo
+from .git_utils import init_git_repo, get_dirty_files, commit_baseline
 from .status import task_status, set_task_status
 from .exit_codes import EX_OK, EX_ERROR, EX_USAGE, EX_SYSTEM
 
@@ -99,6 +99,10 @@ def _build_parser():
                             help="每波执行前暂停确认（适用于交互式非 TUI 场景）")
     run_parser.add_argument("--auto-init", action="store_true",
                             help="目标目录非 git 仓库时自动 git init + 首次 commit（默认关闭）")
+    run_parser.add_argument("--allow-dirty", action="store_true", dest="allow_dirty",
+                            help="允许在主工作区有未提交改动时直接运行（子任务将基于 HEAD，看不到这些改动，风险自负）")
+    run_parser.add_argument("--baseline", action="store_true", dest="baseline",
+                            help="运行前把主工作区未提交改动显式 commit 为基线（让子任务基于正确基线）")
     run_parser.add_argument("--artifact-dir", default=None,
                             help="产物导出目录：子任务写入 worktree/__artifacts__/ 的文件在此收集导出（默认不导出）")
     run_parser.add_argument("--max-cost", type=float, default=None, dest="max_cost",
@@ -585,7 +589,64 @@ def cmd_run(args=None):
             sys.exit(EX_SYSTEM)
         console.print("✓ git 初始化完成（本地，无 remote）")
 
+    # ── A3 未提交基线处理 ──
+    # worktree 从 HEAD 创建，看不到主工作区未提交改动。启动时检测 dirty：
+    #   --allow-dirty  → 显式允许，记录风险继续
+    #   --baseline     → 运行前显式 commit 为基线
+    #   headless/--yes → 默认 fail-safe 中止（防静默基于错误基线跑完 pipeline）
+    #   交互式         → 提示 ① commit 基线 ② 继续 ③ 中止
+    baseline_dirty = False
+    baseline_action = "clean"  # clean | committed | allowed
+    baseline_dirty_files: list[str] = []
+    if (repo / ".git").exists():
+        baseline_dirty_files = get_dirty_files(repo)
+        if baseline_dirty_files:
+            allow_dirty = getattr(args, "allow_dirty", False)
+            want_baseline = getattr(args, "baseline", False)
+            preview = ", ".join(baseline_dirty_files[:5]) + (" ..." if len(baseline_dirty_files) > 5 else "")
+            baseline_dirty = True
+            if allow_dirty:
+                baseline_action = "allowed"
+                console.warning(f"⚠️ 主工作区有 {len(baseline_dirty_files)} 个未提交改动（--allow-dirty）：{preview}")
+                console.warning("   子任务将基于 HEAD，看不到这些改动；合并时可能与之冲突。")
+            elif want_baseline:
+                ok, new_hash, err = commit_baseline(repo)
+                if not ok:
+                    console.error(f"基线 commit 失败: {err}")
+                    sys.exit(EX_ERROR)
+                baseline_action = "committed"
+                console.print(f"✓ 已把 {len(baseline_dirty_files)} 个未提交改动 commit 为基线 ({new_hash[:7]})：{preview}")
+            elif headless:
+                console.error(f"❌ 主工作区有 {len(baseline_dirty_files)} 个未提交改动：{preview}")
+                console.error("   worktree 从 HEAD 创建，子任务看不到这些改动，可能基于错误基线执行。")
+                console.error("   headless 模式默认 fail-safe 中止。处理方式：")
+                console.error("     --baseline    先 commit 为基线再运行")
+                console.error("     --allow-dirty 明确接受风险继续")
+                sys.exit(EX_ERROR)
+            else:
+                console.warning(f"⚠️ 主工作区有 {len(baseline_dirty_files)} 个未提交改动：{preview}")
+                console.print("   worktree 从 HEAD 创建，子任务看不到这些改动，可能基于错误基线执行。")
+                choice = safe_input("处理方式：[B] 先 commit 为基线 / [C] 继续（风险自负）/ [N] 中止 [B]: ").strip().upper() or "B"
+                c = choice
+                if c in ("B", "BASELINE", "1"):
+                    ok, new_hash, err = commit_baseline(repo)
+                    if not ok:
+                        console.error(f"基线 commit 失败: {err}")
+                        sys.exit(EX_ERROR)
+                    baseline_action = "committed"
+                    console.print(f"✓ 已 commit 为基线 ({new_hash[:7]})")
+                elif c in ("C", "CONTINUE", "2"):
+                    baseline_action = "allowed"
+                    console.warning("已选择继续，子任务基于 HEAD（不含未提交改动）。")
+                else:
+                    console.print("已中止。请先提交或暂存改动后重试。")
+                    sys.exit(EX_OK)
+
     config = load_config(config_path=getattr(args, "config", None))
+    # A3 未提交基线：记录启动时主工作区 dirty 状态与处理方式（供 meta.json 持久化）
+    config["_baseline_dirty"] = baseline_dirty
+    config["_baseline_action"] = baseline_action
+    config["_baseline_dirty_files"] = baseline_dirty_files
     config["_parallel"] = parallel  # M4: 时间预估用
     if max_retries is not None:
         config.setdefault("verification", {})["max_retries"] = max_retries
@@ -994,6 +1055,11 @@ def cmd_run(args=None):
             meta["target_branch"] = _base_branch
         except (OSError, subprocess.SubprocessError):
             logger.warning("无法记录 base_commit，recover 将降级为兼容模式")
+    # A3 未提交基线：记录启动时主工作区是否 dirty 及处理方式（可追溯任务基线）
+    meta["baseline_dirty"] = config.get("_baseline_dirty", False)
+    meta["baseline_action"] = config.get("_baseline_action", "clean")
+    if config.get("_baseline_dirty"):
+        meta["baseline_dirty_files"] = config.get("_baseline_dirty_files", [])
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     _unresolved_plan_issues = [

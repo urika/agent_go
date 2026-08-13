@@ -37,6 +37,11 @@ agent_go run <repo-path> --spec docs/tasks/task-xxx.md --force       # skip admi
 # Auto git init for non-git target dir (local-only, no remote)
 agent_go run <repo-path> '<task>' --auto-init
 
+# Dirty working tree at run start: headless/--yes ABORTS (fail-safe) unless you pass one of:
+#   --baseline    commit uncommitted changes as the baseline first (subtasks see correct HEAD)
+#   --allow-dirty explicitly accept the risk (subtasks build from HEAD, won't see dirty changes)
+agent_go run <repo-path> '<task>' --yes --baseline
+
 # Export subtask artifacts (worktree/__artifacts__/) to a directory before cleanup
 agent_go run <repo-path> '<task>' --artifact-dir ~/Desktop/reports
 

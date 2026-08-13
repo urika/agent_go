@@ -60,6 +60,21 @@ class TestBuildParser:
         assert args.agent_type == "reviewer"
         assert args.docs == "README.md,CONTRIBUTING.md"
 
+    def test_run_parser_baseline_flags(self):
+        parser = _build_parser()
+        args = parser.parse_args(["run", "/tmp/repo", "task", "--allow-dirty"])
+        assert args.allow_dirty is True
+        assert args.baseline is False
+
+        args = parser.parse_args(["run", "/tmp/repo", "task", "--baseline"])
+        assert args.baseline is True
+        assert args.allow_dirty is False
+
+        # 默认两者皆 False
+        args = parser.parse_args(["run", "/tmp/repo", "task"])
+        assert args.allow_dirty is False
+        assert args.baseline is False
+
     def test_resume_parser(self):
         parser = _build_parser()
         args = parser.parse_args(["resume", "task-123", "--yes"])
@@ -156,6 +171,74 @@ class TestPlanPreflightRepair:
         assert len(history) == 1
         assert quality["status"] == "passed"
         assert "Plan 预检修复反馈" in mock_generate.call_args.args[4]
+
+
+class TestCmdRunBaseline:
+    """A3 未提交基线处理：cmd_run 启动时的 dirty 检测与处置。"""
+
+    @pytest.fixture(autouse=True)
+    def _restore_console(self):
+        # cmd_run 会 set_default_console(quiet)（headless 隐含 quiet），
+        # 泄漏全局默认 console 会抑制后续测试的 console.print 输出 → 保存/恢复。
+        from agent_go.console import get_default_console, set_default_console
+        prev = get_default_console()
+        yield
+        set_default_console(prev)
+
+    def _make_dirty_repo(self, tmp_path):
+        import subprocess
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=str(repo), capture_output=True, text=True)
+        assert g("init", "-b", "main").returncode == 0
+        (repo / "a.py").write_text("print('hi')\n", encoding="utf-8")
+        g("add", "-A")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init")
+        # 制造未提交改动
+        (repo / "a.py").write_text("print('changed')\n", encoding="utf-8")
+        (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+        return repo
+
+    def _run_args(self, repo, *extra):
+        parser = _build_parser()
+        return parser.parse_args(["run", str(repo), "task", *extra])
+
+    def test_headless_dirty_aborts(self, tmp_path):
+        from agent_go.cli import cmd_run
+        repo = self._make_dirty_repo(tmp_path)
+        with patch("agent_go.cli.generate_plan") as mock_gen:
+            with pytest.raises(SystemExit) as exc:
+                cmd_run(self._run_args(repo, "--yes"))
+        assert exc.value.code == 1  # EX_ERROR fail-safe
+        mock_gen.assert_not_called()  # 未进入 Plan 生成
+
+    def test_headless_allow_dirty_continues(self, tmp_path):
+        from agent_go.cli import cmd_run
+        repo = self._make_dirty_repo(tmp_path)
+        # --allow-dirty 越过早退；后续在 load_config 处停下以避免跑完整 pipeline
+        with patch("agent_go.cli.generate_plan") as mock_gen, \
+             patch("agent_go.cli.load_config", side_effect=RuntimeError("stop-after-hook")):
+            with pytest.raises(RuntimeError, match="stop-after-hook"):
+                cmd_run(self._run_args(repo, "--yes", "--allow-dirty"))
+        mock_gen.assert_not_called()  # 停在 hook 之后、plan 之前
+
+    def test_headless_baseline_commits(self, tmp_path):
+        import subprocess
+        from agent_go.cli import cmd_run
+        repo = self._make_dirty_repo(tmp_path)
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                                     capture_output=True, text=True).stdout.strip()
+        with patch("agent_go.cli.load_config", side_effect=RuntimeError("stop-after-hook")):
+            with pytest.raises(RuntimeError, match="stop-after-hook"):
+                cmd_run(self._run_args(repo, "--yes", "--baseline"))
+        # 未提交改动已被 commit 为基线：工作区 clean，HEAD 前进
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
+                                capture_output=True, text=True).stdout.strip()
+        assert status == ""
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                                    capture_output=True, text=True).stdout.strip()
+        assert head_after != head_before
 
 
 class TestCmdList:
