@@ -637,11 +637,14 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
         }
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
-        config = {
+        config: dict[str, Any] = {
             "plan_api": plan_api,
             # CR-建议#5：hard 难度可用更强模型（--hard-model），easy/medium 用候选模型
             "worker_models": {"easy": model, "medium": model,
                                "hard": hard_model or model},
+            # 任务级难度下限：优先按任务 yaml 的 difficulty 标注子任务（"优先输入标注，
+            # 无输入自行判定"）。hard 任务确保子任务 ≥ hard，触发混合路由 hard→强模型。
+            "min_difficulty": str(task.get("difficulty", "") or ""),
             "behavior": {"auto_confirm_plan": True, "auto_confirm_subtasks": True},
             "evaluator": {"enabled": True},
         }

@@ -520,3 +520,42 @@ class TestConfirmSubtasks:
         with patch("agent_go.ui.safe_input", side_effect=inputs):
             result = confirm_subtasks(subtasks, _make_config(), logger)
         assert result is subtasks
+
+
+class TestMinDifficulty:
+    """任务级难度下限（min_difficulty）：优先按输入标注，无输入自行判定。"""
+
+    def _plan_with_diffs(self, diffs):
+        return {"steps": [{"id": i+1, "title": f"s{i+1}", "difficulty": d,
+                            "agent_type": "developer"} for i, d in enumerate(diffs)],
+                "shared_resources": {}, "dependencies": {}}
+
+    def test_no_min_keeps_llm_labels(self):
+        import logging
+        from agent_go.ui import plan_to_subtasks
+        plan = self._plan_with_diffs(["easy", "medium"])
+        subs = plan_to_subtasks(plan, logging.getLogger("t"))
+        assert [s["difficulty"] for s in subs] == ["easy", "medium"]
+
+    def test_hard_floor_promotes_all(self):
+        """min_difficulty=hard：所有低于 hard 的子任务提升到 hard。"""
+        import logging
+        from agent_go.ui import plan_to_subtasks
+        plan = self._plan_with_diffs(["easy", "medium", "hard"])
+        subs = plan_to_subtasks(plan, logging.getLogger("t"), min_difficulty="hard")
+        assert [s["difficulty"] for s in subs] == ["hard", "hard", "hard"]
+
+    def test_medium_floor_promotes_easy_only(self):
+        """min_difficulty=medium：仅 easy 提升，hard 保持。"""
+        import logging
+        from agent_go.ui import plan_to_subtasks
+        plan = self._plan_with_diffs(["easy", "medium", "hard"])
+        subs = plan_to_subtasks(plan, logging.getLogger("t"), min_difficulty="medium")
+        assert [s["difficulty"] for s in subs] == ["medium", "medium", "hard"]
+
+    def test_invalid_min_ignored(self):
+        import logging
+        from agent_go.ui import plan_to_subtasks
+        plan = self._plan_with_diffs(["easy"])
+        subs = plan_to_subtasks(plan, logging.getLogger("t"), min_difficulty="extreme")
+        assert subs[0]["difficulty"] == "easy"

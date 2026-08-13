@@ -413,6 +413,14 @@ EXAMPLE (3-step plan):
         user_content += f"\n===== 用户补充 =====\n{supplement}\n===== 结束 ====="
     if reference_docs:
         user_content += f"\n===== 参考文档 =====\n{reference_docs}\n===== 结束 ====="
+    # 任务级难度提示（软引导）：让 planner 感知任务整体难度，子任务标注与之一致
+    _task_diff = str(config.get("min_difficulty", "") or "")
+    if _task_diff in ("easy", "medium", "hard"):
+        user_content += (
+            f"\n===== 任务难度 =====\n本任务整体难度为 {_task_diff}。"
+            "请据此标注每个 step 的 difficulty——整体 {_task_diff} 时，"
+            "核心实现步骤应标 " + _task_diff + "（不要全部降为更低的难度）。\n===== 结束 ====="
+        )
 
     # ── 最终预算检查 ──
     if len(system_prompt) > MAX_SYSTEM_PROMPT_CHARS:

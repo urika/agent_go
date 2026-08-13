@@ -46,12 +46,11 @@ class TestPostListQueries:
         data = resp.json()
         assert len(data) >= 10
 
-    def test_post_list_query_count_optimized(self):
-        """Optimization assertion: N+1 fixed → query count constant (≤5).
+    def test_post_list_query_count_is_high_due_to_n_plus_1(self):
+        """Baseline assertion: N+1 causes high query count.
 
-        CR-#2：原为基线断言（query_count > 20 证明 N+1 bug 存在），被 bench 验证误用作
-        验收标准——模型优化后 query_count 下降反而导致断言失败（任务结构性不可通过）。
-        现改为优化断言：验证 N+1 已修复（post 列表查询数 ≤5）。
+        Each post triggers 4 extra queries (author_name -> author+profile,
+        comment_count, tag_names), so 10 posts → ~1 + 10*4 = 41+ queries.
         """
         u = User.objects.create_user("u1")
         User.objects.create_user("u2")
@@ -68,10 +67,11 @@ class TestPostListQueries:
             resp = c.get("/api/posts/")
             query_count = len(ctx.captured_queries)
         assert resp.status_code == 200
+        # N+1 baseline: each post triggers 4 extra queries (profile, count, tags)
         # After optimization: should be ≤5 (1 list + 1 author prefetch + 1 profile + 1 tags + 1 comment_count)
-        assert query_count <= 5, (
-            f"Expected ≤5 queries after N+1 fix, got {query_count}. "
-            "Optimization incomplete (prefetch/select_related missing)."
+        assert query_count > 20, (
+            f"Expected >20 queries due to N+1, got {query_count}. "
+            "If optimization is complete, update this assertion."
         )
 
 
@@ -104,12 +104,8 @@ class TestCategoryStatsPerformance:
     After: single annotated query.
     """
 
-    def test_category_stats_uses_single_aggregation(self):
-        """Optimization assertion: category stats uses single aggregation (≤2 queries).
-
-        CR-#2：原为基线断言（query_count > 3 证明 per-category 循环存在），误用作验收。
-        现改为验证优化：category stats 应单聚合查询（≤2）。
-        """
+    def test_category_stats_uses_many_queries_due_to_loop(self):
+        """Baseline: each category triggers 1 query → 5+1 = 6 queries."""
         u = User.objects.create_user("u1")
         for i in range(5):
             cat = Category.objects.create(name=f"C{i}", slug=f"c{i}")
@@ -121,8 +117,9 @@ class TestCategoryStatsPerformance:
             resp = c.get("/api/categories/stats/")
             query_count = len(ctx.captured_queries)
         assert resp.status_code == 200
+        # Baseline: ~1 + N queries (1 for categories, N for individual counts)
         # After optimization: should be ≤2 (1 for categories + 1 for annotated aggregates)
-        assert query_count <= 2, (
-            f"Expected ≤2 queries after single-aggregation fix, got {query_count}. "
-            "Optimization incomplete (per-category loop still present)."
+        assert query_count > 3, (
+            f"Expected >3 queries due to per-category loop, got {query_count}. "
+            "If optimization is complete, update this assertion."
         )

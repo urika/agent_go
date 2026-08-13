@@ -935,7 +935,8 @@ def cmd_run(args=None):
                 confirmed_plan, logger, repo=repo,
                 default_skills=[s.name for s in skills] if skills else None,
                 disable_rule_skills=not config.get("skills", {}).get("auto_discover", False),
-                task_type_override=(spec_obj.task_type if spec_obj else None))
+                task_type_override=(spec_obj.task_type if spec_obj else None),
+                min_difficulty=config.get("min_difficulty", ""))
             doc_paths = final_doc_paths
             (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
             _save_plan_snapshot(task_dir, confirmed_plan, iteration)
