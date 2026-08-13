@@ -421,6 +421,18 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     if arch_ctx:
         task_md_parts.append(arch_ctx)
 
+    # ── spec 闭环后段注入：Task Spec §3 范围 + §5 验收标准（观测提示，不阻断）──
+    _spec_cfg = _effective_config(config)
+    _spec_acceptance = (_spec_cfg.get("_spec_acceptance") or "").strip()
+    _spec_scope = (_spec_cfg.get("_spec_scope") or "").strip()
+    if _spec_acceptance or _spec_scope:
+        task_md_parts.append("## Spec 约束（来自 Task Spec）")
+        if _spec_scope:
+            task_md_parts.append(f"### 范围\n{_spec_scope}")
+        if _spec_acceptance:
+            task_md_parts.append(f"### 验收标准（最终交付须全部满足）\n{_spec_acceptance}")
+        task_md_parts.append("")
+
     # 注入直接上游子任务的共享上下文（仅依赖图中的直接上游）
     upstream_ids = subtask.get("depends_on", [])
     if upstream_ids:

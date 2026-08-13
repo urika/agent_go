@@ -12,11 +12,15 @@ Task Spec 是 agent_go 的结构化输入契约（SDD 的工程实现）。一�
     ## 6. 参考资料
     ## 7. 已知风险
 
-L1 硬门禁（确定性检查，0 误判，阻断执行）：
-    1. 必填章节完整性（§1/§2/§3/§5 必须存在且非空）
-    2. 文件路径有效性（Spec 引用的路径在 repo 中存在，或最近似匹配）
-    3. 验证命令白名单（Spec 中的验证命令遵循 SAFE_VERIFICATION_PREFIXES）
-    4. 章节长度下限（防敷衍：「修 bug」之类过短目标）
+L1 准入审查（确定性检查，0 误判）：
+    硬门禁（error，阻断执行）：
+        1. 必填章节完整性（§1/§2/§3/§5 必须存在且非空）
+        2. 文件路径有效性（Spec 引用的路径在 repo 中存在，或最近似匹配）
+        3. 验证命令白名单（Spec 中的验证命令遵循 SAFE_VERIFICATION_PREFIXES）
+        4. 章节长度下限（防敷衍：「修 bug」之类过短目标）
+    软警告（warning，提示不阻断）：
+        5. §5 验收标准锚定粒度（至少一条 function/file 级锚定命令，A2）
+        6. §5 验收标准带稳定 AC ID（REQ/AC 追踪链条源头）
 
 L1 通过后返回结构化 TaskSpec，由 generate_plan 注入 prompt。
 """
@@ -111,10 +115,11 @@ class TaskSpec:
 class SpecViolation:
     """L1 硬门禁的单项违规。"""
 
-    check: str          # 检查项标识：required / path / whitelist / length
+    check: str          # 检查项标识：required / path / whitelist / length / anchoring / ac_id
     section: str        # 相关章节号（如 "1"）或 ""
     message: str        # 人可读说明
     suggestion: str = ""  # 修复建议（如最近似文件名）
+    severity: str = "error"  # error = 阻断执行；warning = 提示但不阻断
 
 
 # ─── 解析 ────────────────────────────────────────────────────────────
@@ -260,6 +265,25 @@ def extract_file_paths(text: str) -> list[str]:
     return found
 
 
+_DO_NOT_TOUCH_MARK = re.compile(
+    r"(?:明确|禁止|请勿|不要|不可)?\s*(?:不动的区域|不动|不改动|禁止修改|不可修改|不修改)"
+)
+
+
+def extract_do_not_touch(scope_text: str) -> list[str]:
+    """从 §3 范围文本的「明确不动的区域」小节提取禁止改动文件路径（确定性，零 LLM）。
+
+    §3 范围含两个子小节：需要改动 / 明确不动。「明确不动」通常放在末尾，
+    本函数截取「不动」标记之后的文本并提取文件路径，作为 spec 级 do-not-touch
+    硬约束，供 plan 预检（spec_do_not_touch_violation）与执行期校验消费。
+    """
+    text = scope_text or ""
+    m = _DO_NOT_TOUCH_MARK.search(text)
+    if not m:
+        return []
+    return extract_file_paths(text[m.start():])
+
+
 def _repo_file_set(repo: Optional[Path]) -> set[str]:
     """获取 repo 中已跟踪的文件集合（git ls-files），用于路径校验。"""
     if repo is None or not repo.exists():
@@ -334,6 +358,9 @@ def _edit_distance(a: str, b: str) -> int:
 # 验证命令的常见出现形式：代码块里的 shell 命令、行内的反引号命令
 _CMD_BLOCK = re.compile(r"```(?:bash|shell|sh)?\s*\n(.*?)```", re.DOTALL)
 _CMD_INLINE = re.compile(r"`((?:python|pytest|npm|yarn|cargo|go|make|ruby|rspec|rubocop)\s[^`]+)`")
+
+# 稳定验收 ID（AC-xxx / ac-xxx），与 governance.py 的 _AC_ID 前缀约定一致
+_AC_ID = re.compile(r"\b(?:AC-(\w+)|ac[-_]?(\w+))\b")
 
 
 def _extract_verification_commands(text: str) -> list[str]:
@@ -450,6 +477,28 @@ def validate_spec_l1(spec: TaskSpec, repo: Optional[Path] = None) -> list[SpecVi
                 suggestion=f"允许的前缀包括：{', '.join(SAFE_VERIFICATION_PREFIXES[:8])}{' ...' if len(SAFE_VERIFICATION_PREFIXES) > 8 else ''}",
             ))
 
+    # 检查 5（warning）：§5 验收标准锚定粒度（A2 函数级验收契约）
+    # 「整仓/整目录测试通过 ≠ 目标函数被覆盖」，应至少一条 function/file 级锚定命令。
+    scopes = extract_verification_scopes(spec.acceptance)
+    if scopes.get("commands") and not scopes.get("has_anchored"):
+        violations.append(SpecViolation(
+            check="anchoring",
+            section="5",
+            message="验收标准只有 suite 级验证命令（整仓/整目录），局部测试通过≠目标函数被覆盖",
+            suggestion="建议至少一条 function/file 级锚定命令（如 `pytest tests/test_x.py::test_add` 或 `-k add`）",
+            severity="warning",
+        ))
+
+    # 检查 6（warning）：§5 验收标准带稳定 AC ID（REQ/AC 追踪链条源头）
+    if spec.acceptance.strip() and not _AC_ID.search(spec.acceptance):
+        violations.append(SpecViolation(
+            check="ac_id",
+            section="5",
+            message="验收标准未标注 AC-xxx ID，将无法追踪 requirement → 验收 → 交付",
+            suggestion="建议格式：- [ ] AC-001 登录返回 JWT：`pytest tests/test_login.py::test_login`",
+            severity="warning",
+        ))
+
     return violations
 
 
@@ -467,7 +516,8 @@ budget:     # 可选。任务级成本预算（USD），如 0.30；注入 cost_c
 
 ## 1. 目标（做什么）*
 
-<一段话描述这个任务要达成的最终效果>
+<一段话描述这个任务要达成的最终效果。若可拆分，为每条需求标注稳定 ID（REQ-xxx），
+供追踪 requirement → 验收 → 交付。例：REQ-001 支持 JWT 登录>
 
 ## 2. 动机（为什么）*
 
@@ -485,11 +535,13 @@ budget:     # 可选。任务级成本预算（USD），如 0.30；注入 cost_c
 
 <技术约束、设计约束、兼容性要求。如：迁移必须可回滚、不新增依赖、保持某 API 签名不变。>
 
-## 5. 醇收标准（怎么算做完）*
+## 5. 验收标准（怎么算做完）*
 
-<可自动化判定的验收条件，尽量能写成验证命令。例：
-- [ ] `pytest tests/test_xxx.py -v` 全绿
-- [ ] 新字段默认值为 False>
+<可自动化判定的验收条件，每条带稳定 ID（AC-xxx）并尽量写成可锚定的验证命令（函数/文件级）。
+例：
+- [ ] AC-001 登录返回 JWT：`pytest tests/test_login.py::test_login`
+- [ ] AC-002 新字段默认值为 False：`pytest tests/test_config.py::test_default_false`
+提示：AC ID 用于追踪「每条验收是否被测试覆盖」，缺 ID 无法回溯。>
 
 ## 6. 参考资料
 
@@ -540,9 +592,8 @@ def render_spec_template(repo: Optional[Path] = None) -> str:
     else:
         scope_hint = "<- 在此列出本次需要改动的文件 ->"
 
-    # 修正模板中的笔误（醇收 -> 验收）
-    template = _SPEC_TEMPLATE.replace("醇收标准", "验收标准")
-    return template.format(timestamp=timestamp, repo=repo_str, scope_change_hint=scope_hint)
+    # 直接使用 _SPEC_TEMPLATE（错别字已在模板中修正）
+    return _SPEC_TEMPLATE.format(timestamp=timestamp, repo=repo_str, scope_change_hint=scope_hint)
 
 
 # ─── L1.5 AST 冲突检测（S11 L1.5，学术驱动） ─────────────────────────

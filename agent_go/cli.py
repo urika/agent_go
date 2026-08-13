@@ -11,7 +11,7 @@ from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
 from .pipeline import _run_pipeline
 from .skills import load_skills, discover_skills, render_skill_for_plan, list_skills
-from .spec import parse_spec, validate_spec_l1, render_spec_template, detect_step_conflicts
+from .spec import parse_spec, validate_spec_l1, render_spec_template, detect_step_conflicts, extract_do_not_touch
 from .agents import load_agent_type, list_agent_types
 from .eval import cmd_eval
 from .replay import cmd_replay
@@ -396,6 +396,8 @@ def _build_spec_context(spec_obj) -> str:
 
     §3 范围 / §4 约束 / §5 验收 / §7 风险 → system prompt 硬约束
     （§1 目标已在 cmd_run 中替代 task；§2 动机 / §6 参考已注入 user content）
+    稳定 ID（REQ/AC）→ 从 §1 目标 + §5 验收提取，供 planner 写进 requirement_ids /
+    acceptance_criteria_ids 字段（对应 api.py plan prompt 的稳定 ID 约定）。
     """
     parts = []
     if spec_obj.scope:
@@ -404,6 +406,22 @@ def _build_spec_context(spec_obj) -> str:
         parts.append(f"【设计约束（必须遵守）】\n{spec_obj.constraint.strip()}")
     if spec_obj.acceptance:
         parts.append(f"【验收标准（verification 命令应覆盖这些）】\n{spec_obj.acceptance.strip()}")
+    # 稳定 ID 提取（fail-open：提取失败不影响 plan 生成，仅丢失追踪能力）
+    try:
+        from .governance import extract_spec_requirements
+        reqs = extract_spec_requirements(f"{spec_obj.goal}\n{spec_obj.acceptance}")
+        req_ids = reqs.get("requirement_ids") or []
+        ac_ids = reqs.get("acceptance_criteria_ids") or []
+        if req_ids or ac_ids:
+            id_lines = []
+            if req_ids:
+                id_lines.append("需求 ID: " + ", ".join(req_ids))
+            if ac_ids:
+                id_lines.append("验收 ID: " + ", ".join(ac_ids))
+            id_lines.append("每个 step 必须在 requirement_ids / acceptance_criteria_ids 字段引用对应的 ID")
+            parts.append("【稳定 ID（必须写进对应 step 字段）】\n" + "\n".join(id_lines))
+    except Exception:
+        pass
     if spec_obj.risk:
         parts.append(f"【已知风险（在 steps[].risks 和 difficulty 中体现）】\n{spec_obj.risk.strip()}")
     return "\n\n".join(parts)
@@ -777,6 +795,8 @@ def cmd_run(args=None):
     # ── Task Spec 准入审查（S11-P0）──
     spec_obj = None
     spec_context = ""
+    spec_snapshot = ""
+    spec_do_not_touch: list[str] = []
     if spec_path is not None:
         if not spec_path.exists():
             console.error(f"Spec 文件不存在: {spec_path}")
@@ -785,14 +805,30 @@ def cmd_run(args=None):
         if spec_obj is None:
             console.error(f"Spec 解析失败: {spec_path}")
             sys.exit(EX_USAGE)
+        # A4 spec 快照：拷贝 SPEC.md 到 task_dir，保证任务可复现（SpecSource 演化不影响历史任务）
+        try:
+            _snap = task_dir / "spec_snapshot.md"
+            _snap.write_text(spec_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            spec_snapshot = "spec_snapshot.md"
+        except OSError as _se:
+            logger.warning(f"[spec] 快照保存失败（非关键）: {_se}")
         console.print(f"📋 Task Spec: {spec_obj.title or spec_path.name}")
         # --yes 模式仍跑 L1（确定性检查，0 误判，不跳过）；--force 全跳过
         if not force_spec:
             console.print("🔍 L1 准入审查中...")
             violations = validate_spec_l1(spec_obj, repo)
-            if violations:
-                console.error(f"❌ L1 准入审查未通过（{len(violations)} 项违规）：")
-                for i, v in enumerate(violations, 1):
+            errors = [v for v in violations if v.severity != "warning"]
+            warnings_ = [v for v in violations if v.severity == "warning"]
+            if warnings_:
+                console.print(f"⚠️ L1 软警告（{len(warnings_)} 项，不阻断）：")
+                for i, v in enumerate(warnings_, 1):
+                    sec = f" §{v.section}" if v.section else ""
+                    console.print(f"  {i}. [{v.check}{sec}] {v.message}")
+                    if v.suggestion:
+                        console.print(f"     💡 {v.suggestion}")
+            if errors:
+                console.error(f"❌ L1 准入审查未通过（{len(errors)} 项违规）：")
+                for i, v in enumerate(errors, 1):
                     sec = f" §{v.section}" if v.section else ""
                     console.error(f"  {i}. [{v.check}{sec}] {v.message}")
                     if v.suggestion:
@@ -816,6 +852,15 @@ def cmd_run(args=None):
                 logger.info(f"[cost_control] Spec budget=${spec_obj.budget} 已设任务级 L3 预算")
         # 结构化约束注入（由 generate_plan 的 spec_context 参数消费）
         spec_context = _build_spec_context(spec_obj)
+        # 后段注入（spec 闭环）：§5 验收 + §3 范围 存入 runtime config，供 _build_task_md 注入 TASK.md
+        if spec_obj.acceptance:
+            config["_spec_acceptance"] = spec_obj.acceptance.strip()
+        if spec_obj.scope:
+            config["_spec_scope"] = spec_obj.scope.strip()
+        # §4/§3 架构硬约束：提取「明确不动的区域」文件，供 plan 预检做确定性 fail-close
+        spec_do_not_touch = extract_do_not_touch(spec_obj.scope)
+        if spec_do_not_touch:
+            logger.info(f"[spec] do-not-touch 硬约束: {', '.join(spec_do_not_touch[:8])}{'...' if len(spec_do_not_touch) > 8 else ''}")
 
     # Plan Mode
     console.print("\n🤖 进入 Plan Mode...")
@@ -976,7 +1021,7 @@ def cmd_run(args=None):
     _plan_requirements = []
     if isinstance(confirmed_plan, dict):
         _plan_requirements = confirmed_plan.get("acceptance_criteria_ids") or confirmed_plan.get("requirements") or []
-    plan_quality = validate_plan_quality(confirmed, _plan_requirements)
+    plan_quality = validate_plan_quality(confirmed, _plan_requirements, do_not_touch=spec_do_not_touch)
 
     # Goal Policy Resolver（goal-mechanism-design.md §3.3/§4）：
     # 用户覆盖 > config.goal.policy > 系统确定性策略 > 默认 off。
@@ -1032,6 +1077,7 @@ def cmd_run(args=None):
         "plan_repair_history": preflight_repair_history,
         "plan_repairable_issue_count": plan_quality.get("plan_repairable_issue_count", 0),
         "architecture_review": architecture_review,
+        "spec_snapshot": spec_snapshot,
     }
     # Goal Contract: 从 Task + Plan + Subtask 提取完成契约（确定性，不调 LLM）
     try:
@@ -2678,19 +2724,29 @@ def cmd_spec(args) -> None:
             sys.exit(EX_USAGE)
         repo = Path(args.repo).resolve() if args.repo else None
         violations = validate_spec_l1(spec, repo)
+        errors = [v for v in violations if v.severity != "warning"]
+        warnings_ = [v for v in violations if v.severity == "warning"]
         console.print(f"\n📋 Task Spec: {spec.title or spec_path.name}")
         console.print(f"   完整性: {'✅ 全部必填章节就绪' if spec.is_complete else '❌ 缺失必填章节'}")
         if spec.source_path:
             console.print(f"   来源: {spec.source_path}")
-        if not violations:
+        if not errors:
             console.print("\n✅ L1 准入审查通过（0 项违规）")
         else:
-            console.print(f"\n❌ L1 准入审查未通过（{len(violations)} 项违规）：")
-            for i, v in enumerate(violations, 1):
+            console.print(f"\n❌ L1 准入审查未通过（{len(errors)} 项违规）：")
+            for i, v in enumerate(errors, 1):
                 sec = f" §{v.section}" if v.section else ""
                 console.print(f"  {i}. [{v.check}{sec}] {v.message}")
                 if v.suggestion:
                     console.print(f"     💡 {v.suggestion}")
+        if warnings_:
+            console.print(f"\n⚠️ L1 软警告（{len(warnings_)} 项，不阻断）：")
+            for i, v in enumerate(warnings_, 1):
+                sec = f" §{v.section}" if v.section else ""
+                console.print(f"  {i}. [{v.check}{sec}] {v.message}")
+                if v.suggestion:
+                    console.print(f"     💡 {v.suggestion}")
+        if errors:
             sys.exit(EX_ERROR)
     else:
         console.print("Usage: agent_go spec <template|validate> [args]")

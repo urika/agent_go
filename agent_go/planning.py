@@ -341,6 +341,7 @@ def validate_plan_quality(
     subtasks: list[dict],
     requirements: Optional[list[str]] = None,
     repo: Optional[Path] = None,
+    do_not_touch: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Run deterministic pre-execution checks on the generated Plan.
 
@@ -348,6 +349,7 @@ def validate_plan_quality(
         subtasks: Plan 拆解后的子任务列表
         requirements: Task Spec 的需求 ID 列表
         repo: 可选的项目根目录（启用 P2 agent_prompt 函数引用检查）
+        do_not_touch: Spec §3「明确不动的区域」文件列表（硬约束，命中断绝性阻断）
     """
     from .utils import _is_safe_verification_command, classify_verification_scope
 
@@ -356,6 +358,7 @@ def validate_plan_quality(
     seen_ids: set[str] = set()
     graph: dict[str, list[str]] = {}
     covered: set[str] = set()
+    spec_forbidden = {str(f) for f in (do_not_touch or []) if f}
 
     # 0 子任务 = 假成功源（goal_ab 实验实证：planner 把交付物 JSON schema 误当
     # 执行计划返回 → 0 steps → 真空 DELIVERY_READY）。必须阻断，不得进入执行。
@@ -383,6 +386,17 @@ def validate_plan_quality(
         overlap = sorted(files & forbidden)
         if overlap:
             issues.append({"type": "scope_conflict", "subtask_id": sid, "files": overlap})
+        # spec 级 do-not-touch（§3「明确不动的区域」）：任何子任务命中即确定性阻断
+        if spec_forbidden:
+            _spec_overlap = sorted(files & spec_forbidden)
+            if _spec_overlap:
+                issues.append({
+                    "type": "spec_do_not_touch_violation",
+                    "subtask_id": sid,
+                    "files": _spec_overlap,
+                    "reason": (f"子任务 {sid} 的 files 命中了 Spec §3「明确不动的区域」"
+                               f"：{', '.join(_spec_overlap)}"),
+                })
         covered.update(str(value) for value in st.get("acceptance_criteria_ids", []) or [])
         covered.update(str(value) for value in st.get("requirement_ids", []) or [])
 

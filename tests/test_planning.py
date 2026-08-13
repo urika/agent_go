@@ -186,6 +186,25 @@ def test_validate_plan_quality_detects_scope_and_requirement_gaps():
     }
 
 
+def test_validate_plan_quality_spec_do_not_touch_violation():
+    """spec 级 do-not-touch（§3「明确不动的区域」）命中 → 确定性阻断（fail-close）。"""
+    result = validate_plan_quality([
+        {"id": "sub-1", "verification": "pytest tests", "files": ["src/admin.py"]},
+    ], do_not_touch=["src/admin.py"])
+    assert result["status"] == "blocked"
+    types = {i["type"] for i in result["blocking_issues"]}
+    assert "spec_do_not_touch_violation" in types
+
+
+def test_validate_plan_quality_no_do_not_touch_no_violation():
+    """无 do_not_touch 或未命中 → 不产生 spec_do_not_touch_violation。"""
+    result = validate_plan_quality([
+        {"id": "sub-1", "verification": "pytest tests", "files": ["src/main.py"]},
+    ], do_not_touch=["src/admin.py"])
+    types = {i["type"] for i in result["blocking_issues"]}
+    assert "spec_do_not_touch_violation" not in types
+
+
 def test_validate_plan_quality_files_hint_no_scope_conflict():
     """tester 场景：files_hint 引用 do_not_touch 文件不触发 scope_conflict（仅 files 参与冲突检查）。"""
     result = validate_plan_quality([

@@ -3381,3 +3381,49 @@ class TestTaskBaseShared:
         import agent_go.executor as ex
         assert not hasattr(ex, "_copy_base_md_to_worktree"), \
             "复制基座进 worktree 的函数应已移除"
+
+
+class TestSpecInjection:
+    """spec 闭环后段注入：_build_task_md 按 runtime config 注入 Spec 约束（§3 范围 + §5 验收）。"""
+
+    def _subtask(self):
+        return {
+            "id": "sub-1", "title": "实现功能", "description": "写代码",
+            "files_hint": "*", "verification": "pytest", "risks": [],
+            "depends_on": [], "skills": [], "agent_type": "developer",
+            "agent_prompt": "work", "difficulty": "easy",
+        }
+
+    def test_inject_spec_when_configured(self, tmp_path, logger):
+        from agent_go.executor import _build_task_md
+
+        task_dir = tmp_path / "task"
+        task_dir.mkdir(parents=True)
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+
+        config = {
+            "_spec_acceptance": "- [ ] AC-001 `pytest tests/test_x.py::test_add -v`",
+            "_spec_scope": "只改 src/main.py",
+        }
+        task_md, _, _, _ = _build_task_md(
+            self._subtask(), tmp_path, task_dir, worktree, logger,
+            headless=True, config=config,
+        )
+        assert "Spec 约束" in task_md
+        assert "AC-001" in task_md
+        assert "只改 src/main.py" in task_md
+
+    def test_no_spec_injection_without_config(self, tmp_path, logger):
+        from agent_go.executor import _build_task_md
+
+        task_dir = tmp_path / "task"
+        task_dir.mkdir(parents=True)
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+
+        task_md, _, _, _ = _build_task_md(
+            self._subtask(), tmp_path, task_dir, worktree, logger,
+            headless=True, config={},
+        )
+        assert "Spec 约束" not in task_md

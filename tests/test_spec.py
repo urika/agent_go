@@ -12,7 +12,7 @@ from agent_go.spec import (
     TaskSpec,
     parse_spec, validate_spec_l1, render_spec_template,
     extract_file_paths, _match_section_key, _cmd_matches_whitelist,
-    extract_verification_scopes,
+    extract_verification_scopes, extract_do_not_touch,
 )
 
 
@@ -21,7 +21,7 @@ from agent_go.spec import (
 VALID_SPEC = """# Task Spec: 用户邮箱验证
 
 ## 1. 目标（做什么）
-为 User 模型添加 email_verified 字段和邮箱验证逻辑，包含数据库迁移、token 校验和 API 端点。
+REQ-001 为 User 模型添加 email_verified 字段和邮箱验证逻辑，包含数据库迁移、token 校验和 API 端点。
 
 ## 2. 动机（为什么）
 当前注册无需邮箱验证，垃圾注册增加。相关 Issue: #142。
@@ -42,9 +42,9 @@ VALID_SPEC = """# Task Spec: 用户邮箱验证
 - Python 3.9+，不新增 PyPI 包
 
 ## 5. 验收标准（怎么算做完）
-- [ ] `python -m pytest tests/test_auth.py::test_email_verification -v` 全部通过
-- [ ] 新创建的 User 实例 email_verified 默认为 False
-- [ ] 验证 token 过期后（>24h）拒绝验证请求
+- [ ] AC-001 `python -m pytest tests/test_auth.py::test_email_verification -v` 全部通过
+- [ ] AC-002 新创建的 User 实例 email_verified 默认为 False
+- [ ] AC-003 验证 token 过期后（>24h）拒绝验证请求
 
 ## 6. 参考资料
 - 设计文档：docs/design/email-verification.md
@@ -168,7 +168,7 @@ pytest tests/ -v 全绿。
 # ═══ L1 准入审查测试 ═════════════════════════════════════════════════
 
 class TestValidateSpecL1:
-    """L1 硬门禁 4 项检查。"""
+    """L1 准入审查 6 项检查（4 硬门禁 + 2 软警告）。"""
 
     def test_valid_spec_no_violations(self):
         spec = parse_spec(VALID_SPEC)
@@ -328,6 +328,68 @@ python -m pytest tests/ -v
         wl = [v for v in violations if v.check == "whitelist"]
         assert wl == []
 
+    def test_anchoring_warning_suite_level(self):
+        """检查 5（warning）：§5 只有 suite 级命令 → 锚定 warning，不阻断。"""
+        spec = parse_spec("""# Spec
+
+## 1. 目标
+加一个功能，描述足够长以通过检查。
+
+## 2. 动机
+测试锚定警告，背景说明。
+
+## 3. 范围
+改 src/main.py 一个文件，范围描述也够长了。
+
+## 5. 验收标准
+- [ ] AC-001 `python -m pytest tests/ -v` 全绿
+""")
+        violations = validate_spec_l1(spec, repo=None)
+        anchoring = [v for v in violations if v.check == "anchoring"]
+        assert len(anchoring) == 1
+        assert anchoring[0].severity == "warning"
+
+    def test_anchoring_no_warning_when_function_level(self):
+        """检查 5：§5 有 function 级锚定命令 → 不触发 anchoring warning。"""
+        spec = parse_spec("""# Spec
+
+## 1. 目标
+加一个功能，描述足够长以通过检查。
+
+## 2. 动机
+测试锚定命令，背景说明。
+
+## 3. 范围
+改 src/main.py 一个文件，范围描述也够长了。
+
+## 5. 验收标准
+- [ ] AC-001 `python -m pytest tests/test_x.py::test_add -v`
+""")
+        violations = validate_spec_l1(spec, repo=None)
+        anchoring = [v for v in violations if v.check == "anchoring"]
+        assert anchoring == []
+
+    def test_ac_id_warning(self):
+        """检查 6（warning）：§5 无 AC ID → ac_id warning，不阻断。"""
+        spec = parse_spec("""# Spec
+
+## 1. 目标
+加一个功能，描述足够长以通过检查。
+
+## 2. 动机
+测试 AC ID 警告，背景说明。
+
+## 3. 范围
+改 src/main.py 一个文件，范围描述也够长了。
+
+## 5. 验收标准
+- [ ] `python -m pytest tests/test_x.py::test_add -v`
+""")
+        violations = validate_spec_l1(spec, repo=None)
+        ac_id = [v for v in violations if v.check == "ac_id"]
+        assert len(ac_id) == 1
+        assert ac_id[0].severity == "warning"
+
 
 # ═══ 工具函数测试 ════════════════════════════════════════════════════
 
@@ -355,6 +417,25 @@ class TestExtractFilePaths:
         text = "`src/main.py` 和 `src/main.py`"
         paths = extract_file_paths(text)
         assert paths.count("src/main.py") == 1
+
+
+class TestExtractDoNotTouch:
+    """§3 范围「明确不动的区域」提取 do-not-touch 文件（§4 架构硬约束确定性校验）。"""
+
+    def test_extract_from_do_not_touch_section(self):
+        text = """### 需要改动的文件/模块
+- `src/models/user.py`
+### 明确不动的区域
+- `src/api/admin.py` — 管理后台不改动
+- 不引入邮件发送服务
+"""
+        paths = extract_do_not_touch(text)
+        assert "src/api/admin.py" in paths
+        assert "src/models/user.py" not in paths
+
+    def test_no_do_not_touch_marker(self):
+        text = "只改 src/main.py 一个文件，范围描述也够长了。"
+        assert extract_do_not_touch(text) == []
 
 
 class TestMatchSectionKey:

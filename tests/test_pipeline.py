@@ -121,6 +121,39 @@ class TestPipeline:
         call_ids = [c.args[1]["id"] for c in mock_run_subtask.call_args_list]
         assert call_ids == ["sub-1", "sub-2"]
 
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_traceability_auto_trigger(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """spec 闭环后段：交付门前自动写入 meta.traceability（观测，不阻断交付）。"""
+        sub = _make_subtask("sub-1")
+        repo = temp_dir / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        task_dir = temp_dir / "tasks" / "t1"
+        task_dir.mkdir(parents=True)
+
+        mock_run_subtask.side_effect = [_success_result("sub-1")]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        meta = _default_meta()
+        meta["status_schema_version"] = 1
+        meta["subtasks"] = [sub]
+        _run_pipeline(
+            [sub], repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=meta,
+        )
+
+        final_meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        assert "traceability" in final_meta, "交付门应自动写入 meta.traceability"
+        assert final_meta["traceability"]["status"] in ("no_spec_ids", "incomplete", "complete")
+
     # ── 2. 并行执行 ──────────────────────────────────────────────────────
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))

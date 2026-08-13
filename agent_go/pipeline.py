@@ -920,6 +920,13 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
     meta["failure_class"] = aggregate_failure_class(
         [r.get("failure_class") for r in results_map.values()], meta
     )
+    # M1-6 追踪自动触发（spec 闭环后段）：交付门前自动判定追踪完整性，写入 meta.traceability。
+    # 纯函数、观测标记，不阻断交付（A1/IV-2：决策留给 review/governance/eval gate）。
+    try:
+        from .governance import assess_traceability
+        meta["traceability"] = assess_traceability(meta)
+    except Exception as _te:
+        logger.debug(f"[traceability] 自动判定失败（忽略）: {_te}")
     if meta.get("status_schema_version") and not has_failed and delivery["accepted_delivery"]:
         meta["status"] = "ACCEPTED_DELIVERY"
     elif meta.get("status_schema_version") and not has_failed and delivery["delivery_failed"]:
