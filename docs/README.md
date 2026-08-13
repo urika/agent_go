@@ -31,5 +31,6 @@
 | [design/](design/) | 设计文档：功能扩展和架构改进的设计方案 |
 | [case-study-skill-a-b.md](case-study-skill-a-b.md) | Skill A/B 对照实验：22% 成本降低/44% token 降低/4→0 retries |
 | [product-status-assessment-2026-08-08.md](product-status-assessment-2026-08-08.md) | 产品成熟度评估（2026-08-08 快照，~60% 完成度） |
+| [web-golden-path-acceptance-2026-08-13.md](web-golden-path-acceptance-2026-08-13.md) | 纯本地 Golden Path 真实验收报告（Web 操作台 R1-R17 全链路） |
 | [archive/reference/bench-analysis-2026-08-01.md](archive/reference/bench-analysis-2026-08-01.md) | 历史 Bench 分析：仅作 exploratory 数据，不作为当前 KPI 基线 |
 | [archive/](archive/) | 历史文档：旧 PRD、旧 spec、设计审查，不再维护 |
