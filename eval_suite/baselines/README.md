@@ -29,9 +29,10 @@ source batch 用于防止跨批次或跨 schema 直接合并。
 | `m4-local-sample` | **有效（本地模型对比基线）** | 本地 Qwen3.6-35B 非 goal 5 任务子集：3/5（0.600）——无 goal 时完成率明显低于 goal 模式（0.792 vs 0.600），证明 goal 循环对本地模型提升显著。$/pass=$0.0005 |
 | `m4-local-goal` | **有效（本地模型 goal 复验基线）** | 本地 Qwen3.6-35B + goal 重跑 2 个普通模式失败案例：2/2（1.000）——goal 模式能补齐本地模型初始不足。$/pass=$0.0005 |
 | `m4-local-2refactor` | **有效（本地重构对比基线）** | 本地 Qwen3.6-35B + goal 2 个跨文件重构任务：1/2（0.750）——ld-refactor PASS，va-refactor FAIL（本地重写 tx_symbol 映射语义与原实现不一致，被 evaluator 捕获）。$/pass=$0.001333 |
+| `m4-local-hard-goal` | **有效（本地 hard 能力边界基线）** | 本地 Qwen3.6-35B + goal 6 个 canonical hard 任务（跨 task-mgr/data-pipeline/django-blog）：**0/6 通过**（5 个 capability_failure + 1 infrastructure_failure）——失败模式为复杂代码产出不稳定（未写文件/越界）与超时。证明 **hard 难度（功能系统级）超出 35B 本地模型能力边界**：本地适用 medium 及以下（0.792），hard 需 ≥70B 模型或混合路由（hard → 云端）。$/pass=$0（全失败无有效 pass） |
 | `m4-portal-local-qwen35b` | **有效（本地门户任务基线）** | 本地 Qwen3.6-35B 企业门户新闻中心任务：1/1（1.000）。$/pass=$0（早期 27B 时代无 metering 数据，无法折算 TCO） |
 
-> **本地模型基线说明**：5 个 m4-local-* 批次均为 `claude-sonnet-4-6` 路由名 → 本地 Qwen3.6-35B（worker_backends 指向 localhost:4000）。$/pass 已按 `config.local_model_cost` TCO 口径折算（电费+硬件折旧），非免费。对比口径：云端 M3 同任务集 pass_rate 0.917、$/pass $0.0185。
+> **本地模型基线说明**：6 个 m4-local-* 批次均为 `claude-sonnet-4-6` 路由名 → 本地 Qwen3.6-35B（worker_backends 指向 localhost:4000）。$/pass 已按 `config.local_model_cost` TCO 口径折算（电费+硬件折旧），非免费。对比口径：云端 M3 同任务集 pass_rate 0.917、$/pass $0.0185。能力梯度：medium 0.792（goal）> 非 goal 0.600 > hard 0/6。
 
 ## 收敛流程
 
