@@ -53,6 +53,8 @@ Accepted Delivery Rate 逼近 1  ∧  Human Intervention Minutes → 0  ∧  Cos
 - 同源审查是「回响」（P10）：`judge != candidate` 是铁律，全自主 merge 前必须有「不同源独立验证」兜底。
 - 最高杠杆是 **Spec 质量**（P9），而非堆更多 Agent。
 
+**产品叙事（谦逊地变强）**：agent_go 卖的不是「自动化」，是「可信的自动化」——每一次自动化升级都以「先证明交底可信」为前提。落地方向见 [谦逊层设计](design/humility-layer-design.md)（盲区交底 / 层间归因 / 知识生命周期 / 未覆盖视角 + 信任指标体系：审查后修改率 / 盲区命中率 / 复发可见率）。
+
 ### 1.2 核心用户
 
 首要用户是：
