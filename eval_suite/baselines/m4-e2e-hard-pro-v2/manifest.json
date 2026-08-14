@@ -1,0 +1,27 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "57e5c05f124c4d9154375e56bf5e0ee5ffd648dedc929526d9c5815c7787c811",
+  "created_at": "2026-08-14T23:51:02.441694+00:00",
+  "immutable": true,
+  "manifest_version": 1,
+  "metric_freeze_version": 1,
+  "models": [
+    "claude-sonnet-4-6"
+  ],
+  "record_count": 6,
+  "repeat_values": [
+    1
+  ],
+  "results_sha256": "1d19ebf18fa3ee9d8e508d812f36234574d66d4c3d53379c7cb1a411a9c984a3",
+  "source_batch": "m4-e2e-hard-pro-v2",
+  "suite": "canonical",
+  "task_catalog_hash": "7d080b11d012c8bfa1abc2e69d22ccf490e3b93152b8ae96378fb5a38455077a",
+  "task_ids": [
+    "add-tag-system",
+    "conditional-branching-datapipeline",
+    "db-performance-optimization",
+    "race-condition-taskmgr",
+    "security-hardening-taskmgr",
+    "stage-validation-refactor-datapipeline"
+  ]
+}

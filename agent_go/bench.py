@@ -658,6 +658,11 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
         if user_config.get("evaluator"):
             evaluator_cfg = dict(user_config["evaluator"])
             evaluator_cfg["enabled"] = True  # bench 强制启用语义评估
+            # 混合模式（--hard-model）：evaluator 也用强模型（hard_model→云端），
+            # 避免"强 worker 产出 + 弱 evaluator 误判"错配（本地 35B 评估把含核心
+            # 代码的完整 diff 误判为"仅测试文件"，confidence 0.3 仍判 failed）。
+            if hard_model:
+                evaluator_cfg["model"] = hard_model
             config["evaluator"] = evaluator_cfg
         # 继承用户的 skills / agent_loop / verification / goal 配置（skill 自动发现等），
         # 否则 bench 默认关闭

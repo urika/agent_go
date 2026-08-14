@@ -46,6 +46,18 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
         payload = {"model": model, "max_tokens": api_cfg.get("max_tokens", 4096), "temperature": api_cfg.get("temperature", 0.2), "messages": messages}
     else:
         payload = {"model": model, "messages": messages, "max_tokens": api_cfg.get("max_tokens", 4096), "temperature": api_cfg.get("temperature", 0.2)}
+        # DeepSeek 推理模型（v4-pro，经 opus-4-7 路由）OpenAI 端点必须 thinking enabled，
+        # 否则返回空 content（官方已知行为）。检测模型名含 v4-pro/opus-4-7 自动开启，
+        # 或 api_cfg.thinking 显式开启。reasoning_effort 可选（high 提升推理质量）。
+        _is_reasoning = ("v4-pro" in model or "opus-4-7" in model or "opus-4" in model)
+        if api_cfg.get("thinking") or _is_reasoning:
+            payload["thinking"] = {"type": "enabled"}
+            if api_cfg.get("reasoning_effort"):
+                payload["reasoning_effort"] = api_cfg["reasoning_effort"]
+        # JSON 输出（planner/evaluator 需合法 JSON）：response_format json_object，
+        # 官方要求 prompt 含 "json" 字样 + max_tokens 足够，可显著降低空响应/格式错概率。
+        if api_cfg.get("json_output") or api_cfg.get("response_format") == "json_object":
+            payload["response_format"] = {"type": "json_object"}
 
     import urllib.request, urllib.error
     req = urllib.request.Request(base_url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
