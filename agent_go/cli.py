@@ -66,6 +66,10 @@ def _build_parser():
 
     run_parser.add_argument("--issue", type=int, dest="issue_ref", help="GitHub issue number to link")
     run_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks (default: 1)")
+    run_parser.add_argument("--e2e", action="store_true",
+                            help="强制端到端模式（hard 任务不拆分子任务，保留全局上下文）")
+    run_parser.add_argument("--split", action="store_true",
+                            help="强制拆分模式（覆盖端到端判定，强制 Plan 拆分执行）")
     run_parser.add_argument("--confirm-mode", choices=["auto", "web"], default="auto",
                             dest="confirm_mode",
                             help="计划确认通道：auto=--yes 全自动；web=写 pending 文件等待 Web 确认（R5b）")
@@ -549,6 +553,82 @@ def _confirm_subtasks_channel(subtasks, config, logger, task_dir=None):
     return confirm_subtasks(subtasks, config, logger)
 
 
+# 架构级任务特征信号（L2 判定：需全局视野，拆分易失败）
+_E2E_ARCH_SIGNALS = (
+    "refactor", "重构", "并发", "race condition", "race", "架构", "architecture",
+    "端到端", "end-to-end", "e2e", "performance", "性能优化", "跨文件", "cross-file",
+    "atomic", "原子写", "并发安全", "thread-safe", "threading", "multi-process",
+)
+
+
+def _should_e2e(task_text: str, config: dict, args) -> tuple[bool, str]:
+    """判定端到端模式（hard 任务不拆分，保留全局上下文）。
+
+    判定优先级（"拆分 vs 端到端"框架）：
+      L0 显式 flag：--e2e 强制端到端 / --split 强制拆分（覆盖一切）
+      L1 显式输入难度：config.min_difficulty=hard → 端到端；easy/medium → 拆分
+      L2 任务特征：含架构级信号（refactor/并发/race/架构/端到端/性能/跨文件…）→ 端到端
+      L3 默认：拆分（medium 及以下已验证有效）
+    返回 (是否 e2e, 判定理由)。
+    """
+    if getattr(args, "e2e", False):
+        return True, "--e2e flag"
+    if getattr(args, "split", False):
+        return False, "--split flag"
+    diff = str(config.get("min_difficulty", "") or "")
+    if diff == "hard":
+        return True, "min_difficulty=hard"
+    if diff in ("easy", "medium"):
+        return False, f"min_difficulty={diff}"
+    if config.get("e2e_hard"):
+        return True, "config.e2e_hard"
+    text = (task_text or "").lower()
+    for sig in _E2E_ARCH_SIGNALS:
+        if sig in text:
+            return True, f"架构级特征信号: {sig}"
+    return False, "默认拆分"
+
+
+def _build_e2e_subtask(task_text: str, config: dict) -> dict:
+    """构造单个端到端子任务：完整原始任务 + 全局视野（hard 端到端模式）。
+
+    与 plan_to_subtasks 产物字段兼容（run_subtask 直接消费）。verification 支持
+    字符串或数组（bench 任务级 verification 数组，run_subtask 逐条执行）。
+    difficulty=hard → worker_models.hard 路由（opus-4-7→云端强模型）。
+    """
+    verification = config.get("task_verification", []) or []
+    title = (task_text or "").strip().split("\n")[0][:60] or "端到端任务"
+    desc = (
+        task_text.rstrip()
+        + "\n\n【端到端模式】\n这是一个需要全局视野的 hard 任务（不拆分子任务）。"
+          "请自主探索代码结构、理解整体架构后，端到端完成全部要求；"
+          "修改后运行验证命令确保全部通过（失败则分析根因、修复后重新验证）。"
+    )
+    return {
+        "id": "sub-e2e",
+        "title": title,
+        "description": desc,
+        "files_hint": "*",
+        "agent_prompt": desc,
+        "verification": verification,
+        "risks": [],
+        "depends_on": [],
+        "skills": [],
+        "agent_type": "developer",
+        "difficulty": "hard",
+        "task_type": None,
+        "cognitive_mode": "implement",
+        "allowed_tools": [],
+        "permission_mode": "",
+        "rationale": "hard 端到端模式（保留全局上下文）",
+        "scope_boundary": "",
+        "do_not_touch": [],
+        "requirement_ids": [],
+        "acceptance_criteria_ids": [],
+        "_agent_type_source": "llm",
+    }
+
+
 def cmd_run(args=None):
     if args is None:
         parser = _build_parser()
@@ -871,152 +951,165 @@ def cmd_run(args=None):
 
     plan = None
     confirmed_plan = None
-    max_iter = config.get("behavior", {}).get("max_plan_iterations", 5)
+
+    # ── hard 端到端模式（e2e）：跳过 Plan 拆分，单子任务保留全局上下文 ──
+    # 依据"拆分 vs 端到端"判定框架：hard / 架构级 / 强耦合任务拆分时代价
+    # （上下文丢失）超过收益，对照实验证实端到端 v4-pro 可完成而拆分失败。
+    _e2e, _e2e_reason = _should_e2e(task, config, args)
+    if _e2e:
+        console.print(f"\n🎯 hard 端到端模式（不拆分）: {_e2e_reason}")
+        logger.info(f"[e2e] 端到端模式触发: {_e2e_reason}")
+        subtasks = [_build_e2e_subtask(task, config)]
+        confirmed = _confirm_subtasks_channel(subtasks, config, logger, task_dir=task_dir)
+        # confirmed_plan 保持 None（无 Plan），直接跳过后续 plan 生成/拆解，
+        # 复用下方 plan_quality / pipeline 流程
     iteration = 1
     last_error = None
     preflight_repair_history: list[dict] = []
 
-    for attempt in range(3):
-        try:
-            plan = generate_plan(task, repo, config, logger, "", initial_docs, iteration, skill_plan_context, no_cache=no_cache, spec_context=spec_context)
-            plan["_original_task"] = task
-            break
-        except Exception as e:
-            last_error = e
-            logger.error(f"Plan 失败 (尝试 {attempt+1}): {e}")
-
-    if plan is not None:
-        # API 成功 → 执行前 Plan 预检。确定性问题最多自动修订一次，
-        # 修订后的 Plan 仍需经过 confirm_plan；未解决问题在最终门禁阻断。
-        try:
-            plan, iteration, preflight_repair_history, _preflight_quality = _preflight_repair_plan(
-                plan,
-                task=task,
-                repo=repo,
-                config=config,
-                logger=logger,
-                task_dir=task_dir,
-                skill_plan_context=skill_plan_context,
-                spec_context=spec_context,
-                initial_docs=initial_docs,
-                iteration=iteration,
-            )
-        except Exception as _pe:
-            # 预检本身不是外部增强依赖；异常时保留原 Plan，最终质量门继续兜底。
-            logger.warning(f"[plan_preflight] 预检失败，保留原 Plan: {_pe}")
-        # API 成功 → Plan 确认流程
-        # --yes must remain non-interactive even when preflight produced Plan v2;
-        # the repair version is still shown/persisted separately in plan snapshots.
-        _confirm_iteration = 1 if auto_yes else iteration
-        confirmed_plan, final_doc_paths = _confirm_plan_channel(
-            plan, config, repo, logger, iteration=_confirm_iteration, task=task, plan_dir=task_dir)
-        # 检查降级信号
-        if confirmed_plan == "__FALLBACK__":
-            console.print(f"\n⚠️ 降级到本地规则拆解...")
-            subtasks = decompose_fallback(task, repo, config, logger)
-            doc_paths = []
-            confirmed_plan = None
-        else:
-            while confirmed_plan is None and iteration < max_iter:
-                iteration += 1
-                # 重生成时重新读取 D 挂载的参考文档，避免确认环节挂载的内容丢失
-                regen_docs = read_reference_docs(final_doc_paths, repo, logger) if final_doc_paths else ""
-                # 保存上一版 Plan 快照后再生
-                if plan:
-                    _save_plan_snapshot(task_dir, plan, iteration - 1)
-                _prev_plan = dict(plan) if plan else None  # R-4: diff 基线
-                try:
-                    plan = generate_plan(task, repo, config, logger, "", regen_docs, iteration, skill_plan_context, no_cache=no_cache, spec_context=spec_context)
-                except Exception as e:
-                    logger.error(f"重试生成 Plan 失败: {e}")
-                    console.print(f"\n⚠️ 重试失败: {e}")
-                    console.print("\n⚠️ 降级到本地规则拆解...")
-                    subtasks = decompose_fallback(task, repo, config, logger)
-                    doc_paths = []
-                    confirmed_plan = None
-                    break
+    if not _e2e:
+        max_iter = config.get("behavior", {}).get("max_plan_iterations", 5)
+        for attempt in range(3):
+            try:
+                plan = generate_plan(task, repo, config, logger, "", initial_docs, iteration, skill_plan_context, no_cache=no_cache, spec_context=spec_context)
                 plan["_original_task"] = task
-                if _prev_plan:
-                    # R-4: 实时 diff——用户知道重新生成改了什么
-                    from .ui import show_plan_diff
-                    show_plan_diff(_prev_plan, plan)
-                confirmed_plan, final_doc_paths = _confirm_plan_channel(plan, config, repo, logger, iteration, task=task, plan_dir=task_dir)
-                if confirmed_plan == "__FALLBACK__":
-                    console.print(f"\n⚠️ 降级到本地规则拆解...")
-                    subtasks = decompose_fallback(task, repo, config, logger)
-                    doc_paths = []
-                    confirmed_plan = None
-                    break
+                break
+            except Exception as e:
+                last_error = e
+                logger.error(f"Plan 失败 (尝试 {attempt+1}): {e}")
 
-        if confirmed_plan is None and 'subtasks' not in locals():
-            console.warning(f"达到最大迭代次数 {max_iter}，使用最后版本")
-            confirmed_plan = plan
+        if plan is not None:
+            # API 成功 → 执行前 Plan 预检。确定性问题最多自动修订一次，
+            # 修订后的 Plan 仍需经过 confirm_plan；未解决问题在最终门禁阻断。
+            try:
+                plan, iteration, preflight_repair_history, _preflight_quality = _preflight_repair_plan(
+                    plan,
+                    task=task,
+                    repo=repo,
+                    config=config,
+                    logger=logger,
+                    task_dir=task_dir,
+                    skill_plan_context=skill_plan_context,
+                    spec_context=spec_context,
+                    initial_docs=initial_docs,
+                    iteration=iteration,
+                )
+            except Exception as _pe:
+                # 预检本身不是外部增强依赖；异常时保留原 Plan，最终质量门继续兜底。
+                logger.warning(f"[plan_preflight] 预检失败，保留原 Plan: {_pe}")
+            # API 成功 → Plan 确认流程
+            # --yes must remain non-interactive even when preflight produced Plan v2;
+            # the repair version is still shown/persisted separately in plan snapshots.
+            _confirm_iteration = 1 if auto_yes else iteration
+            confirmed_plan, final_doc_paths = _confirm_plan_channel(
+                plan, config, repo, logger, iteration=_confirm_iteration, task=task, plan_dir=task_dir)
+            # 检查降级信号
+            if confirmed_plan == "__FALLBACK__":
+                console.print(f"\n⚠️ 降级到本地规则拆解...")
+                subtasks = decompose_fallback(task, repo, config, logger)
+                doc_paths = []
+                confirmed_plan = None
+            else:
+                while confirmed_plan is None and iteration < max_iter:
+                    iteration += 1
+                    # 重生成时重新读取 D 挂载的参考文档，避免确认环节挂载的内容丢失
+                    regen_docs = read_reference_docs(final_doc_paths, repo, logger) if final_doc_paths else ""
+                    # 保存上一版 Plan 快照后再生
+                    if plan:
+                        _save_plan_snapshot(task_dir, plan, iteration - 1)
+                    _prev_plan = dict(plan) if plan else None  # R-4: diff 基线
+                    try:
+                        plan = generate_plan(task, repo, config, logger, "", regen_docs, iteration, skill_plan_context, no_cache=no_cache, spec_context=spec_context)
+                    except Exception as e:
+                        logger.error(f"重试生成 Plan 失败: {e}")
+                        console.print(f"\n⚠️ 重试失败: {e}")
+                        console.print("\n⚠️ 降级到本地规则拆解...")
+                        subtasks = decompose_fallback(task, repo, config, logger)
+                        doc_paths = []
+                        confirmed_plan = None
+                        break
+                    plan["_original_task"] = task
+                    if _prev_plan:
+                        # R-4: 实时 diff——用户知道重新生成改了什么
+                        from .ui import show_plan_diff
+                        show_plan_diff(_prev_plan, plan)
+                    confirmed_plan, final_doc_paths = _confirm_plan_channel(plan, config, repo, logger, iteration, task=task, plan_dir=task_dir)
+                    if confirmed_plan == "__FALLBACK__":
+                        console.print(f"\n⚠️ 降级到本地规则拆解...")
+                        subtasks = decompose_fallback(task, repo, config, logger)
+                        doc_paths = []
+                        confirmed_plan = None
+                        break
 
-        if confirmed_plan is not None:
-            # 正常 Plan 路径：拆解子任务并保存 PLAN.md
-            # （降级路径已在上方得到 subtasks，confirmed_plan 为 None，跳过本块）
-            # L1.5 AST 冲突检测（S11，学术驱动）：Plan 确认后、执行前拦截多 step 同文件/同符号冲突
-            try:
-                step_conflicts = detect_step_conflicts(confirmed_plan.get("steps") or [], repo)
-                symbol_conflicts = [c for c in step_conflicts if c.severity == "symbol"]
-                file_conflicts = [c for c in step_conflicts if c.severity == "file"]
-                if step_conflicts:
-                    console.print(f"\n⚡ L1.5 AST 冲突检测：{len(step_conflicts)} 处")
-                    for c in step_conflicts:
-                        icon = "🔴" if c.severity == "symbol" else "🟡"
-                        console.print(f"  {icon} [{c.severity}] {c.file} (steps {'/'.join(map(str, c.steps))})")
-                        if c.symbols:
-                            console.print(f"      同名符号: {', '.join(c.symbols)}")
-                    # 符号级冲突（高置信）在交互模式询问是否继续，--yes/--force 跳过询问
-                    if symbol_conflicts and not auto_yes and not force_spec:
-                        resp = safe_input("\n⚠️ 存在符号级冲突，可能集成失败。继续执行? [y/N] ").strip().lower()
-                        if resp not in ("y", "yes"):
-                            console.error("已取消执行。建议调整 Plan：合并冲突 step 或添加依赖。")
-                            sys.exit(EX_ERROR)
-            except Exception as _e:
-                # 冲突检测是辅助功能，失败不阻断主流程
-                logger.warning(f"L1.5 冲突检测失败（跳过）: {_e}")
-            subtasks = plan_to_subtasks(
-                confirmed_plan, logger, repo=repo,
-                default_skills=[s.name for s in skills] if skills else None,
-                disable_rule_skills=not config.get("skills", {}).get("auto_discover", False),
-                task_type_override=(spec_obj.task_type if spec_obj else None),
-                min_difficulty=config.get("min_difficulty", ""))
-            doc_paths = final_doc_paths
-            (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
-            _save_plan_snapshot(task_dir, confirmed_plan, iteration)
-            logger.info(f"[PLAN] PLAN.md 已保存 (v{iteration})")
-            # S12-P2 G5：规划期欠分解检测——hard 子任务 + 总子任务数过少 → 提示可能撞超时
-            try:
-                from .planning import check_under_decomposition
-                check_under_decomposition(subtasks, logger)
-            except Exception as _ge:
-                logger.debug(f"[G5] 欠分解检测失败（忽略）: {_ge}")
-            # CR-G4：planner 主观难度交叉核对——planner 标的 difficulty 与启发式 hint
-            # 跨两档不一致（如 easy 标注实为跨文件重构）时告警，提醒可能用错档模型。
-            try:
-                from .planning import check_difficulty_mismatch
-                check_difficulty_mismatch(subtasks, logger)
-            except Exception as _de:
-                logger.debug(f"[G4] 难度交叉核对失败（忽略）: {_de}")
-        elif 'subtasks' in locals() and subtasks is not None:
-            # 降级路径中已通过 decompose_fallback 生成 subtasks，无需重复调用
-            pass
+            if confirmed_plan is None and 'subtasks' not in locals():
+                console.warning(f"达到最大迭代次数 {max_iter}，使用最后版本")
+                confirmed_plan = plan
+
+            if confirmed_plan is not None:
+                # 正常 Plan 路径：拆解子任务并保存 PLAN.md
+                # （降级路径已在上方得到 subtasks，confirmed_plan 为 None，跳过本块）
+                # L1.5 AST 冲突检测（S11，学术驱动）：Plan 确认后、执行前拦截多 step 同文件/同符号冲突
+                try:
+                    step_conflicts = detect_step_conflicts(confirmed_plan.get("steps") or [], repo)
+                    symbol_conflicts = [c for c in step_conflicts if c.severity == "symbol"]
+                    file_conflicts = [c for c in step_conflicts if c.severity == "file"]
+                    if step_conflicts:
+                        console.print(f"\n⚡ L1.5 AST 冲突检测：{len(step_conflicts)} 处")
+                        for c in step_conflicts:
+                            icon = "🔴" if c.severity == "symbol" else "🟡"
+                            console.print(f"  {icon} [{c.severity}] {c.file} (steps {'/'.join(map(str, c.steps))})")
+                            if c.symbols:
+                                console.print(f"      同名符号: {', '.join(c.symbols)}")
+                        # 符号级冲突（高置信）在交互模式询问是否继续，--yes/--force 跳过询问
+                        if symbol_conflicts and not auto_yes and not force_spec:
+                            resp = safe_input("\n⚠️ 存在符号级冲突，可能集成失败。继续执行? [y/N] ").strip().lower()
+                            if resp not in ("y", "yes"):
+                                console.error("已取消执行。建议调整 Plan：合并冲突 step 或添加依赖。")
+                                sys.exit(EX_ERROR)
+                except Exception as _e:
+                    # 冲突检测是辅助功能，失败不阻断主流程
+                    logger.warning(f"L1.5 冲突检测失败（跳过）: {_e}")
+                subtasks = plan_to_subtasks(
+                    confirmed_plan, logger, repo=repo,
+                    default_skills=[s.name for s in skills] if skills else None,
+                    disable_rule_skills=not config.get("skills", {}).get("auto_discover", False),
+                    task_type_override=(spec_obj.task_type if spec_obj else None),
+                    min_difficulty=config.get("min_difficulty", ""))
+                doc_paths = final_doc_paths
+                (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
+                _save_plan_snapshot(task_dir, confirmed_plan, iteration)
+                logger.info(f"[PLAN] PLAN.md 已保存 (v{iteration})")
+                # S12-P2 G5：规划期欠分解检测——hard 子任务 + 总子任务数过少 → 提示可能撞超时
+                try:
+                    from .planning import check_under_decomposition
+                    check_under_decomposition(subtasks, logger)
+                except Exception as _ge:
+                    logger.debug(f"[G5] 欠分解检测失败（忽略）: {_ge}")
+                # CR-G4：planner 主观难度交叉核对——planner 标的 difficulty 与启发式 hint
+                # 跨两档不一致（如 easy 标注实为跨文件重构）时告警，提醒可能用错档模型。
+                try:
+                    from .planning import check_difficulty_mismatch
+                    check_difficulty_mismatch(subtasks, logger)
+                except Exception as _de:
+                    logger.debug(f"[G4] 难度交叉核对失败（忽略）: {_de}")
+            elif 'subtasks' in locals() and subtasks is not None:
+                # 降级路径中已通过 decompose_fallback 生成 subtasks，无需重复调用
+                pass
+            else:
+                # 降级拆解
+                console.print(f"\n⚠️ Plan Mode 失败: {last_error}")
+                subtasks = decompose_fallback(task, repo, config, logger)
+
         else:
-            # 降级拆解
-            console.print(f"\n⚠️ Plan Mode 失败: {last_error}")
+            # plan is None：3 次 generate_plan 全部失败，降级到本地规则拆解。
+            # 不加此分支会导致 subtasks 未定义 → confirm_subtasks 抛 UnboundLocalError。
+            # decompose_fallback 有三级降级（本地模型→规则→单任务），永不抛异常。
+            console.print(f"\n⚠️ Plan 生成 3 次均失败: {last_error}")
+            console.print("⚠️ 降级到本地规则拆解...")
             subtasks = decompose_fallback(task, repo, config, logger)
 
-    else:
-        # plan is None：3 次 generate_plan 全部失败，降级到本地规则拆解。
-        # 不加此分支会导致 subtasks 未定义 → confirm_subtasks 抛 UnboundLocalError。
-        # decompose_fallback 有三级降级（本地模型→规则→单任务），永不抛异常。
-        console.print(f"\n⚠️ Plan 生成 3 次均失败: {last_error}")
-        console.print("⚠️ 降级到本地规则拆解...")
-        subtasks = decompose_fallback(task, repo, config, logger)
-
-    # 子任务确认
-    confirmed = _confirm_subtasks_channel(subtasks, config, logger, task_dir=task_dir)
+        # 子任务确认
+        confirmed = _confirm_subtasks_channel(subtasks, config, logger, task_dir=task_dir)
     from .planning import validate_plan_quality
     _plan_requirements = []
     if isinstance(confirmed_plan, dict):
@@ -1113,7 +1206,7 @@ def cmd_run(args=None):
         *plan_quality["blocking_issues"],
         *plan_quality.get("repairable_issues", []),
     ]
-    if _unresolved_plan_issues:
+    if _unresolved_plan_issues and not _e2e:
         if dry_run:
             _print_dry_run_summary(confirmed_plan, confirmed, plan_quality, {}, console, task_id, task_dir)
             try:

@@ -806,6 +806,10 @@ def _assess_verification_confidence(verification: str, has_changes: bool) -> dic
     if not has_changes:
         return {"level": "none", "anchoring": "none", "reason": "无变更，无需验证", "warning": ""}
 
+    # verification 兼容数组（e2e 端到端模式任务级多命令）与字符串：归一化为字符串
+    if isinstance(verification, (list, tuple)):
+        verification = " && ".join(str(c) for c in verification if c)
+
     if not verification or not verification.strip():
         return {
             "level": "manual",

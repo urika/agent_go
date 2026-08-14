@@ -645,6 +645,9 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             # 任务级难度下限：优先按任务 yaml 的 difficulty 标注子任务（"优先输入标注，
             # 无输入自行判定"）。hard 任务确保子任务 ≥ hard，触发混合路由 hard→强模型。
             "min_difficulty": str(task.get("difficulty", "") or ""),
+            # 任务级验证命令（端到端模式 e2e 的 subtask.verification 来源）：
+            # difficulty=hard 触发端到端时，单子任务用任务级 verification 验收。
+            "task_verification": list(task.get("verification", []) or []),
             "behavior": {"auto_confirm_plan": True, "auto_confirm_subtasks": True},
             "evaluator": {"enabled": True},
         }
