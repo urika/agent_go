@@ -6,6 +6,34 @@
 > 背景：agent_go 将本地模型纳入管理（启停/切换/状态监控/保活分工）。按「谁拥有进程谁保活」原则，agent_go 作为消费方只负责就绪检查与一次性修复触发；本文档列出需要 llama-defender（服务方）提供或增强的接口与功能契约。
 > v2 增补：按模型实体三层设计（① 模型固有 / ② 角色绑定 / ③ 部署拓扑），③ 部署拓扑归代理侧，需代理提供**部署可视**与**路由归因**接口（R8-R12），支撑 agent_go 侧 ① registry 数据采集与计量归因。
 
+## 0. 待办清单速览（实施视图：已完成 / 待做 / 顺序）
+
+### 0.1 已完成（保留，勿回退）
+
+| 能力 | 说明 |
+|------|------|
+| 双协议端点 | `POST /v1/messages`（Anthropic）+ `POST /v1/chat/completions`（OpenAI） |
+| thinking/response_format 透传 | `FormatConverter` + `convert_openai_request_to_anthropic` 已修复透传（v4-pro 推理必需，b14 修复） |
+| SmartRouter 智能路由 | 模型偏好（MODEL_ROUTE_PREFERENCES 三模式）+ 阈值/内存/会话/sticky + 云端熔断冷却回退 |
+| manage.sh 生命周期 | `start/stop/status/restart/reload/switch/watchdog`（pidfile + 日志 + 热重载 SIGHUP） |
+| 基础接口 | `GET /v1/models`、`GET /status`(HTML)、`GET /api/status`(JSON)、`GET /metrics`、`GET /api/profiles`、`GET /api/watchdog`、`POST /admin/route/force-local`、`POST /admin/route/force-cloud` |
+
+### 0.2 待做（R8-R12，按优先级与四层闭环支撑映射）
+
+| 优先级 | 需求 | 支撑层 | 解决的 Gap |
+|--------|------|--------|-----------|
+| **P0 R8** | 路由归因返回（`X-Proxy-Route-Target/Actual-Model/Reason/Cost` 响应头） | **④ 观测归因** | metering 按 URL 标 is_local，force_fallback ~36% 回退本地导致归因全错（bench 成本/归因最大误差源） |
+| **P0 R9** | `GET /api/route/policies`（MODEL_ROUTE_PREFERENCES + 云端配置脱敏） | ③ 部署拓扑可视 | 部署拓扑对 agent_go 不可见（G3） |
+| **P1 R10** | `/v1/models` 能力元数据（route/real_model/thinking_supported/json_compliance/context_chars） | ① registry 数据源 | /v1/models 只回别名无能力元数据（G1） |
+| **P1 R11** | `/api/status` 增 `route_config`（cloud_model/route_enabled/cloud_key_set） | ③ 探测依据统一 | 健康检查探测依据不一致（G4） |
+| **P2 R12** | `POST /admin/reload`（HTTP 热重载） | ③ 运维 | 远程/容器场景 reload（等效 manage.sh reload） |
+
+**四层闭环支撑**：① registry ← R10；③ 部署拓扑 ← R9/R11/R12；④ 观测归因 ← **R8（最关键，决定 bench 成本/归因可信度）**；② 角色绑定无代理依赖。
+
+### 0.3 实施顺序
+
+`R8 → R9 → R10 → R11 → R12`（P0 先行，R8 是归因可信度的前提）
+
 ## 1. 需求场景
 
 | # | 场景 | agent_go 行为 | 需要的 llama-defender 能力 |
