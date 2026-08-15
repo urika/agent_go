@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (55 modules, ~30,000 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (56 modules, ~30,000 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
 Runtime has no external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`, `http.server`). Dev/test deps (pytest, pytest-mock, ruff, mypy, pyyaml) are external.
 
@@ -134,7 +134,7 @@ agent_go clean                        # 清理全部任务数据
 agent_go clean --older-than 7         # 只清理早于 7 天前的任务（保留期）
 agent_go clean --fixture-worktrees    # 只清理 eval_suite/fixtures/ 下失效 worktree 注册（ISSUE-38）
 
-# Web 操作台（观测 + 处置：任务启动/恢复/取消/清理/审批/合并/PR + 配置中心 local⇄cloud + 健康检查）
+# Web 操作台（观测 + 处置：任务启动/恢复/取消/清理/审批/合并/PR + 配置中心 local⇄cloud + 健康检查 + 🗂 看板任务管理）
 agent_go web --host 127.0.0.1 --port 8091   # 打开 http://127.0.0.1:8091
 agent_go web --token xxx                     # 可选 Bearer token 鉴权
 ```
@@ -186,7 +186,7 @@ delivery.py         → task-level delivery contract (M1.2); `merge` command is 
 
 If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuilds `meta.json` from worktree state: commit+verify-pass → completed, commit+verify-fail → failed, no commit+orphan changes → reset (resume reruns it), no commit+no changes → no_changes. It never commits orphan changes itself — commit stays the sole completion boundary for resume correctness.
 
-## Key Modules (55 modules, ~30,000 lines)
+## Key Modules (56 modules, ~30,000 lines)
 
 | Module | Purpose |
 |--------|---------|
@@ -239,7 +239,8 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `tui.py` | Curses status dashboard |
 | `review_agent.py` | Read-only independent review subagent, two-phase review |
 | `workflow_gen.py` | GitHub Actions workflow generation (ci command) |
-| `web_server.py` | Web 操作台：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ SSE，stdlib http.server + SPA |
+| `web_server.py` | Web 操作台：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ 🗂 看板视图（kanban 6 写端点，SSE 联动）+ SSE，stdlib http.server + SPA |
+| `kanban.py` | 看板数据层：~/.agent_go/kanban.json 单文件存储（mtime 缓存 + 原子写 + 锁），5 阶段列（brainstorm→operations）× 3 类卡片（discussion/implementation/periodic），阶段流转 + history，task_ids 软链接执行任务（与 status.py 执行态正交，不动 meta.json） |
 | `profiles.py` | Profile 管理：local⇄cloud 一键切换（config local/cloud/status）、.current_profile、健康检查（mismatch 检测）、本地 profile 模板生成 |
 | `task_runner.py` | Web 子进程任务运行器（Thin shell 同哲学）：spawn agent_go --yes --json，meta.json 唯一事实源，SIGINT cancel |
 | `web_confirm.py` | R5b Web 计划确认协议：pending/decision 文件协议 + 阻塞轮询，30min 超时自动取消 |
@@ -275,7 +276,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 
 ```bash
 pip3 install pytest pytest-mock
-pytest tests/                       # 2178 tests (83 files); --tb=short via pyproject addopts
+pytest tests/                       # 2448 tests (93 files); --tb=short via pyproject addopts
 pytest tests/ -q
 pytest tests/ -k "not integration"  # Unit tests only (skips test_integration.py, test_agent_loop_integration.py)
 pytest tests/ -k "TestFormatCommit" -v
@@ -335,8 +336,8 @@ for fut in as_completed(futures):
 ## File Organization
 
 ```
-agent_go/           # 55 Python modules (~30,000 lines)
-tests/              # 83 test files, 2178 tests
+agent_go/           # 56 Python modules (~30,000 lines)
+tests/              # 93 test files, 2448 tests
 eval_suite/         # eval bench suite: tasks/ (35 task YAMLs), fixtures/ (5 fixture repos), results_*.jsonl
 docs/design/        # Design docs: config-schema.md, module-catalog.md, architecture, ADRs
 docs/archive/       # Historical code review records
