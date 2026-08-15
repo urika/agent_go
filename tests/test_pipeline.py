@@ -154,6 +154,114 @@ class TestPipeline:
         assert "traceability" in final_meta, "交付门应自动写入 meta.traceability"
         assert final_meta["traceability"]["status"] in ("no_spec_ids", "incomplete", "complete")
 
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_humility_blind_spots_and_perspectives(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """H1+H4 谦逊层：交付门自动写入 meta.blind_spots + meta.uncovered_perspectives。"""
+        sub = _make_subtask("sub-1")
+        repo = temp_dir / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        task_dir = temp_dir / "tasks" / "t1"
+        task_dir.mkdir(parents=True)
+
+        mock_run_subtask.side_effect = [_success_result("sub-1")]
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        meta = _default_meta()
+        meta["status_schema_version"] = 1
+        meta["subtasks"] = [sub]
+        meta["baseline_dirty"] = True
+        meta["plan_quality"] = {
+            "warnings": [
+                {"type": "verification_not_anchored", "subtask_id": "sub-1",
+                 "verification": "pytest tests/", "reason": "weak"},
+            ],
+        }
+        meta["architecture_review"] = None
+        _run_pipeline(
+            [sub], repo, task_dir, logger,
+            config={}, headless=False, parallel=1,
+            issue_ref="", meta=meta,
+        )
+
+        final_meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+        assert "blind_spots" in final_meta, "交付门应写入 meta.blind_spots"
+        assert "uncovered_perspectives" in final_meta, "交付门应写入 meta.uncovered_perspectives"
+        bs = final_meta["blind_spots"]
+        assert bs["baseline_dirty"] is True
+        assert bs["weakly_anchored_subtasks"] == ["sub-1"]
+        # readonly_review 未启用 → 无失败时 unattributed 为空
+        assert bs["unattributed_failures"] == []
+        assert bs["inconclusive_evaluations"] == []
+        _persp = [p["perspective"] for p in final_meta["uncovered_perspectives"]]
+        assert "independent_reviewer" in _persp
+        assert "architecture_review" in _persp
+
+
+class TestHumilitySignals:
+    """_build_humility_signals 纯函数：H1 盲区 + H4 未覆盖视角聚合。"""
+
+    def _base(self, tmp_path):
+        from agent_go.pipeline import _build_humility_signals
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        return _build_humility_signals, task_dir
+
+    def test_uncovered_acceptance_from_traceability(self, tmp_path):
+        fn, task_dir = self._base(tmp_path)
+        meta = {"traceability": {"missing_requirement_ids": ["AC-002"]}}
+        bs, _ = fn(meta, {}, {}, task_dir)
+        assert bs["uncovered_acceptance_ids"] == ["AC-002"]
+
+    def test_unattributed_failures_rr_disabled(self, tmp_path):
+        fn, task_dir = self._base(tmp_path)
+        results = {"s1": {"subtask_id": "s1", "status": "failed"},
+                   "s2": {"subtask_id": "s2", "status": "completed"}}
+        bs, _ = fn({}, results, {}, task_dir)
+        assert bs["unattributed_failures"] == ["s1"]
+
+    def test_unattributed_failures_rr_enabled_checks_verify_state(self, tmp_path):
+        fn, task_dir = self._base(tmp_path)
+        # s1 有根因，s2 无根因
+        (task_dir / "s1").mkdir()
+        (task_dir / "s1" / "verify_state.json").write_text(
+            json.dumps({"failure_analysis": "root cause here"}), encoding="utf-8")
+        (task_dir / "s2").mkdir()
+        (task_dir / "s2" / "verify_state.json").write_text(
+            json.dumps({"failure_analysis": ""}), encoding="utf-8")
+        results = {"s1": {"subtask_id": "s1", "status": "failed"},
+                   "s2": {"subtask_id": "s2", "status": "failed"}}
+        cfg = {"verification": {"readonly_review": {"enabled": True}}}
+        bs, _ = fn({}, results, cfg, task_dir)
+        assert bs["unattributed_failures"] == ["s2"]
+
+    def test_inconclusive_from_verification_results(self, tmp_path):
+        fn, task_dir = self._base(tmp_path)
+        results = {"s1": {"subtask_id": "s1", "verification_results": [
+            {"type": "semantic", "passed": False, "inconclusive": True}]},
+            "s2": {"subtask_id": "s2", "verification_results": [
+                {"type": "semantic", "passed": True, "inconclusive": False}]}}
+        bs, persp = fn({}, results, {}, task_dir)
+        assert bs["inconclusive_evaluations"] == ["s1"]
+        assert any(p["perspective"] == "semantic_verdict" for p in persp)
+
+    def test_no_blind_spots_empty_signal(self, tmp_path):
+        fn, task_dir = self._base(tmp_path)
+        meta = {"traceability": {"missing_requirement_ids": []},
+                "baseline_dirty": False, "architecture_review": {"decision": "approved"}}
+        cfg = {"verification": {"readonly_review": {"enabled": True}}}
+        bs, persp = fn(meta, {}, cfg, task_dir)
+        assert bs["uncovered_acceptance_ids"] == []
+        assert bs["baseline_dirty"] is False
+        assert persp == []
+
     # ── 2. 并行执行 ──────────────────────────────────────────────────────
     @patch("agent_go.pipeline.subprocess.run")
     @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))

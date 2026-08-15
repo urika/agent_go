@@ -1832,6 +1832,28 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
             lines.append(f"| `{file_path}` | {sub_ids} | +{total_ins}/-{total_del} | {verify_icon} |")
         lines.append("")
 
+    # 已知盲区（谦逊层 H1+H4：系统主动交底，不阻断）
+    blind_spots = meta.get("blind_spots") or {}
+    uncovered_perspectives = meta.get("uncovered_perspectives") or []
+    _blind_lines: list[str] = []
+    if blind_spots.get("uncovered_acceptance_ids"):
+        _blind_lines.append(f"- 未覆盖验收 ID: {', '.join(map(str, blind_spots['uncovered_acceptance_ids']))}")
+    if blind_spots.get("weakly_anchored_subtasks"):
+        _blind_lines.append(f"- 弱锚定验证（整仓测试）子任务: {', '.join(map(str, blind_spots['weakly_anchored_subtasks']))}")
+    if blind_spots.get("unattributed_failures"):
+        _blind_lines.append(f"- 无根因分析的失败子任务: {', '.join(map(str, blind_spots['unattributed_failures']))}")
+    if blind_spots.get("baseline_dirty"):
+        _blind_lines.append("- 任务启动时工作区有未提交改动（baseline_dirty）")
+    if blind_spots.get("inconclusive_evaluations"):
+        _blind_lines.append(f"- 语义评估不确定的子任务: {', '.join(map(str, blind_spots['inconclusive_evaluations']))}")
+    for p in uncovered_perspectives:
+        _blind_lines.append(f"- 未覆盖视角 [{p.get('perspective')}]: {p.get('reason', '')}")
+    if _blind_lines:
+        lines.append("## ⚠️ 已知盲区（系统主动交底，供审查参考）")
+        lines.append("")
+        lines.extend(_blind_lines)
+        lines.append("")
+
     # 子任务详情
     lines.append("## 🔍 子任务详情")
     lines.append("")

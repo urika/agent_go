@@ -1447,19 +1447,21 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     assessment_path=str(task_dir) if task_dir else "",
                     verification_confidence=_l1_confidence_dict if auto_triggered else None,
                 )
+                # 截断兜底：若 evaluator 因 diff 截断导致无法判断（reason 含关键词，
+                # 或置信度极低），用完整 diff 无截断重跑一次 evaluator，避免浪费修复重试。
+                # H1 谦逊层：inconclusive 持久化进 verification_results，供交付盲区清单消费。
+                _reason = semantic_feedback.get("reason", "") or ""
+                _conf = semantic_feedback.get("confidence", 1.0)
+                _inconclusive = any(kw in _reason for kw in ["截断", "无法确认", "inconclusive"])
+                _low_confidence = _conf is not None and _conf <= 0.3
                 verification_results.append({
                     "type": "semantic",
                     "passed": semantic_feedback.get("passed", True),
                     "reason": semantic_feedback.get("reason", "")[:200],
                     "cost_usd": semantic_feedback.get("cost_usd", 0.0),
                     "latency_ms": semantic_feedback.get("latency_ms", 0.0),
+                    "inconclusive": bool(_inconclusive or _low_confidence),
                 })
-                # 截断兜底：若 evaluator 因 diff 截断导致无法判断（reason 含关键词，
-                # 或置信度极低），用完整 diff 无截断重跑一次 evaluator，避免浪费修复重试。
-                _reason = semantic_feedback.get("reason", "") or ""
-                _conf = semantic_feedback.get("confidence", 1.0)
-                _inconclusive = any(kw in _reason for kw in ["截断", "无法确认", "inconclusive"])
-                _low_confidence = _conf is not None and _conf <= 0.3
                 if (_inconclusive or _low_confidence) and not semantic_feedback.get("passed", True):
                     logger.warning(
                         f"语义评估可能因信息不足误判: confidence={_conf} inconclusive={_inconclusive}，"
@@ -1479,12 +1481,17 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         )
                         if _retry_feedback is not semantic_feedback:
                             # 替换 verification_results 中上次的记录
+                            _rr = _retry_feedback.get("reason", "") or ""
+                            _rc = _retry_feedback.get("confidence", 1.0)
                             verification_results[-1] = {
                                 "type": "semantic",
                                 "passed": _retry_feedback.get("passed", True),
                                 "reason": _retry_feedback.get("reason", "")[:200],
                                 "cost_usd": _retry_feedback.get("cost_usd", 0.0),
                                 "latency_ms": _retry_feedback.get("latency_ms", 0.0),
+                                "inconclusive": bool(
+                                    any(kw in _rr for kw in ["截断", "无法确认", "inconclusive"])
+                                    or (_rc is not None and _rc <= 0.3)),
                             }
                             semantic_feedback = _retry_feedback
                             logger.info(f"重试 evaluator 完成: passed={semantic_feedback.get('passed')} conf={semantic_feedback.get('confidence')}")

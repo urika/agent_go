@@ -79,6 +79,107 @@ def _invoke_run_subtask(task_id, st, repo, task_dir, logger, upstream, headless,
     return run_subtask(task_id, st, repo, task_dir, logger, upstream, **kwargs)
 
 
+def _build_humility_signals(
+    meta: dict[str, Any],
+    results_map: dict[str, dict[str, Any]],
+    config: dict[str, Any],
+    task_dir: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """H1+H4 谦逊层：聚合交付盲区清单与未覆盖视角（纯函数，观测不阻断）。
+
+    H1 blind_spots（5 个盲区信号，全部复用已实现采集）：
+      uncovered_acceptance_ids  ← traceability.missing_requirement_ids
+      weakly_anchored_subtasks  ← plan_quality.warnings 中 verification_not_anchored
+      unattributed_failures     ← 失败但无根因（readonly_review 未启用=全部；启用=查 verify_state.failure_analysis）
+      baseline_dirty            ← A3 meta.baseline_dirty
+      inconclusive_evaluations  ← verification_results 中 semantic 条目 inconclusive=True
+
+    H4 uncovered_perspectives（3 个视角缺位）：
+      independent_reviewer / architecture_review / semantic_verdict
+    """
+    results = list(results_map.values()) if results_map else []
+
+    # H1.1 未覆盖验收 ID
+    trace = meta.get("traceability") or {}
+    uncovered_ac = trace.get("missing_requirement_ids") or []
+
+    # H1.2 弱锚定子任务（A2 verification_not_anchored warning）
+    plan_quality = meta.get("plan_quality") or {}
+    weakly_anchored = sorted({
+        str(w.get("subtask_id"))
+        for w in (plan_quality.get("warnings") or [])
+        if isinstance(w, dict) and w.get("type") == "verification_not_anchored"
+        and w.get("subtask_id")
+    })
+
+    # H1.3 无归因失败
+    failed_ids = sorted({
+        str(r.get("subtask_id")) for r in results
+        if r.get("status") == "failed" and r.get("subtask_id")
+    })
+    rr_enabled = bool(
+        ((config or {}).get("verification") or {}).get("readonly_review", {}).get("enabled", False)
+    )
+    if rr_enabled:
+        unattributed: list[str] = []
+        for sid in failed_ids:
+            _has_analysis = False
+            try:
+                _vs = task_dir / sid / "verify_state.json"
+                if _vs.exists():
+                    _fa = (json.loads(_vs.read_text(encoding="utf-8")) or {}).get("failure_analysis", "")
+                    _has_analysis = bool(_fa)
+            except (OSError, json.JSONDecodeError):
+                pass
+            if not _has_analysis:
+                unattributed.append(sid)
+    else:
+        unattributed = failed_ids
+
+    # H1.4 基线 dirty（A3）
+    baseline_dirty = bool(meta.get("baseline_dirty", False))
+
+    # H1.5 语义评估不确定
+    inconclusive = sorted({
+        str(r.get("subtask_id"))
+        for r in results
+        if r.get("subtask_id")
+        for vr in (r.get("verification_results") or [])
+        if isinstance(vr, dict) and vr.get("type") == "semantic" and vr.get("inconclusive")
+    })
+
+    blind_spots = {
+        "uncovered_acceptance_ids": uncovered_ac,
+        "weakly_anchored_subtasks": weakly_anchored,
+        "unattributed_failures": unattributed,
+        "baseline_dirty": baseline_dirty,
+        "inconclusive_evaluations": inconclusive,
+    }
+
+    # H4 未覆盖视角
+    perspectives: list[dict[str, Any]] = []
+    if not rr_enabled:
+        perspectives.append({
+            "perspective": "independent_reviewer",
+            "missing": True,
+            "reason": "readonly_review 未启用（独立只读审查缺位，judge==candidate 风险）",
+        })
+    if not meta.get("architecture_review"):
+        perspectives.append({
+            "perspective": "architecture_review",
+            "missing": True,
+            "reason": "架构审查未执行（fail-open）",
+        })
+    if inconclusive:
+        perspectives.append({
+            "perspective": "semantic_verdict",
+            "missing": True,
+            "reason": f"语义评估不确定（{len(inconclusive)} 个子任务）",
+        })
+
+    return blind_spots, perspectives
+
+
 def _save_meta_atomic(meta: dict, task_dir: Path) -> None:
     """原子写 meta.json：先写 .tmp，再 rename（POSIX 保证原子性）。
 
@@ -927,6 +1028,12 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
         meta["traceability"] = assess_traceability(meta)
     except Exception as _te:
         logger.debug(f"[traceability] 自动判定失败（忽略）: {_te}")
+    # H1+H4 谦逊层：交付盲区清单 + 未覆盖视角（观测标记，不阻断，A1/IV-2）。
+    try:
+        meta["blind_spots"], meta["uncovered_perspectives"] = _build_humility_signals(
+            meta, results_map, config, task_dir)
+    except Exception as _he:
+        logger.debug(f"[humility] 盲区聚合失败（忽略）: {_he}")
     if meta.get("status_schema_version") and not has_failed and delivery["accepted_delivery"]:
         meta["status"] = "ACCEPTED_DELIVERY"
     elif meta.get("status_schema_version") and not has_failed and delivery["delivery_failed"]:
