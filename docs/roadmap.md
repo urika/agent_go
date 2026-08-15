@@ -1,8 +1,8 @@
 # agent_go Roadmap：可靠地产出可合并交付物
 
-> 版本：v4.0
-> 更新日期：2026-08-13
-> 当前阶段：M4 goal 回溯进行中；M0-M3 已 `accepted`
+> 版本：v4.1
+> 更新日期：2026-08-15
+> 当前阶段：M4.5 模型与执行能力 ✅ 已完成（hard 94.4%、方案 B、模型池化）；M0-M4 已 `accepted`
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
@@ -526,6 +526,51 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
                              → 阶段 D（自治，依赖 C + B1）
                              → 阶段 E（仅试点）
 ```
+
+## 7.8 阶段七：模型与执行能力（M4.5 里程碑，已完成 2026-08-15）
+
+目标：从「单一模型链」升级为「**模型池化 + 难度自适应执行**」——hard 任务通过率从 0/6 到 94.4%。
+
+### 背景（实验证据驱动）
+
+hard（功能系统级）任务在 Plan→拆分→worker 局部执行的流程下全部失败（本地 35B 0/6）。对照实验证明根因是**拆分丢失全局上下文**，而非模型能力——端到端单模型执行同一任务成功。由此建立「拆分 vs 端到端」判定框架并落地模型池化。
+
+### 已交付
+
+| 能力 | 说明 | 证据 |
+|------|------|------|
+| **e2e 端到端模式** | hard/架构级任务不拆分子任务，保留全局上下文（worktree 隔离 + 验证循环 + goal + metering 全保留）；判定框架：L0 `--e2e`/`--split` flag > L1 `min_difficulty` > L2 架构级特征信号 > L3 默认拆分 | hard 通过率 0/6 → 33%（首个跃迁） |
+| **模型实体三层设计**（P1-P3） | ① `models.json` registry（endpoint/key_ref/thinking/JSON 遵从/TCO/quality_tags，`agent_go models list/add`）② `router.roles` 角色绑定（planner/evaluator/worker/reviewer，thinking 场景覆盖）③ 部署拓扑收敛代理侧（worker_backends deprecated） | 接入新模型零代码（GLM/K3/v4-pro 声明式适配） |
+| **方案 B 生产配置** | planner=K3（coding 拆解强）+ evaluator=GLM（JSON 评估稳定，规避 K3 纯 thinking 缺陷）+ worker 混合路由 + goal force | hard 17/18（94.4%）、medium/easy 6/6（100%）、真实 dogfood 通过 |
+| **R8 路由归因** | 代理响应头携带 route_target/actual_model/cost，metering is_local 纠正（force_fallback 回退不再误判本地） | 成本/归因可信，选型决策依据 |
+| **验证命令白名单扩展** | pip/pip3 install 支持（`&&` 组合命令逐段校验） | db-performance 通过 |
+| **看板** | 5 阶段 × 3 类型卡片任务管理（web-only，SSE + 审计） | 冒烟验证通过 |
+| **R9 策略可视** | 配置中心展示代理路由策略（模型偏好/云端模型/阈值） | 联合测试通过 |
+
+### 通过率演进（6 个 canonical hard 任务，同口径）
+
+```text
+本地 35B 拆分           0/6  (0%)
+e2e + v4-flash         2/6  (33%)   ← e2e 端到端模式
+e2e + v4-pro           3/6  (50%)
+e2e + GLM              5/6  (83%)
+e2e + K3               3/6  (50%)
+e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
+```
+
+架构改进贡献排序：e2e 端到端（0→33%）> planner/evaluator 上强模型（33→83%）> 角色互补（83→94.4%）> 验证白名单扩展。
+
+### 验收标准（全部达成）
+
+1. 接入新模型 = `agent_go models add` + `router.roles` 绑定，**零代码改动**（thinking/JSON/TCO 声明式）
+2. 全难度可用：hard 94.4% + medium/easy 100%
+3. 真实仓库功能任务端到端 DELIVERY_READY + merge 交付
+4. 成本/归因可信（R8 修正后 metering）
+5. 模型选型有数据依据（[model-selection-report.md](design/model-selection-report.md)：6 组合对比）
+
+### 与 §7.7 阶段六的关系
+
+本阶段是阶段六「智能闭环」的**执行能力底座**：模型池化 + 难度自适应 + 归因可信后，阶段 C（Reflexion/局部重规划）和阶段 D（自治决策）的「换模型/归因复盘」才有可靠基础。
 
 ## 8. 扩展能力决策门
 

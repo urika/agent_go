@@ -381,6 +381,24 @@ metering 不可用时，strict/degrade 模式必须 fail-safe，不能将成本�
 
 模型选择不能只依据厂商 benchmark，必须有 agent_go 自有任务数据支持。
 
+#### F-ROUTE-2 模型池化（✅ 已实现，2026-08-15）
+
+- 模型单一实体三层：① `models.json` registry（模型固有：endpoint/key_ref/thinking 推理特性/JSON 输出遵从/TCO/quality_tags）② `router.roles` 角色绑定（planner/evaluator/worker/reviewer + 场景参数覆盖）③ 部署拓扑收敛代理侧（worker_backends deprecated）。
+- 接入新模型 = `agent_go models add` + 角色绑定，**零代码改动**（声明式 thinking/JSON 自动适配）。
+- 声明式能力：v4-pro/GLM thinking enabled、K3 thinking 始终开启、JSON strict/loose + response_format，均按 registry 声明自动处理。
+
+#### F-ROUTE-3 难度自适应执行（✅ 已实现，2026-08-15）
+
+- **e2e 端到端模式**：hard/架构级任务不拆分子任务（保留全局上下文），判定框架 L0 flag > L1 `min_difficulty` > L2 架构信号 > L3 默认拆分。
+- **方案 B 生产配置**：planner=K3（coding 拆解）+ evaluator=GLM（JSON 评估稳定）+ worker 混合路由 + goal force——hard 17/18（94.4%）、medium/easy 100%、真实 dogfood 通过。
+- 验证命令白名单支持 `pip install` 组合命令（`&&` 逐段校验）。
+
+#### F-ROUTE-4 路由归因与策略可视（✅ 已实现，2026-08-15）
+
+- R8 路由归因：代理响应头 route_target/actual_model/cost → metering is_local 纠正（force_fallback 回退不再误判本地）。
+- R9 策略可视：配置中心展示代理路由策略（模型偏好/云端模型/阈值/Key 状态）。
+- 模型选型数据依据：[model-selection-report.md](design/model-selection-report.md)（6 组合 × 6 hard 任务对比）。
+
 ### 4.6 CLI、JSON 和 MCP
 
 系统应提供：
