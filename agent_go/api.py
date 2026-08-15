@@ -50,9 +50,38 @@ def _resolve_thinking_payload(api_cfg: dict, model: str, provider: str) -> dict:
     return {}
 
 
+def _resolve_planner_api_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    """planner 配置解析（三层设计 P3.1）：router.roles.planner > planner_api > plan_api。
+
+    router.enabled 且 roles.planner 配置时优先（② 角色绑定）；否则 fallback 到
+    planner_api / plan_api 配置块（现有逻辑，router 未启用时完全兼容）。
+    """
+    try:
+        from .router import resolve_role
+        route = resolve_role("planner", config)
+        if route is not None:
+            p = route.primary
+            cfg: dict[str, Any] = {
+                "provider": p.provider,
+                "base_url": p.base_url,
+                "model": p.model,
+                "api_key": p.api_key,
+            }
+            # ② 场景绑定字段透传（thinking/budget 覆盖①默认）
+            if getattr(p, "thinking", None) is not None:
+                cfg["thinking"] = p.thinking
+            if getattr(p, "thinking_budget", None) is not None:
+                cfg["thinking_budget"] = p.thinking_budget
+            return cfg
+    except Exception:
+        pass
+    return config.get("planner_api") or config["plan_api"]
+
+
 def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: logging.Logger) -> str:
-    # planner_api 独立配置（如配置则优先用于 plan 生成，不走 proxy）
-    api_cfg = config.get("planner_api") or config["plan_api"]
+    # planner 配置解析优先级（模型实体三层 P3.1：plan_api/planner_api 合并 → roles.planner）：
+    #   ② router.roles.planner（角色绑定，router.enabled 时）> planner_api > plan_api
+    api_cfg = _resolve_planner_api_cfg(config)
     provider = api_cfg.get("provider", "anthropic")
     base_url = api_cfg["base_url"]
     api_key = get_api_key(config)

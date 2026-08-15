@@ -274,9 +274,9 @@ def call_api(config, messages, logger, role="planner"):
 
 | 阶段 | 内容 | 依赖 |
 |------|------|------|
-| **P1** | models.json registry + evaluator 角色入 router + thinking/JSON 声明式（call_api 读 ①） | router.py/config.py/api.py |
-| **P2** | worker_backends 收敛（worker 统一 worker_base_url）+ local_model_cost 迁入 registry | executor.py/profiles.py |
-| **P3** | plan_api/planner_api 合并 → roles.planner；文档与 CLI（`agent_go models list/add`） | cli.py/docs |
+| **P1** | models.json registry + evaluator 角色入 router + thinking/JSON 声明式（call_api 读 ①） | router.py/config.py/api.py（✅ f8f9e3a） |
+| **P2** | worker_backends 收敛（worker 统一 worker_base_url）+ local_model_cost 迁入 registry | executor.py/profiles.py（✅ 1a0394a） |
+| **P3** | plan_api/planner_api 合并 → roles.planner；文档与 CLI（`agent_go models list/add`） | cli.py/docs（✅ 已完成：_resolve_planner_api_cfg + models list/add） |
 
 ---
 

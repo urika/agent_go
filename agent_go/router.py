@@ -51,6 +51,8 @@ class ProviderConfig:
     temperature: float = 0.2
     max_concurrency: int = 4
     timeout_ms: int = 120000
+    # 角色绑定的独立 API key（② 角色配置；空 = 用全局 plan_api.api_key / key_ref 解析）
+    api_key: str = ""
     # ② 场景绑定覆盖（三层设计 P1）：推理 thinking 开关/预算（覆盖 ① registry 默认值）。
     # None = 未覆盖（用 ① ModelEntity.reasoning.thinking 的声明式默认）。
     thinking: Optional[bool] = None
@@ -66,6 +68,7 @@ class ProviderConfig:
             temperature=data.get("temperature", 0.2),
             max_concurrency=data.get("max_concurrency", 4),
             timeout_ms=data.get("timeout_ms", 120000),
+            api_key=data.get("api_key", ""),
             thinking=data.get("thinking"),
             thinking_budget=data.get("thinking_budget"),
         )

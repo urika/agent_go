@@ -199,6 +199,20 @@ def _build_parser():
     # agents 子命令
     subparsers.add_parser("agents", help="List available Agent types")
 
+    # models 子命令（P3.2：模型池管理——① Model Registry 的查看与注册）
+    models_parser = subparsers.add_parser("models", help="Model registry 管理（list/add）")
+    models_sub = models_parser.add_subparsers(dest="models_subcommand", help="Models operation")
+    models_sub.add_parser("list", help="列出 registry 中的模型")
+    models_add_parser = models_sub.add_parser("add", help="注册新模型到 models.json")
+    models_add_parser.add_argument("model_id", help="模型唯一名（如 kimi-k3）")
+    models_add_parser.add_argument("--provider", default="openai", choices=["anthropic", "openai", "deepseek", "custom"])
+    models_add_parser.add_argument("--base-url", required=True, dest="base_url", help="API 端点")
+    models_add_parser.add_argument("--key-ref", default="", dest="key_ref", help="key 引用（env:VAR / VAR / secret:path#field）")
+    models_add_parser.add_argument("--thinking", action="store_true", help="推理模型需 thinking enabled")
+    models_add_parser.add_argument("--json-loose", action="store_true", dest="json_loose", help="JSON 输出不稳定（needs_response_format）")
+    models_add_parser.add_argument("--tco", type=float, default=0.0, help="本地模型 TCO/次（USD）")
+    models_add_parser.add_argument("--tags", default="", help="能力标签（逗号分隔，如 plan_strong,code_strong）")
+
     # pr 子命令
     pr_parser = subparsers.add_parser("pr", help="Generate and create PR")
     pr_parser.add_argument("task_id", help="Task ID to create PR from")
@@ -3537,6 +3551,62 @@ def cmd_agents() -> None:
         console.print(f"{a['type']:<25} [{src}] {desc}")
     console.sep("─", 55)
 
+
+def cmd_models(args) -> None:
+    """models 子命令：模型池管理（P3.2）——list 查看 / add 注册（① Model Registry）。"""
+    from .models_registry import list_models, load_registry
+    from .config import AGENT_GO_DIR
+
+    sub = getattr(args, "models_subcommand", None)
+    if sub == "list":
+        models = list_models()
+        if not models:
+            console.print("模型池为空（~/.agent_go/models.json 不存在或无模型）")
+            return
+        console.print(f"\n🧠 模型池（{len(models)} 个模型，~/.agent_go/models.json）")
+        console.sep("─", 100)
+        for m in models:
+            thinking = ""
+            if m.thinking.required:
+                thinking = f"thinking:{m.thinking.format}"
+            elif m.thinking.format:
+                thinking = "thinking:optional"
+            json_c = m.output.json_compliance
+            tco = f"TCO ${m.cost.tco_per_call}" if m.cost.tco_per_call else ""
+            tags = ",".join(m.quality_tags) if m.quality_tags else ""
+            console.print(f"{m.id:<22} [{m.provider}] {m.base_url[:38]}")
+            parts = [p for p in (thinking, f"json:{json_c}", tco, tags) if p]
+            if parts:
+                console.print(f"{'':22}  {' | '.join(parts)}")
+        console.sep("─", 100)
+        return
+    if sub == "add":
+        registry_path = AGENT_GO_DIR / "models.json"
+        try:
+            data = json.loads(registry_path.read_text(encoding="utf-8")) if registry_path.exists() else {}
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        entry: dict = {
+            "provider": args.provider,
+            "endpoint": {"base_url": args.base_url, "key_ref": args.key_ref},
+            "reasoning": {"thinking": {"format": args.provider,
+                                       "required": bool(args.thinking)}},
+            "output": {"json_compliance": "loose" if args.json_loose else "strict",
+                       "needs_response_format": bool(args.json_loose)},
+            "cost": {"pricing": args.model_id, "tco_per_call": float(args.tco or 0)},
+            "quality_tags": [t.strip() for t in (args.tags or "").split(",") if t.strip()],
+        }
+        data[args.model_id] = entry
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        console.print(f"✅ 模型已注册: {args.model_id} → {registry_path}")
+        console.print(f"   {args.provider} | {args.base_url[:40]} | thinking={'required' if args.thinking else 'optional'}")
+        # 强制重载 registry 缓存使新模型立即可用
+        load_registry(force_reload=True)
+        return
+    console.print("Usage: agent_go models <list|add>")
+
+
 def _install_sigterm_handler() -> None:
     """P0 Layer 2：注册 SIGTERM/SIGINT handler 优雅退出。
 
@@ -3652,6 +3722,8 @@ def main() -> None:
             cmd_skills(args)
         elif args.command == "agents":
             cmd_agents()
+        elif args.command == "models":
+            cmd_models(args)
         elif args.command == "cache":
             cmd_cache(args)
         elif args.command == "ci":

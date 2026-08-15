@@ -116,6 +116,8 @@ agent_go cache stats
 agent_go router show
 agent_go router set-role <role> --provider <p> --model <m> --base-url <url>
 agent_go router recommend [--results FILE] [--apply] [--force]   # 基于 bench 结果推荐 router.roles + worker_models
+agent_go models list                          # 列出模型池（models.json registry）
+agent_go models add <id> --provider <p> --base-url <url> [--thinking] [--json-loose] [--tco $] [--tags ...]  # 注册新模型（零代码接入）
 agent_go skills list
 agent_go skills show <name> [--json]
 agent_go skills resolve <name>                 # trace a Skill's symlink resolution chain
@@ -202,6 +204,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `agents.py` | Agent type system: developer/architect/reviewer/tester; claude/greywall command |
 | `role_skill_map.py` | Config-driven rule matching: keywords, file patterns, agent type |
 | `router.py` | Role-aware model routing: planner/worker/reviewer, fallback + circuit breaker |
+| `models_registry.py` | 模型池（① Model Registry）：models.json 加载（mtime 缓存）+ ModelEntity（endpoint/thinking/JSON 遵从/TCO/quality_tags）+ key_ref 解析（env/secret，不存明文） |
 | `evaluator.py` | LLM semantic evaluation + failure summary for verification loop |
 | `metrics.py` | Data collection: timing/change stats, estimate_cost, aggregate_metering |
 | `config.py` | Config loading, logging, API key resolution, meter_event |
