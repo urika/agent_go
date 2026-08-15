@@ -449,6 +449,35 @@ def _build_spec_context(spec_obj) -> tuple[str, list[str], list[str]]:
     return "\n\n".join(parts), req_ids, ac_ids
 
 
+def _apply_spec_id_hard_mapping(
+    subtasks: list[dict],
+    spec_obj,
+    spec_req_ids: list[str],
+    spec_ac_ids: list[str],
+    logger: logging.Logger,
+) -> None:
+    """硬映射兜底（spec 闭环 §4.2）：planner 软映射不可靠（冒烟实证 deepseek planner
+    对 AC ID 全部漏标），用「AC 验证命令 ⊆ step.verification」确定性回填。
+    正常拆分路径与 e2e 路径共用；失败不阻断（仅丢追踪能力）。"""
+    if not spec_obj or not (spec_ac_ids or spec_req_ids):
+        return
+    try:
+        from .spec import map_acceptance_to_steps
+        _unmapped_ac = map_acceptance_to_steps(spec_obj.acceptance, subtasks)
+        if spec_req_ids:
+            for st in subtasks:
+                _rids = st.setdefault("requirement_ids", [])
+                for rid in spec_req_ids:
+                    if rid not in _rids:
+                        _rids.append(rid)
+        if _unmapped_ac:
+            logger.warning(f"[spec] 硬映射未匹配的 AC（无法确定性归属 step）: {_unmapped_ac}")
+        else:
+            logger.info(f"[spec] 硬映射完成: REQ={spec_req_ids} AC={spec_ac_ids}")
+    except Exception as _hme:
+        logger.debug(f"[spec] 硬映射失败（非关键）: {_hme}")
+
+
 def _preflight_repair_plan(
     plan: dict,
     *,
@@ -981,6 +1010,8 @@ def cmd_run(args=None):
         logger.info(f"[e2e] 端到端模式触发: {_e2e_reason}")
         subtasks = [_build_e2e_subtask(task, config)]
         confirmed = _confirm_subtasks_channel(subtasks, config, logger, task_dir=task_dir)
+        # 硬映射兜底（e2e 路径同样需要 ID 回填——冒烟实证 docs 任务被误判 e2e 后 ID 全空）
+        _apply_spec_id_hard_mapping(confirmed, spec_obj, spec_req_ids, spec_ac_ids, logger)
         # confirmed_plan 保持 None（无 Plan），直接跳过后续 plan 生成/拆解，
         # 复用下方 plan_quality / pipeline 流程
     iteration = 1
@@ -1095,6 +1126,9 @@ def cmd_run(args=None):
                     disable_rule_skills=not config.get("skills", {}).get("auto_discover", False),
                     task_type_override=(spec_obj.task_type if spec_obj else None),
                     min_difficulty=config.get("min_difficulty", ""))
+                # 硬映射兜底（spec 闭环 §4.2）：planner 软映射不可靠（冒烟实证 deepseek
+                # planner 对 AC ID 全部漏标），用「AC 验证命令 ⊆ step.verification」确定性回填。
+                _apply_spec_id_hard_mapping(subtasks, spec_obj, spec_req_ids, spec_ac_ids, logger)
                 doc_paths = final_doc_paths
                 (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
                 _save_plan_snapshot(task_dir, confirmed_plan, iteration)

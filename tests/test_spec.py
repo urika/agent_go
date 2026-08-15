@@ -438,6 +438,39 @@ class TestExtractDoNotTouch:
         assert extract_do_not_touch(text) == []
 
 
+class TestMapAcceptanceToSteps:
+    """硬映射（§4.2）：AC 验证命令匹配 step.verification 确定性回填 ID。"""
+
+    def test_match_by_verification_command(self):
+        from agent_go.spec import map_acceptance_to_steps
+        acceptance = """- [ ] AC-001 登录返回 JWT：`pytest tests/test_login.py::test_login`
+- [ ] AC-002 密码哈希：`pytest tests/test_auth.py::test_hash`
+"""
+        steps = [
+            {"id": "1", "verification": "pytest tests/test_login.py::test_login -v"},
+            {"id": "2", "verification": "pytest tests/test_auth.py::test_hash"},
+        ]
+        unmapped = map_acceptance_to_steps(acceptance, steps)
+        assert unmapped == []
+        assert steps[0]["acceptance_criteria_ids"] == ["AC-001"]
+        assert steps[1]["acceptance_criteria_ids"] == ["AC-002"]
+
+    def test_no_command_ac_stays_unmapped(self):
+        from agent_go.spec import map_acceptance_to_steps
+        acceptance = "- [ ] AC-003 人工检查：确认文档已更新\n"
+        unmapped = map_acceptance_to_steps(acceptance, [{"id": "1", "verification": "pytest"}])
+        assert unmapped == ["AC-003"]
+
+    def test_merge_with_existing_ids(self):
+        from agent_go.spec import map_acceptance_to_steps
+        acceptance = "- [ ] AC-001 测试：`pytest tests/test_x.py`\n"
+        steps = [{"id": "1", "verification": "pytest tests/test_x.py",
+                  "acceptance_criteria_ids": ["AC-009"]}]
+        unmapped = map_acceptance_to_steps(acceptance, steps)
+        assert unmapped == []
+        assert sorted(steps[0]["acceptance_criteria_ids"]) == ["AC-001", "AC-009"]
+
+
 class TestMatchSectionKey:
     def test_numeric_prefix(self):
         assert _match_section_key("1. 目标") == "1"
@@ -615,3 +648,32 @@ class TestExtractVerificationScopes:
         assert r["commands"] == []
         assert r["has_function_level"] is False
         assert r["has_anchored"] is False
+
+
+class TestMapAcceptanceFallback:
+    """硬映射兜底：未匹配 AC 归给空验证 step。"""
+
+    def test_unmapped_goes_to_empty_verification_step(self):
+        from agent_go.spec import map_acceptance_to_steps
+        acceptance = """- [ ] AC-001 文档含字段说明：`python3 -c "assert 'blind_spots' in open('AGENTS.md').read(); print('OK')"`
+- [ ] AC-002 测试不回归：`python3 -m pytest tests/test_spec.py -q`
+"""
+        steps = [{"id": "1", "verification": ""}]
+        unmapped = map_acceptance_to_steps(acceptance, steps)
+        assert unmapped == []
+        assert sorted(steps[0]["acceptance_criteria_ids"]) == ["AC-001", "AC-002"]
+
+    def test_python3_command_extraction(self):
+        from agent_go.spec import _extract_verification_commands
+        cmds = _extract_verification_commands("`python3 -m pytest tests/test_spec.py -q`")
+        assert any("python3 -m pytest" in c for c in cmds)
+
+
+def test_map_acceptance_list_verification():
+    """verification 为 list 时的归一化（冒烟实证：docs 任务 verification=[]）。"""
+    from agent_go.spec import map_acceptance_to_steps
+    acceptance = "- [ ] AC-001 测试：`pytest tests/test_x.py`\n"
+    steps = [{"id": "1", "verification": []}]
+    unmapped = map_acceptance_to_steps(acceptance, steps)
+    assert unmapped == []
+    assert steps[0]["acceptance_criteria_ids"] == ["AC-001"]

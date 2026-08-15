@@ -195,8 +195,13 @@ def _save_meta_atomic(meta: dict, task_dir: Path) -> None:
     os.replace(tmp_path, meta_path)
 
 
-def _meter_total_cost(metering_path: str) -> float:
-    """聚合 metering.jsonl 的累计成本（任务级，用于成本控制 L3 熔断）。"""
+def _meter_total_cost(metering_path: str, exclude_roles: Optional[tuple[str, ...]] = None) -> float:
+    """聚合 metering.jsonl 的累计成本（任务级，用于成本控制 L3 熔断）。
+
+    exclude_roles: 排除指定 role 的事件（如 reservation 头寸计算排除 planner——
+    动态预算公式 Σ per_subtask×mult 是 worker-only 口径，planner 成本不应吃掉
+    首个 wave 的预留头寸，否则 planner 花 0.01 就会让 easy 任务被 strict 误杀）。
+    """
     if not metering_path:
         return 0.0
     total = 0.0
@@ -209,6 +214,8 @@ def _meter_total_cost(metering_path: str) -> float:
                 try:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if exclude_roles and ev.get("role") in exclude_roles:
                     continue
                 # cost_censored 是控制审计事件，cost_usd 表示累计下限，不是新的消费。
                 if ev.get("event") != "cost_censored":
@@ -649,7 +656,9 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
         # 在下一 wave 复核，reservation 只针对有明确 per-subtask 预算的任务。
         if _cc_cfg.get("enabled") and _cc_cfg.get("budget_mode", "strict") == "strict" and wave:
             _reservation_budget = _cc_cfg.get("max_budget_usd") or _dynamic_task_budget(_cc_cfg, confirmed)
-            _reserved_available = max(0.0, float(_reservation_budget or 0.0) - _meter_total_cost(config.get("_metering_path", "")))
+            # CR-SMOKE-1：头寸计算排除 planner 成本——动态预算公式是 worker-only 口径
+            _reserved_available = max(0.0, float(_reservation_budget or 0.0) - _meter_total_cost(
+                config.get("_metering_path", ""), exclude_roles=("planner",)))
             _reserved_wave = []
             _reservation_blocked = []
             for _st in wave:

@@ -284,6 +284,67 @@ def extract_do_not_touch(scope_text: str) -> list[str]:
     return extract_file_paths(text[m.start():])
 
 
+def _verification_text(value) -> str:
+    """把 step.verification 归一化为文本（支持 str / list[str]）。"""
+    if isinstance(value, list):
+        return " ".join(str(v) for v in value)
+    return str(value or "")
+
+
+def map_acceptance_to_steps(acceptance_text: str, steps: list[dict]) -> list[str]:
+    """硬映射（确定性，零 LLM）：按 §5 验收标准的 AC ID + 反引号验证命令，
+    回填 steps 的 acceptance_criteria_ids。返回未匹配的 AC ID 列表。
+
+    设计依据（spec-closed-loop-design.md §4.2 映射分两层）：
+    planner 软映射不可靠（漏标 ID——冒烟实证：deepseek planner 对 3 条 AC 全部漏标），
+    硬映射用「AC 行的反引号命令 ⊆ step.verification」确定性匹配兜底。
+
+    匹配规则：AC 行内每条反引号命令，若出现在某 step 的 verification 中 → 该 AC 归属该 step。
+    无验证命令的 AC（纯人工检查项）无法确定性匹配 → 留在返回的 unmapped。
+    """
+    unmapped: list[str] = []
+    ac_cmds: dict[str, list[str]] = {}
+    for line in (acceptance_text or "").splitlines():
+        _id_m = _AC_ID.search(line)
+        if not _id_m:
+            continue
+        _num = _id_m.group(1) or _id_m.group(2) or ""
+        ac_id = f"AC-{int(_num):03d}" if _num.isdigit() else f"AC-{_num}"
+        cmds = _CMD_INLINE.findall(line)
+        ac_cmds[ac_id] = cmds
+        if not cmds:
+            unmapped.append(ac_id)
+            continue
+        matched = False
+        for st in steps:
+            ver = _verification_text(st.get("verification"))
+            if any(c in ver for c in cmds):
+                ids = st.setdefault("acceptance_criteria_ids", [])
+                if ac_id not in ids:
+                    ids.append(ac_id)
+                matched = True
+        if not matched:
+            unmapped.append(ac_id)
+    # 兜底归属：未匹配的 AC 归给「验证为空的 step」（如 docs 任务的轻验证步骤，
+    # planner 未写 verification——冒烟实证：deepseek planner 对 docs 任务产出空验证 []）。
+    # 同时把 AC 的验证命令填入该 step 的 verification（否则 traceability 的
+    # verification_coverage=0 会持续标记「验证覆盖不完整」）。
+    if unmapped:
+        empty_verification_steps = [st for st in steps
+                                    if not _verification_text(st.get("verification")).strip()]
+        if empty_verification_steps:
+            _fill_cmds = [c for ac in unmapped for c in ac_cmds.get(ac, [])]
+            for st in empty_verification_steps:
+                ids = st.setdefault("acceptance_criteria_ids", [])
+                for ac_id in unmapped:
+                    if ac_id not in ids:
+                        ids.append(ac_id)
+                if _fill_cmds:
+                    st["verification"] = _fill_cmds
+            unmapped = []
+    return unmapped
+
+
 def _repo_file_set(repo: Optional[Path]) -> set[str]:
     """获取 repo 中已跟踪的文件集合（git ls-files），用于路径校验。"""
     if repo is None or not repo.exists():
@@ -357,7 +418,7 @@ def _edit_distance(a: str, b: str) -> int:
 
 # 验证命令的常见出现形式：代码块里的 shell 命令、行内的反引号命令
 _CMD_BLOCK = re.compile(r"```(?:bash|shell|sh)?\s*\n(.*?)```", re.DOTALL)
-_CMD_INLINE = re.compile(r"`((?:python|pytest|npm|yarn|cargo|go|make|ruby|rspec|rubocop)\s[^`]+)`")
+_CMD_INLINE = re.compile(r"`((?:python3?|pytest|npm|yarn|cargo|go|make|ruby|rspec|rubocop)\s[^`]+)`")
 
 # 稳定验收 ID（AC-xxx / ac-xxx），与 governance.py 的 _AC_ID 前缀约定一致
 _AC_ID = re.compile(r"\b(?:AC-(\w+)|ac[-_]?(\w+))\b")
