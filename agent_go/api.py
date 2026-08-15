@@ -44,6 +44,14 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
 
     if provider == "anthropic":
         payload = {"model": model, "max_tokens": api_cfg.get("max_tokens", 4096), "temperature": api_cfg.get("temperature", 0.2), "messages": messages}
+        # GLM 推理模型（glm-5.x，经智谱 Anthropic 端点）需 thinking enabled 才产出 text block，
+        # 否则仅返回 thinking block 无最终回答。检测 glm 模型或 api_cfg.thinking 显式开启。
+        # Anthropic 格式 thinking: {"type":"enabled","budget_tokens":N}。
+        if api_cfg.get("thinking") or model.startswith("glm"):
+            payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": int(api_cfg.get("thinking_budget", 1024)),
+            }
     else:
         payload = {"model": model, "messages": messages, "max_tokens": api_cfg.get("max_tokens", 4096), "temperature": api_cfg.get("temperature", 0.2)}
         # DeepSeek 推理模型（v4-pro，经 opus-4-7 路由）OpenAI 端点必须 thinking enabled，
