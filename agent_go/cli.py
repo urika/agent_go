@@ -1588,6 +1588,7 @@ def cmd_inspect(args) -> None:
             "summary": summary,
             "verify_ok": verify_ok,
             "has_task_md": task_file.exists(),
+            "problem_id": result.get("problem_id", ""),
         })
 
     if as_json:
@@ -1602,6 +1603,12 @@ def cmd_inspect(args) -> None:
     console.print(f"\n🔍 保留现场: {task_id}")
     console.print(f"📁 任务目录: {task_dir}")
     console.sep("─", 70)
+    # 失败历史关联（#52：决定 resume 修复前看到历史解法——最有价值的召回时机）
+    try:
+        from .problems import load as load_problems
+        problems_map = {p.id: p for p in load_problems(AGENT_GO_DIR / "problems.jsonl")}
+    except Exception:
+        problems_map = {}
     for e in entries:
         icon_map = {"failed": "❌", "blocked": "🔗", "completed": "✅", "no_changes": "⏭️", "running": "🔄"}
         icon = icon_map.get(e["status"], "❓")
@@ -1612,6 +1619,17 @@ def cmd_inspect(args) -> None:
             console.print(f"原因: {e['failure_reason']}")
         if e["summary"]:
             console.print(f"摘要: {e['summary']}")
+        if e["status"] == "failed" and e.get("problem_id"):
+            _prob = problems_map.get(e["problem_id"])
+            if _prob:
+                _hist = f"💡 失败历史: 该模式第 {_prob.occurrence_count} 次出现"
+                if _prob.root_cause:
+                    _hist += f"；历史根因: {_prob.root_cause[:60]}"
+                if _prob.resolution_summary:
+                    _hist += f"；历史解法: {_prob.resolution_summary[:60]}"
+                console.print(_hist)
+                if _prob.status == "opened" and _prob.resolved_by:
+                    console.print("   （上次修复未生效，已重开跟踪）")
         if e["verify_ok"] is not None:
             console.print(f"验证: {'通过' if e['verify_ok'] else '失败'}")
         if e["worktree_exists"]:

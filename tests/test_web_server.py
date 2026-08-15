@@ -648,3 +648,55 @@ class TestSpaJsSyntax:
             "SPA 内嵌 JS 语法错误（常见原因：Python 三引号里的 \\n 注入 JS "
             f"单引号字符串，需写 \\\\n）：\n{r.stderr[:500]}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════
+# 谦逊层（#51）：api_task 透传 blind_spots / uncovered_perspectives / layer_attribution
+# ═══════════════════════════════════════════════════════════════
+
+class TestTaskDetailHumility:
+    """任务详情带出谦逊层聚合数据（纯透传 meta）。"""
+
+    def test_api_task_carries_humility_fields(self, tmp_path, monkeypatch):
+        import json
+        import agent_go.web_server as ws
+
+        agdir = tmp_path / "agdir"
+        agdir.mkdir()
+        td = agdir / "task-20260814-120000-111-aaaa"
+        td.mkdir()
+        (td / "meta.json").write_text(json.dumps({
+            "task": "t", "status": "VERIFICATION_FAILED",
+            "status_schema_version": 1,
+            "blind_spots": {"uncovered_acceptance_ids": ["AC-002"], "baseline_dirty": True},
+            "uncovered_perspectives": [{"perspective": "independent_reviewer", "missing": True}],
+            "layer_attribution": {"primary": "spec_too_broad", "by_subtask": {"sub-1": "worker_capability"}},
+            "subtasks": [], "results": [],
+        }), encoding="utf-8")
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", agdir)
+
+        d = ws.api_task("task-20260814-120000-111-aaaa")
+        assert d is not None
+        assert d["blind_spots"]["uncovered_acceptance_ids"] == ["AC-002"]
+        assert d["blind_spots"]["baseline_dirty"] is True
+        assert d["uncovered_perspectives"][0]["perspective"] == "independent_reviewer"
+        assert d["layer_attribution"]["primary"] == "spec_too_broad"
+
+    def test_api_task_no_humility_when_absent(self, tmp_path, monkeypatch):
+        import json
+        import agent_go.web_server as ws
+
+        agdir = tmp_path / "agdir"
+        agdir.mkdir()
+        td = agdir / "task-20260814-120000-111-bbbb"
+        td.mkdir()
+        (td / "meta.json").write_text(json.dumps({
+            "task": "t", "status": "DELIVERY_READY",
+            "status_schema_version": 1, "subtasks": [], "results": [],
+        }), encoding="utf-8")
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", agdir)
+
+        d = ws.api_task("task-20260814-120000-111-bbbb")
+        assert d["blind_spots"] == {}
+        assert d["uncovered_perspectives"] == []
+        assert d["layer_attribution"] == {}

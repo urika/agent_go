@@ -205,6 +205,10 @@ def api_task(task_id: str) -> Optional[dict]:
             k: meta.get(k) for k in ("planner_model", "source_batch")
             if meta.get(k)
         },
+        # 谦逊层（#51）：已知盲区 + 未覆盖视角 + 层间归因（纯透传 meta 已聚合数据）
+        "blind_spots": meta.get("blind_spots") or {},
+        "uncovered_perspectives": meta.get("uncovered_perspectives") or [],
+        "layer_attribution": meta.get("layer_attribution") or {},
     }
 
 
@@ -2032,8 +2036,11 @@ _SPA_HTML = """<!DOCTYPE html>
   .op-msg { font-size:12px; margin-left:6px; }
   .review-panel { border-top:1px solid var(--border); margin-top:12px;
                   padding-top:4px; }
-  .pending-card { background:rgba(210,153,34,0.08); border:1px solid var(--yellow);
-                  border-radius:8px; padding:12px 14px; margin-bottom:12px; }
+  .pending-card { background:rgba(210,153,34,0.08); border:1px solid var(--yellow);                  border-radius:8px; padding:12px 14px; margin-bottom:12px; }
+  .humility-card { background:rgba(210,153,34,0.06); border:1px solid var(--yellow); border-radius:8px;
+                   padding:10px 14px; margin-top:12px; margin-bottom:12px; }
+  .humility-card .h-title { font-weight:600; color:var(--yellow); margin-bottom:6px; }
+  .humility-card .h-line { color:var(--dim); font-size:13px; line-height:1.6; }
 </style>
 </head>
 <body>
@@ -2574,12 +2581,28 @@ function renderTaskDetail(d) {
         '<div class="loading">点击子任务查看明细</div>'+
       '</div></div>';
   }).join('');
+  // 谦逊层盲区卡片（#51：交底报告进操作台）
+  const bs = d.blind_spots || {};
+  const persp = d.uncovered_perspectives || [];
+  const layer = d.layer_attribution || {};
+  const blindLines = [];
+  if (bs.uncovered_acceptance_ids && bs.uncovered_acceptance_ids.length) blindLines.push('未覆盖验收 ID: ' + bs.uncovered_acceptance_ids.join(', '));
+  if (bs.weakly_anchored_subtasks && bs.weakly_anchored_subtasks.length) blindLines.push('弱锚定验证子任务: ' + bs.weakly_anchored_subtasks.join(', '));
+  if (bs.unattributed_failures && bs.unattributed_failures.length) blindLines.push('无根因失败: ' + bs.unattributed_failures.join(', '));
+  if (bs.baseline_dirty) blindLines.push('任务启动时工作区有未提交改动');
+  if (bs.inconclusive_evaluations && bs.inconclusive_evaluations.length) blindLines.push('语义评估不确定: ' + bs.inconclusive_evaluations.join(', '));
+  persp.forEach(p => blindLines.push('未覆盖视角 [' + esc(p.perspective||'') + ']: ' + esc(p.reason||'')));
+  if (layer.primary) blindLines.push('层间归因: ' + esc(layer.primary));
+  const humilityHtml = blindLines.length
+    ? '<div class="humility-card"><div class="h-title">⚠️ 已知盲区（系统主动交底）</div>' +
+      blindLines.map(l => '<div class="h-line">' + l + '</div>').join('') + '</div>'
+    : '';
   return '<div class="kv">'+
     '<dt>任务</dt><dd>'+esc(d.task)+'</dd>'+
     '<dt>仓库</dt><dd>'+esc(d.repo)+'</dd>'+
     '<dt>状态</dt><dd><span class="'+((STATUS_COLORS[d.status])||'')+'">'+statusIcon(d.status)+' '+esc(d.status)+'</span></dd>'+
     '<dt>创建时间</dt><dd>'+esc(d.created_at||'')+'</dd>'+
-    '</div><div style="margin-top:12px">'+items+'</div>';
+    '</div>'+humilityHtml+'<div style="margin-top:12px">'+items+'</div>';
 }
 
 function bindDetailEvents(taskId, tr) {
