@@ -38,6 +38,7 @@
                    "hard": {"model": "claude-opus-4-7"}}
     }
   },
+  "evaluator": {"arbitration": {"enabled": true, "confidence_threshold": 0.5}},
   "plan_api": {"worker_base_url": "http://localhost:4000"},
   "worker_backends": {"claude-haiku-4-5": "http://localhost:4000",
                        "claude-sonnet-4-6": "http://localhost:4000",
@@ -46,6 +47,43 @@
   "goal": {"enabled": true, "policy": "force", "max_turns": 50, "timeout_seconds": 3600}
 }
 ```
+
+### P0 可靠性降级链（可选增强）
+
+方案 B 的稳定性验证为 17/18（94.4%），长尾波动主要来自单一 provider 的瞬时
+失败或低置信度评估。可在角色绑定中声明多级链，模型实体属性从 registry 自动
+解析，失败时依次降级：
+
+```json
+{
+  "router": {
+    "roles": {
+      "planner": {
+        "model": "kimi-k3",
+        "fallbacks": [
+          {"model": "glm-5.3"},
+          {"model": "deepseek-v4-pro"},
+          {"model": "local-mlx"}
+        ]
+      },
+      "evaluator": {
+        "model": "kimi-k3",
+        "fallbacks": [
+          {"model": "glm-5.3"},
+          {"model": "deepseek-v4-pro"},
+          {"model": "local-mlx"}
+        ]
+      }
+    }
+  },
+  "worker_models_fallback_chain": {
+    "hard": ["kimi-for-coding", "glm-5.3", "deepseek-v4-pro", "local-mlx"]
+  }
+}
+```
+
+降级链默认关闭，避免无意增加成本；启用后所有 fallback 均写入 metering，包含
+实际 provider/model、fallback 结果和失败原因，便于成本与可靠性分析。
 
 ## 3. 配套机制（方案 B 依赖，均已落地）
 

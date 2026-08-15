@@ -127,6 +127,13 @@
     "hard":   ""
   },
 
+  "worker_models_fallback_chain": {
+    "_comment": "P0：验证/超时失败后按顺序升级模型；空数组=不启用。",
+    "easy":   [],
+    "medium": [],
+    "hard":   []
+  },
+
   "worker_models_degrades": {
     "_comment": "预算降级（degrade 模式）时的难度下移映射",
     "easy":   "",

@@ -36,6 +36,30 @@ def _resolve_env_value(value: str) -> str:
     return pattern.sub(_replace, value)
 
 
+def _fallback_model_for_retry(config: dict, difficulty: str, retry_count: int,
+                              current_model: str = "") -> str:
+    """Return the configured model for a verification retry.
+
+    P0 uses a list as an ordered upgrade chain; the legacy single-value mapping
+    remains a fallback for existing configurations. Empty entries and repeating
+    the current model are ignored by the caller.
+    """
+    chains = config.get("worker_models_fallback_chain", {}) or {}
+    chain = chains.get(difficulty, []) if isinstance(chains, dict) else []
+    if isinstance(chain, str):
+        chain = [chain] if chain else []
+    if isinstance(chain, list):
+        index = retry_count - 1
+        if 0 <= index < len(chain) and chain[index]:
+            return str(chain[index])
+    legacy = config.get("worker_models_fallback", {}) or {}
+    if isinstance(legacy, dict):
+        value = legacy.get(difficulty, "")
+        if value and value != current_model:
+            return str(value)
+    return ""
+
+
 # 本地后端真实模型名探测缓存：{(base_url, host, port): model_name}
 _local_model_probe_cache: dict = {}
 
@@ -1723,10 +1747,10 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 logger.warning(f"收到 SIGTERM，跳过第 {retry_count + 1} 次修复")
                 break
             retry_count += 1
-            # retry 时升级模型：worker_models_fallback 配置了升级目标则切换
-            _fb_models = _cfg.get("worker_models_fallback", {})
+            # retry 时升级模型：优先使用 P0 多级 fallback chain，兼容旧单级配置。
             _sub_diff = subtask.get("difficulty", "medium")
-            _fallback_model = _fb_models.get(_sub_diff, "")
+            _fallback_model = _fallback_model_for_retry(
+                _cfg, _sub_diff, retry_count, env.get("AGENT_GO_CLAUDE_MODEL", ""))
             if _fallback_model and env.get("AGENT_GO_CLAUDE_MODEL", "") != _fallback_model:
                 env["AGENT_GO_CLAUDE_MODEL"] = _fallback_model
                 logger.info(f"[model_upgrade] retry={retry_count} difficulty={_sub_diff} → {_fallback_model}")

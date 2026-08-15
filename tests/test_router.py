@@ -199,6 +199,30 @@ class TestResolveProvider:
         }
         assert resolve_provider("tester", config) is None
 
+    def test_resolves_multi_level_fallback_chain(self):
+        config = {
+            "router": {
+                "enabled": True,
+                "roles": {
+                    "evaluator": {
+                        "provider": "moonshot",
+                        "base_url": "https://kimi.example/v1/messages",
+                        "model": "kimi-for-coding",
+                        "fallbacks": [
+                            {"provider": "zhipu", "base_url": "https://glm.example/v1/messages", "model": "glm-5.3"},
+                            {"provider": "deepseek", "base_url": "https://deepseek.example/v1", "model": "deepseek-v4-pro"},
+                            {"provider": "openai", "base_url": "http://localhost:4000/v1", "model": "local-mlx"},
+                        ],
+                    }
+                },
+            }
+        }
+        route = __import__("agent_go.router", fromlist=["resolve_role"]).resolve_role("evaluator", config)
+        assert route is not None
+        assert [p.model for p in route.providers()] == [
+            "kimi-for-coding", "glm-5.3", "deepseek-v4-pro", "local-mlx"
+        ]
+
 
 # ═══════════════════════════════════════════════════════════════
 # _build_metering Tests
@@ -687,6 +711,29 @@ class TestFallbackChain:
         assert metering["fallback_reason"] == "primary_unavailable"
         assert metering["actual_provider"] == "anthropic"
         assert metering["actual_model"] == "claude-haiku-4-5-20251001"
+
+    def test_quality_failure_walks_multi_level_chain(self, clean_breakers, logger):
+        """质量失败时依次尝试 fallback 链，最终记录实际成功模型。"""
+        route = RoleRoute(
+            role="evaluator",
+            primary=ProviderConfig(provider="custom", base_url="http://p", model="k3"),
+            fallbacks=(
+                ProviderConfig(provider="anthropic", base_url="http://glm", model="glm-5.3"),
+                ProviderConfig(provider="openai", base_url="http://ds", model="deepseek-v4-pro"),
+            ),
+        )
+        with patch("urllib.request.urlopen", side_effect=[
+            _bad_structure_response(),  # primary
+            _bad_structure_response(),  # primary retry
+            _bad_structure_response(),  # GLM fallback
+            _ok_response("deepseek fallback"),  # v4-pro fallback
+        ]) as mock_open:
+            content, metering = call_with_role(
+                route, [{"role": "user", "content": "t"}], "k", logger)
+        assert content == "deepseek fallback"
+        assert metering["result"] == "fallback"
+        assert metering["actual_model"] == "deepseek-v4-pro"
+        assert mock_open.call_count == 4
 
 
 # ═══════════════════════════════════════════════════════════════

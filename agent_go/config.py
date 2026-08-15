@@ -153,6 +153,11 @@ DEFAULT_CONFIG = {
         "medium": "",
         "hard": "",
     },
+    "worker_models_fallback_chain": {  # P0：失败后按 retry 顺序自动升级模型
+        "easy": [],
+        "medium": [],
+        "hard": [],
+    },
     "worker_models_degrades": {     # S12-P2：budget_mode=degrade 时的模型降级表（对称升级表）。
                                     # 键 = 当前难度，值 = 降级目标难度；空 = 降档到 claude 默认模型
         "easy": "",

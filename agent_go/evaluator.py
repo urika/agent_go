@@ -423,11 +423,40 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
     start = time.time()
     evaluator_cfg = config.get("evaluator", {})
 
-    # 构建评估用 API 配置
-    eval_api_cfg = dict(config.get("plan_api", {}))
-    for key in ("provider", "model", "base_url", "api_key"):
-        if evaluator_cfg.get(key):
-            eval_api_cfg[key] = evaluator_cfg[key]
+    # P0 provider 降级链/仲裁：router.roles.evaluator 可声明
+    # fallback/fallbacks（例如 K3 → GLM → v4-pro → local）。没有降级链时
+    # 保持现有 call_api 路径，避免改变旧配置的行为与 R8 归因。
+    _evaluator_route = None
+    try:
+        from .router import resolve_role
+        _evaluator_route = resolve_role("evaluator", config)
+    except Exception:
+        _evaluator_route = None
+
+    def _provider_dict(provider_config) -> dict:
+        return {
+            "provider": provider_config.provider,
+            "base_url": provider_config.base_url,
+            "model": provider_config.model,
+            "api_key": provider_config.api_key,
+            "key_ref": getattr(provider_config, "key_ref", ""),
+            "max_tokens": provider_config.max_tokens,
+            "temperature": provider_config.temperature,
+            "timeout_ms": provider_config.timeout_ms,
+            "thinking": provider_config.thinking,
+            "thinking_budget": provider_config.thinking_budget,
+            "json_output": provider_config.json_output,
+            "reasoning_effort": provider_config.reasoning_effort,
+        }
+
+    # 构建评估用 API 配置；router 角色优先，旧 evaluator/plan_api 作为 fallback。
+    if _evaluator_route is not None:
+        eval_api_cfg = _provider_dict(_evaluator_route.primary)
+    else:
+        eval_api_cfg = dict(config.get("plan_api", {}))
+        for key in ("provider", "model", "base_url", "api_key"):
+            if evaluator_cfg.get(key):
+                eval_api_cfg[key] = evaluator_cfg[key]
     # 评估器 API 调用独立超时：不绑定 plan_api 的 timeout_ms（可能长达 3min）
     # 评估只需快速判断 pass/fail，90s 足够
     eval_api_cfg["timeout_ms"] = 90_000
@@ -441,8 +470,20 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
     prompt = _build_eval_prompt(subtask, verification, diff, previous_attempts, no_truncation)
     messages = [{"role": "user", "content": prompt}]
 
+    _route_metering = None
     try:
-        content = call_api(eval_config, messages, logger)
+        _has_fallback_chain = bool(_evaluator_route and len(_evaluator_route.providers()) > 1)
+        if _has_fallback_chain:
+            from .config import get_api_key
+            from .router import call_with_role
+            content, _route_metering = call_with_role(
+                _evaluator_route, messages, get_api_key(eval_config), logger,
+                task_id=config.get("_task_id", ""),
+                subtask_id=subtask.get("id", ""),
+                metering_path=None, config=eval_config,
+            )
+        else:
+            content = call_api(eval_config, messages, logger, role="evaluator")
     except Exception as e:
         logger.warning(f"语义评估 API 调用失败: {e}")
         return {
@@ -457,6 +498,50 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
         }
 
     parsed = _parse_eval_response(content)
+
+    # P0 低置信度复核：primary 给出低置信度/不确定结论时，用降级链的下一个
+    # evaluator 复核一次。高置信度结果不重复调用，避免正常任务成本翻倍。
+    _arb_cfg = evaluator_cfg.get("arbitration", {}) or {}
+    _arb_enabled = bool(
+        _arb_cfg.get("enabled", bool(_evaluator_route and len(_evaluator_route.providers()) > 1))
+    )
+    _arb_threshold = float(_arb_cfg.get("confidence_threshold", 0.5) or 0.5)
+    _arb_route = None
+    if _arb_enabled and _evaluator_route is not None:
+        _candidates = _evaluator_route.providers()[1:]
+        if _candidates:
+            from .router import RoleRoute
+            _arb_route = RoleRoute(
+                role="evaluator", primary=_candidates[0], fallbacks=tuple(_candidates[1:]))
+    _parse_uncertain = "无法解析" in str(parsed.get("reason", ""))
+    if _arb_route is not None and (
+        parsed.get("confidence", 0.0) <= _arb_threshold or _parse_uncertain
+    ):
+        try:
+            from .config import get_api_key
+            from .router import call_with_role
+            _arb_content, _arb_metering = call_with_role(
+                _arb_route, messages, get_api_key(eval_config), logger,
+                task_id=config.get("_task_id", ""),
+                subtask_id=subtask.get("id", ""),
+                metering_path=None, config=eval_config,
+            )
+            _arb_parsed = _parse_eval_response(_arb_content)
+            _primary_score = float(parsed.get("confidence", 0.0) or 0.0)
+            _arb_score = float(_arb_parsed.get("confidence", 0.0) or 0.0)
+            # 复核有更高置信度，或将低置信度 false 改为高置信度 true 时采用。
+            if _arb_score > _primary_score or (
+                not parsed.get("passed", False) and _arb_parsed.get("passed", False)
+            ):
+                parsed = _arb_parsed
+                content = _arb_content
+                _route_metering = _arb_metering
+                logger.info(
+                    "evaluator 低置信度复核采用 fallback: model=%s confidence=%.2f",
+                    _arb_metering.get("actual_model", ""), _arb_score,
+                )
+        except Exception as _arb_err:
+            logger.warning("evaluator 低置信度复核失败（保留 primary 结果）: %s", _arb_err)
     latency_ms = round((time.time() - start) * 1000, 2)
 
     est_prompt_tokens = max(1, _estimate_tokens(prompt))
@@ -464,8 +549,8 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
     cost_usd = 0.0
     try:
         cost_usd = estimate_cost(
-            eval_api_cfg.get("provider", "anthropic"),
-            eval_api_cfg.get("model", ""),
+            (_route_metering or {}).get("actual_provider", eval_api_cfg.get("provider", "anthropic")),
+            (_route_metering or {}).get("actual_model", eval_api_cfg.get("model", "")),
             est_prompt_tokens, est_completion_tokens,
         )
     except Exception:
@@ -477,8 +562,8 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
     _ev = {
         "role": "evaluator",
         "virtual_model": "agentgo-evaluator",
-        "actual_provider": eval_api_cfg.get("provider", "anthropic"),
-        "actual_model": eval_api_cfg.get("model", ""),
+        "actual_provider": (_route_metering or {}).get("actual_provider", eval_api_cfg.get("provider", "anthropic")),
+        "actual_model": (_route_metering or {}).get("actual_model", eval_api_cfg.get("model", "")),
         "difficulty": subtask.get("difficulty", ""),
         "prompt_tokens": est_prompt_tokens,
         "completion_tokens": est_completion_tokens,

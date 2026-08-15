@@ -24,7 +24,7 @@ import threading
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Optional, Any, Callable
 
 from .metrics import estimate_cost
 from .config import meter_event
@@ -53,24 +53,60 @@ class ProviderConfig:
     timeout_ms: int = 120000
     # 角色绑定的独立 API key（② 角色配置；空 = 用全局 plan_api.api_key / key_ref 解析）
     api_key: str = ""
+    key_ref: str = ""
     # ② 场景绑定覆盖（三层设计 P1）：推理 thinking 开关/预算（覆盖 ① registry 默认值）。
     # None = 未覆盖（用 ① ModelEntity.reasoning.thinking 的声明式默认）。
     thinking: Optional[bool] = None
     thinking_budget: Optional[int] = None
+    json_output: Optional[bool] = None
+    reasoning_effort: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProviderConfig":
+        model = data.get("model", "")
+        entity = None
+        key_resolver: Optional[Callable[[str], str]] = None
+        try:
+            from .models_registry import get_model, resolve_key
+            key_resolver = resolve_key
+            entity = get_model(model) if model else None
+        except Exception:
+            pass
+
+        provider = data.get("provider") or (entity.provider if entity else "custom")
+        base_url = data.get("base_url") or (entity.base_url if entity else "")
+        key_ref = data.get("key_ref") or (entity.key_ref if entity else "")
+        api_key = data.get("api_key", "") or ""
+        if not api_key and key_ref and key_resolver is not None:
+            api_key = key_resolver(key_ref)
+
+        # Explicit role values override registry defaults.  Missing values inherit
+        # model-intrinsic reasoning/output capabilities from Model Registry.
+        thinking = data.get("thinking") if "thinking" in data else None
+        thinking_budget = data.get("thinking_budget") if "thinking_budget" in data else None
+        json_output = data.get("json_output") if "json_output" in data else None
+        if entity is not None:
+            if thinking is None and entity.thinking.required:
+                thinking = True
+            if thinking_budget is None and entity.thinking.required:
+                thinking_budget = entity.thinking.budget_tokens
+            if json_output is None:
+                json_output = entity.output.needs_response_format or entity.output.json_compliance == "strict"
+
         return cls(
-            provider=data.get("provider", "custom"),
-            base_url=data.get("base_url", ""),
-            model=data.get("model", ""),
+            provider=provider,
+            base_url=base_url,
+            model=model,
             max_tokens=data.get("max_tokens", 4096),
             temperature=data.get("temperature", 0.2),
             max_concurrency=data.get("max_concurrency", 4),
             timeout_ms=data.get("timeout_ms", 120000),
-            api_key=data.get("api_key", ""),
-            thinking=data.get("thinking"),
-            thinking_budget=data.get("thinking_budget"),
+            api_key=api_key,
+            key_ref=key_ref,
+            thinking=thinking,
+            thinking_budget=thinking_budget,
+            json_output=json_output,
+            reasoning_effort=data.get("reasoning_effort", ""),
         )
 
 
@@ -80,6 +116,22 @@ class RoleRoute:
     role: str
     primary: ProviderConfig
     fallback: Optional[ProviderConfig] = None  # None = 不降级
+    fallbacks: tuple[ProviderConfig, ...] = ()  # P0 多级降级链（兼容旧 fallback）
+
+    def providers(self) -> list[ProviderConfig]:
+        """Return primary followed by unique fallback providers in order."""
+        candidates = [self.primary]
+        if self.fallback is not None:
+            candidates.append(self.fallback)
+        candidates.extend(self.fallbacks)
+        result: list[ProviderConfig] = []
+        seen: set[tuple[str, str, str]] = set()
+        for provider in candidates:
+            key = (provider.provider, provider.model, provider.base_url)
+            if key not in seen:
+                seen.add(key)
+                result.append(provider)
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -190,16 +242,7 @@ def resolve_provider(agent_type: str, config: dict) -> Optional[RoleRoute]:
     if not role_cfg:
         return None
 
-    # 构建 primary provider
-    primary = ProviderConfig.from_dict(role_cfg)
-
-    # 构建 fallback provider（如有）
-    fallback = None
-    fallback_cfg = role_cfg.get("fallback")
-    if fallback_cfg:
-        fallback = ProviderConfig.from_dict(fallback_cfg)
-
-    return RoleRoute(role=role, primary=primary, fallback=fallback)
+    return _build_role_route(role, role_cfg)
 
 
 def resolve_role(role: str, config: dict) -> Optional[RoleRoute]:
@@ -217,12 +260,25 @@ def resolve_role(role: str, config: dict) -> Optional[RoleRoute]:
     role_cfg = roles.get(role)
     if not role_cfg:
         return None
+    return _build_role_route(role, role_cfg)
+
+
+def _build_role_route(role: str, role_cfg: dict) -> RoleRoute:
+    """Build a route from legacy single fallback or P0 ``fallbacks`` list."""
     primary = ProviderConfig.from_dict(role_cfg)
-    fallback = None
+    configs: list[ProviderConfig] = []
     fallback_cfg = role_cfg.get("fallback")
-    if fallback_cfg:
-        fallback = ProviderConfig.from_dict(fallback_cfg)
-    return RoleRoute(role=role, primary=primary, fallback=fallback)
+    if isinstance(fallback_cfg, dict):
+        configs.append(ProviderConfig.from_dict(fallback_cfg))
+    fallback_list = role_cfg.get("fallbacks", [])
+    if isinstance(fallback_list, list):
+        configs.extend(ProviderConfig.from_dict(item) for item in fallback_list if isinstance(item, dict))
+    return RoleRoute(
+        role=role,
+        primary=primary,
+        fallback=configs[0] if configs else None,
+        fallbacks=tuple(configs),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -278,6 +334,11 @@ def _call_api_internal(
             "temperature": pc.temperature,
             "messages": messages,
         }
+        if pc.thinking:
+            payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": pc.thinking_budget or 8192,
+            }
     else:
         payload = {
             "model": model,
@@ -285,6 +346,12 @@ def _call_api_internal(
             "max_tokens": pc.max_tokens,
             "temperature": pc.temperature,
         }
+        if pc.thinking:
+            payload["thinking"] = {"type": "enabled"}
+        if pc.reasoning_effort:
+            payload["reasoning_effort"] = pc.reasoning_effort
+        if pc.json_output:
+            payload["response_format"] = {"type": "json_object"}
 
     timeout_sec = pc.timeout_ms / 1000
     req = urllib.request.Request(
@@ -303,6 +370,16 @@ def _call_api_internal(
         content = _text_block["text"] if _text_block else _blocks[0].get("text", str(_blocks[0]))
     else:
         content = data["choices"][0]["message"]["content"]
+
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError(f"{provider}:{model} returned empty content")
+    if pc.json_output:
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{provider}:{model} returned invalid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{provider}:{model} returned non-object JSON")
 
     usage = data.get("usage", {})
     prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
@@ -373,8 +450,9 @@ def call_with_role(
         actual_model = pc.model
         _quality_fail = False
 
+        provider_key = pc.api_key or api_key
         try:
-            content, pt, ct = _call_api_internal(pc, messages, api_key)
+            content, pt, ct = _call_api_internal(pc, messages, provider_key)
             prompt_tokens = pt
             completion_tokens = ct
             cb.record_success()
@@ -392,12 +470,13 @@ def call_with_role(
             logger.warning(f"[Router] Primary provider {_provider_key(pc)} 失败: {_error_summary(e)}")
             return None
 
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
             _quality_fail = True
             if is_fallback:
                 fallback_reason = f"fallback_quality_fail: {_error_summary(e)}"
-                raise RuntimeError(f"路由调用失败（primary + fallback 均质量失败）: {e}") from e
-            logger.warning(f"[Router] Primary provider {_provider_key(pc)} 质量失败: {_error_summary(e)}")
+                logger.warning(f"[Router] Fallback provider {_provider_key(pc)} 质量失败: {_error_summary(e)}")
+            else:
+                logger.warning(f"[Router] Primary provider {_provider_key(pc)} 质量失败: {_error_summary(e)}")
             return None
 
     def _error_summary(e: Exception) -> str:
@@ -432,10 +511,11 @@ def call_with_role(
             meter_event(metering_path, metering)
             return content, metering
 
-    # 3. Fallback
-    if route.fallback is not None:
-        logger.info(f"[Router] 降级到 fallback: {_provider_key(route.fallback)}")
-        content = _try_provider(route.fallback, is_fallback=True)
+    # 3. Fallback chain（P0：按配置顺序 K3 → GLM → v4-pro → local）
+    fallback_candidates = route.providers()[1:]
+    for fallback_index, fallback_provider in enumerate(fallback_candidates, start=1):
+        logger.info(f"[Router] 降级到 fallback[{fallback_index}]: {_provider_key(fallback_provider)}")
+        content = _try_provider(fallback_provider, is_fallback=True)
         if content is not None:
             latency_ms = round((time.time() - start) * 1000, 2)
             cost = estimate_cost(actual_provider, actual_model, prompt_tokens, completion_tokens)
@@ -448,7 +528,10 @@ def call_with_role(
 
     # 全失败：写入 metering 后 raise（保证审计可见性）
     _final_result = "failed"
-    _final_fallback = f"primary_unavailable:fallback_{'unavailable' if route.fallback else 'not_configured'}"
+    _final_fallback = (
+        "primary_unavailable:fallback_chain_exhausted"
+        if fallback_candidates else "primary_unavailable:fallback_not_configured"
+    )
     _final_latency = round((time.time() - start) * 1000, 2)
     _final_model = actual_model or route.primary.model or "unknown"
     meter_event(metering_path, _build_metering(
@@ -457,9 +540,10 @@ def call_with_role(
         0.0, _final_latency, _final_result, _final_fallback,
         task_id, subtask_id, _policy_violation,
     ))
+    failure_label = "均质量失败" if _quality_fail else "链路均失败"
     raise RuntimeError(
         f"路由调用失败：primary {_provider_key(route.primary)} 不可用，"
-        f"fallback {'不可用' if route.fallback is None else '也失败'}"
+        f"fallback {'不可用' if not fallback_candidates else failure_label}"
     )
 
 

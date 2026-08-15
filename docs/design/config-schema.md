@@ -236,6 +236,50 @@ Agent 类型默认配置。
 
 结构同 `worker_models`。当主模型不可用时使用。
 
+### `worker_models_fallback_chain`（P0：难度→多级失败升级链）
+
+值为模型 ID 数组，按验证失败/超时的重试顺序切换；空数组表示关闭。
+旧的 `worker_models_fallback` 单值配置仍兼容，但新配置优先。
+
+```json
+{
+  "worker_models_fallback_chain": {
+    "easy": [],
+    "medium": ["claude-opus-4-7"],
+    "hard": ["kimi-for-coding", "glm-5.3", "deepseek-v4-pro", "local-mlx"]
+  }
+}
+```
+
+### evaluator 多级降级与低置信度复核（P0）
+
+在 `router.roles.evaluator` 中使用 `fallbacks` 数组声明 provider/model 降级链。
+模型可以只写 `model`，其 endpoint/key/thinking/JSON 能力从 `models.json` registry
+解析；也可以显式覆盖 endpoint 或场景参数。primary 返回空内容、非法 JSON 或 API
+不可用时自动按顺序尝试下一个 provider；有效但低置信度（默认 `<=0.5`）时自动
+调用下一个 evaluator 做一次仲裁。
+
+```json
+{
+  "router": {
+    "enabled": true,
+    "roles": {
+      "evaluator": {
+        "model": "kimi-k3",
+        "fallbacks": [
+          {"model": "glm-5.3"},
+          {"model": "deepseek-v4-pro"},
+          {"model": "local-mlx"}
+        ]
+      }
+    }
+  },
+  "evaluator": {
+    "arbitration": {"enabled": true, "confidence_threshold": 0.5}
+  }
+}
+```
+
 ### `worker_models_degrades`（预算降级时难度下移）
 
 | 字段 | 类型 | 默认值 | 说明 |
