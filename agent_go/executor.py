@@ -2331,6 +2331,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         #   响应是云模型             → 实际走云（不清零，按实际模型计价）
         #   探测失败                 → 保守不清零（宁多算不乱清）
         _really_local, _actual_model = _verify_local_backend(_worker_url_src, routed_model=routed_model)
+        # R8 路由归因透传到 worker metering（命中缓存，无重复探测）：
+        # route_target/route_reason 注入 env，subtask meter_event 记录真实路由决策
+        _rt, _ra, _rr = _probe_route_attribution(_worker_url_src, routed_model)
+        if _rt:
+            env["AGENT_GO_ROUTE_TARGET"] = _rt
+            env["AGENT_GO_ROUTE_REASON"] = _rr or ""
         if _really_local:
             env["AGENT_GO_IS_LOCAL"] = "1"
             _local_model_name = _actual_model or _probe_local_model(_worker_url_src)

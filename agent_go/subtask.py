@@ -708,7 +708,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                     _cost = round(claude_usage_total["cost_usd"], 6)
             else:
                 _cost = round(claude_usage_total["cost_usd"], 6)
-        meter_event(metering_path, {
+        _metering_rec = {
             "role": "worker",
             "virtual_model": "agentgo-worker",
             "actual_provider": "claude-code",
@@ -730,7 +730,12 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             "task_id": env.get("AGENT_GO_TASK_ID", ""),
             "subtask_id": sub_id,
             "num_turns": claude_usage_total["num_turns"],
-        })
+        }
+        # R8 路由归因（executor 注入 env）：worker metering 记录代理真实路由决策
+        if env.get("AGENT_GO_ROUTE_TARGET"):
+            _metering_rec["route_target"] = env["AGENT_GO_ROUTE_TARGET"]
+            _metering_rec["route_reason"] = env.get("AGENT_GO_ROUTE_REASON", "")
+        meter_event(metering_path, _metering_rec)
         logger.info(f"{PFX} Claude 执行计量: {claude_usage_total['prompt_tokens']}+{claude_usage_total['completion_tokens']} tokens, ${_cost:.4f}{' (本地模型, 成本 0)' if _is_local else ''}")
 
     _cp = subprocess.CompletedProcess(

@@ -201,6 +201,17 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
                 _event["route_reason"] = route_reason
                 _event["is_local"] = _is_local
             meter_event(config.get("_metering_path"), _event)
+            # R8 归因共享给下游计量（evaluator 等不调本函数 meter_event 的角色）：
+            # 存 config 临时键，evaluator 的 meter_event 读取补充 route_target/is_local。
+            if route_target:
+                config["_route_attribution"] = {
+                    "route_target": route_target,
+                    "route_actual_model": route_actual_model,
+                    "route_reason": route_reason,
+                    "route_cost": route_cost,
+                }
+            else:
+                config.pop("_route_attribution", None)  # 无 R8（旧代理）时清理，防串扰
             return content
     except urllib.error.HTTPError as e:
         try:

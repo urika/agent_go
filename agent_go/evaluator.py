@@ -474,7 +474,7 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
     logger.info(f"语义评估: passed={parsed['passed']} confidence={parsed['confidence']:.2f} reason={parsed['reason'][:80]}")
 
     # 写 metering（仅成本记录）
-    meter_event(config.get("_metering_path"), {
+    _ev = {
         "role": "evaluator",
         "virtual_model": "agentgo-evaluator",
         "actual_provider": eval_api_cfg.get("provider", "anthropic"),
@@ -488,7 +488,19 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
         "fallback_reason": "",
         "task_id": config.get("_task_id", ""),
         "subtask_id": subtask.get("id", ""),
-    })
+    }
+    # R8 路由归因（call_api 共享）：evaluator 经代理时按真实后端模型/route_target 纠正
+    # actual_model 与 is_local（force_fallback 回退云端不再误判 local；代理声称本地实走云端被覆盖）。
+    # 注意：call_api 把 R8 写入 eval_config（dict(config) 浅拷贝的对象），须读 eval_config 而非 config。
+    _ra = eval_config.get("_route_attribution") or {}
+    if _ra.get("route_target"):
+        _ev["route_target"] = _ra["route_target"]
+        if _ra.get("route_actual_model"):
+            _ev["route_actual_model"] = _ra["route_actual_model"]
+            _ev["actual_model"] = _ra["route_actual_model"]
+        _ev["route_reason"] = _ra.get("route_reason", "")
+        _ev["is_local"] = _ra["route_target"] == "local"
+    meter_event(config.get("_metering_path"), _ev)
 
     return {
         "passed": parsed["passed"],
