@@ -784,7 +784,6 @@ def api_proxy_policies() -> dict:
     配置中心展示代理的模型→后端路由偏好/云端模型/智能路由阈值，替代盲猜
     （部署拓扑 ③ 对 agent_go 可视）。代理不可达/未实现时返回 ok=False。
     """
-    import urllib.error
     import urllib.request as _ur
     from .profiles import DEFAULT_LOCAL_URL
     # R9 由本地代理（llama.cpp）提供，无论当前配置云端/本地都指向本地代理
