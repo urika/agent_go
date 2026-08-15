@@ -21,6 +21,35 @@ __all__ = [
     "list_cache_entries", "clean_expired_cache",
 ]
 
+def _resolve_thinking_payload(api_cfg: dict, model: str, provider: str) -> dict:
+    """解析 thinking 配置（声明式，三层设计 P1.4）：② binding(api_cfg) 覆盖 > ① registry 声明。
+
+    优先级：
+      1. api_cfg.thinking=True（② 场景显式开启）→ 按 provider 格式构造
+      2. ① registry[model].reasoning.thinking.required=True → 声明式开启（接新模型零代码）
+      3. 否则不开启
+    返回 thinking payload dict（空 dict = 不注入）。
+    """
+    # ② 场景显式开启（api_cfg.thinking）
+    if api_cfg.get("thinking"):
+        if provider == "anthropic":
+            return {"type": "enabled", "budget_tokens": int(api_cfg.get("thinking_budget", 1024))}
+        return {"type": "enabled"}
+    # ① registry 声明式（模型固有推理特性）
+    try:
+        from .models_registry import get_model
+        ent = get_model(model)
+    except Exception:
+        ent = None
+    if ent and ent.thinking.required:
+        budget = int(api_cfg.get("thinking_budget", ent.thinking.budget_tokens or 1024))
+        if ent.thinking.format == "anthropic" or provider == "anthropic":
+            param = ent.thinking.budget_param or "budget_tokens"
+            return {"type": "enabled", param: budget}
+        return {"type": "enabled"}
+    return {}
+
+
 def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: logging.Logger) -> str:
     # planner_api 独立配置（如配置则优先用于 plan 生成，不走 proxy）
     api_cfg = config.get("planner_api") or config["plan_api"]
@@ -42,28 +71,19 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
     else:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    # thinking 注入（声明式，P1.4）：② binding 覆盖 > ① registry 声明（接新模型零代码）
+    _thinking = _resolve_thinking_payload(api_cfg, model, provider)
     if provider == "anthropic":
         payload = {"model": model, "max_tokens": api_cfg.get("max_tokens", 4096), "temperature": api_cfg.get("temperature", 0.2), "messages": messages}
-        # GLM 推理模型（glm-5.x，经智谱 Anthropic 端点）需 thinking enabled 才产出 text block，
-        # 否则仅返回 thinking block 无最终回答。检测 glm 模型或 api_cfg.thinking 显式开启。
-        # Anthropic 格式 thinking: {"type":"enabled","budget_tokens":N}。
-        if api_cfg.get("thinking") or model.startswith("glm"):
-            payload["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": int(api_cfg.get("thinking_budget", 1024)),
-            }
+        if _thinking:
+            payload["thinking"] = _thinking
     else:
         payload = {"model": model, "messages": messages, "max_tokens": api_cfg.get("max_tokens", 4096), "temperature": api_cfg.get("temperature", 0.2)}
-        # DeepSeek 推理模型（v4-pro，经 opus-4-7 路由）OpenAI 端点必须 thinking enabled，
-        # 否则返回空 content（官方已知行为）。检测模型名含 v4-pro/opus-4-7 自动开启，
-        # 或 api_cfg.thinking 显式开启。reasoning_effort 可选（high 提升推理质量）。
-        _is_reasoning = ("v4-pro" in model or "opus-4-7" in model or "opus-4" in model)
-        if api_cfg.get("thinking") or _is_reasoning:
-            payload["thinking"] = {"type": "enabled"}
-            if api_cfg.get("reasoning_effort"):
-                payload["reasoning_effort"] = api_cfg["reasoning_effort"]
-        # JSON 输出（planner/evaluator 需合法 JSON）：response_format json_object，
-        # 官方要求 prompt 含 "json" 字样 + max_tokens 足够，可显著降低空响应/格式错概率。
+        if _thinking:
+            payload["thinking"] = _thinking
+        if api_cfg.get("reasoning_effort"):
+            payload["reasoning_effort"] = api_cfg["reasoning_effort"]
+        # JSON 输出（planner/evaluator 需合法 JSON）：response_format json_object。
         if api_cfg.get("json_output") or api_cfg.get("response_format") == "json_object":
             payload["response_format"] = {"type": "json_object"}
 

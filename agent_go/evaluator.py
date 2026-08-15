@@ -335,9 +335,32 @@ def _visual_eval(subtask, worktree, verification, previous_attempts, config, log
     try:
         # 构建 API 配置（复用 evaluator 的 provider/model 选择）
         eval_api_cfg = dict(config.get("plan_api", {}))
-        for key in ("provider", "model", "base_url", "api_key"):
-            if eval_cfg.get(key):
-                eval_api_cfg[key] = eval_cfg[key]
+        # P1.5：evaluator 接入 router.roles（② 角色绑定）——router.enabled 且
+        # router.roles.evaluator 配置时，优先用 router 解析（含 thinking/thinking_budget），
+        # fallback 到 evaluator 配置块（现有逻辑）。
+        _router_cfg = None
+        try:
+            from .router import resolve_role
+            _router_cfg = resolve_role("evaluator", config)
+        except Exception:
+            _router_cfg = None
+        if _router_cfg is not None:
+            _p = _router_cfg.primary
+            eval_api_cfg.update({
+                "provider": _p.provider,
+                "base_url": _p.base_url,
+                "model": _p.model,
+            })
+            if _p.api_key:
+                eval_api_cfg["api_key"] = _p.api_key
+            if _p.thinking is not None:
+                eval_api_cfg["thinking"] = _p.thinking
+            if _p.thinking_budget is not None:
+                eval_api_cfg["thinking_budget"] = _p.thinking_budget
+        else:
+            for key in ("provider", "model", "base_url", "api_key"):
+                if eval_cfg.get(key):
+                    eval_api_cfg[key] = eval_cfg[key]
         eval_api_cfg["timeout_ms"] = 90_000
         eval_config = dict(config)
         eval_config["plan_api"] = eval_api_cfg

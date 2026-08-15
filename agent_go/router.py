@@ -23,7 +23,7 @@ import logging
 import threading
 import urllib.request
 import urllib.error
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Any
 
 from .metrics import estimate_cost
@@ -51,6 +51,10 @@ class ProviderConfig:
     temperature: float = 0.2
     max_concurrency: int = 4
     timeout_ms: int = 120000
+    # ② 场景绑定覆盖（三层设计 P1）：推理 thinking 开关/预算（覆盖 ① registry 默认值）。
+    # None = 未覆盖（用 ① ModelEntity.reasoning.thinking 的声明式默认）。
+    thinking: Optional[bool] = None
+    thinking_budget: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProviderConfig":
@@ -62,6 +66,8 @@ class ProviderConfig:
             temperature=data.get("temperature", 0.2),
             max_concurrency=data.get("max_concurrency", 4),
             timeout_ms=data.get("timeout_ms", 120000),
+            thinking=data.get("thinking"),
+            thinking_budget=data.get("thinking_budget"),
         )
 
 
@@ -190,6 +196,29 @@ def resolve_provider(agent_type: str, config: dict) -> Optional[RoleRoute]:
     if fallback_cfg:
         fallback = ProviderConfig.from_dict(fallback_cfg)
 
+    return RoleRoute(role=role, primary=primary, fallback=fallback)
+
+
+def resolve_role(role: str, config: dict) -> Optional[RoleRoute]:
+    """按角色名直接解析路由（三层设计 P1：补齐 evaluator 等非 agent_type 角色）。
+
+    与 resolve_provider（agent_type→role 映射）互补：call_api/evaluator 等
+    非 agent_type 驱动的调用方按角色名（planner/evaluator/worker/reviewer）解析。
+
+    router.enabled=false 或角色未配置 → None（调用方 fallback 到现有配置路径）。
+    """
+    router_cfg = config.get("router", {})
+    if not router_cfg.get("enabled", False):
+        return None
+    roles = router_cfg.get("roles", {})
+    role_cfg = roles.get(role)
+    if not role_cfg:
+        return None
+    primary = ProviderConfig.from_dict(role_cfg)
+    fallback = None
+    fallback_cfg = role_cfg.get("fallback")
+    if fallback_cfg:
+        fallback = ProviderConfig.from_dict(fallback_cfg)
     return RoleRoute(role=role, primary=primary, fallback=fallback)
 
 
