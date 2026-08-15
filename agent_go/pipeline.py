@@ -1129,6 +1129,30 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
             if r and r.get("status") == "failed" and r.get("failure_reason"):
                 console.print(f"  {r['subtask_id']}: {r['failure_reason']}")
 
+    # ── 已知盲区（谦逊层 #48：交底报告——系统主动告知，无需用户自查）──
+    _blind = meta.get("blind_spots") or {}
+    _blind_items: list[str] = []
+    if _blind.get("uncovered_acceptance_ids"):
+        _blind_items.append(f"未覆盖验收 ID: {', '.join(map(str, _blind['uncovered_acceptance_ids']))}")
+    if _blind.get("weakly_anchored_subtasks"):
+        _blind_items.append(f"弱锚定验证子任务: {', '.join(map(str, _blind['weakly_anchored_subtasks']))}")
+    if _blind.get("unattributed_failures"):
+        _blind_items.append(f"无根因失败: {', '.join(map(str, _blind['unattributed_failures']))}")
+    if _blind.get("baseline_dirty"):
+        _blind_items.append("任务启动时工作区有未提交改动")
+    if _blind.get("inconclusive_evaluations"):
+        _blind_items.append(f"语义评估不确定: {', '.join(map(str, _blind['inconclusive_evaluations']))}")
+    for _p in (meta.get("uncovered_perspectives") or []):
+        _blind_items.append(f"未覆盖视角 [{_p.get('perspective')}]: {_p.get('reason', '')}")
+    if _blind_items:
+        console.subtitle("⚠️ 已知盲区（系统主动交底）")
+        for _item in _blind_items:
+            console.print(f"  {_item}")
+    _layer = meta.get("layer_attribution") or {}
+    if _layer.get("primary"):
+        console.print(f"  🎯 层间归因: {_layer['primary']}（review 可看每子任务归因）")
+
+
     # ── 验证质量警告 ──
     weak_verify = [
         r for r in results_map.values()

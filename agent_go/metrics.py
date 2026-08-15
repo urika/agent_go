@@ -9,6 +9,7 @@ __all__ = [
     "estimate_cost", "DEFAULT_PRICING", "aggregate_metering",
     "compute_frozen_metrics", "is_valid_metric_task",
     "aggregate_failure_classes", "local_tco_usd",
+    "compute_trust_metrics",
 ]
 
 # local_model_cost 配置缓存（local_tco_usd 惰性加载一次）
@@ -397,4 +398,57 @@ def compute_mcp_tool_success_rate(events: list[dict], exclude_user_config_errors
         "success_rate": rate,
         "excluded_user_config": len(events) - n,
         "passes_threshold": bool(rate is not None and rate >= MCP_TOOL_SUCCESS_THRESHOLD),
+    }
+
+
+def compute_trust_metrics(task_dirs: list[Path]) -> dict[str, Any]:
+    """#49 信任指标（渐进自治放行门）：审查后修改率 / 复发可见率 / 盲区命中率。
+
+    数据来源：各 task_dir 的 meta.json（results[].problem_id）+ review.json（decision）。
+
+    审查后修改率 = (rejected + changes_requested) / 有 review 决策的任务数
+      —— 交付的「初始可信度」：用户审查后动手改的比例越低越可信。
+    复发可见率   = 失败子任务中带 problem_id 的比例
+      —— 学习闭环覆盖率：失败能否关联到历史 Problem（#50 接线后才有数据）。
+    盲区命中率   = 盲区标注项最终真出问题的比例
+      —— 需跨任务历史关联（task X 的盲区 → task Y 的失败），暂返回 None 待数据积累。
+
+    Returns:
+        {"review_modification_rate": float|None, "reviewed_tasks": int,
+         "recurrence_visibility_rate": float|None, "failed_subtasks": int,
+         "blind_spot_hit_rate": None}
+    """
+    reviewed = 0
+    modified = 0
+    failed_total = 0
+    failed_with_problem = 0
+    for td in task_dirs:
+        meta_path = td / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for r in meta.get("results") or []:
+            if isinstance(r, dict) and r.get("status") == "failed":
+                failed_total += 1
+                if r.get("problem_id"):
+                    failed_with_problem += 1
+        review_path = td / "review.json"
+        if review_path.exists():
+            try:
+                decision = (json.loads(review_path.read_text(encoding="utf-8")) or {}).get("decision", "")
+            except (OSError, json.JSONDecodeError):
+                decision = ""
+            if decision:
+                reviewed += 1
+                if decision in ("rejected", "changes_requested"):
+                    modified += 1
+    return {
+        "review_modification_rate": round(modified / reviewed, 4) if reviewed else None,
+        "reviewed_tasks": reviewed,
+        "recurrence_visibility_rate": round(failed_with_problem / failed_total, 4) if failed_total else None,
+        "failed_subtasks": failed_total,
+        "blind_spot_hit_rate": None,  # 待跨任务历史积累（#49 后续接线）
     }

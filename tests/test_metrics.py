@@ -269,3 +269,44 @@ def test_k12_empty():
     r = compute_mcp_tool_success_rate([])
     assert r["success_rate"] is None
     assert r["passes_threshold"] is False
+
+
+# ═══ #49 信任指标 ═══════════════════════════════════════════════════════
+
+import json as _json
+
+
+def test_compute_trust_metrics_review_and_recurrence(tmp_path):
+    """审查后修改率 + 复发可见率。"""
+    from agent_go.metrics import compute_trust_metrics
+
+    # task-1: 1 失败带 problem_id + review=changes_requested
+    t1 = tmp_path / "task-1"
+    t1.mkdir()
+    (t1 / "meta.json").write_text(_json.dumps({
+        "results": [{"subtask_id": "s1", "status": "failed", "problem_id": "p-1"}]}), encoding="utf-8")
+    (t1 / "review.json").write_text(_json.dumps({"decision": "changes_requested"}), encoding="utf-8")
+    # task-2: 1 失败无 problem_id + review=approved
+    t2 = tmp_path / "task-2"
+    t2.mkdir()
+    (t2 / "meta.json").write_text(_json.dumps({
+        "results": [{"subtask_id": "s1", "status": "failed"}]}), encoding="utf-8")
+    (t2 / "review.json").write_text(_json.dumps({"decision": "approved"}), encoding="utf-8")
+    # task-3: 无 meta（跳过）
+    t3 = tmp_path / "task-3"
+    t3.mkdir()
+
+    r = compute_trust_metrics([t1, t2, t3])
+    assert r["reviewed_tasks"] == 2
+    assert r["review_modification_rate"] == 0.5  # 1/2
+    assert r["failed_subtasks"] == 2
+    assert r["recurrence_visibility_rate"] == 0.5  # 1/2
+    assert r["blind_spot_hit_rate"] is None  # 待跨任务历史
+
+
+def test_compute_trust_metrics_empty(tmp_path):
+    from agent_go.metrics import compute_trust_metrics
+    r = compute_trust_metrics([])
+    assert r["review_modification_rate"] is None
+    assert r["recurrence_visibility_rate"] is None
+    assert r["failed_subtasks"] == 0

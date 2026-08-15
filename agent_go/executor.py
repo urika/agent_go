@@ -2556,6 +2556,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
 
     # M2.5 偏差反馈：失败子任务生成 DeviationEvent 持久化到 deviation.jsonl。
     # 只记录能力相关失败（不记录 blocked/no_changes），供 CLI/MCP 查询与聚合。
+    # M5/H3 问题跟踪：失败同时录制进全局 Problem 实体（复发计数/历史关联，#50）。
+    problem_id = ""
     if status == "failed" and verify_ok is False and task_dir:
         try:
             from .deviation import classify_deviation, write as write_deviation
@@ -2570,6 +2572,35 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 },
             )
             write_deviation(task_dir / "deviation.jsonl", _dev_evt)
+            # 失败录制进全局 Problem（去重键 = failure_pattern，含兜底派生）
+            try:
+                from .problems import record as record_problem
+                from .config import AGENT_GO_DIR
+                _pattern = _dev_evt.failure_pattern
+                if not _pattern:
+                    _kr = verify_results.get("kill_reason") or ""
+                    _pattern = _kr if _kr and _kr != "none" else ""
+                if not _pattern:
+                    _first_fail = next(
+                        (vr.get("command", "")[:60] for vr in verification_results
+                         if isinstance(vr, dict) and vr.get("exit_code", 0) not in (0, -1)),
+                        "")
+                    _pattern = (f"{failure_class or 'unknown'}:{_first_fail}"
+                                if _first_fail else (failure_class or "unknown"))
+                _prob = record_problem(
+                    AGENT_GO_DIR / "problems.jsonl",
+                    failure_pattern=_pattern,
+                    failure_class=failure_class or "",
+                    task_id=task_id,
+                    subtask_id=sub_id,
+                    summary=_dev_evt.summary,
+                    evidence=_dev_evt.evidence,
+                    root_cause_category=_dev_evt.root_cause_category,
+                )
+                if _prob:
+                    problem_id = _prob.id
+            except Exception:
+                logger.debug("Problem 录制失败（非关键）", exc_info=True)
         except Exception:
             logger.debug("deviation 事件写入失败（非关键）", exc_info=True)
 
@@ -2592,6 +2623,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
              "commit_hash": verify_results.get("commit_hash", ""),
              "failure_class": failure_class,
              "layer_attribution": layer_attribution,
+             "problem_id": problem_id,
             "agent_type_source": subtask.get("_agent_type_source", "default"),
             "skills_unresolved": unresolved_skills,
             "retry_count": retry_count,

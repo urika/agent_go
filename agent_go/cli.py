@@ -1868,6 +1868,34 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
         lines.extend(_layer_lines)
         lines.append("")
 
+    # 失败历史关联（#50：让用户看见「越用越聪明」——失败时告知「这不是第一次」）
+    try:
+        from .problems import load as load_problems
+        from .config import AGENT_GO_DIR
+        problems_map = {p.id: p for p in load_problems(AGENT_GO_DIR / "problems.jsonl")}
+        _hist_lines: list[str] = []
+        for r in results:
+            _pid = r.get("problem_id") or ""
+            prob = problems_map.get(_pid)
+            if not prob or r.get("status") != "failed":
+                continue
+            _sid = r.get("subtask_id", "")
+            _line = f"- {_sid}: 该失败模式第 **{prob.occurrence_count}** 次出现"
+            if prob.root_cause:
+                _line += f"；历史根因: {prob.root_cause[:80]}"
+            if prob.resolution_summary:
+                _line += f"；历史解法: {prob.resolution_summary[:80]}"
+            if prob.status == "opened" and prob.resolved_by:
+                _line += "（上次修复未生效，已重开跟踪）"
+            _hist_lines.append(_line)
+        if _hist_lines:
+            lines.append("## 💡 失败历史关联（这不是第一次）")
+            lines.append("")
+            lines.extend(_hist_lines)
+            lines.append("")
+    except Exception:
+        pass
+
     # 子任务详情
     lines.append("## 🔍 子任务详情")
     lines.append("")
@@ -1996,6 +2024,12 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
             json.dumps(_conclusion, indent=2, ensure_ascii=False), encoding="utf-8")
         lines.append("")
         lines.append("✅ **审查通过** — 已写入 review.json")
+
+    # 三个例外点显式产品承诺（#50：拒绝权是权利，不是负担）
+    lines.append("")
+    lines.append("---")
+    lines.append("> 🤝 **你可以随时说不**：Plan 确认时改/删/重生成、merge 前喊停、失败后 inspect/resume——")
+    lines.append("> 这是你的权利，不是负担。agent_go 永不自动 merge，永远等你点头。")
 
     console.print("\n".join(lines))
 
