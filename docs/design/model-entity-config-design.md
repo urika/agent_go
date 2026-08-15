@@ -199,8 +199,35 @@ def call_api(config, messages, logger, role="planner"):
 |------|------|
 | 与 router.roles 现有 fallback/熔断的语义合并复杂 | P1 只加字段不改 fallback 逻辑 |
 | worker_backends 收敛影响现有 local profile | 保留兼容读取（有 worker_backends 时优先，新增不推荐） |
-| 代理侧路由是黑盒（agent_go 无法感知 hard→云端） | metering 按 URL 标 is_local 的局限已记录（b17），后续代理暴露路由元数据 |
+| 代理侧路由是黑盒（agent_go 无法感知 hard→云端） | metering 按 URL 标 is_local 的局限已记录（b17），需代理路由归因接口（见 §8.1） |
 | models.json 与 pricing.py 双定价源 | registry.pricing 只做引用（pricing.py 为唯一价格表） |
+
+## 8.1 ③ 部署拓扑接口契约（llama.cpp 提供）
+
+③ 归代理侧，但 agent_go 需要代理提供**部署可视**与**路由归因**接口才能闭环。详见 [llama-defender-integration-requirements.md](llama-defender-integration-requirements.md) §3.1（R8-R12）。
+
+### 现有接口盘点（按三层映射，已覆盖 ~80%）
+
+| 层 | 接口 | 状态 |
+|----|------|------|
+| 推理 | `/v1/messages`、`/v1/chat/completions` | ✅（thinking/response_format 透传已修复） |
+| 模型 | `GET /v1/models` | ✅ 别名+route metadata（能力元数据不足，R10） |
+| 状态 | `GET /status`(HTML)、`GET /api/status`(JSON)、`/api/profiles`、`/api/watchdog` | ✅ |
+| 监控 | `GET /metrics`、`/metrics/history`、`/session` | ✅ |
+| 控制 | `manage.sh`（start/stop/status/reload/switch/watchdog）、`POST /admin/route/force-local|force-cloud` | ✅ |
+| 路由 | SmartRouter 智能路由（模型偏好/header/冷却/阈值/内存/会话/sticky/熔断/预算） | ✅ |
+
+### Gap 与需提供接口（优先级）
+
+| Gap | 影响 | 需提供接口 | 优先级 |
+|-----|------|-----------|--------|
+| **G2 路由归因无返回**：metering 按 URL 标 is_local，force_fallback ~36% 回退本地归因全错 | 成本错算 | R8：响应头/字段带回 `X-Proxy-Route-Target/Actual-Model/Reason/Cost` | **P0** |
+| **G3 部署拓扑不可视**：MODEL_ROUTE_PREFERENCES 对 agent_go 不可见 | 无法预知模型走哪 | R9：`GET /api/route/policies`（脱敏：cloud_model/cloud_key_set/preferences） | **P0** |
+| G1 /v1/models 无能力元数据 | ① registry 手工录入 | R10：metadata 增强（real_model/thinking_supported/json_compliance/context_chars） | P1 |
+| G4 健康检查探测依据不一致 | 探测不准 | R11：/api/status 增 route_config（cloud_model/route_enabled/cloud_key_set） | P1 |
+| HTTP 热重载缺失（仅 CLI） | 远程场景受限 | R12：`POST /admin/reload`（可选） | P2 |
+
+**边界**（agent_go 侧，不需代理做）：① 逻辑 registry（quality_tags/pricing/角色绑定）、② 角色场景参数、Plan/拆解/e2e 判定。
 
 ## 9. 分阶段落地
 

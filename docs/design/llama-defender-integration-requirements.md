@@ -1,9 +1,10 @@
 # llama-defender 集成需求（agent_go → 服务方）
 
-> 状态：需求稿，待 llama-defender 侧评估实现（2026-08-12）
-> 关联：[local-model-management-design.md](local-model-management-design.md)（agent_go 侧设计）
+> 状态：需求稿 v2（2026-08-15 更新：并入模型实体三层设计的接口契约，补充 R8-R12）
+> 关联：[local-model-management-design.md](local-model-management-design.md)（agent_go 侧设计）、[model-entity-config-design.md](model-entity-config-design.md)（模型实体三层配置设计）
 > 目标项目：`/Users/jinsongwang/APP/llama.cpp`（llama-defender）
 > 背景：agent_go 将本地模型纳入管理（启停/切换/状态监控/保活分工）。按「谁拥有进程谁保活」原则，agent_go 作为消费方只负责就绪检查与一次性修复触发；本文档列出需要 llama-defender（服务方）提供或增强的接口与功能契约。
+> v2 增补：按模型实体三层设计（① 模型固有 / ② 角色绑定 / ③ 部署拓扑），③ 部署拓扑归代理侧，需代理提供**部署可视**与**路由归因**接口（R8-R12），支撑 agent_go 侧 ① registry 数据采集与计量归因。
 
 ## 1. 需求场景
 
@@ -31,6 +32,11 @@
 | `manage.sh stop / stop-backend / restart` | 停止/重启（S4/S5） | ✅ 可用，有副作用 |
 | `configs/active.conf` 软链 | 当前 profile ground truth（S2/S5） | ✅ 文件级可信 |
 | `*.pid` + pgrep 自愈 | 进程 ground truth（S3） | ✅ |
+| `GET /api/status` | 结构化状态（R1，**已实现**） | ✅ JSON：proxy/backend/active_profile/state |
+| `GET /api/profiles` | profile 列表（R6，**已实现**） | ✅ JSON |
+| `GET /api/watchdog` | watchdog 状态（R5，**已实现**） | ✅ JSON |
+| `GET /metrics/history` | 历史指标（S7） | ✅ JSON |
+| `POST /admin/route/force-local` / `force-cloud` | 手动路由覆盖（会话级） | ✅ |
 
 ## 3. 需新增/增强的接口（gap）
 
@@ -127,6 +133,83 @@ manage.sh 是**服务启停的主路径**，尤其在 HTTP API 生效前或代�
 
 **需求（可选）**：模型切换完成 / 自动重启发生时写 `logs/lifecycle_events.jsonl`（每行 `{ts, event, detail}`），agent_go 监控页可消费。轮询 status 已可满足，此条非必需。
 
+---
+
+## 3.1 模型实体三层设计增补需求（R8-R12，2026-08-15）
+
+以下需求来自 [model-entity-config-design.md](model-entity-config-design.md) 的三层设计：③ 部署拓扑归代理侧，需代理提供**部署可视**与**路由归因**接口，支撑 agent_go 侧 ① 模型 registry 数据采集与计量归因。
+
+### R8（P0）：路由归因返回（响应头/字段）
+
+**现状缺口（G2）**：agent_go metering 按 URL（localhost）标 `is_local=True`，但代理 force_fallback 时 opus-4-7 有 ~36% 概率回退本地——**代理知道实际路由（cloud/local）与真实模型，但不回传**，导致计量归因全错（云端调用被记为本地、成本错算）。
+
+**需求**：每个推理响应（`/v1/messages`、`/v1/chat/completions`）带路由归因：
+
+| 方式 | 字段 | 说明 |
+|---|---|---|
+| 响应头（推荐，流式兼容） | `X-Proxy-Route-Target: cloud\|local\|local_forced` | 实际路由 |
+| | `X-Proxy-Route-Actual-Model: deepseek-v4-pro` | 真实后端模型名 |
+| | `X-Proxy-Route-Reason: model_forced_fallback_cloud` | 路由原因 |
+| | `X-Proxy-Route-Cost: 0.0002` | 本次云端费用（本地为 0） |
+| 或响应体扩展字段（非流式） | `"proxy_route": {"target","actual_model","reason","cost"}` | 同上 |
+
+流式响应在 `message_start` / 首帧携带。agent_go metering 据此标 `is_local`（target=local 才是本地）与实际模型，修正成本归因。
+
+### R9（P0）：路由策略可视端点 `GET /api/route/policies`
+
+**现状缺口（G3）**：`MODEL_ROUTE_PREFERENCES`（模型→本地/混合/云端三模式路由表）对 agent_go 不可见——agent_go 无法预知某模型会走哪、cloud_model 是什么、云端 key 是否就绪。
+
+**需求**：返回脱敏后的路由配置：
+
+```json
+{
+  "route_enabled": true,
+  "cloud_model": "deepseek-v4-pro",
+  "cloud_key_set": true,
+  "threshold_chars": 80000,
+  "preferences": {
+    "claude-haiku-4-5": {"route_bias": "prefer_local", "behavior": "prefer", "cloud_model": "deepseek-v4-flash"},
+    "claude-sonnet-4-6": {"route_bias": "auto", "behavior": "prefer", "cloud_model": "deepseek-v4-flash"},
+    "claude-opus-4-7": {"route_bias": "prefer_cloud", "behavior": "force_fallback", "cloud_model": "deepseek-v4-pro"}
+  }
+}
+```
+
+`cloud_key_set` 仅布尔（**不返回 key 明文**）。agent_go 健康检查/配置中心据此展示「该模型实际会走本地还是云端」，替代当前盲猜。
+
+### R10（P1）：`/v1/models` 能力元数据增强
+
+**现状缺口（G1）**：`/v1/models` 只回别名 + route，无能力元数据——agent_go 的 ① 模型 registry 需手工录入 thinking/json_compliance/context 等固有属性，无法自动采集。
+
+**需求**：每个模型条目增强 metadata：
+
+```json
+{"id": "claude-opus-4-7", "object": "model",
+ "metadata": {"route": "cloud", "real_model": "deepseek-v4-pro",
+              "thinking_supported": true, "thinking_required": true,
+              "json_compliance": "loose", "context_chars": 200000}}
+```
+
+字段：`route`（已有）、`real_model`、`thinking_supported/required`、`json_compliance`（strict/loose/poor）、`context_chars`。agent_go registry 可定时同步，替代手工维护。
+
+### R11（P1）：`/api/status` 路由配置段增强
+
+**现状缺口（G4）**：健康检查的模型名探测依据不一致（/status HTML vs /v1/models 别名），且不知云端配置状态。
+
+**需求**：`/api/status` 增加 `route_config` 段：`{"cloud_model": "...", "route_enabled": bool, "cloud_key_set": bool, "cloud_concurrent": n}`。与 R9 互补（R9 全量策略，R11 当前状态摘要）。
+
+### R12（P2）：HTTP 热重载 `POST /admin/reload`
+
+**现状**：热重载仅 `manage.sh reload`（CLI，需到仓库目录执行）。proxy_down 以外的远程/容器场景无 HTTP 路径。
+
+**需求（可选）**：`POST /admin/reload` 等效 SIGHUP 热重载（读 active.conf 应用变更），返回 `{reloaded: true, active_profile: "..."}`。幂等。
+
+### 边界（不需代理提供，agent_go 侧职责）
+
+- ① 逻辑模型 registry：`quality_tags`、pricing 表、角色绑定（router.roles）——agent_go `models.json`/pricing.py
+- ② 角色场景参数：temperature/max_tokens/thinking 开关/goal/min_difficulty——agent_go config
+- Plan 生成/拆解/e2e 判定——agent_go 核心流程
+
 ## 4. 接口协议要求汇总
 
 | 维度 | 要求 |
@@ -151,6 +234,11 @@ manage.sh 是**服务启停的主路径**，尤其在 HTTP API 生效前或代�
 | R5 watchdog 状态 | P1 | diagnose 输出含「watchdog 恢复中」判定 |
 | R6 profile 端点 | P1（可选） | `model list` 走 HTTP（若实现） |
 | R7 事件通知 | P2（可选） | 监控页展示生命周期事件 |
+| R8 路由归因返回 | **P0** | metering 按 route_target 标 is_local（不再按 URL），成本归因正确 |
+| R9 路由策略可视 | **P0** | 配置中心展示模型实际路由（本地/云端），替代盲猜 |
+| R10 模型能力元数据 | P1 | ① registry 自动同步能力属性，免手工录入 |
+| R11 status 路由配置段 | P1 | 健康检查探测依据统一（cloud_model/key_set） |
+| R12 HTTP 热重载 | P2（可选） | 远程/容器场景可 reload |
 
 ## 6. 兼容策略
 
