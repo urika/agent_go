@@ -175,6 +175,9 @@ _BOUNDARY_AFTER = rf'(?![^{_BOUNDARY_CHARS}])'
 
 _mod_logger = logging.getLogger(__name__)
 
+# P2：worker_backends 废弃提示一次性 flag（模块级，避免每子任务重复 warning）
+_WORKER_BACKENDS_DEPRECATED_WARNED = False
+
 
 def _effective_config(config: Optional[dict]) -> dict:
     """优先使用调用方传入的运行时 config（含 CLI 覆盖，如 --max-retries/--no-goal），
@@ -2235,6 +2238,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         log_event(logger, "model_routing", {"sub_id": sub_id, "difficulty": difficulty,
                                              "task_type": _task_type, "model": routed_model})
     # worker_backends：按模型名映射 ANTHROPIC_BASE_URL（覆盖 worker_base_url 的统一值）
+    # DEPRECATED（模型实体三层设计 P2）：worker_backends 是③部署拓扑放错层（与代理路由
+    # 重复，漂移源）。推荐收敛为单值 worker_base_url，模型→后端细粒度路由留代理侧。
+    # 本块保留兼容（有 worker_backends 优先，无则 worker_base_url fallback），首次使用
+    # 时 warning 提示迁移；新配置请只用 worker_base_url。
+    global _WORKER_BACKENDS_DEPRECATED_WARNED
     _worker_backends = _effective_config(config).get("worker_backends", {})
     _backend_url = ""
     if routed_model and _worker_backends and routed_model in _worker_backends:
@@ -2242,6 +2250,12 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         if _backend_url:
             env["ANTHROPIC_BASE_URL"] = _backend_url
             logger.info(f"[worker_backend] {routed_model} → {_backend_url}")
+            if not _WORKER_BACKENDS_DEPRECATED_WARNED:
+                _WORKER_BACKENDS_DEPRECATED_WARNED = True
+                logger.warning(
+                    "[deprecated] worker_backends 已废弃（部署拓扑放错层，与代理路由重复）。"
+                    "建议收敛为单值 worker_base_url，模型→后端路由留代理侧。"
+                )
     # 本地后端检测：worker_backends / worker_base_url 指向本机（127.0.0.1/localhost）
     # 时，标记为本地模型（成本清零），并把真实后端模型名透传给 subtask
     # （claude 会把 claude-haiku-4-5 等路由名硬编码映射成 deepseek-v4-flash

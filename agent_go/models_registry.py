@@ -85,6 +85,8 @@ class ModelEntity:
     provider: str                       # "anthropic" | "openai" | "deepseek" | "custom"
     base_url: str = ""
     key_ref: str = ""                   # env 变量名或 secret 引用（**不存明文**）
+    backend_model: str = ""             # 真实后端模型名（本地代理后端的实际模型，
+                                        # 如 unsloth/Qwen3.6-35B...；metering actual_model 匹配用）
     thinking: ThinkingSpec = field(default_factory=ThinkingSpec)
     output: OutputSpec = field(default_factory=OutputSpec)
     context_chars: int = 200000         # 实际上下文上限（压缩/路由阈值用）
@@ -100,6 +102,7 @@ class ModelEntity:
             provider=data.get("provider", "custom"),
             base_url=endpoint.get("base_url", data.get("base_url", "")),
             key_ref=endpoint.get("key_ref", data.get("key_ref", "")),
+            backend_model=data.get("backend_model", data.get("real_model", "")),
             thinking=ThinkingSpec.from_dict(data.get("reasoning", {}).get("thinking", {}) or {}),
             output=OutputSpec.from_dict(data.get("output", {}) or {}),
             context_chars=int(data.get("limits", {}).get("context_chars", 200000)),

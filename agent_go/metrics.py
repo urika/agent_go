@@ -17,15 +17,31 @@ _local_tco_cost: dict = {}
 
 
 def local_tco_usd(model: str) -> float:
-    """本地模型 TCO 成本（每次调用估算）。从 config.local_model_cost 读取。
+    """本地模型 TCO 成本（每次调用估算）。
+
+    读取优先级（P2.2 local_model_cost 迁入 ① registry）：
+    1. ① registry：按 backend_model（真实后端模型名，metering actual_model）或
+       id 匹配，返回该实体的 cost.tco_per_call
+    2. fallback config.local_model_cost[model]（兼容现有，registry 未注册时）
 
     本地模型 metering cost_usd=0，直接进 $/pass 会让 gate 视为"免费"失真。
-    配置 local_model_cost[model] 后，返回该模型每次调用的 TCO 估算成本
-    （电费 + 硬件折旧）。未配置返回 0（保持原语义）。
+    配置后返回该模型每次调用的 TCO 估算成本（电费 + 硬件折旧）。未配置返回 0。
 
     共享函数：bench（_collect_result 聚合 metering）与 eval（analyze_cost）
     均调用，保证 metric-freeze/gate 的本地基线 $/pass 含 TCO。
     """
+    # ① registry 优先（按真实后端模型名/id 匹配）
+    try:
+        from .models_registry import load_registry
+        for entity in load_registry().values():
+            if entity.cost.tco_per_call and (
+                entity.backend_model == model or entity.id == model
+            ):
+                return float(entity.cost.tco_per_call)
+    except Exception:
+        pass
+
+    # fallback：config.local_model_cost（兼容现有）
     global _local_tco_loaded, _local_tco_cost
     if not _local_tco_loaded:
         _local_tco_loaded = True
