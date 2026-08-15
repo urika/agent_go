@@ -272,10 +272,21 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, float]] = {
     ("openai", "gpt-4o"):                           (2.50, 10.0),
     ("openai", "gpt-4o-mini"):                      (0.15, 0.60),
     # DeepSeek（deepseek-chat/reasoner 已于 2026-07-24 弃用，由 v4-flash 替代）
-    ("deepseek", "deepseek-v4-flash"):              (0.27, 1.10),
-    ("deepseek", "deepseek-v4-pro"):                (0.55, 2.19),
+    ("deepseek", "deepseek-v4-flash"):              (0.14, 0.28),
+    ("deepseek", "deepseek-v4-pro"):                (0.435, 0.87),
     ("deepseek", "deepseek-chat"):                  (0.27, 1.10),   # 已弃用，保留向后兼容
     ("deepseek", "deepseek-reasoner"):              (0.55, 2.19),   # 已弃用，保留向后兼容
+    # DeepSeek 经代理 OpenAI 端点（provider=openai 时 provider 对齐，避免查不到 → 0）
+    ("openai", "deepseek-v4-flash"):                (0.14, 0.28),
+    ("openai", "deepseek-v4-pro"):                  (0.435, 0.87),
+    # 智谱 GLM-5.3（anthropic 兼容直连，2026-08 官方 ¥4.2/¥16.8 ≈ $0.6/$2.4）
+    ("anthropic", "glm-5.3"):                       (0.60, 2.40),
+    ("zhipu", "glm-5.3"):                           (0.60, 2.40),
+    # 月之暗面 Kimi K3 / kimi-for-coding（anthropic 兼容直连，$3/$15）
+    ("anthropic", "kimi-for-coding"):               (3.0, 15.0),
+    ("anthropic", "k3"):                            (3.0, 15.0),
+    ("moonshot", "kimi-for-coding"):                (3.0, 15.0),
+    ("moonshot", "k3"):                             (3.0, 15.0),
     # 本地模型 — 成本为 0
     ("custom", "*"):                                 (0.0, 0.0),
 }

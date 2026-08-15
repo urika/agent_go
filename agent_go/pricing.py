@@ -74,6 +74,8 @@ MODEL_PRICES = {
     # ── 月之暗面 Kimi（2026-07，platform.kimi.com） ──
     "kimi-k2":                 {"prompt": 0.56, "completion": 2.22},   # K2 旗舰（¥4/16）
     "kimi-k2.5":               {"prompt": 0.95, "completion": 4.0},    # K2.5（前端专精，256K ctx）
+    "kimi-for-coding":         {"prompt": 3.0, "completion": 15.0},    # K3 coding 旗舰（$3/$15，缓存命中 $0.3）
+    "k3":                      {"prompt": 3.0, "completion": 15.0},    # K3 别名（1M ctx）
 
     # ── 智谱 GLM（2026-07，bigmodel.cn） ──
     "glm-5":                   {"prompt": 0.07, "completion": 0.14},   # 最新旗舰（¥0.5~1）
@@ -82,6 +84,7 @@ MODEL_PRICES = {
     "glm-4.7":                 {"prompt": 0.5556, "completion": 2.2222},  # GLM-4.7（¥4/16，2026-07 实测 claude-* 路由实际后端）
     "glm-5.1":                 {"prompt": 0.8333, "completion": 3.3333},  # GLM-5.1（¥6/24，阿里云百炼=智谱官网）
     "glm-5.2":                 {"prompt": 1.1111, "completion": 3.8889},  # GLM-5.2（¥8/28，智谱官方，settings 默认 sonnet）
+    "glm-5.3":                 {"prompt": 0.60, "completion": 2.40},      # GLM-5.3（¥4.2/¥16.8 未命中缓存，2026-08 方案 B evaluator）
     "glm-4.5-air":             {"prompt": 0.1111, "completion": 0.2778},  # GLM-4.5-Air（¥0.8/2，2025-07-29 官方）
 
     # ── 旧版保留（⚰️ 供旧 metering 日志兼容） ──
@@ -102,7 +105,8 @@ MODEL_TIER: dict[str, list[str]] = {
         "gpt-5.7", "gpt-5",
         "gemini-3.1-pro",
         "qwen-max",
-        "glm-5.2", "glm-5.1",
+        "glm-5.2", "glm-5.1", "glm-5.3",
+        "kimi-for-coding", "k3",
     ],
     "value": [
         # 主力性价比 — 大部分 production 任务
