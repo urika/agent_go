@@ -1,0 +1,27 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "c207eb64d0fa20bce1e335ddad016ece32282eed2e8cc914e7023c37be831184",
+  "created_at": "2026-08-15T18:33:11.072248+00:00",
+  "immutable": true,
+  "manifest_version": 1,
+  "metric_freeze_version": 1,
+  "models": [
+    "claude-sonnet-4-6"
+  ],
+  "record_count": 6,
+  "repeat_values": [
+    1
+  ],
+  "results_sha256": "c3471ddf2647d1374f57e61a481129423d402104e3d047ce7d4b36c622eae5f0",
+  "source_batch": "m4-mixB-med-easy",
+  "suite": "canonical",
+  "task_catalog_hash": "7d080b11d012c8bfa1abc2e69d22ccf490e3b93152b8ae96378fb5a38455077a",
+  "task_ids": [
+    "add-count-stage",
+    "add-format-helper",
+    "add-limit-stage",
+    "email-validator",
+    "implement-done-command",
+    "math-helpers"
+  ]
+}
