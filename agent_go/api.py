@@ -124,6 +124,17 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
         with urllib.request.urlopen(req, timeout=_timeout_sec) as resp:
             latency = time.time() - start
             raw_body = resp.read()
+            # R8 路由归因（llama.cpp）：X-Proxy-Route-Target/Actual-Model/Reason/Cost 响应头，
+            # 纠正 metering is_local 误判（force_fallback 云端失败回退本地时，按 URL 会全标 local）。
+            # getattr 安全读取（mock/自定义响应对象可能无 headers 属性，兼容测试与旧代理）。
+            _resp_headers = getattr(resp, "headers", {}) or {}
+            route_target = _resp_headers.get("X-Proxy-Route-Target", "")
+            route_actual_model = _resp_headers.get("X-Proxy-Route-Actual-Model", "")
+            route_reason = _resp_headers.get("X-Proxy-Route-Reason", "")
+            try:
+                route_cost = float(_resp_headers.get("X-Proxy-Route-Cost", "") or 0.0)
+            except (TypeError, ValueError):
+                route_cost = 0.0
             try:
                 data = json.loads(raw_body)
             except json.JSONDecodeError as e:
@@ -151,31 +162,45 @@ def call_api(config: dict[str, Any], messages: list[dict[str, Any]], logger: log
             # 兼容 Anthropic (input_tokens/output_tokens) 和 OpenAI (prompt_tokens/completion_tokens) 格式
             prompt_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("output_tokens") or usage.get("completion_tokens", 0)
+            # R8 归因纠正：actual_model 用代理真实后端模型（route_actual_model），cost 按它重算；
+            # is_local 按 route_target（cloud→False 云端计费，local→True 本地/TCO）。
+            # 无 R8（非代理/旧代理）时保持现有按 URL/路由名的行为（兼容）。
+            _meter_model = route_actual_model or model
+            if route_target:
+                _is_local = route_target == "local"
+                _cost = route_cost if route_cost > 0 else round(
+                    estimate_cost(provider, _meter_model, prompt_tokens, completion_tokens), 6)
+            else:
+                _is_local = None
+                _cost = round(estimate_cost(provider, model, prompt_tokens, completion_tokens), 6)
             log_event(logger, "api_call", {
                 "provider": provider, "model": model,
                 "latency_ms": round(latency * 1000, 2), "response_len": len(content),
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
-                "cost_usd": round(estimate_cost(provider, model, prompt_tokens, completion_tokens), 6),
+                "cost_usd": _cost,
             })
             # Phase 1 配套：结构化计量日志
-            meter_event(
-                config.get("_metering_path"),
-                {
-                    "role": "planner",
-                    "virtual_model": "agentgo-planner",
-                    "actual_provider": provider,
-                    "actual_model": model,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "cost_usd": round(estimate_cost(provider, model, prompt_tokens, completion_tokens), 6),
-                    "latency_ms": round(latency * 1000, 2),
-                    "result": "success",
-                    "fallback_reason": "",
-                    "task_id": config.get("_task_id", ""),
-                    "subtask_id": "",
-                }
-            )
+            _event = {
+                "role": "planner",
+                "virtual_model": "agentgo-planner",
+                "actual_provider": provider,
+                "actual_model": _meter_model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost_usd": _cost,
+                "latency_ms": round(latency * 1000, 2),
+                "result": "success",
+                "fallback_reason": "",
+                "task_id": config.get("_task_id", ""),
+                "subtask_id": "",
+            }
+            if route_target:
+                _event["route_target"] = route_target
+                _event["route_actual_model"] = route_actual_model
+                _event["route_reason"] = route_reason
+                _event["is_local"] = _is_local
+            meter_event(config.get("_metering_path"), _event)
             return content
     except urllib.error.HTTPError as e:
         try:

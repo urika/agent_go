@@ -93,6 +93,52 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
 # 用 _local_model_probe_cache 的失效逻辑兜底——成功结果缓存，失败不缓存可重试）。
 _local_verify_cache: dict[str, tuple[bool, str]] = {}
 
+# R8 路由归因探测缓存：base_url+routed_model → (route_target, route_actual_model, reason)。
+_route_attr_cache: dict[str, tuple[str, str, str]] = {}
+
+
+def _probe_route_attribution(base_url: str, routed_model: str = "",
+                             timeout: float = 8.0) -> tuple[str, str, str]:
+    """R8 路由归因探测（llama.cpp R8）：POST /v1/messages 读 X-Proxy-Route-* 响应头。
+
+    按 URL（localhost）判 is_local 会在 force_fallback 时误判（opus-4-7 云端失败回退
+    本地，或 URL 本地但路由到云端）。R8 响应头直接给出代理的真实路由决策
+    （route_target=cloud/local + route_actual_model=真实后端模型），是 is_local 判定的
+    最准数据源。比 claude 探测（subprocess，慢且拿不到响应头）更快更准。
+
+    返回 (route_target, route_actual_model, reason)；无 R8（旧代理/失败）→ ("", "", "")。
+    """
+    if not base_url:
+        return ("", "", "")
+    key = base_url.rstrip("/") + "|" + (routed_model or "")
+    if key in _route_attr_cache:
+        return _route_attr_cache[key]
+    target = actual = reason = ""
+    try:
+        import urllib.request as _urlreq
+        url = base_url.rstrip("/") + "/v1/messages"
+        body = json.dumps({
+            "model": routed_model or "claude-sonnet-4-6",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}],
+        }).encode("utf-8")
+        req = _urlreq.Request(url, data=body, method="POST", headers={
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "User-Agent": "agent_go-route-probe/1.0",
+        })
+        with _urlreq.urlopen(req, timeout=timeout) as resp:
+            target = resp.headers.get("X-Proxy-Route-Target", "") or ""
+            actual = resp.headers.get("X-Proxy-Route-Actual-Model", "") or ""
+            reason = resp.headers.get("X-Proxy-Route-Reason", "") or ""
+            # 读取少量 body 避免连接占用（响应头已够，body 可弃）
+            resp.read(256)
+    except Exception:
+        pass
+    if target:
+        _route_attr_cache[key] = (target, actual, reason)
+    return (target, actual, reason)
+
 
 def _verify_local_backend(base_url: str, timeout: float = 15.0,
                           routed_model: str = "") -> tuple[bool, str]:
@@ -118,6 +164,16 @@ def _verify_local_backend(base_url: str, timeout: float = 15.0,
     key = base_url.rstrip("/")
     if key in _local_verify_cache:
         return _local_verify_cache[key]
+
+    # R8 路由归因优先（llama.cpp R8）：force_fallback 模型（opus-4-7 等）按 URL/status
+    # 会误判 local（/status 声明本地模型但实际走云端）。route_target 是代理真实路由
+    # 决策，最准——有 R8 直接用它判定，无 R8（旧代理）再走 /status + claude 探测。
+    _rt, _ra, _rr = _probe_route_attribution(base_url, routed_model)
+    if _rt:
+        _is_local_r8 = (_rt == "local")
+        _result_r8 = (_is_local_r8, _ra or _probe_local_model(base_url, timeout=3.0))
+        _local_verify_cache[key] = _result_r8
+        return _result_r8
 
     # 1. /status 声明（可靠，HTTP 快速）
     _local_declared = _probe_local_model(base_url, timeout=3.0)

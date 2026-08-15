@@ -2267,6 +2267,15 @@ class TestProbeLocalModel:
 class TestVerifyLocalBackend:
     """S12 本地判定加固：URL 指向本机但实际走云时不清零成本。"""
 
+    @pytest.fixture(autouse=True)
+    def _no_r8(self, monkeypatch):
+        """本类测试聚焦 /status + claude 探测路径（R8 之前的行为）。
+        统一禁用 R8 路由归因探测（返回空），避免代理在线时 R8 生效覆盖 /status mock 期望。
+        R8 优先路径的专门测试见 tests/test_route_attribution.py。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_probe_route_attribution", lambda *a, **k: ("", "", ""))
+        monkeypatch.setattr(executor, "_route_attr_cache", {})
+
     def test_local_confirmed(self, monkeypatch):
         """响应 model == /status 声明本地模型 → 真本地。"""
         from agent_go import executor
