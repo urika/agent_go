@@ -87,6 +87,12 @@ def read_reference_docs(doc_paths: list[str], repo: Path, logger: logging.Logger
 # 结构化白名单：每个命令定义允许的 flags（正则）和 positionals（正则）
 # 值为 str 时表示 alias（指向另一个命令的规则集）
 _CMD_ARG_RULES = {
+    "pip": {
+        "install": {"flags": r'^(-e|--editable|-q|--quiet|-U|--upgrade|--no-deps|-r|--requirement|--index-url=\S+|--extra-index-url=\S+)$',
+                    # 包名/路径/requirements 文件。禁止 .. 穿越与 shell 注入符号。
+                    "positionals": r'^(?!.*\.\.)[\w./\-_+=<>!~\[\],@]+$'},
+    },
+    "pip3": "pip",
     "go": {
         "test":  {"flags": r'^(-v|-run=\S+|-count=\S+|-timeout=\S+|-tags=\S+|-cover|-race|-bench=\S+|-parallel=\S+|-json|-vet=\S+|-coverpkg=\S+|-c|-o=\S+)$',
                   "positionals": r'^[\w./@\-_]+$'},
