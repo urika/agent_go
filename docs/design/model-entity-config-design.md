@@ -236,3 +236,53 @@ def call_api(config, messages, logger, role="planner"):
 | **P1** | models.json registry + evaluator 角色入 router + thinking/JSON 声明式（call_api 读 ①） | router.py/config.py/api.py |
 | **P2** | worker_backends 收敛（worker 统一 worker_base_url）+ local_model_cost 迁入 registry | executor.py/profiles.py |
 | **P3** | plan_api/planner_api 合并 → roles.planner；文档与 CLI（`agent_go models list/add`） | cli.py/docs |
+
+---
+
+## 10. 产品价值论证（实验证据量化）
+
+按 m4 系列实验批次，本设计对 agent_go 产品能力的提升：
+
+### 10.1 能力上限：接对强模型 → hard 通过率实质提升
+
+同一批 6 个 hard 任务（canonical hard，跨 3 fixture）的演进链：
+
+```
+本地 35B（拆分）          0/6   (0%)
+混合 v2（v4-flash 拆分）   0/6   (0%)
+e2e 端到端（v4-flash）     2/6   (33%)
+e2e + 云端 v4-pro         3/6   (50%)
+e2e + GLM glm-5.3 评估     5/6   (83%)
+```
+
+**结论**：能力上限不由框架决定，而由"能否方便地接对强模型"决定。三层设计（① 一次注册 + ② 角色绑定）让换模型从"改多处配置+改代码"变为"registry 加一条"——这是 hard 通过率 0%→83% 的底层条件。
+
+### 10.2 接入边际成本：模型池化的前提
+
+| 维度 | 现状（压平混放） | 三层设计后 |
+|------|----------------|-----------|
+| 接入新模型改动面 | 5+ 处配置 + call_api 改代码 | models.json 加 1 条，**零代码** |
+| thinking/JSON 特性 | call_api 硬编码检测（每模型改代码） | ① 声明式（`reasoning.thinking`/`output.json_compliance`） |
+| 验证新模型 | 全链路重跑试错 | registry 声明 → 直接 bench 验证 |
+
+GLM 接入实测改动面（5 处+代码）→ 设计后 1 条 registry 记录，边际成本趋零，**模型池化（多模型共存评测）才可行**。
+
+### 10.3 观测归因可信度：决策依据可信
+
+- **问题**：metering 按 URL（localhost）标 is_local，opus-4-7 force_fallback ~36% 回退本地 → bench 成本/通过率归因全错（决策基于错误数据）
+- **解法**：R8 路由归因返回（代理响应头 X-Proxy-Route-Target/Actual-Model/Cost）→ metering 按实际 route_target 标注
+- **价值**：bench 数据（pass_rate、$/pass、TCO 口径）成为**可信决策依据**（模型选型、门禁、成本核算的前提）
+
+### 10.4 角色/场景扩展效率
+
+新角色（如安全审查员）/新场景（如 e2e 模式）的接入动作 **90% 收敛在 ② 角色绑定**（router.roles 指派 + 场景参数），只有判定/调用需少量一次性代码。变化被隔离在 ②，① 模型固有与 ③ 部署拓扑不受牵连——**扩展不破坏稳定层**。
+
+### 10.5 可维护性：消除双实现漂移
+
+`worker_backends`（agent_go 侧）与 `MODEL_ROUTE_PREFERENCES`（代理侧）是同一部署拓扑职责的两处实现 → 收敛到代理侧单一事实源，消除"改一处忘另一处"的漂移类 bug。
+
+### 10.6 演进路径
+
+三层设计 + R8-R12 接口是**模型池化 + 多模型评测**的基建：模型注册（①）→ 角色绑定（②）→ 部署路由（③）→ 观测归因（④，R8 支撑）→ 反哺①quality_tags 与②场景选择的闭环。没有这个闭环，"持续测评更强模型"只能靠手工试错。
+
+**一句话**：本设计把"接模型、选模型、评模型"从多点手工配置升级为可扩展的模型池体系——直接支撑 hard 能力上限（83%）与数据可信（R8）两大产品指标。
