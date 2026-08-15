@@ -778,6 +778,28 @@ def api_health() -> dict:
     return health_check()
 
 
+def api_proxy_policies() -> dict:
+    """代理路由策略可视（R9 消费）：GET <代理>/api/route/policies。
+
+    配置中心展示代理的模型→后端路由偏好/云端模型/智能路由阈值，替代盲猜
+    （部署拓扑 ③ 对 agent_go 可视）。代理不可达/未实现时返回 ok=False。
+    """
+    import urllib.error
+    import urllib.request as _ur
+    from .profiles import DEFAULT_LOCAL_URL
+    # R9 由本地代理（llama.cpp）提供，无论当前配置云端/本地都指向本地代理
+    proxy_url = DEFAULT_LOCAL_URL
+    url = f"{proxy_url}/api/route/policies"
+    try:
+        with _ur.urlopen(url, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        return {"ok": False, "error": str(e), "proxy_url": proxy_url}
+    data["ok"] = True
+    data["proxy_url"] = proxy_url
+    return data
+
+
 def _audit(op: str, params: dict, result: Any, ok: bool, token: str = "") -> None:
     """写操作审计行（R16）：append ~/.agent_go/web_audit.jsonl。
 
@@ -1418,6 +1440,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             if len(parts) == 2 and parts[1] == "audit":
                 self._reply_json(200, api_audit())
+                return
+            if len(parts) == 2 and parts[1] == "proxy-policies":
+                self._reply_json(200, api_proxy_policies())
                 return
             if len(parts) == 3 and parts[1] == "config" and parts[2] == "diff":
                 name = next((unquote(p[5:]) for p in query.split("&")
@@ -3451,6 +3476,34 @@ async function loadConfig() {
     html += '<div class="warn-banner">⚠️ '+esc(health.suggestion || '本地代理模型与 profile 不一致')+
             ' <button class="btn primary" id="btnLocalFix">重新生成 local profile</button></div>';
   }
+  // R9 消费：代理路由策略可视（模型→后端路由偏好/云端模型/智能路由阈值）
+  try {
+    const pp = await api('/api/proxy-policies');
+    if (pp.ok) {
+      html += '<div class="section-title">🛣️ 代理路由策略（'+esc(pp.proxy_url)+'）</div>';
+      html += '<div class="kpi-grid">'+
+        kpiCard('智能路由', pp.route_enabled ? '✅ 启用' : '⏸ 关闭', pp.route_enabled ? 'green' : '')+
+        kpiCard('云转阈值', pp.threshold_chars != null ? (pp.threshold_chars/1000)+'K chars' : '-', '')+
+        kpiCard('云端模型', esc(pp.cloud_model || '-'), '')+
+        kpiCard('云端 Key', pp.cloud_key_set ? '✅ 已配置' : '❌ 未配置', pp.cloud_key_set ? 'green' : 'red')+
+        '</div>';
+      // 模型路由偏好表
+      const prefRows = Object.entries(pp.preferences || {}).map(([m, p]) => {
+        const behavior = (p.behavior||'prefer') + (p.route_bias ? '·'+p.route_bias : '');
+        return '<tr><td>'+esc(m)+'</td><td>'+esc(behavior)+'</td>'+
+          '<td>'+esc(p.cloud_model || '-')+'</td>'+
+          '<td>'+(p.threshold_factor ? '×'+p.threshold_factor : '-')+'</td></tr>';
+      }).join('');
+      if (prefRows) html += '<table><thead><tr><th>模型</th><th>偏好</th><th>云端模型</th><th>阈值系数</th></tr></thead><tbody>'+prefRows+'</tbody></table>';
+      // 后端 providers
+      const provs = Object.entries(pp.providers || {}).map(([k, v]) =>
+        '<tr><td>'+esc(k)+'</td><td>'+esc(v.base_url || '')+'</td>'+
+        '<td>'+(v.key_set ? '✅' : '❌')+'</td></tr>').join('');
+      if (provs) html += '<table style="margin-top:8px"><thead><tr><th>Provider</th><th>Base URL</th><th>Key</th></tr></thead><tbody>'+provs+'</tbody></table>';
+    } else {
+      html += '<div class="section-title">🛣️ 代理路由策略</div><div style="color:var(--dim);font-size:12px">代理不可达或未提供 R9 接口（'+esc(pp.error||'')+'）</div>';
+    }
+  } catch (e) {}
   // profile 列表（非备份）
   const userProfiles = (prof.profiles || []).filter(p => !p.is_backup);
   if (userProfiles.length) {

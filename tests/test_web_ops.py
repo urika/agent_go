@@ -840,3 +840,48 @@ class TestAuditApi:
         assert len(d["records"]) == 2
         assert d["records"][0]["params"]["task"] == "第二次"  # 倒序（最新在前）
         assert d["total"] == 2
+
+
+class TestProxyPolicies:
+    """R9 策略可视消费：web /api/proxy-policies 端点。"""
+
+    def test_returns_policies(self, ops_env, monkeypatch):
+        """代理在线时返回完整策略（mock urllib）。"""
+        import urllib.request as _ur
+        payload = json.dumps({
+            "route_enabled": True, "threshold_chars": 200000,
+            "cloud_model": "deepseek-v4-flash", "cloud_key_set": True,
+            "providers": {"deepseek": {"base_url": "https://api.deepseek.com", "key_set": True}},
+            "preferences": {"claude-opus-4-7": {"behavior": "force_fallback", "route_bias": "prefer_cloud", "cloud_model": "deepseek-v4-pro"}},
+        }).encode()
+        class _Resp:
+            def read(self): return payload
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        monkeypatch.setattr(_ur, "urlopen", lambda url, timeout=0: _Resp())
+        d = ws.api_proxy_policies()
+        assert d["ok"] is True
+        assert d["route_enabled"] is True
+        assert d["preferences"]["claude-opus-4-7"]["route_bias"] == "prefer_cloud"
+
+    def test_proxy_down_ok_false(self, ops_env, monkeypatch):
+        """代理不可达时 ok=False + 可读错误（不抛异常）。"""
+        import urllib.request as _ur
+        def boom(url, timeout=0):
+            raise OSError("connection refused")
+        monkeypatch.setattr(_ur, "urlopen", boom)
+        d = ws.api_proxy_policies()
+        assert d["ok"] is False
+        assert "error" in d
+        # proxy_url 固定指向本地代理（不随配置 worker_base_url 漂移）
+        assert d["proxy_url"] == "http://localhost:4000"
+
+    def test_http_error_ok_false(self, ops_env, monkeypatch):
+        import urllib.error as _ue
+        import urllib.request as _ur
+        def boom(url, timeout=0):
+            raise _ue.HTTPError(url, 401, "Unauthorized", {}, None)
+        monkeypatch.setattr(_ur, "urlopen", boom)
+        d = ws.api_proxy_policies()
+        assert d["ok"] is False
+        assert "401" in d["error"]
