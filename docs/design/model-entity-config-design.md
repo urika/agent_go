@@ -84,6 +84,47 @@
 
 **关键决策**：agent_go 的 `worker_backends` 收敛为**单值 `worker_base_url`**（或干脆由 profiles 管理），模型→后端的细粒度路由**全部留代理侧**（它是唯一 7×24 部署方）。
 
+### ③.1 代理介入判据与边界澄清（避免误读）
+
+> **"部署拓扑收敛到代理侧" ≠ 所有模型流量都必须走代理。** 代理是可选部署方，是否经代理由模型协议/上下文/托管需求决定。
+
+**代理的三重价值**（本地模型经代理的完整原因，非仅托管）：
+
+| 价值 | 说明 |
+|------|------|
+| ① 托管 | 本地模型进程/GPU/生命周期管理（manage.sh 启停/热重载/watchdog） |
+| ② 智能路由 | 本地 ↔ 云端分流、超长上下文自动转云端、云端失败熔断回退（SmartRouter） |
+| ③ 报文压缩 | 上下文压缩（ContentCompressor：长上下文压缩到本地模型可用范围） |
+
+**走代理 vs 直连判据**：
+
+| 情况 | 路由 | 原因 |
+|------|------|------|
+| 非 Anthropic 协议模型（deepseek/OpenAI 接口） | **走代理** | 需协议转换（claude CLI 只懂 Anthropic） |
+| 本地模型（上下文有限） | **走代理** | 需托管 + 智能路由（超长转云）+ 报文压缩 |
+| 需本地 ↔ 云端智能分流 | **走代理** | SmartRouter 决策 |
+| **Anthropic 兼容 + 上下文足够 + 云端模型**（如 glm-5.3，上下文 1M） | **可直连** | 无需托管/协议转换/压缩 |
+
+**新增模型决策流程**：
+
+```
+新增模型 M：
+  ① models.json 注册（endpoint/key_ref/thinking/json_compliance/quality_tags）
+  ② router.roles 绑定角色（planner/evaluator/worker）
+  ③ 判定接入路径：
+     Anthropic 兼容 且 上下文足够 且 云端模型？
+       ├─ 是 → 直连 M 端点（不走代理，如 glm-5.3）
+       └─ 否 → 走代理（协议转换 / 本地托管 / 超长转云 / 压缩，如 deepseek / 本地 MLX）
+```
+
+**实证对照**：
+
+| 模型 | 协议 | 上下文 | 接入路径 |
+|------|------|--------|---------|
+| glm-5.3 | Anthropic 兼容 | 1M（足够） | **直连 GLM 端点**（m4-glm-hard 实测，planner/evaluator 未走代理） |
+| deepseek-v4-pro/flash | OpenAI | 小（需压缩） | **走代理**（claude CLI 需转换 + 超长转云） |
+| 本地 Qwen3.6-35B（MLX） | OpenAI | 小（需压缩） | **走代理**（托管 + 压缩 + 智能路由） |
+
 ## 4. 目标结构（schema 设计）
 
 ### 4.1 ① Model Registry —— `~/.agent_go/models.json`（或 config.json `models:` 块）
