@@ -76,3 +76,66 @@ def test_completed_no_semantic_results_returns_none():
     """status=completed 且无语义评估记录 → 无失败（返回 None），不破坏既有行为。"""
     result = {"status": "completed", "verify_ok": True, "exit_code": 0}
     assert classify_failure(result) is None
+
+
+# ═══ H2 谦逊层：层间归因 ═══════════════════════════════════════════════
+
+from agent_go.failure import attribute_layer, LAYER_PRIORITY
+
+
+def test_layer_priority_order_is_actionable():
+    """优先级 = 复盘动作顺序：先修 plan、再修依赖、再调预算、再修 spec、最后换模型。"""
+    assert LAYER_PRIORITY == (
+        "planner_out_of_scope",
+        "contract_broken",
+        "constraint_blocked",
+        "spec_too_broad",
+        "worker_capability",
+    )
+
+
+def test_planner_out_of_scope_from_plan_blocking():
+    """规则层：plan 预检 do-not-touch/所有权 violation → planner_out_of_scope。"""
+    meta = {"plan_quality": {"blocking_issues": [
+        {"type": "spec_do_not_touch_violation", "subtask_id": "sub-1"}]}}
+    assert attribute_layer("system_error", meta=meta) == "planner_out_of_scope"
+
+
+def test_contract_broken_from_merge_conflicts():
+    """协议层：上游合并冲突 → contract_broken。"""
+    assert attribute_layer("verification_failure",
+                           result={"status": "failed", "merge_conflicts": {"up-1": "..."}}) \
+        == "contract_broken"
+    assert attribute_layer("verification_failure",
+                           result={"status": "failed",
+                                   "failure_reason": "上游合并冲突: up-1"}) \
+        == "contract_broken"
+
+
+def test_constraint_blocked_from_budget():
+    """规则层：预算中止/阻断 → constraint_blocked。"""
+    assert attribute_layer("budget_abort", result={"status": "failed"}) == "constraint_blocked"
+    assert attribute_layer(None, result={"status": "blocked"}) == "constraint_blocked"
+
+
+def test_spec_too_broad_precedes_worker_capability():
+    """规范层：能力失败但验收无法锚定/覆盖不全 → 优先归因 spec_too_broad。"""
+    meta = {"plan_quality": {"warnings": [
+        {"type": "verification_not_anchored", "subtask_id": "sub-1"}]}}
+    assert attribute_layer("verification_failure", meta=meta) == "spec_too_broad"
+    meta2 = {"traceability": {"missing_requirement_ids": ["AC-002"]}}
+    assert attribute_layer("verification_failure", meta=meta2) == "spec_too_broad"
+
+
+def test_worker_capability_fallback():
+    """功能层：纯模型/验证能力失败 → worker_capability。"""
+    assert attribute_layer("verification_failure", result={"status": "failed"}) \
+        == "worker_capability"
+    assert attribute_layer("model_failure") == "worker_capability"
+    assert attribute_layer("timeout") == "worker_capability"
+
+
+def test_no_attribution_for_unclassified():
+    """无失败证据 → None（不强行归因）。"""
+    assert attribute_layer(None) is None
+    assert attribute_layer("delivery_failure") is None

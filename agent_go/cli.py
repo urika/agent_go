@@ -1854,6 +1854,20 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
         lines.extend(_blind_lines)
         lines.append("")
 
+    # 层间归因（谦逊层 H2：失败定位到「层」，回答「该修 spec、修 planner、调预算还是换模型」）
+    layer_attr = meta.get("layer_attribution") or {}
+    _layer_lines: list[str] = []
+    _primary = layer_attr.get("primary")
+    if _primary:
+        _layer_lines.append(f"- 任务级归因: **{_primary}**")
+    for _sid, _layer in sorted((layer_attr.get("by_subtask") or {}).items()):
+        _layer_lines.append(f"- {_sid}: {_layer}")
+    if _layer_lines:
+        lines.append("## 🎯 层间归因（失败定位到「层」）")
+        lines.append("")
+        lines.extend(_layer_lines)
+        lines.append("")
+
     # 子任务详情
     lines.append("## 🔍 子任务详情")
     lines.append("")

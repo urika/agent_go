@@ -128,3 +128,85 @@ def aggregate_failure_class(classes: list[str | None], meta: dict[str, Any] | No
         if failure_class in present:
             return failure_class
     return None
+
+
+# ═══════════════════════════════════════════════════════════
+# H2 谦逊层：层间归因（layer attribution）
+# ═══════════════════════════════════════════════════════════
+
+# 优先级 = 复盘动作顺序（越靠前越「可修」）：
+#   planner_out_of_scope（修 plan）> contract_broken（修依赖）
+#   > constraint_blocked（调预算）> spec_too_broad（修 spec）> worker_capability（换模型）
+LAYER_PRIORITY: tuple[str, ...] = (
+    "planner_out_of_scope",
+    "contract_broken",
+    "constraint_blocked",
+    "spec_too_broad",
+    "worker_capability",
+)
+
+# 规则层：planner 违反 do-not-touch / 文件所有权（plan 预检 blocking issue）
+_PLANNER_BLOCKING_TYPES = frozenset({
+    "spec_do_not_touch_violation",
+    "scope_conflict",
+    "file_overlap_without_dependency",
+    "core_file_shared_ownership",
+})
+
+# 功能层：模型/验证能力不足的 failure_class
+_WORKER_CAPABILITY_CLASSES = frozenset({"model_failure", "verification_failure", "timeout"})
+
+
+def attribute_layer(
+    failure_class: str | None = None,
+    meta: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+) -> str | None:
+    """H2 谦逊层：把失败归因到「层」（纯函数，确定性，零 LLM）。
+
+    六层映射（humility-layer-design.md §H2）——agent_go 可确定性判定的 5 个归因：
+      规范层 spec_too_broad       = 验收无法锚定（A2 弱锚定）或追踪不完整（有未覆盖 AC）
+      规则层 planner_out_of_scope = planner 违反 do-not-touch/文件所有权（plan 预检阻断）
+      规则层 constraint_blocked   = 预算/成本阻断（budget_abort / blocked）
+      协议层 contract_broken      = 上游合并冲突 / artifact 传递断裂
+      功能层 worker_capability    = 模型/验证能力不足（model/verification/timeout）
+    （目标层/原则层 = 人工决策域，不做确定性归因）
+
+    价值：复盘时回答「该修 spec、修 planner、调预算还是换模型」。
+    """
+    meta = meta or {}
+    result = result or {}
+
+    # 规则层：planner 越界（plan 预检 blocking）
+    plan_quality = meta.get("plan_quality") or {}
+    blocking_types = {
+        str(i.get("type")) for i in (plan_quality.get("blocking_issues") or [])
+        if isinstance(i, dict)
+    }
+    if blocking_types & _PLANNER_BLOCKING_TYPES:
+        return "planner_out_of_scope"
+
+    # 协议层：上游合并冲突 / artifact 断裂
+    if result.get("merge_conflicts"):
+        return "contract_broken"
+    if "上游合并冲突" in str(result.get("failure_reason") or ""):
+        return "contract_broken"
+
+    # 规则层：预算/成本阻断
+    if failure_class == "budget_abort" or result.get("status") == "blocked":
+        return "constraint_blocked"
+
+    # 规范层 vs 功能层：同为能力失败时，若验收「无法锚定/覆盖不全」优先归因到 spec
+    if failure_class in _WORKER_CAPABILITY_CLASSES:
+        warnings = plan_quality.get("warnings") or []
+        has_unanchored = any(
+            isinstance(w, dict) and w.get("type") == "verification_not_anchored"
+            for w in warnings
+        )
+        trace = meta.get("traceability") or {}
+        has_missing = bool(trace.get("missing_requirement_ids"))
+        if has_unanchored or has_missing:
+            return "spec_too_broad"
+        return "worker_capability"
+
+    return None

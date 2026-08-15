@@ -203,6 +203,10 @@ class TestPipeline:
         _persp = [p["perspective"] for p in final_meta["uncovered_perspectives"]]
         assert "independent_reviewer" in _persp
         assert "architecture_review" in _persp
+        # H2：层间归因也写入 meta
+        assert "layer_attribution" in final_meta, "交付门应写入 meta.layer_attribution"
+        assert final_meta["layer_attribution"]["primary"] is None  # 无失败 → 无归因
+        assert final_meta["layer_attribution"]["by_subtask"] == {}
 
 
 class TestHumilitySignals:

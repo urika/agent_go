@@ -2540,6 +2540,19 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         "crash_but_verified": verify_results.get("crash_but_verified", False),
         "verification_results": verification_results,
     })
+    # H2 谦逊层：子任务级层间归因（确定性，fail-open）
+    try:
+        from .failure import attribute_layer
+        layer_attribution = attribute_layer(
+            failure_class,
+            result={
+                "status": status,
+                "merge_conflicts": merge_conflicts,
+                "failure_reason": failure_reason,
+            },
+        )
+    except Exception:
+        layer_attribution = None
 
     # M2.5 偏差反馈：失败子任务生成 DeviationEvent 持久化到 deviation.jsonl。
     # 只记录能力相关失败（不记录 blocked/no_changes），供 CLI/MCP 查询与聚合。
@@ -2578,6 +2591,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
              "verify_ok": verify_ok, "duration_sec": round(claude_time, 2),
              "commit_hash": verify_results.get("commit_hash", ""),
              "failure_class": failure_class,
+             "layer_attribution": layer_attribution,
             "agent_type_source": subtask.get("_agent_type_source", "default"),
             "skills_unresolved": unresolved_skills,
             "retry_count": retry_count,

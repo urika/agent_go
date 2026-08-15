@@ -1034,6 +1034,23 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
             meta, results_map, config, task_dir)
     except Exception as _he:
         logger.debug(f"[humility] 盲区聚合失败（忽略）: {_he}")
+    # H2 谦逊层：层间归因（任务级 primary + 子任务级 map，观测不阻断）。
+    try:
+        from .failure import attribute_layer
+        _sub_layers: dict[str, str] = {}
+        for _r in results_map.values():
+            _sid = _r.get("subtask_id")
+            if not _sid:
+                continue
+            _layer = attribute_layer(_r.get("failure_class"), result=_r)
+            if _layer:
+                _sub_layers[str(_sid)] = _layer
+        meta["layer_attribution"] = {
+            "primary": attribute_layer(meta.get("failure_class"), meta=meta),
+            "by_subtask": _sub_layers,
+        }
+    except Exception as _le:
+        logger.debug(f"[humility] 层间归因失败（忽略）: {_le}")
     if meta.get("status_schema_version") and not has_failed and delivery["accepted_delivery"]:
         meta["status"] = "ACCEPTED_DELIVERY"
     elif meta.get("status_schema_version") and not has_failed and delivery["delivery_failed"]:
