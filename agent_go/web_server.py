@@ -54,6 +54,8 @@ from .profiles import (
     read_current_profile,
 )
 from .task_runner import TaskRunnerError, task_runner
+from . import kanban
+from .kanban import KanbanError
 # 复用 eval 的 JSONL/JSON 读取（与 bench/cross_judge 同源，避免实现漂移）
 from .eval import _read_jsonl, _read_json
 
@@ -1173,6 +1175,52 @@ def api_storage() -> dict:
     }
 
 
+def api_kanban() -> dict:
+    """看板数据（Kanban）：卡片按 stage 分组 + 关联任务实时状态派生。
+
+    看板 stage 与执行状态正交：卡片只存 task_ids 软链接，latest_task 从
+    meta.json 实时派生（复用 _list_task_dirs/task_status），不冗余在卡片上。
+    archived 卡片默认不返回。
+    """
+    board = kanban.load_board()
+    # 任务状态快照：task_id → {status, task}
+    status_map: dict[str, dict] = {}
+    for td in _list_task_dirs():
+        meta = _task_meta(td)
+        if not meta:
+            continue
+        status_map[td.name] = {
+            "task_id": td.name,
+            "status": task_status(meta),
+            "task": meta.get("task", ""),
+        }
+    grouped: dict[str, list] = {key: [] for key, _ in kanban.STAGES}
+    for card in board.get("cards", []):
+        if card.get("archived"):
+            continue
+        stage = card.get("stage", "")
+        if stage not in grouped:
+            continue  # 历史脏数据（非法 stage）防御性跳过
+        c = dict(card)
+        tids = c.get("task_ids") or []
+        latest = None
+        for tid in reversed(tids):  # 最近一次派发优先
+            if tid in status_map:
+                latest = status_map[tid]
+                break
+        if latest is None and tids:
+            # 关联任务已被清理 → 标记 unknown（不丢弃链接信息）
+            latest = {"task_id": tids[-1], "status": "unknown", "task": ""}
+        c["latest_task"] = latest
+        grouped[stage].append(c)
+    return {
+        "stages": [{"key": k, "label": label} for k, label in kanban.STAGES],
+        "card_types": kanban.CARD_TYPES,
+        "cards": grouped,
+        "total": sum(len(v) for v in grouped.values()),
+    }
+
+
 class WebHandler(BaseHTTPRequestHandler):
     """只读观察 API handler。"""
 
@@ -1346,6 +1394,10 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[1] == "storage":
                 self._reply_json(200, api_storage())
                 return
+            # ── 看板（Kanban）──
+            if len(parts) == 2 and parts[1] == "kanban":
+                self._reply_json(200, api_kanban())
+                return
             # ── 配置中心 + 健康检查（M1/R3-R4）──
             if len(parts) == 2 and parts[1] == "profiles":
                 self._reply_json(200, api_profiles())
@@ -1501,6 +1553,33 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "confirm":
                 self._op_confirm(parts[2], body, token)
                 return
+            # ── 看板（Kanban）────────────────────────────────
+            # POST /api/kanban/cards {title, type, stage?, repo?, description?, cron?}
+            if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "cards":
+                self._op_kanban_create(body, token)
+                return
+            # POST /api/kanban/cards/<id>/<update|move|archive|delete|dispatch>
+            if len(parts) == 5 and parts[1] == "kanban" and parts[2] == "cards":
+                card_id, action = parts[3], parts[4]
+                if action == "update":
+                    self._op_kanban_update(card_id, body, token)
+                    return
+                if action == "move":
+                    self._op_kanban_move(card_id, body, token)
+                    return
+                if action == "archive":
+                    self._op_kanban_archive(card_id, body, token)
+                    return
+                if action == "delete":
+                    self._op_kanban_delete(card_id, token)
+                    return
+                if action == "dispatch":
+                    self._op_kanban_dispatch(card_id, body, token)
+                    return
+        except KanbanError as e:
+            _audit("error", {"path": path}, str(e), False, token)
+            self._reply_json(422, {"error": str(e)})
+            return
         except ProfileError as e:
             _audit("error", {"path": path}, str(e), False, token)
             self._reply_json(422, {"error": str(e)})
@@ -1730,6 +1809,118 @@ class WebHandler(BaseHTTPRequestHandler):
                result, True, token)
         self._reply_json(200, result)
 
+    # ── 看板（Kanban）写操作 ─────────────────────────────────
+
+    def _kanban_card_or_reply(self, card_id: str) -> Optional[dict]:
+        """看板写端点共用前置：id 格式非法 → 400；不存在 → 404；通过返回卡片。"""
+        try:
+            card = kanban.get_card(card_id)
+        except KanbanError as e:
+            self._reply_json(400, {"error": str(e)})
+            return None
+        if card is None:
+            self._reply_json(404, {"error": f"卡片不存在: {card_id}"})
+            return None
+        return card
+
+    def _op_kanban_create(self, body: dict, token: str) -> None:
+        title = str(body.get("title") or "").strip()
+        ctype = str(body.get("type") or "")
+        if not title:
+            self._reply_json(400, {"error": "title 不能为空"})
+            return
+        if ctype not in kanban.CARD_TYPES:
+            self._reply_json(400, {"error": f"type 须为 {'/'.join(kanban.CARD_TYPES)}"})
+            return
+        # 非法 stage / implementation 缺 repo → KanbanError → 422（except 链）
+        card = kanban.create_card(
+            title=title, type=ctype,
+            stage=str(body.get("stage") or "brainstorm"),
+            repo=str(body.get("repo") or "").strip(),
+            description=str(body.get("description") or ""),
+            cron=str(body.get("cron") or "").strip(),
+            spec_path=str(body.get("spec_path") or "").strip())
+        _audit("kanban.create", {"card_id": card["id"], "title": title, "type": ctype},
+               card, True, token)
+        self._reply_json(200, {"ok": True, "card": card})
+
+    def _op_kanban_update(self, card_id: str, body: dict, token: str) -> None:
+        if self._kanban_card_or_reply(card_id) is None:
+            return
+        fields = {k: str(body[k]) for k in
+                  ("title", "description", "repo", "cron", "spec_path") if k in body}
+        if not fields:
+            self._reply_json(400, {"error": "无可更新字段（title/description/repo/cron/spec_path）"})
+            return
+        card = kanban.update_card(card_id, **fields)
+        _audit("kanban.update", {"card_id": card_id, "fields": sorted(fields)},
+               card, True, token)
+        self._reply_json(200, {"ok": True, "card": card})
+
+    def _op_kanban_move(self, card_id: str, body: dict, token: str) -> None:
+        if self._kanban_card_or_reply(card_id) is None:
+            return
+        stage = str(body.get("stage") or "")
+        if not stage:
+            self._reply_json(400, {"error": "stage 不能为空"})
+            return
+        card = kanban.move_card(card_id, stage, note=str(body.get("note") or ""))
+        _audit("kanban.move", {"card_id": card_id, "stage": stage}, card, True, token)
+        self._reply_json(200, {"ok": True, "card": card})
+
+    def _op_kanban_archive(self, card_id: str, body: dict, token: str) -> None:
+        if self._kanban_card_or_reply(card_id) is None:
+            return
+        archived = bool(body.get("archived", True))
+        card = kanban.archive_card(card_id, archived=archived)
+        _audit("kanban.archive", {"card_id": card_id, "archived": archived},
+               card, True, token)
+        self._reply_json(200, {"ok": True, "card": card})
+
+    def _op_kanban_delete(self, card_id: str, token: str) -> None:
+        if self._kanban_card_or_reply(card_id) is None:
+            return
+        # 已派发过任务的卡片 → KanbanError → 422（except 链）
+        kanban.delete_card(card_id)
+        _audit("kanban.delete", {"card_id": card_id}, {"deleted": card_id}, True, token)
+        self._reply_json(200, {"ok": True, "deleted": card_id})
+
+    def _op_kanban_dispatch(self, card_id: str, body: dict, token: str) -> None:
+        """派发执行：implementation/periodic 卡片 → task_runner.start_run，
+        成功后 link_task + 自动流转到 implementation 列。"""
+        card = self._kanban_card_or_reply(card_id)
+        if card is None:
+            return
+        if card.get("type") not in ("implementation", "periodic"):
+            self._reply_json(422, {"error": "仅 implementation/periodic 卡片可派发执行"})
+            return
+        repo = (card.get("repo") or "").strip()
+        if not repo or not Path(repo).is_dir():
+            self._reply_json(422, {"error": f"卡片 repo 为空或路径不存在: {repo or '<空>'}"})
+            return
+        try:
+            parallel = int(body.get("parallel") or 1)
+        except (TypeError, ValueError):
+            self._reply_json(400, {"error": "parallel 必须为正整数"})
+            return
+        confirm_mode = str(body.get("confirm_mode") or "auto")
+        if confirm_mode not in ("auto", "web"):
+            self._reply_json(400, {"error": "confirm_mode 须为 auto/web"})
+            return
+        # 任务文本 = 标题 + 描述（截断防御，防超长 argv）
+        task_text = card.get("title", "")
+        if card.get("description"):
+            task_text += "\n\n" + card["description"]
+        task_text = task_text[:4000]
+        task_id = task_runner.start_run(repo, task_text, parallel=parallel,
+                                        confirm_mode=confirm_mode)
+        kanban.link_task(card_id, task_id)
+        card = kanban.move_card(card_id, "implementation", note=f"派发任务 {task_id}")
+        result = {"ok": True, "task_id": task_id, "card": card}
+        _audit("kanban.dispatch", {"card_id": card_id, "task_id": task_id, "repo": repo},
+               {"task_id": task_id}, True, token)
+        self._reply_json(200, result)
+
     def do_PUT(self) -> None:
         """PUT /api/config {field, value}（R14 白名单字段编辑）。"""
         parsed = urlparse(self.path)
@@ -1854,6 +2045,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 sigs.append(f"{td.name}:{meta_p.stat().st_mtime:.0f}:{meta_p.stat().st_size}")
             except OSError:
                 continue
+        # 看板数据变化也触发 SSE refresh（kanban.json 不在任务目录内）
+        try:
+            kb = kanban.board_path()
+            sigs.append(f"kanban:{kb.stat().st_mtime:.0f}:{kb.stat().st_size}")
+        except OSError:
+            pass
         return "|".join(sigs)
 
 
@@ -2041,12 +2238,50 @@ _SPA_HTML = """<!DOCTYPE html>
                    padding:10px 14px; margin-top:12px; margin-bottom:12px; }
   .humility-card .h-title { font-weight:600; color:var(--yellow); margin-bottom:6px; }
   .humility-card .h-line { color:var(--dim); font-size:13px; line-height:1.6; }
+  .kanban-toolbar { display:flex; gap:12px; align-items:center; margin-bottom:12px; }
+  .kanban-toolbar input { background:var(--panel); border:1px solid var(--border);
+                          color:var(--text); padding:6px 10px; border-radius:6px; font-size:13px; }
+  .kanban-board { display:flex; gap:12px; align-items:flex-start; overflow-x:auto;
+                  padding-bottom:8px; }
+  .kanban-col { flex:1 1 0; min-width:220px; background:var(--panel);
+                border:1px solid var(--border); border-radius:8px; padding:8px; }
+  .kanban-col.drag-over { border-color:var(--blue); }
+  .kanban-col-head { display:flex; align-items:center; gap:8px; padding:4px 6px 10px;
+                     font-weight:600; }
+  .kanban-new-btn { margin-left:auto; background:transparent; border:1px solid var(--border);
+                    color:var(--dim); border-radius:6px; cursor:pointer; font-size:12px;
+                    padding:2px 8px; }
+  .kanban-new-btn:hover { color:var(--blue); border-color:var(--blue); }
+  .kanban-card { background:#1a1e26; border:1px solid var(--border); border-radius:8px;
+                 padding:10px 12px; margin-bottom:8px; cursor:pointer; }
+  .kanban-card:hover { border-color:var(--blue); }
+  .kanban-card.open { border-color:var(--blue); }
+  .kanban-card .kc-title { font-weight:500; margin-bottom:6px; }
+  .kanban-card .kc-meta { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .kanban-card .kc-foot { display:flex; gap:6px; align-items:center; margin-top:8px; }
+  .kanban-move-btn { background:transparent; border:1px solid var(--border); color:var(--dim);
+                     border-radius:4px; cursor:pointer; font-size:11px; padding:1px 6px; }
+  .kanban-move-btn:hover { color:var(--blue); border-color:var(--blue); }
+  .kanban-detail { border-top:1px solid var(--border); margin-top:8px; padding-top:8px; }
+  .kanban-detail pre { max-height:240px; }
+  .kanban-detail .kc-tasks { margin:8px 0; }
+  .kanban-task-link { cursor:pointer; }
+  .kanban-task-link:hover { color:var(--blue); border-color:var(--blue); }
+  .kanban-history { font-size:12px; color:var(--dim); margin-top:8px; }
+  .kanban-history .kh-item { padding:3px 0; border-bottom:1px dashed var(--border); }
+  .kanban-form { background:#0b0d11; border:1px solid var(--border); border-radius:8px;
+                 padding:10px; margin-bottom:8px; }
+  .kanban-form input, .kanban-form select, .kanban-form textarea {
+    width:100%; background:var(--panel); border:1px solid var(--border); color:var(--text);
+    padding:5px 8px; border-radius:6px; font-size:12px; margin-bottom:6px; }
+  .kanban-form textarea { resize:vertical; font-family:inherit; line-height:1.5; }
 </style>
 </head>
 <body>
 <header>
   <h1>🌐 agent_go 观察平台</h1>
   <nav class="nav-tabs">
+    <button class="nav-tab" data-view="kanban">🗂 看板</button>
     <button class="nav-tab active" data-view="tasks">📋 任务</button>
     <button class="nav-tab" data-view="overview">📊 总览</button>
     <button class="nav-tab" data-view="cost">💰 成本</button>
@@ -2741,6 +2976,273 @@ function renderTimeline(d) {
     : '<div class="kv"><dt>无时间线</dt><dd></dd></div>';
 }
 
+// ── 看板（Kanban）──────────────────────────────────────
+let kanbanData = null;
+let kanbanRepoFilter = '';
+let kanbanExpanded = null;      // 展开详情的卡片 id
+let kanbanEditing = null;       // 正在编辑的卡片 id
+let kanbanNewCardStage = null;  // 正在新建卡片的列
+
+async function loadKanban() {
+  try {
+    kanbanData = await api('/api/kanban');
+    renderKanban();
+    setConn(true);
+  } catch (e) {
+    setConn(false);
+    document.getElementById('mainView').innerHTML =
+      '<div class="err">加载失败: '+esc(e.message)+'</div>';
+  }
+}
+
+function renderKanban() {
+  const d = kanbanData || {stages: [], cards: {}, card_types: {}};
+  const filter = kanbanRepoFilter.trim().toLowerCase();
+  let html = '<div class="kanban-toolbar">'+
+    '<input type="text" id="kanbanRepoFilter" placeholder="🔍 按 repo 筛选…" value="'+esc(kanbanRepoFilter)+'">'+
+    '<span class="dim">共 '+(d.total||0)+' 张卡片'+(filter?'（已筛选）':'')+'</span></div>';
+  html += '<div class="kanban-board">';
+  d.stages.forEach((st, si) => {
+    let cards = d.cards[st.key] || [];
+    if (filter) cards = cards.filter(c => (c.repo||'').toLowerCase().includes(filter));
+    html += '<div class="kanban-col" data-stage="'+st.key+'">'+
+      '<div class="kanban-col-head"><span>'+esc(st.label)+'</span>'+
+      '<span class="tag">'+cards.length+'</span>'+
+      '<button class="kanban-new-btn" data-stage="'+st.key+'">＋ 新建</button></div>';
+    if (kanbanNewCardStage === st.key) html += kanbanFormHtml('new', {});
+    cards.forEach(c => { html += kanbanCardHtml(c, si, d.stages.length); });
+    html += '</div>';
+  });
+  html += '</div>';
+  document.getElementById('mainView').innerHTML = html;
+  bindKanbanEvents();
+}
+
+function findKanbanCard(id) {
+  const cards = (kanbanData||{}).cards || {};
+  for (const key of Object.keys(cards)) {
+    const hit = (cards[key]||[]).find(c => c.id === id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function kanbanCardHtml(c, stageIdx, stageCount) {
+  const typeLabel = ((kanbanData||{}).card_types||{})[c.type] || c.type;
+  const repoShort = c.repo ? c.repo.split('/').filter(Boolean).pop() : '';
+  let html = '<div class="kanban-card'+(kanbanExpanded===c.id?' open':'')+'" draggable="true" data-card="'+esc(c.id)+'">'+
+    '<div class="kc-title">'+esc(c.title)+'</div>'+
+    '<div class="kc-meta"><span class="tag">'+esc(typeLabel)+'</span>';
+  if (repoShort) html += '<span class="tag" title="'+esc(c.repo)+'">📁 '+esc(repoShort)+'</span>';
+  if (c.cron) html += '<span class="tag">⏰ '+esc(c.cron)+'</span>';
+  if (c.latest_task) html += '<span class="badge '+(STATUS_COLORS[c.latest_task.status]||'st-pending')+'">'+esc(c.latest_task.status)+'</span>';
+  html += '</div>';
+  // 流转按钮（◀▶ 无拖拽 fallback）
+  html += '<div class="kc-foot">';
+  if (stageIdx > 0) html += '<button class="kanban-move-btn" data-card="'+esc(c.id)+'" data-dir="-1" title="移到上一阶段">◀</button>';
+  if (stageIdx < stageCount-1) html += '<button class="kanban-move-btn" data-card="'+esc(c.id)+'" data-dir="1" title="移到下一阶段">▶</button>';
+  html += '<span class="dim" style="margin-left:auto">'+esc((c.updated||'').replace('T',' ').slice(5,16))+'</span></div>';
+  if (kanbanExpanded === c.id) html += kanbanDetailHtml(c);
+  html += '</div>';
+  return html;
+}
+
+function kanbanDetailHtml(c) {
+  let html = '<div class="kanban-detail">';
+  if (kanbanEditing === c.id) {
+    html += kanbanFormHtml('edit', c);
+  } else if (c.description) {
+    // MVP 不做 markdown 渲染，pre 原文展示
+    html += '<pre>'+esc(c.description)+'</pre>';
+  } else {
+    html += '<div class="dim">（无描述）</div>';
+  }
+  if ((c.task_ids||[]).length) {
+    html += '<div class="kc-tasks">'+c.task_ids.map(tid =>
+      '<span class="tag kanban-task-link" data-task="'+esc(tid)+'" title="点击查看任务列表">🔗 '+esc(tid)+'</span>').join(' ')+'</div>';
+  }
+  html += '<div class="op-bar">'+
+    '<button class="btn kanban-op" data-op="edit" data-card="'+esc(c.id)+'">✏️ 编辑</button>';
+  if (c.type === 'implementation' || c.type === 'periodic')
+    html += '<button class="btn primary kanban-op" data-op="dispatch" data-card="'+esc(c.id)+'">🚀 派发执行</button>';
+  html += '<button class="btn kanban-op" data-op="archive" data-card="'+esc(c.id)+'">🗄️ 归档</button>';
+  if (!(c.task_ids||[]).length)
+    html += '<button class="btn kanban-op" data-op="delete" data-card="'+esc(c.id)+'">🗑️ 删除</button>';
+  html += '<span class="op-msg" id="kanbanMsg-'+esc(c.id)+'"></span></div>';
+  const hist = (c.history||[]).slice().reverse();
+  if (hist.length) {
+    html += '<div class="kanban-history">'+hist.map(h =>
+      '<div class="kh-item">'+esc((h.ts||'').replace('T',' '))+' · '+esc(h.action)+
+      (h.from?' '+esc(h.from)+' → '+esc(h.to||''):'')+
+      (h.note?' · '+esc(h.note):'')+'</div>').join('')+'</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function kanbanFormHtml(mode, c) {
+  const isNew = mode === 'new';
+  const types = (kanbanData||{}).card_types || {};
+  let html = '<div class="kanban-form" data-mode="'+mode+'" data-card="'+esc(c.id||'')+'">';
+  html += '<input type="text" class="kf-title" placeholder="标题 *" value="'+esc(c.title||'')+'">';
+  if (isNew) {
+    html += '<select class="kf-type">'+
+      Object.entries(types).map(([k, v]) =>
+        '<option value="'+esc(k)+'">'+esc(v)+'</option>').join('')+'</select>';
+  }
+  html += '<input type="text" class="kf-repo" placeholder="repo 路径（实施/周期类必填）" value="'+esc(c.repo||'')+'">';
+  html += '<textarea class="kf-desc" rows="3" placeholder="描述（markdown，讨论沉淀）">'+esc(c.description||'')+'</textarea>';
+  if (isNew || c.type === 'periodic')
+    html += '<input type="text" class="kf-cron" placeholder="cron 表达式（周期类展示用）" value="'+esc(c.cron||'')+'">';
+  html += '<div style="display:flex;gap:8px;align-items:center">'+
+    '<button class="btn primary kf-save">'+(isNew?'创建':'保存')+'</button>'+
+    '<button class="btn kf-cancel">取消</button>'+
+    '<span class="op-msg kf-msg"></span></div></div>';
+  return html;
+}
+
+function bindKanbanEvents() {
+  const main = document.getElementById('mainView');
+  // repo 筛选（客户端过滤）
+  const fi = document.getElementById('kanbanRepoFilter');
+  if (fi) {
+    fi.oninput = () => { kanbanRepoFilter = fi.value; renderKanban(); };
+    if (kanbanRepoFilter) { fi.focus(); fi.setSelectionRange(fi.value.length, fi.value.length); }
+  }
+  // 列头新建按钮（内联表单开关）
+  main.querySelectorAll('.kanban-new-btn').forEach(b => {
+    b.onclick = () => {
+      kanbanNewCardStage = (kanbanNewCardStage === b.dataset.stage) ? null : b.dataset.stage;
+      renderKanban();
+    };
+  });
+  // 卡片：点击展开/收起详情 + 拖拽流转
+  main.querySelectorAll('.kanban-card').forEach(el => {
+    el.addEventListener('click', ev => {
+      if (ev.target.closest('button') || ev.target.closest('.kanban-form')) return;
+      const id = el.dataset.card;
+      kanbanExpanded = (kanbanExpanded === id) ? null : id;
+      kanbanEditing = null;
+      renderKanban();
+    });
+    el.addEventListener('dragstart', ev => {
+      ev.dataTransfer.setData('text/plain', el.dataset.card);
+      ev.dataTransfer.effectAllowed = 'move';
+    });
+  });
+  // 列：拖放目标
+  main.querySelectorAll('.kanban-col').forEach(col => {
+    col.addEventListener('dragover', ev => { ev.preventDefault(); col.classList.add('drag-over'); });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', async ev => {
+      ev.preventDefault();
+      col.classList.remove('drag-over');
+      const cardId = ev.dataTransfer.getData('text/plain');
+      const stage = col.dataset.stage;
+      if (!cardId || !stage) return;
+      try {
+        await postJSON('/api/kanban/cards/'+encodeURIComponent(cardId)+'/move', {stage});
+        loadKanban();
+      } catch (e) { alert('流转失败: '+e.message); }
+    });
+  });
+  // ◀▶ 流转按钮（无拖拽 fallback）
+  main.querySelectorAll('.kanban-move-btn').forEach(b => {
+    b.onclick = async ev => {
+      ev.stopPropagation();
+      const stages = (kanbanData||{}).stages || [];
+      const card = findKanbanCard(b.dataset.card);
+      if (!card) return;
+      const idx = stages.findIndex(s => s.key === card.stage);
+      const ni = idx + parseInt(b.dataset.dir, 10);
+      if (ni < 0 || ni >= stages.length) return;
+      try {
+        await postJSON('/api/kanban/cards/'+encodeURIComponent(card.id)+'/move', {stage: stages[ni].key});
+        loadKanban();
+      } catch (e) { alert('流转失败: '+e.message); }
+    };
+  });
+  // 新建/编辑表单
+  main.querySelectorAll('.kanban-form').forEach(f => {
+    const msg = f.querySelector('.kf-msg');
+    f.querySelector('.kf-cancel').onclick = () => {
+      if (f.dataset.mode === 'new') kanbanNewCardStage = null; else kanbanEditing = null;
+      renderKanban();
+    };
+    f.querySelector('.kf-save').onclick = async () => {
+      const title = f.querySelector('.kf-title').value.trim();
+      const repo = f.querySelector('.kf-repo').value.trim();
+      const description = f.querySelector('.kf-desc').value;
+      const cronEl = f.querySelector('.kf-cron');
+      const typeEl = f.querySelector('.kf-type');
+      if (!title) { msg.textContent = '⚠️ 标题必填'; msg.style.color = 'var(--yellow)'; return; }
+      const type = typeEl ? typeEl.value : '';
+      // 前端预校验（后端仍会再校验一次）
+      if (typeEl && (type === 'implementation' || type === 'periodic') && !repo) {
+        msg.textContent = '⚠️ 实施/周期类卡片必须填 repo'; msg.style.color = 'var(--yellow)'; return;
+      }
+      try {
+        if (f.dataset.mode === 'new') {
+          await postJSON('/api/kanban/cards', {title, type, stage: kanbanNewCardStage,
+            repo, description, cron: cronEl ? cronEl.value.trim() : ''});
+          kanbanNewCardStage = null;
+        } else {
+          const body = {title, repo, description};
+          if (cronEl) body.cron = cronEl.value.trim();
+          await postJSON('/api/kanban/cards/'+encodeURIComponent(f.dataset.card)+'/update', body);
+          kanbanEditing = null;
+        }
+        loadKanban();
+      } catch (e) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; }
+    };
+  });
+  // 详情操作按钮
+  main.querySelectorAll('.kanban-op').forEach(b => {
+    b.onclick = async ev => {
+      ev.stopPropagation();
+      const id = b.dataset.card;
+      const op = b.dataset.op;
+      const msg = document.getElementById('kanbanMsg-'+id);
+      if (op === 'edit') { kanbanEditing = id; renderKanban(); return; }
+      if (op === 'dispatch') {
+        if (!confirm('派发卡片到 agent_go 执行？\\n任务文本 = 卡片标题 + 描述')) return;
+        b.disabled = true;
+        try {
+          const d = await postJSON('/api/kanban/cards/'+encodeURIComponent(id)+'/dispatch', {parallel: 1});
+          if (msg) { msg.textContent = '✅ 已派发: '+d.task_id; msg.style.color = 'var(--green)'; }
+          setTimeout(loadKanban, 800);
+        } catch (e) {
+          if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; }
+          b.disabled = false;
+        }
+        return;
+      }
+      if (op === 'archive') {
+        if (!confirm('归档该卡片？（归档后不在看板展示）')) return;
+        try {
+          await postJSON('/api/kanban/cards/'+encodeURIComponent(id)+'/archive', {archived: true});
+          kanbanExpanded = null;
+          loadKanban();
+        } catch (e) { if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; } }
+        return;
+      }
+      if (op === 'delete') {
+        if (!confirm('物理删除该卡片？仅未派发过任务的卡片可删除。')) return;
+        try {
+          await postJSON('/api/kanban/cards/'+encodeURIComponent(id)+'/delete', {});
+          kanbanExpanded = null;
+          loadKanban();
+        } catch (e) { if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; } }
+        return;
+      }
+    };
+  });
+  // 关联任务 → 跳任务列表
+  main.querySelectorAll('.kanban-task-link').forEach(el => {
+    el.onclick = ev => { ev.stopPropagation(); switchView('tasks'); };
+  });
+}
+
 // ── 视图切换 + 新视图渲染（P0-2 / P1 / P2）─────────────────
 let currentView = 'tasks';
 
@@ -2756,6 +3258,7 @@ function switchView(name) {
   main.innerHTML = '<div class="loading">加载中…</div>';
   // 返回 loader 的 Promise，调用方可链式等待渲染完成
   if (name === 'tasks') return loadTasks();
+  if (name === 'kanban') return loadKanban();
   if (name === 'archive') return loadTasks('/api/archive');
   if (name === 'overview') return loadOverview();
   if (name === 'cost') return loadCost();
@@ -3113,8 +3616,9 @@ function connectSSE() {
     try {
       const m = JSON.parse(e.data);
       if (m.type === 'refresh') {
-        // 仅任务视图自动刷新（其他视图按需手动刷新，避免覆盖用户正在看的页面）
+        // 任务/看板视图自动刷新（其他视图按需手动刷新，避免覆盖用户正在看的页面）
         if (currentView === 'tasks') loadTasks();
+        if (currentView === 'kanban') loadKanban();
       }
     } catch(_) {}
   });

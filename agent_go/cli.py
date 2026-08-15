@@ -409,15 +409,19 @@ def _build_parser():
     return parser
 
 
-def _build_spec_context(spec_obj) -> str:
+def _build_spec_context(spec_obj) -> tuple[str, list[str], list[str]]:
     """把 TaskSpec 的范围/约束/验收/风险组装成注入 Plan prompt 的结构化约束文本。
 
-    §3 范围 / §4 约束 / §5 验收 / §7 风险 → system prompt 硬约束
-    （§1 目标已在 cmd_run 中替代 task；§2 动机 / §6 参考已注入 user content）
-    稳定 ID（REQ/AC）→ 从 §1 目标 + §5 验收提取，供 planner 写进 requirement_ids /
-    acceptance_criteria_ids 字段（对应 api.py plan prompt 的稳定 ID 约定）。
+    返回 (context, req_ids, ac_ids)：
+      §3 范围 / §4 约束 / §5 验收 / §7 风险 → system prompt 硬约束
+      （§1 目标已在 cmd_run 中替代 task；§2 动机 / §6 参考已注入 user content）
+      稳定 ID（REQ/AC）→ 从 §1 目标 + §5 验收提取，供 planner 写进 requirement_ids /
+      acceptance_criteria_ids 字段；同时返回给 cmd_run 持久化进 meta（traceability 的
+      spec 侧输入——缺了这步 assess_traceability 永远 no_spec_ids）。
     """
     parts = []
+    req_ids: list[str] = []
+    ac_ids: list[str] = []
     if spec_obj.scope:
         parts.append(f"【范围（必须遵守）】\n{spec_obj.scope.strip()}")
     if spec_obj.constraint:
@@ -442,7 +446,7 @@ def _build_spec_context(spec_obj) -> str:
         pass
     if spec_obj.risk:
         parts.append(f"【已知风险（在 steps[].risks 和 difficulty 中体现）】\n{spec_obj.risk.strip()}")
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), req_ids, ac_ids
 
 
 def _preflight_repair_plan(
@@ -891,6 +895,8 @@ def cmd_run(args=None):
     spec_context = ""
     spec_snapshot = ""
     spec_do_not_touch: list[str] = []
+    spec_req_ids: list[str] = []
+    spec_ac_ids: list[str] = []
     if spec_path is not None:
         if not spec_path.exists():
             console.error(f"Spec 文件不存在: {spec_path}")
@@ -945,7 +951,7 @@ def cmd_run(args=None):
                 config["cost_control"] = _cc
                 logger.info(f"[cost_control] Spec budget=${spec_obj.budget} 已设任务级 L3 预算")
         # 结构化约束注入（由 generate_plan 的 spec_context 参数消费）
-        spec_context = _build_spec_context(spec_obj)
+        spec_context, spec_req_ids, spec_ac_ids = _build_spec_context(spec_obj)
         # 后段注入（spec 闭环）：§5 验收 + §3 范围 存入 runtime config，供 _build_task_md 注入 TASK.md
         if spec_obj.acceptance:
             config["_spec_acceptance"] = spec_obj.acceptance.strip()
@@ -1185,6 +1191,9 @@ def cmd_run(args=None):
         "plan_repairable_issue_count": plan_quality.get("plan_repairable_issue_count", 0),
         "architecture_review": architecture_review,
         "spec_snapshot": spec_snapshot,
+        # spec 级稳定 ID 持久化（traceability 的 spec 侧输入；空列表 = 无 spec 任务）
+        "requirement_ids": spec_req_ids,
+        "acceptance_criteria_ids": spec_ac_ids,
     }
     # Goal Contract: 从 Task + Plan + Subtask 提取完成契约（确定性，不调 LLM）
     try:
@@ -1889,7 +1898,6 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
     # 失败历史关联（#50：让用户看见「越用越聪明」——失败时告知「这不是第一次」）
     try:
         from .problems import load as load_problems
-        from .config import AGENT_GO_DIR
         problems_map = {p.id: p for p in load_problems(AGENT_GO_DIR / "problems.jsonl")}
         _hist_lines: list[str] = []
         for r in results:

@@ -363,7 +363,7 @@ class TestRunHeadless:
                     "task", Path("/tmp/work"),
                     {"AGENT_GO_METERING_PATH": str(meter_path), "AGENT_GO_TASK_ID": "task-kr",
                      "AGENT_GO_DIFFICULTY": "hard"},
-                    logger, "sub-kr"
+                    logger, "sub-kr", config={"goal": {"enabled": False}}
                 )
 
         mock_proc.kill.assert_called_once()
@@ -901,7 +901,7 @@ class TestGoalWatchdog:
         with patch("time.time", side_effect=lambda: next(time_gen)):
             with patch("time.sleep"):
                 with patch("agent_go.subtask.subprocess.run", side_effect=_rr):
-                    result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-p3")
+                    result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-p3", config={"goal": {"enabled": False}})
 
         # 复检发现文件活性 → 复位，不 kill；进程最终自然退出
         mock_proc.kill.assert_not_called()
@@ -959,7 +959,7 @@ class TestGoalWatchdog:
             with patch("time.sleep"):
                 with patch("agent_go.subtask.subprocess.run", side_effect=_rr):
                     with patch("subprocess.Popen", return_value=mock_proc):
-                        _run_headless("task", wt, {}, logger, "sub-mtime")
+                        _run_headless("task", wt, {}, logger, "sub-mtime", config={"goal": {"enabled": False}})
 
         # mtime 被检出 → 复检判活性 → 复位 → 进程自然退出，不 kill
         mock_proc.kill.assert_not_called()
@@ -1004,7 +1004,7 @@ class TestGoalWatchdog:
         with patch("time.time", side_effect=lambda: next(time_gen)):
             with patch("time.sleep"):
                 with patch("agent_go.subtask.subprocess.run", side_effect=_rr):
-                    result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-p3b")
+                    result = _run_headless("task", Path("/tmp/work"), {}, logger, "sub-p3b", config={"goal": {"enabled": False}})
 
         mock_proc.kill.assert_called_once()
         assert getattr(result, "kill_reason", None) == "stuck"
@@ -1612,6 +1612,6 @@ def test_stuck_grace_env_override_accepted(mock_run, mock_popen, logger, tmp_pat
             "task", Path("/tmp/work"),
             {"AGENT_GO_METERING_PATH": str(meter_path), "AGENT_GO_TASK_ID": "t",
              "AGENT_GO_DIFFICULTY": "hard", "AGENT_GO_STUCK_GRACE_SEC": "30"},
-            logger, "sub-grace")
+            logger, "sub-grace", config={"goal": {"enabled": False}})
     mock_proc.kill.assert_called_once()
     assert getattr(result, "kill_reason", None) == "stuck"
