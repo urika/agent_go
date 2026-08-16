@@ -33,7 +33,7 @@ from agent_go.recover import (
 def _init_repo(path: Path, files: Optional[dict[str, str]] = None) -> None:
     """Helper: git init + first commit."""
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=str(path), capture_output=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(path), capture_output=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(path), capture_output=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=str(path), capture_output=True)
     if files:
@@ -252,7 +252,7 @@ class TestResetOrphanChanges:
         这是旧代码 checkout -- . 失败的唯一场景（index 为空）。
         """
         (tmp_path / ".gitkeep").write_text("", encoding="utf-8")
-        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(tmp_path), capture_output=True)
         subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(tmp_path), capture_output=True)
         subprocess.run(["git", "config", "user.name", "t"], cwd=str(tmp_path), capture_output=True)
         subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)

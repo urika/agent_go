@@ -131,7 +131,7 @@ from pathlib import Path
 def _init_repo(path: Path, files=None):
     """git init + first commit."""
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=str(path), capture_output=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(path), capture_output=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(path), capture_output=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=str(path), capture_output=True)
     for name, content in (files or {"file.txt": "base"}).items():

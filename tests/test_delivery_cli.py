@@ -10,7 +10,7 @@ from agent_go.cli import cmd_merge, cmd_pr
 
 def _init_repo(path: Path):
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=str(path), capture_output=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(path), capture_output=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(path), capture_output=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=str(path), capture_output=True)
     (path / "file.txt").write_text("base", encoding="utf-8")
