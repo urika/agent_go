@@ -34,6 +34,7 @@ import re
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .status import task_status, normalize_task_status
@@ -1198,17 +1199,33 @@ def api_storage() -> dict:
     }
 
 
-def api_kanban() -> dict:
-    """看板数据（Kanban）：卡片按 stage 分组 + 关联任务实时状态派生。
+# ── 任务状态快照（api_kanban 复用，meta 签名缓存避免每请求全量解析）──
 
-    看板 stage 与执行状态正交：卡片只存 task_ids 软链接，latest_task 从
-    meta.json 实时派生（复用 _list_task_dirs/task_status），不冗余在卡片上。
-    archived 卡片默认不返回。
+_task_status_cache: dict[str, dict] = {}
+_task_status_sig: str = ""
+_task_status_lock = threading.Lock()
+
+
+def _task_status_snapshot() -> dict[str, dict]:
+    """task_id → {task_id, status, task} 快照，按各 meta.json 的 mtime:size 签名
+    缓存；任务无变化时 /api/kanban 复用，避免每次请求全量 open+json.loads（O(tasks)）。
+    任务目录/meta 变化（含新增/清理）都会使签名失效。
     """
-    board = kanban.load_board()
-    # 任务状态快照：task_id → {status, task}
-    status_map: dict[str, dict] = {}
+    global _task_status_cache, _task_status_sig
+    parts: list[str] = []
+    dirs: list[Path] = []
     for td in _list_task_dirs():
+        dirs.append(td)
+        meta_p = td / "meta.json"
+        try:
+            parts.append(f"{td.name}:{meta_p.stat().st_mtime:.6f}:{meta_p.stat().st_size}")
+        except OSError:
+            continue
+    sig = f"{AGENT_GO_DIR}\n" + "|".join(parts)
+    if sig == _task_status_sig:
+        return _task_status_cache
+    status_map: dict[str, dict] = {}
+    for td in dirs:
         meta = _task_meta(td)
         if not meta:
             continue
@@ -1217,9 +1234,25 @@ def api_kanban() -> dict:
             "status": task_status(meta),
             "task": meta.get("task", ""),
         }
+    with _task_status_lock:
+        _task_status_cache = status_map
+        _task_status_sig = sig
+    return status_map
+
+
+def api_kanban(include_archived: bool = False) -> dict:
+    """看板数据（Kanban）：卡片按 stage 分组 + 关联任务实时状态派生。
+
+    看板 stage 与执行状态正交：卡片只存 task_ids 软链接，latest_task 从
+    meta.json 实时派生（复用 _list_task_dirs/task_status，mtime 签名缓存），
+    不冗余在卡片上。archived 卡片默认不返回；include_archived=True 时按其
+    stage 分组返回（卡片带 archived:true，供前端归档视图/取消归档）。
+    """
+    board = kanban.load_board()
+    status_map = _task_status_snapshot()
     grouped: dict[str, list] = {key: [] for key, _ in kanban.STAGES}
     for card in board.get("cards", []):
-        if card.get("archived"):
+        if card.get("archived") and not include_archived:
             continue
         stage = card.get("stage", "")
         if stage not in grouped:
@@ -1441,7 +1474,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             # ── 看板（Kanban）──
             if len(parts) == 2 and parts[1] == "kanban":
-                self._reply_json(200, api_kanban())
+                # ?archived=1 → 归档视图（含已归档卡片，供取消归档）
+                include_archived = "archived" in query
+                self._reply_json(200, api_kanban(include_archived=include_archived))
                 return
             # ── 配置中心 + 健康检查（M1/R3-R4）──
             if len(parts) == 2 and parts[1] == "profiles":
@@ -1963,6 +1998,16 @@ class WebHandler(BaseHTTPRequestHandler):
         if confirm_mode not in ("auto", "web"):
             self._reply_json(400, {"error": "confirm_mode 须为 auto/web"})
             return
+        # 幂等防护：卡片已有运行中任务（EXECUTING/PLANNING 或托管句柄存活）→ 拒绝重复派发
+        for tid in reversed(card.get("task_ids") or []):
+            st = _task_status_of(tid)
+            if st in _RUNNING_STATES or task_runner.is_running(tid):
+                self._reply_json(409, {
+                    "error": f"卡片已有运行中任务（{tid}，状态 {st}），不可重复派发。"
+                             "可先取消或等待其结束。",
+                    "task_id": tid,
+                })
+                return
         # 任务文本 = 标题 + 描述（截断防御，防超长 argv）
         task_text = card.get("title", "")
         if card.get("description"):
@@ -2317,6 +2362,8 @@ _SPA_HTML = """<!DOCTYPE html>
   .kanban-card { background:#1a1e26; border:1px solid var(--border); border-radius:8px;
                  padding:10px 12px; margin-bottom:8px; cursor:pointer; }
   .kanban-card:hover { border-color:var(--blue); }
+  .kanban-card.archived { opacity:0.55; filter:saturate(0.5); }
+  .kanban-card.archived:hover { border-color:var(--yellow); }
   .kanban-card.open { border-color:var(--blue); }
   .kanban-card .kc-title { font-weight:500; margin-bottom:6px; }
   .kanban-card .kc-meta { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
@@ -3044,10 +3091,11 @@ let kanbanRepoFilter = '';
 let kanbanExpanded = null;      // 展开详情的卡片 id
 let kanbanEditing = null;       // 正在编辑的卡片 id
 let kanbanNewCardStage = null;  // 正在新建卡片的列
+let kanbanShowArchived = false; // 归档视图开关（含已归档卡片，可取消归档）
 
 async function loadKanban() {
   try {
-    kanbanData = await api('/api/kanban');
+    kanbanData = await api('/api/kanban' + (kanbanShowArchived ? '?archived=1' : ''));
     renderKanban();
     setConn(true);
   } catch (e) {
@@ -3062,6 +3110,8 @@ function renderKanban() {
   const filter = kanbanRepoFilter.trim().toLowerCase();
   let html = '<div class="kanban-toolbar">'+
     '<input type="text" id="kanbanRepoFilter" placeholder="🔍 按 repo 筛选…" value="'+esc(kanbanRepoFilter)+'">'+
+    '<button class="btn '+(kanbanShowArchived?'primary':'')+'" id="kanbanArchToggle" title="显示/隐藏已归档卡片">🗂 '+
+    (kanbanShowArchived?'已归档（含）':'已归档')+'</button>'+
     '<span class="dim">共 '+(d.total||0)+' 张卡片'+(filter?'（已筛选）':'')+'</span></div>';
   html += '<div class="kanban-board">';
   d.stages.forEach((st, si) => {
@@ -3092,17 +3142,18 @@ function findKanbanCard(id) {
 function kanbanCardHtml(c, stageIdx, stageCount) {
   const typeLabel = ((kanbanData||{}).card_types||{})[c.type] || c.type;
   const repoShort = c.repo ? c.repo.split('/').filter(Boolean).pop() : '';
-  let html = '<div class="kanban-card'+(kanbanExpanded===c.id?' open':'')+'" draggable="true" data-card="'+esc(c.id)+'">'+
+  let html = '<div class="kanban-card'+(c.archived?' archived':'')+(kanbanExpanded===c.id?' open':'')+'"'+(c.archived?'':' draggable="true"')+' data-card="'+esc(c.id)+'">'+
     '<div class="kc-title">'+esc(c.title)+'</div>'+
     '<div class="kc-meta"><span class="tag">'+esc(typeLabel)+'</span>';
+  if (c.archived) html += '<span class="tag" style="color:var(--yellow)">🗂 已归档</span>';
   if (repoShort) html += '<span class="tag" title="'+esc(c.repo)+'">📁 '+esc(repoShort)+'</span>';
   if (c.cron) html += '<span class="tag">⏰ '+esc(c.cron)+'</span>';
   if (c.latest_task) html += '<span class="badge '+(STATUS_COLORS[c.latest_task.status]||'st-pending')+'">'+esc(c.latest_task.status)+'</span>';
   html += '</div>';
   // 流转按钮（◀▶ 无拖拽 fallback）
   html += '<div class="kc-foot">';
-  if (stageIdx > 0) html += '<button class="kanban-move-btn" data-card="'+esc(c.id)+'" data-dir="-1" title="移到上一阶段">◀</button>';
-  if (stageIdx < stageCount-1) html += '<button class="kanban-move-btn" data-card="'+esc(c.id)+'" data-dir="1" title="移到下一阶段">▶</button>';
+  if (!c.archived && stageIdx > 0) html += '<button class="kanban-move-btn" data-card="'+esc(c.id)+'" data-dir="-1" title="移到上一阶段">◀</button>';
+  if (!c.archived && stageIdx < stageCount-1) html += '<button class="kanban-move-btn" data-card="'+esc(c.id)+'" data-dir="1" title="移到下一阶段">▶</button>';
   html += '<span class="dim" style="margin-left:auto">'+esc((c.updated||'').replace('T',' ').slice(5,16))+'</span></div>';
   if (kanbanExpanded === c.id) html += kanbanDetailHtml(c);
   html += '</div>';
@@ -3125,9 +3176,18 @@ function kanbanDetailHtml(c) {
   }
   html += '<div class="op-bar">'+
     '<button class="btn kanban-op" data-op="edit" data-card="'+esc(c.id)+'">✏️ 编辑</button>';
-  if (c.type === 'implementation' || c.type === 'periodic')
-    html += '<button class="btn primary kanban-op" data-op="dispatch" data-card="'+esc(c.id)+'">🚀 派发执行</button>';
-  html += '<button class="btn kanban-op" data-op="archive" data-card="'+esc(c.id)+'">🗄️ 归档</button>';
+  if (!c.archived && (c.type === 'implementation' || c.type === 'periodic')) {
+    // 幂等防护前端侧：最新任务运行中 → 禁派发
+    const lt = c.latest_task || {};
+    const running = (lt.status === 'EXECUTING' || lt.status === 'PLANNING');
+    html += '<button class="btn primary kanban-op" data-op="dispatch" data-card="'+esc(c.id)+'"'+
+      (running ? ' disabled title="该卡片已有运行中任务（'+esc(lt.status)+'），不可重复派发"' : '') +
+      '>🚀 派发执行</button>';
+  }
+  if (c.archived)
+    html += '<button class="btn kanban-op" data-op="unarchive" data-card="'+esc(c.id)+'">♻️ 恢复（取消归档）</button>';
+  else
+    html += '<button class="btn kanban-op" data-op="archive" data-card="'+esc(c.id)+'">🗄️ 归档</button>';
   if (!(c.task_ids||[]).length)
     html += '<button class="btn kanban-op" data-op="delete" data-card="'+esc(c.id)+'">🗑️ 删除</button>';
   html += '<span class="op-msg" id="kanbanMsg-'+esc(c.id)+'"></span></div>';
@@ -3170,6 +3230,15 @@ function bindKanbanEvents() {
   if (fi) {
     fi.oninput = () => { kanbanRepoFilter = fi.value; renderKanban(); };
     if (kanbanRepoFilter) { fi.focus(); fi.setSelectionRange(fi.value.length, fi.value.length); }
+  }
+  // 归档视图开关
+  const archBtn = document.getElementById('kanbanArchToggle');
+  if (archBtn) {
+    archBtn.onclick = () => {
+      kanbanShowArchived = !kanbanShowArchived;
+      kanbanExpanded = null;
+      loadKanban();
+    };
   }
   // 列头新建按钮（内联表单开关）
   main.querySelectorAll('.kanban-new-btn').forEach(b => {
@@ -3283,6 +3352,14 @@ function bindKanbanEvents() {
         if (!confirm('归档该卡片？（归档后不在看板展示）')) return;
         try {
           await postJSON('/api/kanban/cards/'+encodeURIComponent(id)+'/archive', {archived: true});
+          kanbanExpanded = null;
+          loadKanban();
+        } catch (e) { if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; } }
+        return;
+      }
+      if (op === 'unarchive') {
+        try {
+          await postJSON('/api/kanban/cards/'+encodeURIComponent(id)+'/archive', {archived: false});
           kanbanExpanded = null;
           loadKanban();
         } catch (e) { if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; } }

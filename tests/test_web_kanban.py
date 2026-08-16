@@ -115,6 +115,27 @@ class TestGetKanban:
         d = _get(f"{ops_server}/api/kanban")
         assert d["total"] == 0
 
+    def test_archived_visible_with_archived_param(self, ops_server):
+        """备注1：?archived=1 返回已归档卡片（archived:true），默认不返回。"""
+        card = _create_card(ops_server)
+        code, _ = _post(f"{ops_server}/api/kanban/cards/{card['id']}/archive", {})
+        assert code == 200
+        d = _get(f"{ops_server}/api/kanban?archived=1")
+        assert d["total"] == 1
+        found = d["cards"]["brainstorm"][0]
+        assert found["id"] == card["id"]
+        assert found["archived"] is True
+
+    def test_unarchive_returns_to_board(self, ops_server):
+        card = _create_card(ops_server)
+        _post(f"{ops_server}/api/kanban/cards/{card['id']}/archive", {})
+        code, _ = _post(f"{ops_server}/api/kanban/cards/{card['id']}/archive",
+                        {"archived": False})
+        assert code == 200
+        d = _get(f"{ops_server}/api/kanban")
+        assert d["total"] == 1
+        assert d["cards"]["brainstorm"][0]["id"] == card["id"]
+
     def test_latest_task_derived_from_meta(self, ops_server, ops_env):
         """卡片 task_ids 软链接 → latest_task 从 meta.json 实时派生。"""
         _mk_task(ops_env, TID, status="FAILED")
@@ -241,6 +262,61 @@ class TestDispatch:
     def test_dispatch_not_found_404(self, ops_server):
         code, _ = _post(f"{ops_server}/api/kanban/cards/card-ghost000000/dispatch", {})
         assert code == 404
+
+    def test_dispatch_conflict_running_task_409(self, ops_server, ops_env, monkeypatch):
+        """备注4：卡片已有运行中任务（EXECUTING）→ 拒绝重复派发（409），不启动新任务。"""
+        _mk_task(ops_env, TID, status="EXECUTING")
+        card = _create_card(ops_server, type="implementation", repo="/tmp")
+        kb.link_task(card["id"], TID)
+        called = []
+        monkeypatch.setattr(ws.task_runner, "start_run",
+                            lambda *a, **k: called.append(a) or "should-not-happen")
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch", {})
+        assert code == 409
+        assert "运行中" in d["error"]
+        assert d["task_id"] == TID
+        assert called == []  # start_run 未被调用
+
+    def test_dispatch_ok_after_task_finished(self, ops_server, ops_env, monkeypatch):
+        """任务结束后（VERIFICATION_FAILED）可再次派发新任务。"""
+        _mk_task(ops_env, TID, status="FAILED")
+        card = _create_card(ops_server, type="implementation", repo="/tmp")
+        kb.link_task(card["id"], TID)
+        TID2 = "task-20260816-100000-222-cccc"
+        monkeypatch.setattr(ws.task_runner, "start_run",
+                            lambda repo, task, parallel=1, goal=None, confirm_mode="auto": TID2)
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch", {})
+        assert code == 200
+        assert d["task_id"] == TID2
+        assert d["card"]["task_ids"] == [TID, TID2]
+
+
+class TestStatusSnapshot:
+    def test_snapshot_caches_and_invalidates(self, ops_env):
+        """备注3：任务状态快照按 meta 签名缓存；meta 变化（状态/大小）触发重建。"""
+        _mk_task(ops_env, TID, status="FAILED")
+        s1 = ws._task_status_snapshot()
+        s2 = ws._task_status_snapshot()
+        assert s1 is s2  # 缓存命中同一对象
+        assert s1[TID]["status"]  # 非空即可
+        # 修改 meta 状态 → 签名变化 → 重建快照
+        td = ops_env / TID
+        meta = json.loads((td / "meta.json").read_text(encoding="utf-8"))
+        meta["status"] = "COMPLETED"
+        (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        s3 = ws._task_status_snapshot()
+        assert s3 is not s1
+        assert s3[TID]["status"] != s1[TID]["status"]  # FAILED→COMPLETED 状态变化被捕获
+
+    def test_snapshot_isolated_by_dir(self, ops_env, tmp_path, monkeypatch):
+        """快照签名包含 AGENT_GO_DIR：切目录后不命中旧缓存。"""
+        _mk_task(ops_env, TID, status="FAILED")
+        ws._task_status_snapshot()
+        adir2 = tmp_path / "agent_go2"
+        adir2.mkdir()
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", adir2)
+        s = ws._task_status_snapshot()
+        assert TID not in s  # 新目录无任务，不返回旧缓存内容
 
 
 class TestDelete:

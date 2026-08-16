@@ -181,6 +181,41 @@ class TestDispatchCard:
             kb.dispatch_card("card-ghost000000", "task-x")
 
 
+class TestInterprocessLock:
+    def test_lock_file_created(self, kb_env):
+        kb.create_card("x", "discussion")
+        assert kb.board_path().with_suffix(".lock").exists()
+
+    def test_concurrent_processes_do_not_lose_cards(self, kb_env):
+        """跨进程并发 create_card 无丢卡（flock 串行化 RMW）。
+
+        无文件锁时，多进程共享 kanban.json.tmp + 各自 read-modify-write，
+        会互相覆盖丢卡。用 flock 后每张卡都写入。
+        """
+        pytest.importorskip("fcntl")
+        import os
+        import subprocess
+        import sys
+
+        repo_root = str(Path(__file__).resolve().parents[1])
+        adir = str(kb_env)
+        code = (
+            "import sys, os\n"
+            f"sys.path.insert(0, {repo_root!r})\n"
+            "import agent_go.kanban as kb\n"
+            "from pathlib import Path\n"
+            "kb.AGENT_GO_DIR = Path(os.environ['KANBAN_TEST_DIR'])\n"
+            "for i in range(15):\n"
+            "    kb.create_card(f'proc{os.getpid()}-{i}', 'discussion')\n"
+        )
+        env = dict(os.environ, KANBAN_TEST_DIR=adir)
+        procs = [subprocess.Popen([sys.executable, "-c", code], env=env) for _ in range(4)]
+        for p in procs:
+            assert p.wait() == 0, f"子进程失败 rc={p.returncode}"
+        board = kb.load_board(force=True)
+        assert len(board["cards"]) == 60
+
+
 class TestLoadSave:
     def test_empty_board_when_file_missing(self, kb_env):
         board = kb.load_board()

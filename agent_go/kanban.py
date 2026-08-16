@@ -32,6 +32,7 @@ import re
 import secrets
 import string
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -80,6 +81,32 @@ def board_path() -> Path:
 _board_cache: Optional[dict] = None
 _board_mtime: float = 0.0
 _lock = threading.Lock()  # web 是 ThreadingHTTPServer，读写改需串行化
+
+
+@contextmanager
+def _interprocess_lock():
+    """跨进程 RMW 文件锁（kanban.lock，flock LOCK_EX）。
+
+    进程内线程串行仍由模块级 _lock 保证；该锁防止多实例（如双 `agent_go web`）
+    并发读-改-写同一 kanban.json 时互相覆盖（共享 tmp 文件被 clobber / 丢更新）。
+    非 Unix 平台（无 fcntl）降级为 no-op —— 仅进程内锁。
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - 非 Unix 平台
+        yield
+        return
+    path = board_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path.with_suffix(".lock"), "w")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
 
 def _empty_board() -> dict:
@@ -202,7 +229,7 @@ def create_card(title: str, type: str, stage: str = "brainstorm", repo: str = ""
     _validate_stage(stage)
     repo = (repo or "").strip()
     _validate_repo(type, repo)
-    with _lock:
+    with _lock, _interprocess_lock():
         board = load_board()
         now = _now_iso()
         card = {
@@ -232,7 +259,7 @@ def update_card(card_id: str, **fields: str) -> dict:
     bad = [k for k in fields if k not in _UPDATABLE_FIELDS]
     if bad:
         raise KanbanError(f"不可更新字段: {', '.join(sorted(bad))}")
-    with _lock:
+    with _lock, _interprocess_lock():
         board = load_board()
         card = _require_card(board, card_id)
         for k, v in fields.items():
@@ -250,7 +277,7 @@ def move_card(card_id: str, to_stage: str, note: str = "") -> dict:
     """阶段流转（MVP 允许任意方向流转，PM 灵活性优先，history 留痕）。"""
     _validate_card_id(card_id)
     _validate_stage(to_stage)
-    with _lock:
+    with _lock, _interprocess_lock():
         board = load_board()
         card = _require_card(board, card_id)
         from_stage = card.get("stage", "")
@@ -264,7 +291,7 @@ def move_card(card_id: str, to_stage: str, note: str = "") -> dict:
 def archive_card(card_id: str, archived: bool = True) -> dict:
     """归档/取消归档（归档卡片默认不在看板展示）。"""
     _validate_card_id(card_id)
-    with _lock:
+    with _lock, _interprocess_lock():
         board = load_board()
         card = _require_card(board, card_id)
         card["archived"] = bool(archived)
@@ -279,7 +306,7 @@ def link_task(card_id: str, task_id: str) -> dict:
     _validate_card_id(card_id)
     if not task_id:
         raise KanbanError("task_id 不能为空")
-    with _lock:
+    with _lock, _interprocess_lock():
         board = load_board()
         card = _require_card(board, card_id)
         if task_id not in card.setdefault("task_ids", []):
@@ -301,7 +328,7 @@ def dispatch_card(card_id: str, task_id: str, to_stage: str = "implementation",
     _validate_stage(to_stage)
     if not task_id:
         raise KanbanError("task_id 不能为空")
-    with _lock:
+    with _lock, _interprocess_lock():
         board = load_board()
         card = _require_card(board, card_id)
         if task_id not in card.setdefault("task_ids", []):
@@ -319,7 +346,7 @@ def delete_card(card_id: str) -> None:
     """物理删除卡片。已派发过任务（task_ids 非空）的卡片拒绝删除（防御数据堆积，
     保留追溯链；不要了请归档）。"""
     _validate_card_id(card_id)
-    with _lock:
+    with _lock, _interprocess_lock():
         board = load_board()
         card = _require_card(board, card_id)
         if card.get("task_ids"):

@@ -85,12 +85,12 @@ archived = bool(body.get("archived", True))
 
 ---
 
-## 备注（可接受，不阻塞）
+## 备注（均已解决，随二期一并落地）
 
-- **归档不可逆于 UI**：前端无归档视图/取消归档入口，误归档只能手工调 API（`POST .../archive {"archived": false}`）。MVP 范围外，二期补归档列表。
-- **并发/多进程**：`kanban.py` 的 `_lock` 仅进程内有效；两个 `agent_go web` 实例同时写同一固定 `kanban.json.tmp` 会互相覆盖（无文件锁）。单实例部署 OK。已实测验证 `load_board` 返回共享缓存 dict 在并发读写下**不会**抛 `list changed size during iteration`（CPython 对 append 不设迭代版本检查 + `os.replace` 原子替换 + GIL 单属性赋值原子），仅可能读到瞬时中间态，自愈，非 bug。
-- **性能**：`api_kanban`（`web_server.py:1188-1196`）与 `_tasks_signature`（`web_server.py:2042-2047`）每次请求/poll 全量扫描任务目录读全部 meta.json（O(tasks) 文件 I/O）。任务多时看板刷新 + SSE 有压力，二期可引入 mtime 快照索引。
-- **派发幂等性**：无防重入；前端禁用按钮降低双击风险，但 API 重试会重复建任务。MVV 可接受，二期可加 `dispatching` 标志或前置状态检查。
+- **归档不可逆于 UI**：`api_kanban` 新增 `include_archived`（`GET /api/kanban?archived=1`），前端新增「🗂 已归档」开关 + 已归档卡片灰显（`.archived` 样式）+ 详情面板「♻️ 恢复」按钮（`archived:false`）。✅ 已解决
+- **并发/多进程**：`kanban.py` 新增 `_interprocess_lock`（`kanban.lock` flock LOCK_EX，非 Unix 平台降级 no-op），所有 7 个 RMW 函数改为 `with _lock, _interprocess_lock():`，防止多实例（双 `agent_go web`）并发读-改-写互相覆盖。已实测：无锁 4×30 并发仅剩 51/120 张（丢更新 + JSON 损坏），有锁 4×15=60 全保留。✅ 已解决
+- **性能**：`api_kanban` 任务状态改为 `_task_status_snapshot()` 按 meta 签名（`AGENT_GO_DIR\n` + `mtime:size`）缓存，任务无变化时复用，消除每请求全量 open+json.loads（O(tasks) 解析 → O(tasks) stat）。✅ 已解决
+- **派发幂等性**：`_op_kanban_dispatch` 前置检查卡片最新任务，`EXECUTING/PLANNING` 或托管句柄存活 → 409 拒绝重复派发；前端联动禁用派发按钮。✅ 已解决
 
 ---
 
