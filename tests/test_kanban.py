@@ -150,6 +150,37 @@ class TestArchiveDeleteLink:
             kb.delete_card("card-ghost000000")
 
 
+class TestDispatchCard:
+    def test_dispatch_atomic_link_and_move(self, kb_env):
+        card = kb.create_card("实施", "implementation", repo="/tmp/repo", stage="design")
+        tid = "task-20260816-100000-111-bbbb"
+        out = kb.dispatch_card(card["id"], tid)
+        assert out["stage"] == "implementation"
+        assert out["task_ids"] == [tid]
+        acts = [h["action"] for h in out["history"]]
+        assert acts[-2:] == ["link", "move"]
+        mv = out["history"][-1]
+        assert mv["from"] == "design" and mv["to"] == "implementation"
+        assert mv.get("note", "") == ""
+
+    def test_dispatch_with_note_and_dedupe(self, kb_env):
+        card = kb.create_card("实施", "implementation", repo="/tmp/repo")
+        tid = "task-20260816-100000-111-bbbb"
+        kb.dispatch_card(card["id"], tid, note="派发任务 x")
+        out = kb.dispatch_card(card["id"], tid)  # 重复派发同一 task_id → task_ids 去重
+        assert out["task_ids"] == [tid]
+        assert out["history"][-1].get("note", "") == ""
+
+    def test_dispatch_invalid_args(self, kb_env):
+        card = kb.create_card("实施", "implementation", repo="/tmp/repo")
+        with pytest.raises(kb.KanbanError, match="task_id"):
+            kb.dispatch_card(card["id"], "")
+        with pytest.raises(kb.KanbanError, match="stage"):
+            kb.dispatch_card(card["id"], "task-x", to_stage="done")
+        with pytest.raises(kb.KanbanError, match="不存在"):
+            kb.dispatch_card("card-ghost000000", "task-x")
+
+
 class TestLoadSave:
     def test_empty_board_when_file_missing(self, kb_env):
         board = kb.load_board()

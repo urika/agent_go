@@ -290,6 +290,31 @@ def link_task(card_id: str, task_id: str) -> dict:
     return card
 
 
+def dispatch_card(card_id: str, task_id: str, to_stage: str = "implementation",
+                  note: str = "") -> dict:
+    """派发执行（原子）：单锁内完成 link_task + move_card 的读-改-写。
+
+    web 层 dispatch 端点用此替代分步 link+move，避免"任务已启动但卡片写入
+    部分失败"的中间态（链接了没流转 / 只成功一半）。history 记 link + move 两条。
+    """
+    _validate_card_id(card_id)
+    _validate_stage(to_stage)
+    if not task_id:
+        raise KanbanError("task_id 不能为空")
+    with _lock:
+        board = load_board()
+        card = _require_card(board, card_id)
+        if task_id not in card.setdefault("task_ids", []):
+            card["task_ids"].append(task_id)
+        from_stage = card.get("stage", "")
+        card["stage"] = to_stage
+        card["updated"] = _now_iso()
+        _append_history(card, "link", note=task_id)
+        _append_history(card, "move", **{"from": from_stage, "to": to_stage, "note": note})
+        _save_board(board)
+    return card
+
+
 def delete_card(card_id: str) -> None:
     """物理删除卡片。已派发过任务（task_ids 非空）的卡片拒绝删除（防御数据堆积，
     保留追溯链；不要了请归档）。"""
