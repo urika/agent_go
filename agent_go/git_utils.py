@@ -199,7 +199,7 @@ def commit_baseline(repo: Path, message: str = "") -> tuple[bool, str, str]:
 
 def get_resource_map(repo: Path, git_info: dict[str, str]) -> dict[str, Any]:
     """生成共享资源清单。"""
-    resources = {
+    resources: dict[str, Any] = {
         "project_root": str(repo),
         "git_remote": git_info.get("remote", ""),
         "git_branch": git_info.get("branch", ""),

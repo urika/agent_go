@@ -134,7 +134,7 @@ def evaluate(
                 subtask_id=subtask.get("id", ""),
                 trigger_source=trigger,
                 verification=verification,
-                verification_confidence=vc_level,
+                verification_confidence="unknown" if vc_level not in ("deterministic", "heuristic", "manual", "none", "unknown") else vc_level,  # type: ignore[arg-type]
                 evaluator_strategy=strategy_name,
                 evaluator_provider=config.get("evaluator", {}).get(
                     "provider", config.get("plan_api", {}).get("provider", "")),

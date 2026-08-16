@@ -147,7 +147,7 @@ def render_export_summary(export_result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _human_size(num: int) -> str:
+def _human_size(num: float) -> str:
     """把字节数格式化为可读单位。"""
     for unit in ("B", "KB", "MB", "GB"):
         if num < 1024:

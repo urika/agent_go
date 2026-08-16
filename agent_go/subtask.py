@@ -8,7 +8,7 @@ import signal
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from .config import log_event
 
@@ -62,7 +62,7 @@ def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger
             ["git", "commit", "--no-edit", "-m", f"merge upstream {tag}"],
             cwd=str(dst_worktree), capture_output=True)
         if commit_result.returncode != 0:
-            logger.warning(f"merge commit 失败: {commit_result.stderr[:200]}")
+            logger.warning(f"merge commit 失败: {commit_result.stderr[:200].decode(errors='replace')}")
         logger.info(f"git merge {tag} 成功")
     else:
         conflict_result = subprocess.run(
@@ -253,9 +253,9 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
             return -1
 
     # Phase 1 配套：累计所有 attempt 的 Claude usage（result 事件提取）
-    claude_usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "duration_ms": 0, "num_turns": 0, "model": ""}
+    claude_usage_total: dict[str, Any] = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "duration_ms": 0, "num_turns": 0, "model": ""}
 
-    def _run_one(prompt: str, attempt: int) -> tuple[subprocess.Popen, list[str], bool]:
+    def _run_one(prompt: str, attempt: int) -> tuple[subprocess.Popen, list[str], bool, Optional[str]]:
         """启动 claude -p (stream-json) 并实时解析事件。"""
         mcp_config_path: Optional[str] = None
         # S12-P0 G1：记录 kill 原因（stuck / hard_timeout / goal_timeout / goal_turns）。
@@ -304,7 +304,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 _budget = float(_budgets) if _budgets else 0.0
             else:
                 # 未知难度回退 medium（避免该难度子任务无成本保护）
-                _budget = _budgets.get(_diff) or _budgets.get("medium")
+                _budget = float(_budgets.get(_diff) or _budgets.get("medium") or 0)
             if _budget and _budget > 0:
                 cmd.extend(["--max-budget-usd", str(_budget)])
         # S4 复杂度双通道：difficulty 路由的模型（env 由 executor 注入）
@@ -367,7 +367,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         # **惰性化**：仅在进入 grace 宽限态后启用，正常执行（事件活跃）不调用 subprocess，
         # 避免干扰现有流程与测试。_last_alive_ts 由 S1 事件刷新。
         _last_alive_ts = [last_ts[0]]
-        _stuck_suspected_ts = [None]  # 进入 grace 宽限态的时间（None=未进入）
+        _stuck_suspected_ts: list = [None]  # 进入 grace 宽限态的时间（None=未进入）
         _grace_baseline = [("", -1)]  # 进入宽限态时的 (S2 快照, S3 CPU ticks) 基线
 
         def parse_and_log(raw_line: str, label: str) -> None:
@@ -472,8 +472,8 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 # Phase 1 配套：提取 Claude 执行的 token/cost，写入 metering
                 usage = event.get("usage", {}) or {}
                 claude_cost = event.get("total_cost_usd")
-                pt = usage.get("input_tokens") or usage.get("prompt_tokens", 0) or 0
-                ct = usage.get("output_tokens") or usage.get("completion_tokens", 0) or 0
+                pt = int(usage.get("input_tokens") or usage.get("prompt_tokens", 0) or 0)
+                ct = int(usage.get("output_tokens") or usage.get("completion_tokens", 0) or 0)
                 if pt or ct or claude_cost:
                     claude_usage_total["prompt_tokens"] += pt
                     claude_usage_total["completion_tokens"] += ct
@@ -500,11 +500,11 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 pass
 
         def read_stdout() -> None:
-            for line in iter(proc.stdout.readline, ''):
+            for line in iter(proc.stdout.readline, '') if proc.stdout else iter(()):
                 parse_and_log(line, "out")
 
         def read_stderr() -> None:
-            for line in iter(proc.stderr.readline, ''):
+            for line in iter(proc.stderr.readline, '') if proc.stderr else iter(()):
                 parse_and_log(line, "err")
 
         t_out = threading.Thread(target=read_stdout, daemon=True)
@@ -512,7 +512,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         t_out.start()
         t_err.start()
 
-        idle_logged_at = 0
+        idle_logged_at = 0.0
         run_start = time.time()
         run_start_ref[0] = run_start  # 供 _record_kill 闭包读取耗时
         while proc.poll() is None:
@@ -675,7 +675,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         # 实际请求模型：优先用 claude 响应中解析出的真实模型名
         # （如 --model claude-haiku-4-5 实际请求 deepseek-v4-flash），
         # 解析失败时回退路由名
-        _resolved_model = claude_usage_total.get("model") or _model
+        _resolved_model = str(claude_usage_total.get("model") or _model)
         # S12 云后端透传：executor 验证发现"URL 本地但实际走云"时注入
         # AGENT_GO_ACTUAL_MODEL（如 glm-4.7），优先用它做真实模型计价
         _cloud_actual = env.get("AGENT_GO_ACTUAL_MODEL", "")
@@ -698,8 +698,8 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         # 但实际后端可能是 DeepSeek 等更便宜的模型。用实际模型名 + MODEL_PRICES
         # 定价重算，避免成本虚高（如 claude-haiku-4-5 实际是 deepseek-v4-flash，
         # 定价 $0.14/$0.28 而非 $1/$5）。
-        _prompt_tok = claude_usage_total["prompt_tokens"]
-        _comp_tok = claude_usage_total["completion_tokens"]
+        _prompt_tok = int(claude_usage_total.get("prompt_tokens") or 0)
+        _comp_tok = int(claude_usage_total.get("completion_tokens") or 0)
         if _is_local:
             _cost = 0.0
         else:

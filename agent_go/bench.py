@@ -19,10 +19,10 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 try:
-    import yaml
+    import yaml  # type: ignore[import-untyped]
 except ImportError:
     yaml = None  # yaml 不是 stdlib，bench 启动时提示安装
 
@@ -97,7 +97,6 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
             _timed_out = True
             try:
                 proc.terminate()
-                proc._terminated = True
             except ProcessLookupError:
                 pass
         _time.sleep(min(poll_interval, remaining))
@@ -125,7 +124,13 @@ def _run_with_grace(proc: subprocess.Popen, hard_timeout: int, grace_sec: int = 
             except OSError:
                 pass
         t.join(timeout=2)
-    _r = type("R", (), {"stdout": "".join(stdout_lines), "stderr": "".join(stderr_lines)})
+    class _R:
+        stdout: str
+        stderr: str
+        timed_out: bool = False
+    _r = _R()
+    _r.stdout = "".join(stdout_lines)
+    _r.stderr = "".join(stderr_lines)
     _r.timed_out = _timed_out
     return _r
 
@@ -738,7 +743,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     if _resolved_td is None:
         _after_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
         _new_dirs = _after_dirs - _before_dirs
-    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch)
+    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch)  # type: ignore[return-value]
 
 
 def _prune_fixture_worktrees(repo: Path) -> None:
@@ -885,7 +890,7 @@ def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = No
     if _p95:
         _margin = 1.5 if task.get("high_variance") else 1.3
         dynamic = max(dynamic, int(_p95 * _margin))
-    return max(cfg_timeout, dynamic)
+    return int(max(cfg_timeout, dynamic))
 
 
 def _subtask_semantic_ok(subtask_result: dict) -> Optional[bool]:
@@ -1043,8 +1048,9 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     # cost 聚合：本地模型事件（is_local=True 且 cost=0）按 local_model_cost TCO 折算，
     # 使 metric-freeze/gate 的本地基线 $/pass 含真实 TCO（电费+折旧），不视为免费。
     total_cost = sum(ev.get("cost_usd", 0) or 0 for ev in metering)
+    _tco: Optional[Callable[[str], float]] = None
     try:
-        from .metrics import local_tco_usd as _tco
+        from .metrics import local_tco_usd as _tco  # type: ignore[assignment]
     except Exception:
         _tco = None
     if _tco is not None:
@@ -1554,7 +1560,7 @@ def cmd_models(args=None) -> None:
     for model, m in data["models"].items():
         icon = {"recommended": "★", "conditional": "⚠", "discouraged": "✗", "insufficient_data": "?"}[m["recommendation"]]
         bv = "💰" if m.get("best_value") else "  "  # CR-G1：性价比最优标记
-        tier_str = {"frontier": "F", "value": "V", "lite": "L"}.get(model_tier(model), "-")  # CR-G2：tier 展示
+        tier_str = {"frontier": "F", "value": "V", "lite": "L"}.get(model_tier(str(model)) or "", "-")  # CR-G2：tier 展示
         capd = m.get("cost_per_accepted_delivery_usd")
         capd_str = f"${capd:>7.4f}" if capd is not None else "      -"
         adr = m.get("accepted_delivery_rate")
@@ -1622,7 +1628,7 @@ def _recommend_worker_models(models: dict[str, Any]) -> dict[str, Optional[dict]
     }
 
 
-def _recommend_roles(models: dict[str, Any]) -> dict[str, Optional[dict]]:
+def _recommend_roles(models: dict[str, Any]) -> dict[str, Any]:
     """CR-G5 / P1：基于模型生产力指标推荐完整角色路由（planner/worker/reviewer + fallback）。
 
     与 _recommend_worker_models（只推荐难度槽模型名）不同，本函数产出 config 可直接
@@ -1652,8 +1658,8 @@ def _recommend_roles(models: dict[str, Any]) -> dict[str, Optional[dict]]:
         return {"planner": None, "worker": None, "reviewer": None,
                 "note": "无通过率≥60% 且样本≥3 的模型，无法推荐"}
 
-    def _provider(n: str) -> Optional[str]:
-        return infer_provider(n)
+    def _provider(n: str) -> str:
+        return infer_provider(n) or "unknown"
 
     def _desc(n: str, m: dict) -> dict:
         return {
@@ -1915,7 +1921,7 @@ def compute_cost_baseline(results_paths: list, tasks_dir: str = "eval_suite",
         per_dm.setdefault(diff, {}).setdefault(model, []).append(cost)
         per_diff.setdefault(diff, []).append(cost)
 
-    out = {"per_difficulty_model": {}, "per_difficulty": {}}
+    out: dict[str, Any] = {"per_difficulty_model": {}, "per_difficulty": {}}
     for diff, by_model in per_dm.items():
         out["per_difficulty_model"][diff] = {}
         for model, costs in by_model.items():

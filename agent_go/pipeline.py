@@ -282,7 +282,8 @@ def _subtask_budget_reservation(cc_cfg: dict, subtask: dict) -> float:
         return 0.0
 
 
-def _estimate_wave_count(subtasks: list[dict], completed_ids: set = frozenset()) -> int:
+def _estimate_wave_count(subtasks: list[dict], completed_ids: Optional[set] = None) -> int:
+    completed_ids = completed_ids if completed_ids is not None else set()
     """估算拓扑波次总数（仅计算不执行，P1-4 波次进度卡片用）。
 
     对剩余子任务重复分层：每轮取出所有依赖已满足的子任务为一个 wave。
@@ -439,7 +440,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
             _task_lock_file.close()
 
     meta_lock = threading.Lock()
-    active_pids = set()
+    active_pids: set = set()
     active_pids_lock = threading.Lock()
     degraded_count = sum(1 for r in results_map.values() if r.get("status") in ("no_changes", "degraded"))
     total = len(confirmed)
@@ -562,7 +563,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                 if blockers:
                     newly_blocked.append(st)
                     blocked_ids.add(st["id"])
-                    root = next((results_map.get(dep) for dep in blockers if results_map.get(dep)), {})
+                    root: dict[str, Any] = next((r for r in (results_map.get(dep) for dep in blockers) if r), {})
                     root_class = root.get("failure_class") or classify_failure(root) or "system_error"
                     results_map[st["id"]] = {
                         "subtask_id": st["id"], "status": "blocked",
@@ -867,7 +868,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                     logger.info(f"[remote] pushed: {branch}")
                 else:
                     push_errors += 1
-                    logger.warning(f"[remote] 推送失败 {branch}: {push_result.stderr.strip()[:200]}")
+                    logger.warning(f"[remote] 推送失败 {branch}: {push_result.stderr.strip()[:200].decode(errors='replace')}")
         if push_errors == 0:
             logger.info("[remote] 所有分支推送成功")
         else:
@@ -964,7 +965,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                 logger.debug(f"[tag] deleted: {tag_name}")
             else:
                 tag_errors += 1
-                logger.debug(f"[tag] 删除失败 {tag_name}: {tag_result.stderr.strip()[:100]}")
+                logger.debug(f"[tag] 删除失败 {tag_name}: {tag_result.stderr.strip()[:100].decode(errors='replace')}")
         if tag_errors:
             logger.warning(f"[tag] {tag_errors} 个 tag 删除失败")
         else:
@@ -1164,9 +1165,9 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
         console.subtitle("⚠️ 已知盲区（系统主动交底）")
         for _item in _blind_items:
             console.print(f"  {_item}")
-    _layer = meta.get("layer_attribution") or {}
-    if _layer.get("primary"):
-        console.print(f"  🎯 层间归因: {_layer['primary']}（review 可看每子任务归因）")
+    _layer_attr: dict[str, Any] = meta.get("layer_attribution") or {}
+    if _layer_attr.get("primary"):
+        console.print(f"  🎯 层间归因: {_layer_attr['primary']}（review 可看每子任务归因）")
 
 
     # ── 验证质量警告 ──

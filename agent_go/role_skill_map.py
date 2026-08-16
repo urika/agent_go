@@ -97,14 +97,14 @@ def load_role_skill_map(project_root: Optional[Path] = None) -> dict[str, Any]:
     （default_agent_type / recommended_agents / recommended_skills）
     由更具体的层级整体覆盖。
     """
-    project_map = _load_json(_project_map_path(project_root))
+    project_map = _load_json(_project_map_path(project_root or Path.cwd()))
     global_map = _load_json(_global_map_path())
 
     merged: dict[str, Any] = dict(DEFAULT_MAP)
     rules: list[dict[str, Any]] = []
     for layer in (project_map, global_map, DEFAULT_MAP):
         if layer:
-            rules.extend(layer.get("rules", []))
+            rules.extend(r for r in (layer.get("rules") or []) if isinstance(r, dict))
     merged["rules"] = rules
     for layer in (global_map, project_map):
         if layer:

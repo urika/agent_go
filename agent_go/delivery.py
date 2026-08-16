@@ -95,7 +95,7 @@ def create_delivery_branch(
     task_id: str,
     base_commit: str,
     results: list[dict[str, Any]],
-) -> tuple[bool, str, list[str]]:
+) -> tuple[bool, str, str]:
     """Create a delivery branch aggregating successful subtask commits.
 
     Returns (success: bool, delivery_branch_name: str, error: str).

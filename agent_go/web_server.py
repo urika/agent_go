@@ -1182,13 +1182,13 @@ def api_storage() -> dict:
             continue
         total += size
         has_meta = (d / "meta.json").exists()
-        entry = {"name": d.name, "size": size, "has_meta": has_meta}
+        entry: dict[str, Any] = {"name": d.name, "size": size, "has_meta": has_meta}
         if has_meta:
             tasks.append(entry)
         else:
             orphans.append(entry)
 
-    tasks.sort(key=lambda x: x["size"], reverse=True)
+    tasks.sort(key=lambda x: int(x["size"] or 0), reverse=True)
     return {
         "total_size": total,
         "total_size_mb": round(total / 1024 / 1024, 2),
@@ -1419,8 +1419,8 @@ class WebHandler(BaseHTTPRequestHandler):
                     self._reply_json(200, data)
                 return
             if len(parts) == 5 and parts[1] == "tasks" and parts[4] == "log":
-                data = _extract_subtask_log(parts[2], parts[3])
-                self._reply_json(200, {"lines": data})
+                data_log = _extract_subtask_log(parts[2], parts[3])
+                self._reply_json(200, {"lines": data_log})
                 return
             # ── 审批/交付数据（M2/R9-R10）──
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "review":

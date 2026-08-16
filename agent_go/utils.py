@@ -92,7 +92,7 @@ def read_reference_docs(doc_paths: list[str], repo: Path, logger: logging.Logger
 # ── 验证命令安全规则 ──────────────────────────────────────────
 # 结构化白名单：每个命令定义允许的 flags（正则）和 positionals（正则）
 # 值为 str 时表示 alias（指向另一个命令的规则集）
-_CMD_ARG_RULES = {
+_CMD_ARG_RULES: dict[str, Any] = {
     "pip": {
         "install": {"flags": r'^(-e|--editable|-q|--quiet|-U|--upgrade|--no-deps|-r|--requirement|--index-url=\S+|--extra-index-url=\S+)$',
                     # 包名/路径/requirements 文件。禁止 .. 穿越与 shell 注入符号。

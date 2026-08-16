@@ -213,7 +213,7 @@ class MCPServerConnection:
         """发通知（无 id，不等响应）。"""
         if self.proc is None or self.proc.stdin is None:
             return
-        msg = {"jsonrpc": JSONRPC_VERSION, "method": method}
+        msg: dict[str, Any] = {"jsonrpc": JSONRPC_VERSION, "method": method}
         if params:
             msg["params"] = params
         try:

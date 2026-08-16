@@ -167,7 +167,9 @@ def _shorten_log_line(raw: str, max_w: int) -> str:
     if "{" in raw:
         try:
             ev = json.loads(raw.split("{", 1)[0].rsplit(" | ", 1)[-1] + "{" + raw.split("{", 1)[1]) if "{" in raw else raw.split(" | ")[-1] if " | " in raw else raw
-            return ev.get("event", raw)[:max_w]
+            if isinstance(ev, dict):
+                return str(ev.get("event", raw))[:max_w]
+            return str(ev)[:max_w]
         except (json.JSONDecodeError, IndexError):
             pass
     text = raw.split(" | ")[-1] if " | " in raw else raw
@@ -190,7 +192,7 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
     stdscr.nodelay(True)
     stdscr.timeout(500)
     selected_idx = 0
-    expanded_tasks = set()
+    expanded_tasks: set[str] = set()
     filter_mode = 0
     detail_idx = 0
 

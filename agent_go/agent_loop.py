@@ -113,7 +113,7 @@ def _assistant_message(tool_calls: list[dict], text: str, provider: str) -> dict
             })
         return {"role": "assistant", "content": content_blocks}
     else:
-        msg = {"role": "assistant", "content": text or None}
+        msg: dict[str, Any] = {"role": "assistant", "content": text or None}
         if tool_calls:
             msg["tool_calls"] = [
                 {

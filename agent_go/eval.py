@@ -60,7 +60,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _read_log_events(log_path: Path, event_name: str) -> list[dict[str, Any]]:
-    events = []
+    events: list[dict[str, Any]] = []
     if not log_path.exists():
        return events
     # 匹配 JSON 中 "event":"xxx" 或 "event": "xxx"（兼容有无空格）
@@ -207,7 +207,7 @@ def analyze_performance(meta: Optional[dict[str, Any]], log_path: Optional[Path]
        for k, v in timing_totals.items():
            p5[k] = round(v / total_ms * 100, 1)
 
-    p1 = 0
+    p1 = 0.0
     p6 = 100
     sum_duration = sum(durations)
     p2 = 0
@@ -838,7 +838,7 @@ def analyze_ux(tasks_dir: Path) -> dict[str, Any]:
     total = 0
     with_docs = 0
     plan_iterations = []
-    agent_counts = {}
+    agent_counts: dict[str, int] = {}
     skill_subtasks = 0
     subtask_total = 0
 

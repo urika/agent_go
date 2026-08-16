@@ -237,13 +237,13 @@ def recover_task(
     # 与 pipeline 共用同一 task lock，禁止 recover 与 run/resume 并发。
     lock_path = task_dir / ".task.lock"
     try:
-        import fcntl
+        import fcntl as _fcntl_mod
     except ImportError:  # pragma: no cover - POSIX is the supported runtime
-        fcntl = None
+        _fcntl_mod = None  # type: ignore[assignment]
     lock_file = lock_path.open("a+", encoding="utf-8")
-    if fcntl is not None:
+    if _fcntl_mod is not None:
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _fcntl_mod.flock(lock_file.fileno(), _fcntl_mod.LOCK_EX | _fcntl_mod.LOCK_NB)
         except BlockingIOError:
             lock_file.close()
             return {"error": f"task {task_id} is already being recovered or resumed"}
@@ -340,7 +340,7 @@ def recover_task(
         "overall_status": response_status,
         "meta_updated": meta_updated,
     }
-    if fcntl is not None:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    if _fcntl_mod is not None:
+        _fcntl_mod.flock(lock_file.fileno(), _fcntl_mod.LOCK_UN)
     lock_file.close()
     return response

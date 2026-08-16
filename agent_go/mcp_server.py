@@ -60,7 +60,7 @@ class MCPError(Exception):
 
 
 # 预定义错误类型模板 — Agent 收到错误后可依据 fix 字段自主恢复
-ERROR_TEMPLATES = {
+ERROR_TEMPLATES: dict[str, dict[str, Any]] = {
     "AGENT_GO_TASK_NOT_FOUND": {
         "message": "任务不存在",
         "fix": {
@@ -406,7 +406,7 @@ class MCPServer:
         self._send(self._error_payload(msg_id, code, message, data))
 
     def _notify(self, method: str, params: Optional[dict] = None) -> None:
-        msg = {"jsonrpc": JSONRPC_VERSION, "method": method}
+        msg: dict[str, Any] = {"jsonrpc": JSONRPC_VERSION, "method": method}
         if params is not None:
             msg["params"] = params
         if self._notification_sink is not None:
@@ -465,7 +465,7 @@ class MCPServer:
         每个 subtask 的实时活动（P1-2 并行活动追踪）。
         """
         def _monitor() -> None:
-            for raw in iter(proc.stdout.readline, ""):
+            for raw in iter(proc.stdout.readline, "") if proc.stdout else iter(()):
                 raw = raw.strip()
                 if not raw:
                     continue
@@ -522,7 +522,7 @@ class MCPServer:
         state_lock = _Lock()
 
         def _reader() -> None:
-            for raw in iter(proc.stdout.readline, ""):
+            for raw in iter(proc.stdout.readline, "") if proc.stdout else iter(()):
                 raw = raw.strip()
                 if not raw:
                     continue
@@ -1178,7 +1178,7 @@ class MCPServer:
                                       "text": json.dumps({"tasks": entries}, ensure_ascii=False)}]}
 
             if resource == "summary":
-                td = self._ensure_task_dir(task_id)
+                td = self._ensure_task_dir(task_id or "")
                 mp = td / "meta.json"
                 if not mp.exists():
                     raise MCPError("AGENT_GO_TASK_NOT_FOUND", f"meta.json 不存在: {task_id}",
@@ -1194,14 +1194,14 @@ class MCPServer:
                     "progress": {"completed": n_done, "failed": n_fail, "total": total},
                     "duration_sec": sum(r.get("duration_sec", 0) for r in results),
                     "cost_usd": self._aggregate_cost(td),
-                    "activity": self._tracker.snapshot(task_id),
+                    "activity": self._tracker.snapshot(task_id or ""),
                 }
                 return {"uri": uri, "mimeType": "application/json",
                         "contents": [{"uri": uri, "mimeType": "application/json",
                                       "text": json.dumps(summary, ensure_ascii=False)}]}
 
             if resource == "plan":
-                td = self._ensure_task_dir(task_id)
+                td = self._ensure_task_dir(task_id or "")
                 plans_dir = td / "plans"
                 versions = sorted([f.stem for f in plans_dir.glob("v*.json")],
                                   key=lambda x: int(x[1:])) if plans_dir.exists() else []
@@ -1220,32 +1220,32 @@ class MCPServer:
                                       "text": json.dumps(plan, ensure_ascii=False)[:20000]}]}
 
             if resource == "metering":
-                td = self._ensure_task_dir(task_id)
+                td = self._ensure_task_dir(task_id or "")
                 mp = td / "metering.jsonl"
                 if not mp.exists():
                     return {"uri": uri, "mimeType": "application/json",
                             "contents": [{"uri": uri, "mimeType": "application/json", "text": "{}"}]}
-                total = 0.0
-                tokens = 0
-                calls = 0
+                total_m = 0.0
+                tokens_m = 0
+                calls_m = 0
                 for line in mp.read_text(encoding="utf-8").strip().split("\n"):
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         rec = json.loads(line)
-                        total += rec.get("cost_usd", 0)
-                        tokens += rec.get("total_tokens", 0) or 0
-                        calls += 1
+                        total_m += float(rec.get("cost_usd", 0) or 0)
+                        tokens_m += int(rec.get("total_tokens", 0) or 0)
+                        calls_m += 1
                     except json.JSONDecodeError:
                         pass
-                data = {"calls": calls, "total_tokens": tokens, "cost_usd": round(total, 4)}
+                data_m: dict[str, Any] = {"calls": calls_m, "total_tokens": tokens_m, "cost_usd": round(total_m, 4)}
                 return {"uri": uri, "mimeType": "application/json",
                         "contents": [{"uri": uri, "mimeType": "application/json",
-                                      "text": json.dumps(data, ensure_ascii=False)}]}
+                                      "text": json.dumps(data_m, ensure_ascii=False)}]}
 
             if resource == "log/recent":
-                td = self._ensure_task_dir(task_id)
+                td = self._ensure_task_dir(task_id or "")
                 lp = td / "execution.log"
                 if not lp.exists():
                     return {"uri": uri, "mimeType": "text/plain",
@@ -1256,8 +1256,8 @@ class MCPServer:
                         "contents": [{"uri": uri, "mimeType": "text/plain", "text": tail}]}
 
             if resource == "review":
-                td = self._ensure_task_dir(task_id)
-                data = {}
+                td = self._ensure_task_dir(task_id or "")
+                data: dict[str, Any] = {}
                 rp = td / "review.json"
                 if rp.exists():
                     try:

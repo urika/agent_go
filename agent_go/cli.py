@@ -2331,7 +2331,7 @@ def _show_plan_diff(task_dir: Path, v1: int, v2: Optional[int] = None) -> None:
         s1 = next((s for s in steps1 if s["id"] == sid), None)
         s2 = next((s for s in steps2 if s["id"] == sid), None)
         if not s1:
-            _rows.append([str(sid), s2["title"][:50], "🆕 新增"])
+            _rows.append([str(sid), (s2 or {}).get("title", "")[:50], "🆕 新增"])
             continue
         if not s2:
             _rows.append([str(sid), s1["title"][:50], "🗑️ 删除"])

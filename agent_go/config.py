@@ -224,7 +224,7 @@ DEFAULT_CONFIG = {
     },
 }
 
-DECOMPOSE_RULES = [
+DECOMPOSE_RULES: list[dict[str, Any]] = [
     {
         # 注意：pattern 不能太宽泛，否则 "10 万 tokens" 这种常见词会误触发
         "patterns": ["JWT 签名", "jwt 签名", "auth 模块", "登录认证", "access token", "refresh token", "OAuth"],

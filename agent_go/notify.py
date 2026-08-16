@@ -230,8 +230,8 @@ def _render_webhook_body(fmt: str, payload: dict[str, Any]) -> tuple[bytes, dict
             md += f"\n\n{failure_lines}"
         if payload["preserved_worktrees"]:
             md += "\n\n保留现场: " + ", ".join(p["subtask_id"] for p in payload["preserved_worktrees"])
-        body = {"msgtype": "markdown", "markdown": {"title": summary[:80], "text": md}}
-        return json.dumps(body, ensure_ascii=False).encode("utf-8"), {}
+        body_md: dict[str, Any] = {"msgtype": "markdown", "markdown": {"title": summary[:80], "text": md}}
+        return json.dumps(body_md, ensure_ascii=False).encode("utf-8"), {}
 
     if fmt == "ntfy":
         text = summary + (f"\n{failure_lines}" if failure_lines else "")

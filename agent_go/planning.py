@@ -422,7 +422,7 @@ def validate_plan_quality(
     requirements = [str(value) for value in (requirements or []) if str(value)]
     unique_requirements = set(requirements)
     coverage = None if not unique_requirements else round(len(unique_requirements & covered) / len(unique_requirements), 6)
-    if unique_requirements and coverage < 1.0:
+    if unique_requirements and coverage is not None and coverage < 1.0:
         issues.append({"type": "requirement_coverage_incomplete", "missing": sorted(unique_requirements - covered)})
 
     # G8: 独立可验证性检查（Split Design Benchmark 实证：claude/opencode 均以
@@ -439,14 +439,14 @@ def validate_plan_quality(
                 "type": "unverifiable_upstream",
                 "subtask_id": sid,
                 "depended_by": dependents,
-                "reason": (f"子任务 {sid} 无验证命令，但被 {'/'.join(dependents)} 依赖——"
+                "reason": (f"子任务 {sid} 无验证命令，但被 {'/'.join(str(d) for d in dependents)} 依赖——"
                            f"上游产物未经验证即被下游消费，建议为 {sid} 补充验证或与下游合并。"),
             })
 
     # G7: 跨子任务文件重叠检测（bench 实证的交叉污染根因）
-    overlap = check_subtask_file_overlap(subtasks)
-    issues.extend(overlap["issues"])
-    warnings.extend(overlap["warnings"])
+    overlap_result = check_subtask_file_overlap(subtasks)
+    issues.extend(overlap_result.get("issues") or [])
+    warnings.extend(overlap_result.get("warnings") or [])
 
     # G6 升级：小改动（有效文件数 ≤2）但 ≥3 子任务 → 过度分解 → blocking
     # （bench 实证：fix-missing-default 5 行改动拆 3 个 → 成本翻倍且失败）
@@ -769,9 +769,9 @@ def check_agent_prompt_functions(
         # 对于 method-like 调用（如 obj.method()），提取类名部分检查
         truly_unknown = set()
         for func in unknown:
-            parts = func.rsplit(".", 1)
-            if len(parts) == 2:
-                obj, method = parts
+            parts_list = func.rsplit(".", 1)
+            if len(parts_list) == 2:
+                obj, method = parts_list
                 # 如果是已知类的方法调用，跳过（如 df.to_csv → 检查 DataFrame）
                 if obj in project_funcs or obj in _BUILTIN_CALLABLES:
                     continue

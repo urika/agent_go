@@ -240,7 +240,7 @@ def collect_change_stats(worktree_path: Path) -> dict[str, Any]:
 
 
 def collect_merge_result(upstream_id: str, success: bool, conflict_files: Optional[list[str]] = None) -> dict[str, Any]:
-    result = {"upstream": upstream_id, "status": "success" if success else "conflict"}
+    result: dict[str, Any] = {"upstream": upstream_id, "status": "success" if success else "conflict"}
     if conflict_files:
         result["conflict_files"] = conflict_files
     return result
@@ -328,7 +328,7 @@ def aggregate_metering(metering_path: Path) -> dict[str, Any]:
             "by_role": {role: {"calls": int, "cost_usd": float}},
         }
     """
-    totals = {
+    totals: dict[str, Any] = {
         "total_calls": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -349,19 +349,19 @@ def aggregate_metering(metering_path: Path) -> dict[str, Any]:
             except json.JSONDecodeError:
                 continue
             totals["total_calls"] += 1
-            pt = event.get("prompt_tokens", 0) or 0
-            ct = event.get("completion_tokens", 0) or 0
+            pt = int(event.get("prompt_tokens", 0) or 0)
+            ct = int(event.get("completion_tokens", 0) or 0)
             totals["prompt_tokens"] += pt
             totals["completion_tokens"] += ct
             totals["total_tokens"] += pt + ct
-            totals["cost_usd"] += event.get("cost_usd", 0.0) or 0.0
-            totals["latency_ms"] += event.get("latency_ms", 0.0) or 0.0
+            totals["cost_usd"] += float(event.get("cost_usd", 0.0) or 0.0)
+            totals["latency_ms"] += float(event.get("latency_ms", 0.0) or 0.0)
 
-            role = event.get("role", "unknown")
+            role = str(event.get("role", "unknown"))
             if role not in totals["by_role"]:
                 totals["by_role"][role] = {"calls": 0, "cost_usd": 0.0}
             totals["by_role"][role]["calls"] += 1
-            totals["by_role"][role]["cost_usd"] += event.get("cost_usd", 0.0) or 0.0
+            totals["by_role"][role]["cost_usd"] += float(event.get("cost_usd", 0.0) or 0.0)
     except OSError:
         pass
 

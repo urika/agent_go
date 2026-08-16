@@ -27,8 +27,11 @@ ignore = ["E501"]  # 行长度由 formatter 管理
 [tool.mypy]
 python_version = "3.9"
 ignore_missing_imports = true
-warn_return_any = true
+# JSON 读取/配置合并固有返回 Any（load_config/eval 读取），显式收窄是样板代码；
+# 保留其余严格检查（Optional 未检查/运算符/attr 等真实类型问题仍报错）
+warn_return_any = false
 warn_unused_configs = true
+disable_error_code = ["annotation-unchecked"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

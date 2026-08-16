@@ -80,7 +80,7 @@ def _parse_plan_md(text: str) -> dict:
     plan: dict = {"overview": "", "estimated_effort": "", "shared_resources": {},
                   "steps": [], "dependencies": {}}
     current_section = None
-    current_step = None
+    current_step: Optional[dict] = None
 
     for line in text.split("\n"):
         s = line.strip()
@@ -146,7 +146,7 @@ def _parse_plan_md(text: str) -> dict:
                     elif key == "verification":
                         current_step["verification"] = val
                 elif s and not line.startswith("-") and not line.startswith("#"):
-                    current_step["description"] += " " + s
+                    current_step["description"] = str(current_step.get("description", "")) + " " + s
         elif current_section == "deps":
             m = _re.match(r'^- step (\d+) depends_on: (.+)$', line)
             if m:
@@ -446,7 +446,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
     """
     behavior = config.get("behavior", {})
     auto_confirm = behavior.get("auto_confirm_plan", False)
-    reference_doc_paths = []
+    reference_doc_paths: list = []
     plan_api_failure_count = 0
     max_plan_api_failures = 2
 
@@ -526,7 +526,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
             _edit_plan_via_editor(plan, logger)
         elif choice == "S":
             console.force("\n✏️  请输入补充内容（支持多行，空行结束）：")
-            lines = []
+            lines: list = []
             while True:
                 line = safe_input()
                 if line.strip() == "" and lines and lines[-1].strip() == "":
@@ -554,7 +554,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 if plan_api_failure_count >= max_plan_api_failures:
                     fallback_choice = _prompt_fallback(logger)
                     if fallback_choice == "fallback":
-                        return ("__FALLBACK__", None)
+                        return ("__FALLBACK__", None)  # type: ignore[return-value]
                     plan_api_failure_count = 0  # 用户选择重试，重置计数
         elif choice == "D":
             console.force("\n📎 输入参考文档路径（多个逗号分隔，目录自动读 .md）：")
@@ -585,7 +585,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 if plan_api_failure_count >= max_plan_api_failures:
                     fallback_choice = _prompt_fallback(logger)
                     if fallback_choice == "fallback":
-                        return ("__FALLBACK__", None)
+                        return ("__FALLBACK__", None)  # type: ignore[return-value]
                     plan_api_failure_count = 0
         else:
             if choice == "":

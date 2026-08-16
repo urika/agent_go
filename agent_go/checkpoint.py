@@ -187,8 +187,8 @@ class SnapshotManager:
             except (OSError, ValueError):
                 try:
                     from glob import iglob
-                    for p in iglob(abs_pattern, recursive=True):
-                        pp = Path(p)
+                    for pp_str in iglob(abs_pattern, recursive=True):
+                        pp = Path(pp_str)
                         if pp.is_file():
                             try:
                                 rel = pp.relative_to(worktree).as_posix()

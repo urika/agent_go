@@ -645,7 +645,7 @@ def decompose_fallback(task: str, repo: Path, config: dict[str, Any], logger: lo
     task_lower = task.lower()
     for rule in DECOMPOSE_RULES:
         if any(p.lower() in task_lower for p in rule["patterns"]):
-            return [{"id": f"sub-{i+1}", **st} for i, st in enumerate(rule["subtasks"])]
+            return [{"id": f"sub-{i+1}", **st} for i, st in enumerate(rule["subtasks"] or [])]
     return [{"id": "sub-1", "title": "执行主任务", "description": task, "files_hint": "*", "agent_prompt": task}]
 
 

@@ -17,7 +17,7 @@ Agent 配置文件：~/.agent_go/agents/<type>.json
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from dataclasses import dataclass, field
 
 __all__ = ["load_agent_type", "list_agent_types"]
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 AGENT_GO_AGENTS_DIR = Path.home() / ".agent_go" / "agents"
 
 # 内置 Agent 类型（无需配置文件）
-_BUILTIN_AGENTS = {
+_BUILTIN_AGENTS: dict[str, dict[str, Any]] = {
     "developer": {
         "type": "developer",
         "description": "开发者 — 默认角色，拥有完整读写和执行权限",

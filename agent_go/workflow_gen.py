@@ -1,7 +1,7 @@
 """GitHub Actions workflow auto-generation."""
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .console import _LazyConsole
 
@@ -9,7 +9,7 @@ console = _LazyConsole()
 
 __all__ = ["cmd_ci"]
 
-TEMPLATES = {
+TEMPLATES: dict[str, dict[str, Any]] = {
     "python": {
         "detect": ["requirements.txt", "setup.py", "pyproject.toml", "setup.cfg"],
         "workflow": "name: Test\n\non: [push, pull_request]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.11'\n      - run: pip install pytest\n      - run: pytest tests/ -v\n",
@@ -76,5 +76,5 @@ def cmd_ci(args=None) -> None:
     if wf_file.exists():
         console.print(f"已存在: {wf_file}")
         return
-    wf_file.write_text(content, encoding="utf-8")
+    wf_file.write_text(content or "", encoding="utf-8")
     console.print(f"已生成: {wf_file} ({lang})")
