@@ -151,6 +151,14 @@ def _build_parser():
     show_parser = subparsers.add_parser("show", help="Show task details")
     show_parser.add_argument("task_id", help="Task ID to show")
 
+    # report 子命令（P1：任务共享——报告导出）
+    report_parser = subparsers.add_parser("report", help="导出任务报告（md/html，用于分享/分发）")
+    report_parser.add_argument("task_id", help="Task ID to report")
+    report_parser.add_argument("--format", choices=["md", "html"], default="md",
+                               help="报告格式（默认 md）")
+    report_parser.add_argument("--output", default="",
+                               help="输出路径（默认 <task_id>.md / .html，- 输出到 stdout）")
+
     # status 子命令
     status_parser = subparsers.add_parser("status", help="Live status monitoring")
     status_parser.add_argument("--watch", "-w", action="store_true", help="Auto-refresh status")
@@ -2891,6 +2899,163 @@ def _cmd_status_text(args=None):
             break
         time.sleep(5)
 
+def cmd_report(args=None) -> None:
+    """导出任务报告（P1：任务共享——md/html 报告分发）。"""
+    task_id = args.task_id
+    task_dir = AGENT_GO_DIR / task_id
+    if not task_dir.exists():
+        console.error(f"任务不存在: {task_id}")
+        sys.exit(EX_USAGE)
+    meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    results = meta.get("results", []) or []
+    subtasks = meta.get("subtasks", []) or []
+    status = meta.get("status", "unknown")
+    repo = meta.get("repo", "")
+
+    # metering 汇总（成本/耗时）
+    metering_records = []
+    mj = task_dir / "metering.jsonl"
+    if mj.exists():
+        for line in mj.read_text(encoding="utf-8").splitlines():
+            try:
+                metering_records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    total_cost = round(sum(r.get("cost_usd", 0) or 0 for r in metering_records), 6)
+    total_elapsed = round(sum(r.get("duration_sec", 0) or 0 for r in results), 1)
+    role_models = {}
+    for r in metering_records:
+        role = r.get("role", "?")
+        model = r.get("route_actual_model") or r.get("actual_model") or r.get("routed_model") or "?"
+        role_models.setdefault(role, set()).add(model)
+
+    # 交付信息
+    review_decision = None
+    rj = task_dir / "review.json"
+    if rj.exists():
+        try:
+            review_decision = json.loads(rj.read_text(encoding="utf-8")).get("decision")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    lines: list[str] = []
+    lines.append(f"# 任务报告: {meta.get('task', task_id)[:80]}")
+    lines.append("")
+    lines.append(f"- **任务 ID**: `{task_id}`")
+    lines.append(f"- **状态**: `{status}`")
+    lines.append(f"- **仓库**: `{repo}`")
+    lines.append(f"- **创建**: {meta.get('created', '?')}")
+    lines.append(f"- **总成本**: ${total_cost:.4f} | **总耗时**: {total_elapsed}s")
+    if role_models:
+        _model_desc = ", ".join(
+            k + "=" + ",".join(sorted(v)) for k, v in role_models.items())
+        lines.append(f"- **模型**: {_model_desc}")
+    if review_decision:
+        lines.append(f"- **审批决策**: `{review_decision}`")
+    delivery_branch = meta.get("delivery_branch", "")
+    if delivery_branch:
+        lines.append(f"- **交付分支**: `{delivery_branch}`")
+    if meta.get("explicit_merge_commit"):
+        lines.append(f"- **合并提交**: `{meta['explicit_merge_commit'][:12]}`")
+    lines.append("")
+
+    # 子任务明细
+    done = sum(1 for r in results if r.get("status") == "completed")
+    failed = sum(1 for r in results if r.get("status") == "failed")
+    lines.append(f"## 子任务（{done} 完成 / {failed} 失败 / 共 {len(subtasks)}）")
+    lines.append("")
+    lines.append("| 子任务 | 状态 | 验证 | 耗时 | 摘要 |")
+    lines.append("|--------|------|------|------|------|")
+    for i, st in enumerate(subtasks):
+        r = results[i] if i < len(results) else {}
+        st_status = r.get("status", "pending")
+        verify = "✅" if r.get("verify_ok") else ("❌" if r.get("verify_ok") is False else "—")
+        dur = r.get("duration_sec", 0)
+        summary = (r.get("summary", "") or "")[:50].replace("|", "/")
+        lines.append(f"| `{st.get('id','')}` | {st_status} | {verify} | {dur}s | {summary} |")
+    lines.append("")
+
+    # 失败原因
+    failures = [(st.get('id', ''), r.get('failure_reason', ''))
+                for i, st in enumerate(subtasks) if i < len(results) and results[i].get("failure_reason")]
+    if failures:
+        lines.append("## 失败原因")
+        lines.append("")
+        for sid, reason in failures:
+            lines.append(f"- **{sid}**: {reason[:200]}")
+        lines.append("")
+
+    # 成本明细
+    if metering_records:
+        lines.append("## 成本明细（metering）")
+        lines.append("")
+        lines.append("| 角色 | 模型 | 调用 | 成本 |")
+        lines.append("|------|------|------|------|")
+        agg: dict = {}
+        for r in metering_records:
+            role = r.get("role", "?")
+            model = r.get("route_actual_model") or r.get("actual_model") or "?"
+            key = (role, model)
+            slot = agg.setdefault(key, {"calls": 0, "cost": 0.0})
+            slot["calls"] += 1
+            slot["cost"] += r.get("cost_usd", 0) or 0
+        for (role, model), slot in sorted(agg.items()):
+            lines.append(f"| {role} | `{model}` | {slot['calls']} | ${slot['cost']:.4f} |")
+        lines.append("")
+
+    md = "\n".join(lines)
+    if args.format == "html":
+        import html as _html
+        # md → html：标题/列表/表格/段落
+        parts: list[str] = []
+        in_table = False
+        for l in lines:
+            if l.startswith("|"):
+                if not in_table:
+                    parts.append("<table>")
+                    in_table = True
+                cells = [c.strip() for c in l.strip("|").split("|")]
+                is_header = any(c in ("子任务", "状态", "验证", "耗时", "摘要",
+                                      "角色", "模型", "调用", "成本") for c in cells)
+                tag = "th" if is_header else "td"
+                parts.append("<tr>" + "".join(
+                    f"<{tag}>{_html.escape(c)}</{tag}>" for c in cells) + "</tr>")
+            else:
+                if in_table:
+                    parts.append("</table>")
+                    in_table = False
+                if l.startswith("## "):
+                    parts.append(f"<h2>{_html.escape(l[3:])}</h2>")
+                elif l.startswith("# "):
+                    parts.append(f"<h1>{_html.escape(l[2:])}</h1>")
+                elif l.startswith("- "):
+                    parts.append(f"<p>• {_html.escape(l[2:])}</p>")
+                elif l:
+                    parts.append(f"<p>{_html.escape(l)}</p>")
+        if in_table:
+            parts.append("</table>")
+        report = (f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                  f"<title>任务报告 {task_id}</title>"
+                  f"<style>body{{font-family:-apple-system,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;color:#222}}"
+                  f"table{{border-collapse:collapse;width:100%;margin:8px 0}}"
+                  f"td,th{{border:1px solid #ddd;padding:6px 10px;font-size:13px;text-align:left}}"
+                  f"th{{background:#f7f7f7}}"
+                  f"h1{{font-size:20px}}h2{{font-size:16px;margin-top:28px}}"
+                  f"code{{background:#f4f4f4;padding:1px 5px;border-radius:3px}}"
+                  f"p{{font-size:14px;line-height:1.6}}</style></head><body>"
+                  f"{''.join(parts)}</body></html>")
+        out = report
+    else:
+        out = md
+
+    if args.output == "-":
+        console.print(out)
+        return
+    path = Path(args.output) if args.output else task_dir.parent / f"{task_id}.{args.format}"
+    path.write_text(out, encoding="utf-8")
+    console.success(f"报告已导出: {path}")
+
+
 def cmd_config(args=None) -> None:
     """config 子命令：无参=打印当前配置；local/cloud 一键切换；status 健康检查（M1/R1-R4）。"""
     sub = getattr(args, "config_subcommand", None) if args else None
@@ -3836,6 +4001,8 @@ def main() -> None:
             cmd_list()
         elif args.command == "show":
             cmd_show(args)
+        elif args.command == "report":
+            cmd_report(args)
         elif args.command == "status":
             cmd_status(args)
         elif args.command == "config":
