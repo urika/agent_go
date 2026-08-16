@@ -1,7 +1,13 @@
-import subprocess, json, re, time, shlex, logging, importlib
+import subprocess
+import json
+import re
+import time
+import shlex
+import logging
+import importlib
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 __all__ = ["read_reference_docs", "SAFE_VERIFICATION_PREFIXES", "_safe_optional_call",
            "slugify_branch_name", "classify_verification_scope"]

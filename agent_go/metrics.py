@@ -200,7 +200,6 @@ def collect_timing(worktree_create_ms: float, merge_upstream_ms: float, claude_e
 
 
 def collect_change_stats(worktree_path: Path) -> dict[str, Any]:
-    files_changed = 0
     insertions = 0
     deletions = 0
     actual_files = []

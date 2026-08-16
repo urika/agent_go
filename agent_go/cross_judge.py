@@ -19,12 +19,10 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .console import _LazyConsole
-from .config import AGENT_GO_DIR
 from .eval import _read_jsonl, _read_json
-from .pricing import MODEL_PRICES
 
 __all__ = ["cmd_judge", "cross_judge_results", "calibrate_judge"]
 console = _LazyConsole()
@@ -434,7 +432,7 @@ def _print_cross_judge_summary(scores: list[dict], judge_models: list[str]) -> N
         if sc >= 0:
             by_candidate[cm][jm].append(sc)
 
-    console.print(f"\n📊 交叉评判矩阵（semantic_score 均值，满分 5）")
+    console.print("\n📊 交叉评判矩阵（semantic_score 均值，满分 5）")
     console.print("─" * 70)
     header = f"{'产出者 ↓ / 评判者 →':<28}"
     for jm in judge_models:

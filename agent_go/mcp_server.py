@@ -13,7 +13,13 @@ Environment:
     AGENT_GO_API_KEY             API key passed through to agent_go subprocesses
 """
 
-import sys, json, os, subprocess, time, threading, fnmatch, logging
+import sys
+import json
+import os
+import subprocess
+import time
+import threading
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
@@ -639,9 +645,6 @@ class MCPServer:
 
     def _build_completed(self, task_id: str, meta: dict, timed_out: bool = False) -> dict:
         results = meta.get("results", [])
-        total = len(meta.get("subtasks", [results]))
-        n_done = sum(1 for r in results if r.get("status") in ("completed", "no_changes"))
-        n_fail = sum(1 for r in results if r.get("status") in ("failed", "blocked"))
         cost = self._aggregate_cost(AGENT_GO_DIR / task_id)
         status = (
             "EXECUTING" if meta.get("status_schema_version") else "running"
@@ -1080,7 +1083,7 @@ class MCPServer:
 
     def _tool_review(self, args: dict) -> dict:
         task_id = args["task_id"]
-        self._ensure_task_dir(task_id)
+        td = self._ensure_task_dir(task_id)
         action = args["action"]
 
         if action == "analyze":

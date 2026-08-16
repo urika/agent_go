@@ -369,7 +369,7 @@ def aggregate_performance(tasks_dir: Path) -> Optional[dict[str, Any]]:
 
 # 定价表已迁至 pricing.py（纯配置数据，避免 eval 成为配置的事实标准源）。
 # eval.py 通过模块级 import 引用，analyze_cost 内直接使用 MODEL_PRICES / PROVIDER_DEFAULT_MODEL。
-from .pricing import (
+from .pricing import (  # noqa: E402
     MODEL_PRICES,
     PROVIDER_DEFAULT_MODEL,
     LEGACY_PROVIDER_DEFAULT_MODEL,
@@ -1084,7 +1084,7 @@ def _print_quality_report(q: Optional[dict[str, Any]]) -> None:
             console.print(f"  ★ 自动触发率:         {auto}%")
     cs = q["change_scale"]
     console.print(f"  变更规模:            avg {cs['avg_files']} files, +{cs['avg_insertions']}/-{cs['avg_deletions']}")
-    console.print(f"  ─────────────────────────────")
+    console.print("  ─────────────────────────────")
     console.print(f"  评分: {q['score']}/100")
     console.print("─" * 50)
 
@@ -1106,13 +1106,13 @@ def _print_perf_report(p: Optional[dict[str, Any]]) -> None:
        verify = p5.get("verification_ms", 0)
        console.print(f"  P5 阶段占比:         claude={claude}% verify={verify}% other={100-claude-verify}%")
     console.print(f"  P6 并发效率:         {p['P6_concurrency_efficiency_pct']}%")
-    console.print(f"  ─────────────────────────────")
+    console.print("  ─────────────────────────────")
     console.print(f"  评分: {p['score']}/100")
     console.print("─" * 50)
 
 
 def _print_cost_report(c: dict[str, Any]) -> None:
-    console.print(f"\n💰 成本报告")
+    console.print("\n💰 成本报告")
     console.print("─" * 50)
     console.print(f"  API 调用:            {c['total_calls']} 次")
     console.print(f"  Token:               {c['total_prompt_tokens']:,} in + {c['total_completion_tokens']:,} out")
@@ -1126,7 +1126,7 @@ def _print_cost_report(c: dict[str, Any]) -> None:
        for model, cost in c["by_model"].items():
            console.print(f"    {model}:  ${cost}")
     if c.get("by_role"):
-       console.print(f"  按角色:")
+       console.print("  按角色:")
        for role, v in c["by_role"].items():
            console.print(f"    {role}:  {v['calls']} 次, ${v['cost_usd']}")
     console.print(f"  API 错误:            {c['errors']} 次")
@@ -1165,7 +1165,7 @@ def _print_gate_report(g: dict[str, Any]) -> None:
 
 
 def _print_reliability_report(r: dict[str, Any]) -> None:
-    console.print(f"\n🔧 可靠性报告")
+    console.print("\n🔧 可靠性报告")
     console.print("─" * 50)
     console.print(f"  任务完成率:          {r['success_rate']}% ({r['completed']}/{r['tasks_total']})")
     sand = r["sandbox"]
@@ -1183,7 +1183,7 @@ def _print_reliability_report(r: dict[str, Any]) -> None:
 
 
 def _print_ux_report(u: dict[str, Any]) -> None:
-    console.print(f"\n📈 使用习惯报告")
+    console.print("\n📈 使用习惯报告")
     console.print("─" * 50)
     console.print(f"  分析任务数:          {u['tasks_total']}")
     console.print(f"  文档挂载率:          {u['docs_usage_pct']}%")

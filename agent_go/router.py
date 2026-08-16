@@ -499,7 +499,7 @@ def call_with_role(
 
     # 2. 质量失败：primary 重试 1 次（仅质量失败，可用性失败直接降级）
     if _quality_fail:
-        logger.info(f"[Router] Primary 质量失败，重试 1 次")
+        logger.info("[Router] Primary 质量失败，重试 1 次")
         content = _try_provider(route.primary)
         if content is not None:
             latency_ms = round((time.time() - start) * 1000, 2)

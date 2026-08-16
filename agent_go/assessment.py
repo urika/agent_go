@@ -20,7 +20,7 @@ import json
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Literal
+from typing import Any, Literal
 
 
 # ═══════════════════════════════════════════════════════════════

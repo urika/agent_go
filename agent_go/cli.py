@@ -1,4 +1,11 @@
-import sys, os, subprocess, json, time, logging, argparse, shutil
+import sys
+import os
+import subprocess
+import json
+import time
+import logging
+import argparse
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
@@ -870,12 +877,12 @@ def cmd_run(args=None):
         if _budget_mode_flag:
             _cc["budget_mode"] = _budget_mode_flag
         config["cost_control"] = _cc
-        logger.info(f"[cost_control] --budget ${_budget_flag} 已启用 L3 任务级熔断 (mode={_cc.get('budget_mode', 'strict')})")
+        logging.getLogger(__name__).info(f"[cost_control] --budget ${_budget_flag} 已启用 L3 任务级熔断 (mode={_cc.get('budget_mode', 'strict')})")
     elif _budget_mode_flag:
         _cc = dict(config.get("cost_control") or {})
         _cc["budget_mode"] = _budget_mode_flag
         config["cost_control"] = _cc
-        logger.info(f"[cost_control] --budget-mode {_budget_mode_flag}（未指定预算，仅设策略）")
+        logging.getLogger(__name__).info(f"[cost_control] --budget-mode {_budget_mode_flag}（未指定预算，仅设策略）")
 
     logger = setup_logger(task_id, task_dir)
     logger.info("=" * 60)
@@ -1066,7 +1073,7 @@ def cmd_run(args=None):
                 plan, config, repo, logger, iteration=_confirm_iteration, task=task, plan_dir=task_dir)
             # 检查降级信号
             if confirmed_plan == "__FALLBACK__":
-                console.print(f"\n⚠️ 降级到本地规则拆解...")
+                console.print("\n⚠️ 降级到本地规则拆解...")
                 subtasks = decompose_fallback(task, repo, config, logger)
                 doc_paths = []
                 confirmed_plan = None
@@ -1096,7 +1103,7 @@ def cmd_run(args=None):
                         show_plan_diff(_prev_plan, plan)
                     confirmed_plan, final_doc_paths = _confirm_plan_channel(plan, config, repo, logger, iteration, task=task, plan_dir=task_dir)
                     if confirmed_plan == "__FALLBACK__":
-                        console.print(f"\n⚠️ 降级到本地规则拆解...")
+                        console.print("\n⚠️ 降级到本地规则拆解...")
                         subtasks = decompose_fallback(task, repo, config, logger)
                         doc_paths = []
                         confirmed_plan = None
@@ -1323,9 +1330,12 @@ def cmd_run(args=None):
     _step_confirm = getattr(args, 'step_confirm', False)
 
     if _interactive_mode:
-        import threading as _th, signal as _sig
+        import threading as _th
+        import signal as _sig
         from .tui import cmd_status_tui
         _interrupted = _th.Event()
+        _prev_int = _sig.getsignal(_sig.SIGINT)
+        _prev_term = _sig.getsignal(_sig.SIGTERM)
 
         _pipeline_t = _th.Thread(
             target=_run_pipeline,
@@ -1348,7 +1358,6 @@ def cmd_run(args=None):
 def _print_dry_run_summary(plan: Optional[dict], subtasks: list, plan_quality: dict,
                            time_est: dict, console, task_id: str, task_dir: Path) -> None:
     """Print plan + subtask summary for --dry-run mode. No side effects."""
-    import json as _json
 
     console.title("DRY-RUN：Plan 预览（未执行任何操作）")
     console.print(f"   Task ID: {task_id}")
@@ -1689,11 +1698,11 @@ def cmd_inspect(args) -> None:
             console.print(f"📁 {e['worktree_path']}")
             console.print(f"🔗 git branch: {e['branch']}")
             if e["has_task_md"]:
-                console.print(f"📝 TASK.md | result.json")
+                console.print("📝 TASK.md | result.json")
         else:
-            console.print(f"(worktree 不存在 — 已清理或未创建)")
+            console.print("(worktree 不存在 — 已清理或未创建)")
     console.sep("─", 70)
-    console.print(f"提示: cd 到 worktree 路径查看完整文件状态")
+    console.print("提示: cd 到 worktree 路径查看完整文件状态")
 
 
 def cmd_list() -> None:
@@ -1831,6 +1840,7 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
     Args:
         deep_review: 是否启用深层审查（独立模型分析每个子任务的 diff）
     """
+    config = load_config()
     task_dir = AGENT_GO_DIR / task_id
     if not task_dir.exists():
         console.error(f"任务不存在: {task_id}")
@@ -1851,14 +1861,12 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
     results = meta.get("results", [])
 
     # 读取每个子任务的结果
-    result_map = {r["subtask_id"]: r for r in results}
     subtask_map = {s["id"]: s for s in subtasks}
 
     # 收集文件变更：按文件路径分组
     file_changes: dict[str, list[dict]] = {}
     for r in results:
         sid = r.get("subtask_id", "")
-        summary = r.get("summary", "")
         change_stats = r.get("change_stats", {})
         actual_files = change_stats.get("actual_files", [])
         for f in actual_files:
@@ -1880,20 +1888,20 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
 
     lines = [
         f"# 📋 任务审查: {task_id}",
-        f"",
+        "",
         f"**任务**: {task_title}",
         f"**创建时间**: {created}",
         f"**状态**: {status}",
         f"**子任务数**: {len(subtasks)}",
-        f"",
+        "",
     ]
 
     # 文件变更摘要
     if file_changes:
         lines.append("## 📁 文件变更汇总")
         lines.append("")
-        lines.append(f"| 文件 | 涉及子任务 | 变更量 | 验证 |")
-        lines.append(f"|------|-----------|--------|------|")
+        lines.append("| 文件 | 涉及子任务 | 变更量 | 验证 |")
+        lines.append("|------|-----------|--------|------|")
         for file_path, changes in sorted(file_changes.items()):
             sub_ids = ", ".join(c["subtask_id"] for c in changes)
             total_ins = sum(c["insertions"] for c in changes)
@@ -2006,7 +2014,6 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
                 if not diff.strip():
                     continue
                 # 获取 repo 路径构建审查 prompt
-                review_repo = meta.get("repo", "")
                 review_prompt = (
                     f"你是一位资深代码审查者。请审查以下 git diff 变更。\n\n"
                     f"### 子任务: {title} ({sid})\n"
@@ -2065,7 +2072,7 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
         (task_dir / "review.json").write_text(
             json.dumps(_conclusion, indent=2, ensure_ascii=False), encoding="utf-8")
         lines.append("")
-        lines.append(f"📝 **需要修改** — 已写入 review.json")
+        lines.append("📝 **需要修改** — 已写入 review.json")
         if comment_text:
             lines.append(f"  审查意见: {comment_text}")
         lines.append("")
@@ -2150,8 +2157,8 @@ def _build_quality_dashboard(meta: dict, task_dir: Optional[Path] = None) -> str
     lines = [
         "## 📊 Quality Dashboard",
         "",
-        f"| 指标 | 值 |",
-        f"|------|-----|",
+        "| 指标 | 值 |",
+        "|------|-----|",
         f"| 通过率 | {pass_rate}% ({completed}/{total}) |",
         f"| 验证通过率 | {verify_rate}% ({verified}/{total}) |",
         f"| 总耗时 | {duration_str} |",
@@ -2298,7 +2305,7 @@ def _show_plan_diff(task_dir: Path, v1: int, v2: Optional[int] = None) -> None:
     console.subtitle("概览")
     console.print(f"  步骤: {len(steps1)} → {len(steps2)}  ({'+' if _added else ''}{len(_added)}/-{len(_removed)}/={len(_matched)})")
     if plan1.get("overview") != plan2.get("overview"):
-        console.print(f"  📝 概述: ✏️ 已修改")
+        console.print("  📝 概述: ✏️ 已修改")
 
     # 全局字段对比
     _global_keys = ["estimated_effort"]
@@ -2310,7 +2317,13 @@ def _show_plan_diff(task_dir: Path, v1: int, v2: Optional[int] = None) -> None:
 
     # 步骤对比详情
     console.subtitle("步骤详情")
-    _TITLE = 0; _DESC = 1; _FILES = 2; _VER = 3; _DIFF = 4; _AGENT = 5; _SKILL = 6
+    _TITLE = 0
+    _DESC = 1
+    _FILES = 2
+    _VER = 3
+    _DIFF = 4
+    _AGENT = 5
+    _SKILL = 6
     _headers = ["#", "标题", "变更"]
     _rows: list[list[str]] = []
     _all_ids = sorted(_s1_ids | _s2_ids)
@@ -2464,7 +2477,7 @@ def cmd_pr(args=None):
         out = task_dir / "PR.md"
         out.write_text(pr_body, encoding="utf-8")
         console.print(f"PR 描述已写入 {out}")
-        push_hint = f" --push" if not do_push else ""
+        push_hint = " --push" if not do_push else ""
         console.print(f"请手动创建 PR 或稍后执行: agent_go pr {task_id}{push_hint}")
     else:
         # 在线模式：通过 gh CLI 创建 PR，显式指定 head/base。
@@ -2547,7 +2560,7 @@ def cmd_pr(args=None):
                         meta["status"] = "ACCEPTED_DELIVERY"
                     (task_dir / "meta.json").write_text(
                         json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-                    console.print(f"PR 元数据已持久化，任务标记为 ACCEPTED_DELIVERY")
+                    console.print("PR 元数据已持久化，任务标记为 ACCEPTED_DELIVERY")
                 else:
                     console.error(f"gh pr create 失败: {_err}")
                     (task_dir / "PR.md").write_text(pr_body, encoding="utf-8")
@@ -2790,9 +2803,9 @@ def _cmd_status_text(args=None):
         lines = log_path.read_text(encoding="utf-8").strip().split("\n")
         # 从最后 50 行中筛选 claude 相关行
         tail = lines[-50:]
-        claude_lines = [l for l in tail if "[claude" in l or "[text]" in l
-                        or "[Read]" in l or "[Write]" in l or "[Bash]" in l
-                        or "[tool_result]" in l or "[result]" in l]
+        claude_lines = [ln for ln in tail if "[claude" in ln or "[text]" in ln
+                        or "[Read]" in ln or "[Write]" in ln or "[Bash]" in ln
+                        or "[tool_result]" in ln or "[result]" in ln]
         return claude_lines[-count:]
 
     def _get_task_status(task_dir: Path) -> Optional[dict[str, Any]]:
@@ -2801,7 +2814,6 @@ def _cmd_status_text(args=None):
             return None
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         status = task_status(meta)
-        zombie = False
         log_path = task_dir / "execution.log"
         ZOMBIE_TIMEOUT = 600  # 10 分钟无日志输出视为僵尸任务
 
@@ -2809,7 +2821,6 @@ def _cmd_status_text(args=None):
         if status == "running" and log_path.exists():
             log_mtime = log_path.stat().st_mtime
             if time.time() - log_mtime > ZOMBIE_TIMEOUT:
-                zombie = True
                 meta["status"] = "failed"
                 meta["_zombie_note"] = f"进程异常退出，日志于 {datetime.fromtimestamp(log_mtime).strftime('%H:%M:%S')} 停止更新"
                 # 尝试终止可能残留的 claude 进程
@@ -3011,12 +3022,12 @@ def cmd_report(args=None) -> None:
         # md → html：标题/列表/表格/段落
         parts: list[str] = []
         in_table = False
-        for l in lines:
-            if l.startswith("|"):
+        for ln in lines:
+            if ln.startswith("|"):
                 if not in_table:
                     parts.append("<table>")
                     in_table = True
-                cells = [c.strip() for c in l.strip("|").split("|")]
+                cells = [c.strip() for c in ln.strip("|").split("|")]
                 is_header = any(c in ("子任务", "状态", "验证", "耗时", "摘要",
                                       "角色", "模型", "调用", "成本") for c in cells)
                 tag = "th" if is_header else "td"
@@ -3026,14 +3037,14 @@ def cmd_report(args=None) -> None:
                 if in_table:
                     parts.append("</table>")
                     in_table = False
-                if l.startswith("## "):
-                    parts.append(f"<h2>{_html.escape(l[3:])}</h2>")
-                elif l.startswith("# "):
-                    parts.append(f"<h1>{_html.escape(l[2:])}</h1>")
-                elif l.startswith("- "):
-                    parts.append(f"<p>• {_html.escape(l[2:])}</p>")
-                elif l:
-                    parts.append(f"<p>{_html.escape(l)}</p>")
+                if ln.startswith("## "):
+                    parts.append(f"<h2>{_html.escape(ln[3:])}</h2>")
+                elif ln.startswith("# "):
+                    parts.append(f"<h1>{_html.escape(ln[2:])}</h1>")
+                elif ln.startswith("- "):
+                    parts.append(f"<p>• {_html.escape(ln[2:])}</p>")
+                elif ln:
+                    parts.append(f"<p>{_html.escape(ln)}</p>")
         if in_table:
             parts.append("</table>")
         report = (f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -3480,7 +3491,7 @@ def cmd_recover(args) -> None:
         console.error(f"{result['error']}")
         sys.exit(EX_SYSTEM)
 
-    console.print(f"\n📊 扫描结果：")
+    console.print("\n📊 扫描结果：")
     for sub in result.get("recovered", []):
         marker = "🆕" if sub.get("recovered") and sub.get("recovered_at") else "📦"
         orphan = " (orphan reset)" if sub.get("orphan_reset") else ""
@@ -3491,7 +3502,7 @@ def cmd_recover(args) -> None:
     overall = result.get("overall_status", "unknown")
     console.print(f"\n   overall_status: {overall}")
     if dry_run:
-        console.print(f"   (dry-run，未写入 meta.json)")
+        console.print("   (dry-run，未写入 meta.json)")
     else:
         console.print(f"   ✓ meta.json 已更新（recovered_at={result.get('recovered_at', '?')[:19]}）")
 

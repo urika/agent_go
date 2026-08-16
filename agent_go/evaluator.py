@@ -28,7 +28,7 @@ import re
 import time
 import logging
 from pathlib import Path
-from typing import Any, Optional, Protocol
+from typing import Optional, Protocol
 
 from .api import call_api
 from .config import meter_event
@@ -604,7 +604,7 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
 
 def _build_eval_prompt(subtask, verification, diff, previous_attempts, no_diff_truncation=False):
     """构建语义评估 prompt（含 confidence 要求）。
-    
+
     no_diff_truncation=True 时禁用 diff 长度截断，用于截断兜底重试。"""
     title = subtask.get("title", "")
     description = subtask.get("description", "")[:2000]
@@ -744,7 +744,7 @@ def _format_diff_for_eval(diff: str, max_chars: int = 12000) -> str:
         # 每个文件最少保留：diff --git 行 + hunk 头部
         header_block = _extract_diff_header(file_lines)
         result.extend(header_block)
-        budget -= sum(len(l) + 1 for l in header_block)  # +1 for newline
+        budget -= sum(len(ln) + 1 for ln in header_block)  # +1 for newline
 
         if budget <= 0:
             break
@@ -754,7 +754,7 @@ def _format_diff_for_eval(diff: str, max_chars: int = 12000) -> str:
         hunks = _split_diff_hunks(file_lines)
         added_any = False
         for hunk in hunks:
-            hunk_size = sum(len(l) + 1 for l in hunk)
+            hunk_size = sum(len(ln) + 1 for ln in hunk)
             if budget >= hunk_size or not added_any:
                 result.extend(hunk)
                 budget -= hunk_size

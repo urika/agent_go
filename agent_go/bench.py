@@ -8,7 +8,6 @@ CLI:
   agent_go eval models  # 读 results.jsonl 输出决策矩阵
 """
 
-import argparse
 import hashlib
 import json
 import logging
@@ -31,7 +30,7 @@ from .console import _LazyConsole
 from .config import AGENT_GO_DIR, CONFIG_PATH
 from .eval import _read_jsonl, _read_json
 from .assessment import load_all as load_all_assessments, compute_false_positive_rate
-from .pricing import MODEL_PRICES, model_tier, validate_worker_tier
+from .pricing import model_tier, validate_worker_tier
 from .failure import classify_failure
 from .bench_schema import validate_record
 
@@ -1288,7 +1287,6 @@ def analyze_model_productivity(results_path: Path) -> dict[str, Any]:
         if r.get("suite") == "stress" or r.get("high_variance", False)
     ]
     by_model: dict[str, list[dict]] = {}
-    by_difficulty: dict[str, list[dict]] = {}  # 注：当前任务 YAML 有 difficulty 字段
 
     for r in ordinary_results:
         model = r.get("model", "unknown")
@@ -1557,13 +1555,6 @@ def cmd_models(args=None) -> None:
         icon = {"recommended": "★", "conditional": "⚠", "discouraged": "✗", "insufficient_data": "?"}[m["recommendation"]]
         bv = "💰" if m.get("best_value") else "  "  # CR-G1：性价比最优标记
         tier_str = {"frontier": "F", "value": "V", "lite": "L"}.get(model_tier(model), "-")  # CR-G2：tier 展示
-        fp_str = f"{m.get('false_positive_rate', '?'):>3}%" if isinstance(m.get('false_positive_rate'), (int, float)) else "   ?"
-        eff = m.get("efficiency_score", 0)
-        eff_str = f"{eff:>7.1f}" if eff > 0 else "     -"
-        k8 = m.get("k8_zero_retry_pass_rate")
-        k8_str = f"{k8:>5.0%}" if k8 is not None else "    -"
-        corr = m.get("avg_corrected_pass_rate")
-        corr_str = f"{corr:>6.0%}" if corr is not None else "     -"
         capd = m.get("cost_per_accepted_delivery_usd")
         capd_str = f"${capd:>7.4f}" if capd is not None else "      -"
         adr = m.get("accepted_delivery_rate")

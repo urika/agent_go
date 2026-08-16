@@ -1,4 +1,11 @@
-import subprocess, json, re, time, threading, logging, signal, os
+import subprocess
+import json
+import re
+import time
+import threading
+import logging
+import signal
+import os
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -74,7 +81,7 @@ def _git_merge_upstream(src_worktree: Path, dst_worktree: Path, tag: str, logger
         if headless:
             # Headless 模式: 保留冲突状态，让 Claude Code 现场解决
             # 不执行 merge --abort，工作区保持冲突标记 (<<<<<<<)
-            logger.info(f"headless 模式: 保留冲突标记，Claude Code 将自动解决")
+            logger.info("headless 模式: 保留冲突标记，Claude Code 将自动解决")
         else:
             # 交互模式: abort，让用户手动重新 merge
             subprocess.run(["git", "merge", "--abort"],

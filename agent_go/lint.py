@@ -163,7 +163,6 @@ def _check_suspicious_for_loops(tree: ast.AST, filepath: str) -> list[dict]:
         # Report only vars consumed by ≥ _MIN_SIBLING_USES distinct siblings
         leaky = sorted(v for v, n in sibling_uses.items() if n >= _MIN_SIBLING_USES)
         if leaky:
-            var_list = ", ".join(leaky)
             uses_str = ", ".join(f"{v}={sibling_uses[v]}" for v in leaky)
             issues.append({
                 "file": filepath,

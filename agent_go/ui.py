@@ -1,4 +1,9 @@
-import sys, os, logging, subprocess, tempfile
+import sys
+import os
+import json
+import logging
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,17 +24,22 @@ __all__ = [
 def plan_to_md(plan: dict[str, Any]) -> str:
     """将 Plan 转为 Markdown 文档（IDS §4.2.4 格式：英文 key，自由文本值中英均可）。"""
     lines = [
-        f"# 执行方案\n",
+        "# 执行方案\n",
         f"## 概述\n{plan.get('overview', 'N/A')}\n",
         f"## 预估工作量\n{plan.get('estimated_effort', 'N/A')}\n",
-        f"## 共享资源清单\n",
+        "## 共享资源清单\n",
     ]
     sr = plan.get("shared_resources", {})
-    if sr.get("git_remote"): lines.append(f"- Git 远程: {sr['git_remote']}")
-    if sr.get("git_branch"): lines.append(f"- 当前分支: {sr['git_branch']}")
-    if sr.get("directories"): lines.append(f"- 关键目录: {', '.join(sr['directories'])}")
-    if sr.get("config_files"): lines.append(f"- 配置文件: {', '.join(sr['config_files'])}")
-    if sr.get("env_vars"): lines.append(f"- 环境变量: {', '.join(sr['env_vars'])}")
+    if sr.get("git_remote"):
+        lines.append(f"- Git 远程: {sr['git_remote']}")
+    if sr.get("git_branch"):
+        lines.append(f"- 当前分支: {sr['git_branch']}")
+    if sr.get("directories"):
+        lines.append(f"- 关键目录: {', '.join(sr['directories'])}")
+    if sr.get("config_files"):
+        lines.append(f"- 配置文件: {', '.join(sr['config_files'])}")
+    if sr.get("env_vars"):
+        lines.append(f"- 环境变量: {', '.join(sr['env_vars'])}")
     lines.append(f"\n## 执行步骤 ({len(plan.get('steps', []))} 步)\n")
     for step in plan.get("steps", []):
         lines.append(f"### [{step['id']}] {step['title']}\n")
@@ -75,15 +85,25 @@ def _parse_plan_md(text: str) -> dict:
     for line in text.split("\n"):
         s = line.strip()
         if s.startswith("## 概述"):
-            current_section = "overview"; current_step = None; continue
+            current_section = "overview"
+            current_step = None
+            continue
         elif s.startswith("## 预估工作量"):
-            current_section = "effort"; current_step = None; continue
+            current_section = "effort"
+            current_step = None
+            continue
         elif s.startswith("## 共享资源清单"):
-            current_section = "resources"; current_step = None; continue
+            current_section = "resources"
+            current_step = None
+            continue
         elif s.startswith("## 执行步骤"):
-            current_section = "steps"; current_step = None; continue
+            current_section = "steps"
+            current_step = None
+            continue
         elif s.startswith("## 依赖关系"):
-            current_section = "deps"; current_step = None; continue
+            current_section = "deps"
+            current_step = None
+            continue
 
         if current_section == "overview" and s:
             plan["overview"] = (plan["overview"] + " " + s).strip()
@@ -279,9 +299,15 @@ def print_plan(plan: dict[str, Any], config: dict[str, Any], force: bool = False
     duration = _estimate_duration(plan, parallel)
 
     _out = console.force if force else console.print
-    _sep = lambda c, w: console.force(c * w) if force else console.sep(c, w)
-    _title = lambda m: _console_force_title(m) if force else console.title(m)
-    _subtitle = lambda m: _console_force_subtitle(m) if force else console.subtitle(m)
+
+    def _sep(c: str, w: int) -> None:
+        console.force(c * w) if force else console.sep(c, w)
+
+    def _title(m: str) -> None:
+        _console_force_title(m) if force else console.title(m)
+
+    def _subtitle(m: str) -> None:
+        _console_force_subtitle(m) if force else console.subtitle(m)
 
     _sep("=", 70)
     _title("📋 执行方案")
@@ -294,9 +320,12 @@ def print_plan(plan: dict[str, Any], config: dict[str, Any], force: bool = False
     sr = plan.get("shared_resources", {})
     if sr and behavior.get("show_resource_map", True):
         _parts = []
-        if sr.get("git_remote"): _parts.append(f"🔗 {sr['git_remote']}")
-        if sr.get("git_branch"): _parts.append(f"🌿 {sr['git_branch']}")
-        if sr.get("directories"): _parts.append(f"📁 {', '.join(sr['directories'])}")
+        if sr.get("git_remote"):
+            _parts.append(f"🔗 {sr['git_remote']}")
+        if sr.get("git_branch"):
+            _parts.append(f"🌿 {sr['git_branch']}")
+        if sr.get("directories"):
+            _parts.append(f"📁 {', '.join(sr['directories'])}")
         if _parts:
             _out(" | ".join(_parts))
 
@@ -435,8 +464,8 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 logger.info("默认同意模式：自动确认 Plan")
                 log_event(logger, "plan_auto_confirmed", {"iteration": iteration})
                 return plan, reference_doc_paths
-            console.force(f"\n⚡ 默认同意模式已开启（来自配置 behavior.auto_confirm_plan）")
-            console.force(f"   按 Enter 直接确认，或输入任意键进入交互模式...")
+            console.force("\n⚡ 默认同意模式已开启（来自配置 behavior.auto_confirm_plan）")
+            console.force("   按 Enter 直接确认，或输入任意键进入交互模式...")
             quick = safe_input("\n> ").strip()
             if not quick:
                 logger.info("默认同意模式：自动确认 Plan")
@@ -483,10 +512,14 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
                 new_desc = safe_input(f"  描述 [{step['description']}]: ").strip()
                 new_files = safe_input(f"  文件 [{', '.join(step.get('files',[]))}]: ").strip()
                 new_prompt = safe_input(f"  Agent Prompt [{step.get('agent_prompt','')[:50]}...]: ").strip()
-                if new_title: step["title"] = new_title
-                if new_desc: step["description"] = new_desc
-                if new_files: step["files"] = [f.strip() for f in new_files.split(",")]
-                if new_prompt: step["agent_prompt"] = new_prompt
+                if new_title:
+                    step["title"] = new_title
+                if new_desc:
+                    step["description"] = new_desc
+                if new_files:
+                    step["files"] = [f.strip() for f in new_files.split(",")]
+                if new_prompt:
+                    step["agent_prompt"] = new_prompt
                 logger.info(f"用户编辑步骤 {step['id']}")
         elif choice == "M":
             logger.info("用户选择 $EDITOR 编辑完整方案")
@@ -733,8 +766,8 @@ def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], log
             logger.info("默认同意模式：自动确认子任务")
             log_event(logger, "subtasks_auto_confirmed", {"count": len(subtasks)})
             return subtasks
-        console.force(f"\n⚡ 默认同意模式已开启（behavior.auto_confirm_subtasks）")
-        console.force(f"   按 Enter 直接执行，或输入任意键进入交互...")
+        console.force("\n⚡ 默认同意模式已开启（behavior.auto_confirm_subtasks）")
+        console.force("   按 Enter 直接执行，或输入任意键进入交互...")
         quick = safe_input("\n> ").strip()
         if not quick:
             logger.info("默认同意模式：自动确认子任务")
@@ -766,10 +799,14 @@ def confirm_subtasks(subtasks: list[dict[str, Any]], config: dict[str, Any], log
                 d = safe_input(f"描述 [{st['description'][:100]}...]: ").strip()
                 f = safe_input(f"文件 [{st.get('files_hint','')}]: ").strip()
                 p = safe_input(f"Agent Prompt [{st.get('agent_prompt','')[:50]}...]: ").strip()
-                if t: st["title"] = t
-                if d: st["description"] = d
-                if f: st["files_hint"] = f
-                if p: st["agent_prompt"] = p
+                if t:
+                    st["title"] = t
+                if d:
+                    st["description"] = d
+                if f:
+                    st["files_hint"] = f
+                if p:
+                    st["agent_prompt"] = p
             print_subtasks(subtasks, config)
         elif choice == "A":
             title = safe_input("新标题: ").strip()
@@ -802,8 +839,13 @@ def verify_subtask(current: int, total: int, summary: str, logger: logging.Logge
     while True:
         c = safe_input("\n> ").strip().upper()
         log_event(logger, "user_verify", {"current": current, "choice": c})
-        if c in ("C", "CONTINUE") or (c == "" and auto_verify): return "next"
-        elif c in ("R", "RETRY"): return "retry"
-        elif c in ("M", "MODIFY"): return "modify"
-        elif c in ("A", "ABORT"): return "abort"
-        else: print("无效输入")
+        if c in ("C", "CONTINUE") or (c == "" and auto_verify):
+            return "next"
+        elif c in ("R", "RETRY"):
+            return "retry"
+        elif c in ("M", "MODIFY"):
+            return "modify"
+        elif c in ("A", "ABORT"):
+            return "abort"
+        else:
+            print("无效输入")

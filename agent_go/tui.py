@@ -6,7 +6,6 @@ meta.json / metering.jsonl / execution.log，渲染 TUI 界面。
 import json
 import logging
 import time
-import os
 import subprocess as _subprocess
 from pathlib import Path
 from datetime import datetime
@@ -63,7 +62,7 @@ class LogTailer:
             self._pos = self._fp.tell()
         except OSError:
             return []
-        stripped = [l.rstrip("\n\r") for l in new_lines]
+        stripped = [ln.rstrip("\n\r") for ln in new_lines]
         self._all_lines.extend(stripped)
         if len(self._all_lines) > self.max_lines:
             self._all_lines = self._all_lines[-self.max_lines:]
@@ -79,7 +78,7 @@ def _get_tail_lines(log_path: Path, count: int = 10) -> list[str]:
         return []
     lines = log_path.read_text(encoding="utf-8").strip().split("\n")
     tail = lines[-30:]
-    return [l.split(" | ")[-1][:100] for l in tail if "|" in l][-count:]
+    return [ln.split(" | ")[-1][:100] for ln in tail if "|" in ln][-count:]
 
 
 def _read_metering_cost(task_dir: Path) -> float:
@@ -367,10 +366,10 @@ def tui_main(stdscr: Any, task_filter: Optional[str] = None) -> None:
             visible_lines = all_lines[max(0, len(all_lines) - max_visible - log_scroll):len(all_lines) - log_scroll] if all_lines else []
             visible_lines = visible_lines[:max_visible]
 
-            for k, l in enumerate(visible_lines):
+            for k, ln in enumerate(visible_lines):
                 if log_y + k >= max_y - 1:
                     break
-                display = _shorten_log_line(l, max_x - 4)
+                display = _shorten_log_line(ln, max_x - 4)
                 if focus == "log":
                     attr = curses.A_REVERSE if k == log_scroll % max_visible else 0
                 else:

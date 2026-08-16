@@ -1,4 +1,5 @@
-import subprocess, logging
+import subprocess
+import logging
 from pathlib import Path
 from typing import Any, Optional
 

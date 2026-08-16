@@ -1,6 +1,9 @@
 import hashlib
 import sys
-import json, re, time, logging
+import json
+import re
+import time
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
@@ -136,7 +139,8 @@ def call_api(
         if api_cfg.get("json_output") or api_cfg.get("response_format") == "json_object":
             payload["response_format"] = {"type": "json_object"}
 
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
     req = urllib.request.Request(base_url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     start = time.time()
     _timeout_sec = api_cfg.get("timeout_ms", 120000) / 1000.0

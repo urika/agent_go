@@ -1,6 +1,15 @@
-import os, subprocess, re, sys, time, shlex, shutil, logging, json, threading, signal
+import os
+import subprocess
+import re
+import sys
+import time
+import shlex
+import shutil
+import logging
+import json
+import threading
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional
 
 from .console import _LazyConsole
 from .config import log_event, safe_input, meter_event, write_censored_event
@@ -379,7 +388,7 @@ def _create_worktree(task_id, sub_id, repo, task_dir, logger):
 
     worktree_create_ms = 0
     if (worktree / ".git").exists():
-        logger.info(f"worktree 已存在，跳过创建")
+        logger.info("worktree 已存在，跳过创建")
     elif (repo / ".git").exists():
         branch = f"agent_go/{task_id}/{sub_id}"
         wt_start = time.time()
@@ -809,7 +818,7 @@ def _build_repair_prompt(
     # LLM 语义评估反馈（Phase 3）
     if semantic_feedback and not semantic_feedback.get("passed", True):
         parts.append("### LLM 语义评估反馈")
-        parts.append(f"**评估结果:** 未通过")
+        parts.append("**评估结果:** 未通过")
         if semantic_feedback.get("reason"):
             parts.append(f"**原因:** {semantic_feedback['reason']}")
         if semantic_feedback.get("suggestions"):
@@ -833,7 +842,7 @@ def _build_repair_prompt(
     # 失败命令及输出
     parts.append("### 失败命令及输出")
     for cmd, output in zip(failed_cmds, failed_outputs):
-        parts.append(f"```")
+        parts.append("```")
         parts.append(f"$ {cmd}")
         if output:
             # 截断过长输出
@@ -863,7 +872,7 @@ def _build_repair_prompt(
     parts.append("请仔细分析上述失败原因（特别是 stdout/stderr 输出），修复代码确保所有验证命令通过。")
     parts.append("直接修改文件，不要询问。")
     if attempt >= max_retries:
-        parts.append(f"**这是最后一次修复机会。** 如果仍失败，此子任务将被标记为失败。")
+        parts.append("**这是最后一次修复机会。** 如果仍失败，此子任务将被标记为失败。")
 
     return "\n".join(parts)
 
@@ -1331,7 +1340,6 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     # 有验证命令但无变更：不再直接判失败，而是进入验证循环执行验证——
     # 若验证通过则算成功（no_changes），失败才算失败。这修复「任务已满足、
     # 无需变更但被误判失败」的场景（如函数已存在、claude 确认验证通过）。
-    agent_type_check = subtask.get("agent_type", "developer")
     verify_ok = True
     retry_count = 0
     verification_results = []
@@ -1395,7 +1403,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         while retry_count <= max_retries:
             # P2 Layer 3b: 中断信号→退出验证循环（由 _install_subtask_sigterm_handler 设置）
             if interrupt_event.is_set():
-                logger.warning(f"收到 SIGTERM 信号，退出验证循环")
+                logger.warning("收到 SIGTERM 信号，退出验证循环")
                 break
             # 1. 执行所有验证命令
             all_pass = True
@@ -1522,9 +1530,9 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     except Exception as _retry_err:
                         logger.debug(f"语义评估截断重试失败（已忽略）: {_retry_err}")
                 if semantic_feedback.get("evaluator_skipped"):
-                    logger.warning(f"语义评估 API 调用失败（已跳过，结果视为通过）")
+                    logger.warning("语义评估 API 调用失败（已跳过，结果视为通过）")
                     if _cfg.get("evaluator", {}).get("fail_closed", False):
-                        logger.warning(f"fail_closed=True，标记为失败")
+                        logger.warning("fail_closed=True，标记为失败")
                         all_pass = False
                         failed_cmds = ["<semantic_eval>"]
                         failed_outputs = [f"语义评估 API 调用失败（fail_closed）: {semantic_feedback.get('reason', '')}"]
@@ -1611,11 +1619,11 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                             _trunc = _line[:60]
                             console.force(f"│   {_trunc}".ljust(_card_width) + "│")
                 if summary:
-                    console.force(f"│ 📁 文件变更".ljust(_card_width) + "│")
+                    console.force("│ 📁 文件变更".ljust(_card_width) + "│")
                     for _s in summary.split("\n")[:3]:
                         console.force(f"│   {_s[:60]}".ljust(_card_width) + "│")
                 console.force("├─" + "─" * (_card_width - 2) + "┤")
-                console.force(f"│ [R] 重试  [C] 跳过  [A] 中止".ljust(_card_width) + "│")
+                console.force("│ [R] 重试  [C] 跳过  [A] 中止".ljust(_card_width) + "│")
                 console.force("└" + "─" * (_card_width - 2) + "┘")
                 _user_skip = False
                 while True:
@@ -1923,7 +1931,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 "attempt": retry_count,
                 "failed_cmds": failed_cmds,
                 "failure_summary": failed_summary,
-                "fix_summary": f"已执行修复并重新验证",
+                "fix_summary": "已执行修复并重新验证",
             })
 
             # 重置语义反馈，下次重新评估
@@ -2486,7 +2494,6 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         task_dir=task_dir, config=config, interrupt_event=interrupt_event,
         initial_kill_reason=getattr(result, "kill_reason", None),
     )
-    has_changes = verify_results["has_changes"]
     summary = verify_results["summary"]
     metrics_changes = verify_results["metrics_changes"]
     git_commit_ms = verify_results["git_commit_ms"]

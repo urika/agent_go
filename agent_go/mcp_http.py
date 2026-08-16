@@ -16,7 +16,13 @@ Usage:
     python3 -m agent_go.mcp_server --http --port 8090
 """
 
-import json, logging, queue, select, socket, threading, time
+import json
+import logging
+import queue
+import select
+import socket
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 

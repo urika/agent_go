@@ -1,4 +1,11 @@
-import sys, os, subprocess, json, threading, signal, logging, inspect
+import sys
+import os
+import subprocess
+import json
+import threading
+import signal
+import logging
+import inspect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
@@ -862,7 +869,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                     push_errors += 1
                     logger.warning(f"[remote] 推送失败 {branch}: {push_result.stderr.strip()[:200]}")
         if push_errors == 0:
-            logger.info(f"[remote] 所有分支推送成功")
+            logger.info("[remote] 所有分支推送成功")
         else:
             logger.warning(f"[remote] {push_errors} 个分支推送失败")
 
@@ -961,7 +968,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
         if tag_errors:
             logger.warning(f"[tag] {tag_errors} 个 tag 删除失败")
         else:
-            logger.info(f"[tag] 任务 tags 已清理")
+            logger.info("[tag] 任务 tags 已清理")
 
         if gc_disabled and original_gc_value is not None:
             _, _, _ = _set_gc_auto(repo, original_gc_value)
@@ -1195,7 +1202,7 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
             console.print(f"     🔗 git branch: {branch}")
         console.print("─" * 60)
         console.print("  使用 agent_go inspect <task-id> 查看详情")
-        console.print(f"  或直接 cd 到对应目录查看")
+        console.print("  或直接 cd 到对应目录查看")
 
     # ── S9-B 产物导出清单（与保留 worktree 清单并列） ──
     if export_result:
