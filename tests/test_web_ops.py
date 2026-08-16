@@ -50,7 +50,8 @@ def _mk_task(adir: Path, task_id: str, status: str = "FAILED",
 def ops_server(ops_env, monkeypatch) -> Generator[str, None, None]:
     from http.server import ThreadingHTTPServer
     server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
-    server.token = ""
+    server.admin_token = ""
+    server.viewer_token = ""
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     host, port = server.server_address[:2]
@@ -288,7 +289,8 @@ class TestAuditToken:
         monkeypatch.setattr(ws.task_runner, "start_run", lambda *a, **k: TID)
         from http.server import ThreadingHTTPServer
         server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
-        server.token = "sec"
+        server.admin_token = "sec"
+        server.viewer_token = ""
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         host, port = server.server_address[:2]
@@ -885,3 +887,78 @@ class TestProxyPolicies:
         d = ws.api_proxy_policies()
         assert d["ok"] is False
         assert "401" in d["error"]
+
+
+class TestRoleAuth:
+    """P1.2 多用户角色：admin（全部）/ viewer（只读）/ 无配置（全开放）。"""
+
+    def _server(self, admin="", viewer=""):
+        from http.server import ThreadingHTTPServer
+        import agent_go.web_server as ws
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
+        server.admin_token = admin
+        server.viewer_token = viewer
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        host, port = server.server_address[:2]
+        return server, f"http://127.0.0.1:{port}"
+
+    def _req(self, base, method, path, body=None, token=""):
+        import urllib.request
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        data = json.dumps(body or {}).encode() if body is not None else None
+        req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_no_config_open(self, tmp_path, monkeypatch):
+        """无 token 配置 → 全开放（向后兼容）。"""
+        import agent_go.web_server as ws
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", tmp_path)
+        server, base = self._server()
+        try:
+            assert self._req(base, "GET", "/api/profiles") == 200
+            assert self._req(base, "POST", "/api/profile/cloud") == 200
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_viewer_read_only(self, tmp_path, monkeypatch):
+        """viewer：GET 200，写操作 403。"""
+        import agent_go.web_server as ws
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", tmp_path)
+        server, base = self._server(admin="admin-sec", viewer="view-sec")
+        try:
+            assert self._req(base, "GET", "/api/profiles", token="view-sec") == 200
+            assert self._req(base, "POST", "/api/profile/cloud", {}, token="view-sec") == 403
+            assert self._req(base, "DELETE", f"/api/tasks/{TID}", {"confirm": True}, token="view-sec") == 403
+            assert self._req(base, "PUT", "/api/config", {"field": "goal", "value": {}}, token="view-sec") == 403
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_admin_all(self, tmp_path, monkeypatch):
+        """admin：GET + 写操作全通过。"""
+        import agent_go.web_server as ws
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", tmp_path)
+        server, base = self._server(admin="admin-sec", viewer="view-sec")
+        try:
+            assert self._req(base, "GET", "/api/profiles", token="admin-sec") == 200
+            assert self._req(base, "POST", "/api/profile/cloud", {}, token="admin-sec") == 200
+            assert self._req(base, "PUT", "/api/config", {"field": "goal", "value": {}}, token="admin-sec") == 200
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_no_token_401(self, tmp_path, monkeypatch):
+        """配置了 token 但未提供 → 401。"""
+        import agent_go.web_server as ws
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", tmp_path)
+        server, base = self._server(admin="admin-sec")
+        try:
+            assert self._req(base, "GET", "/api/profiles") == 401
+            assert self._req(base, "POST", "/api/profile/cloud", {}) == 401
+        finally:
+            server.shutdown(); server.server_close()

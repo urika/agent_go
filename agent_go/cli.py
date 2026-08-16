@@ -389,7 +389,9 @@ def _build_parser():
     web_parser = subparsers.add_parser("web", help="只读 Web 观察平台（任务清单/子任务明细/日志/metering/时间线）")
     web_parser.add_argument("--host", default="127.0.0.1", help="绑定地址（默认 127.0.0.1，仅本地）")
     web_parser.add_argument("--port", type=int, default=8091, help="监听端口（默认 8091）")
-    web_parser.add_argument("--token", default=None, help="可选 Bearer token 鉴权（默认关闭）")
+    web_parser.add_argument("--token", default=None, help="可选 admin Bearer token 鉴权（全部操作，默认关闭）")
+    web_parser.add_argument("--viewer-token", default=None,
+                            help="可选 viewer Bearer token（只读 GET；写操作 403）")
 
     # router 子命令
     router_parser = subparsers.add_parser("router", help="Role-aware model routing configuration")

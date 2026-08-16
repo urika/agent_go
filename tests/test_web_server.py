@@ -90,7 +90,8 @@ def base_url(mock_tasks) -> Generator[str, None, None]:
     from http.server import ThreadingHTTPServer
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
-    server.token = ""
+    server.admin_token = ""
+    server.viewer_token = ""
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     host, port = server.server_address[:2]
@@ -250,7 +251,8 @@ class TestAuth:
         from http.server import ThreadingHTTPServer
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
-        server.token = "sec"
+        server.admin_token = "sec"
+        server.viewer_token = ""
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         host, port = server.server_address[:2]

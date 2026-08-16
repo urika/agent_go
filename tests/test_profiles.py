@@ -233,7 +233,8 @@ def write_server(profile_env, monkeypatch) -> Generator[str, None, None]:
                         lambda url, key="": {"ok": True, "url": url, "latency_ms": 1})
     from http.server import ThreadingHTTPServer
     server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
-    server.token = ""
+    server.admin_token = ""
+    server.viewer_token = ""
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     host, port = server.server_address[:2]
@@ -313,7 +314,8 @@ class TestWriteApiAuth:
         monkeypatch.setattr(prof, "probe_local_models", lambda url: ["m"])
         from http.server import ThreadingHTTPServer
         server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
-        server.token = "sec"
+        server.admin_token = "sec"
+        server.viewer_token = ""
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         host, port = server.server_address[:2]

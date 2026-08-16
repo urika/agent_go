@@ -1253,19 +1253,47 @@ class WebHandler(BaseHTTPRequestHandler):
 
     # ── 鉴权 ─────────────────────────────────────────────────
 
-    def _auth_ok(self, query: str = "") -> bool:
-        token = getattr(self.server, "token", None)  # type: ignore[attr-defined]
-        if not token:
-            return True
+    def _auth_role(self, query: str = "") -> str:
+        """请求角色：admin / viewer / open（无鉴权配置，全开放）/ ""（未认证）。
+
+        P1.2 多用户角色：--admin-token（或兼容 --token）全部操作；--viewer-token 只读。
+        """
+        admin = getattr(self.server, "admin_token", None) or ""
+        viewer = getattr(self.server, "viewer_token", None) or ""
+        if not admin and not viewer:
+            return "open"  # 未配置任何 token → 向后兼容（全开放）
         auth = self.headers.get("Authorization", "")
         api_key = self.headers.get("X-Api-Key", "")
-        if auth == f"Bearer {token}" or api_key == token:
-            return True
+        token = auth[7:] if auth.startswith("Bearer ") else (api_key or "")
         # EventSource 无法自定义请求头，允许 ?token= query 传递（仅 SSE 等场景）
-        for pair in query.split("&"):
-            if pair.startswith("token=") and unquote(pair[6:]) == token:
-                return True
-        return False
+        if not token:
+            for pair in query.split("&"):
+                if pair.startswith("token="):
+                    token = unquote(pair[6:])
+        if admin and token == admin:
+            return "admin"
+        if viewer and token == viewer:
+            return "viewer"
+        return ""
+
+    def _auth_ok(self, query: str = "") -> bool:
+        return self._auth_role(query) != ""
+
+    def _auth_guard(self, query: str = "", required: str = "read") -> bool:
+        """鉴权守卫。required=read：admin/viewer 均可；required=admin：仅 admin（写操作）。
+
+        401 = 未认证（无有效 token）；403 = 认证但角色权限不足（viewer 访问写操作）。
+        """
+        role = self._auth_role(query)
+        if role == "open":
+            return True
+        if role == "":
+            self._reply_json(401, {"error": "unauthorized"})
+            return False
+        if required == "admin" and role != "admin":
+            self._reply_json(403, {"error": "forbidden: viewer 角色无写操作权限"})
+            return False
+        return True
 
     # ── 工具 ─────────────────────────────────────────────────
 
@@ -1291,12 +1319,6 @@ class WebHandler(BaseHTTPRequestHandler):
     def _reply_html(self, body: str) -> None:
         self._reply(200, "text/html; charset=utf-8", body.encode("utf-8"))
 
-    def _auth_guard(self, query: str = "") -> bool:
-        if not self._auth_ok(query):
-            self._reply_json(401, {"error": "unauthorized"})
-            return False
-        return True
-
     # ── 路由 ─────────────────────────────────────────────────
 
     def do_GET(self) -> None:
@@ -1309,7 +1331,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._reply_json(200, {"status": "ok", "server": "agent_go-web"})
             return
         if path.startswith("/api/"):
-            if not self._auth_guard(parsed.query):
+            if not self._auth_guard(parsed.query, required="read"):
                 return
             self._route_api(path, parsed.query)
             return
@@ -1493,7 +1515,7 @@ class WebHandler(BaseHTTPRequestHandler):
         if not path.startswith("/api/"):
             self._reply_json(404, {"error": f"not found: {path}"})
             return
-        if not self._auth_guard(parsed.query):
+        if not self._auth_guard(parsed.query, required="admin"):
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1515,7 +1537,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def _route_write_api(self, path: str, body: dict) -> None:
         parts = [p for p in path.split("/") if p]
-        token = getattr(self.server, "token", None) or ""  # type: ignore[attr-defined]
+        token = getattr(self.server, "admin_token", None) or ""  # type: ignore[attr-defined]
         try:
             # POST /api/profile/local {url?}  一键本地（R3）
             if len(parts) == 3 and parts[1] == "profile" and parts[2] == "local":
@@ -1871,8 +1893,13 @@ class WebHandler(BaseHTTPRequestHandler):
     def _op_kanban_update(self, card_id: str, body: dict, token: str) -> None:
         if self._kanban_card_or_reply(card_id) is None:
             return
-        fields = {k: str(body[k]) for k in
-                  ("title", "description", "repo", "cron", "spec_path") if k in body}
+        # null 安全（与 create 一致）：null 视为未传，跳过；title/repo/cron/spec_path strip，
+        # description 保留原文（markdown 缩进/首尾空格可能是有意为之）。
+        fields = {}
+        for k in ("title", "description", "repo", "cron", "spec_path"):
+            if k in body and body[k] is not None:
+                v = body[k]
+                fields[k] = str(v).strip() if k != "description" else str(v)
         if not fields:
             self._reply_json(400, {"error": "无可更新字段（title/description/repo/cron/spec_path）"})
             return
@@ -1895,7 +1922,10 @@ class WebHandler(BaseHTTPRequestHandler):
     def _op_kanban_archive(self, card_id: str, body: dict, token: str) -> None:
         if self._kanban_card_or_reply(card_id) is None:
             return
-        archived = bool(body.get("archived", True))
+        archived = body.get("archived", True)
+        if not isinstance(archived, bool):
+            self._reply_json(400, {"error": "archived 必须为布尔值（true/false）"})
+            return
         card = kanban.archive_card(card_id, archived=archived)
         _audit("kanban.archive", {"card_id": card_id, "archived": archived},
                card, True, token)
@@ -1911,7 +1941,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def _op_kanban_dispatch(self, card_id: str, body: dict, token: str) -> None:
         """派发执行：implementation/periodic 卡片 → task_runner.start_run，
-        成功后 link_task + 自动流转到 implementation 列。"""
+        成功后原子 link_task + 自动流转到 implementation 列（dispatch_card 单锁）。"""
         card = self._kanban_card_or_reply(card_id)
         if card is None:
             return
@@ -1938,8 +1968,7 @@ class WebHandler(BaseHTTPRequestHandler):
         task_text = task_text[:4000]
         task_id = task_runner.start_run(repo, task_text, parallel=parallel,
                                         confirm_mode=confirm_mode)
-        kanban.link_task(card_id, task_id)
-        card = kanban.move_card(card_id, "implementation", note=f"派发任务 {task_id}")
+        card = kanban.dispatch_card(card_id, task_id, note=f"派发任务 {task_id}")
         result = {"ok": True, "task_id": task_id, "card": card}
         _audit("kanban.dispatch", {"card_id": card_id, "task_id": task_id, "repo": repo},
                {"task_id": task_id}, True, token)
@@ -1952,7 +1981,7 @@ class WebHandler(BaseHTTPRequestHandler):
         if not path.startswith("/api/"):
             self._reply_json(404, {"error": f"not found: {path}"})
             return
-        if not self._auth_guard(parsed.query):
+        if not self._auth_guard(parsed.query, required="admin"):
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1967,7 +1996,7 @@ class WebHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._reply_json(400, {"error": "invalid JSON body"})
             return
-        token = getattr(self.server, "token", None) or ""  # type: ignore[attr-defined]
+        token = getattr(self.server, "admin_token", None) or ""  # type: ignore[attr-defined]
         if path == "/api/config":
             field = str(body.get("field") or "")
             value = body.get("value")
@@ -1989,7 +2018,7 @@ class WebHandler(BaseHTTPRequestHandler):
         if not path.startswith("/api/"):
             self._reply_json(404, {"error": f"not found: {path}"})
             return
-        if not self._auth_guard(parsed.query):
+        if not self._auth_guard(parsed.query, required="admin"):
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -2005,7 +2034,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._reply_json(400, {"error": "invalid JSON body"})
             return
         parts = [p for p in path.split("/") if p]
-        token = getattr(self.server, "token", None) or ""  # type: ignore[attr-defined]
+        token = getattr(self.server, "admin_token", None) or ""  # type: ignore[attr-defined]
         if len(parts) == 3 and parts[1] == "tasks":
             task_id = parts[2]
             td = _task_dir(task_id)
@@ -2079,8 +2108,14 @@ class WebHandler(BaseHTTPRequestHandler):
 
 
 def serve_web(host: str = "127.0.0.1", port: int = 8091,
-              token: Optional[str] = None) -> None:
+              token: Optional[str] = None,
+              viewer_token: Optional[str] = None) -> None:
     """启动 Web 操作台服务（阻塞）。
+
+    鉴权（P1.2 多用户角色）：
+      --token/--admin-token：admin 角色（全部操作）
+      --viewer-token：viewer 角色（只读 GET；写操作 403）
+      两者均未配置 → 全开放（向后兼容）
 
     U4 失控防护：
       - 启动时扫描疑似孤儿任务（EXECUTING 但无托管句柄）并警告
@@ -2089,7 +2124,8 @@ def serve_web(host: str = "127.0.0.1", port: int = 8091,
     import atexit
 
     httpd = ThreadingHTTPServer((host, port), WebHandler)
-    httpd.token = token or ""  # type: ignore[attr-defined]
+    httpd.admin_token = token or ""  # type: ignore[attr-defined]
+    httpd.viewer_token = viewer_token or ""  # type: ignore[attr-defined]
 
     orphans = task_runner.orphan_tasks()
     if orphans:
@@ -3694,13 +3730,14 @@ connectSSE();
 
 
 def main(args: Any = None) -> None:  # CLI 入口
-    """agent_go web [--host H] [--port P] [--token T]"""
+    """agent_go web [--host H] [--port P] [--token T] [--viewer-token VT]"""
     import argparse
 
     # 兼容两种调用：CLI 分发传入已解析 Namespace（args 无 .split 方法），
     # 直接命令行调用传入 argv 列表。
     if isinstance(args, argparse.Namespace):
-        serve_web(host=args.host, port=args.port, token=args.token)
+        serve_web(host=args.host, port=args.port, token=args.token,
+                  viewer_token=getattr(args, "viewer_token", None))
         return
 
     parser = argparse.ArgumentParser(prog="agent_go web",
@@ -3708,6 +3745,8 @@ def main(args: Any = None) -> None:  # CLI 入口
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8091)
     parser.add_argument("--token", default=None,
-                        help="可选 Bearer token 鉴权（默认关闭）")
+                        help="可选 admin Bearer token 鉴权（全部操作，默认关闭）")
+    parser.add_argument("--viewer-token", default=None,
+                        help="可选 viewer Bearer token（只读 GET；写操作 403）")
     ns = parser.parse_args(args)
-    serve_web(host=ns.host, port=ns.port, token=ns.token)
+    serve_web(host=ns.host, port=ns.port, token=ns.token, viewer_token=ns.viewer_token)

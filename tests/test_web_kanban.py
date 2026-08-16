@@ -34,7 +34,8 @@ def ops_env(tmp_path: Path, monkeypatch) -> Path:
 def ops_server(ops_env, monkeypatch) -> Generator[str, None, None]:
     from http.server import ThreadingHTTPServer
     server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
-    server.token = ""
+    server.admin_token = ""
+    server.viewer_token = ""
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     host, port = server.server_address[:2]
@@ -185,6 +186,22 @@ class TestCreateMove:
         assert code == 200
         assert d["card"]["description"] == "新描述"
 
+    def test_update_null_is_ignored(self, ops_server):
+        """L2：JSON null 视为未传，不覆盖成字面量 'None'。"""
+        card = _create_card(ops_server, title="原标题")
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/update",
+                        {"repo": None, "title": "新标题"})
+        assert code == 200
+        assert d["card"]["title"] == "新标题"
+        assert d["card"]["repo"] == ""
+
+    def test_update_repo_stripped(self, ops_server):
+        card = _create_card(ops_server, type="implementation", repo="/tmp")
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/update",
+                        {"repo": "  /tmp/repo  "})
+        assert code == 200
+        assert d["card"]["repo"] == "/tmp/repo"
+
 
 class TestDispatch:
     def test_dispatch_ok(self, ops_server, ops_env, monkeypatch):
@@ -196,9 +213,11 @@ class TestDispatch:
                         {"parallel": 2})
         assert code == 200
         assert d["task_id"] == TID
-        # link_task + 自动流转到 implementation
+        # link_task + 自动流转到 implementation（原子 dispatch_card）
         assert d["card"]["task_ids"] == [TID]
         assert d["card"]["stage"] == "implementation"
+        acts = [h["action"] for h in d["card"]["history"]]
+        assert acts[-2:] == ["link", "move"]
         audits = [a for a in _audit_lines(ops_env) if a["op"] == "kanban.dispatch"]
         assert audits and audits[0]["ok"]
         assert audits[0]["params"]["task_id"] == TID
@@ -241,11 +260,32 @@ class TestDelete:
         assert "不可删除" in d["error"]
 
 
+class TestArchiveBool:
+    def test_archive_string_false_rejected(self, ops_server):
+        """L3：archived 必须为真布尔，字符串 'false' 不应被强转为 True。"""
+        card = _create_card(ops_server)
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/archive",
+                        {"archived": "false"})
+        assert code == 400
+        assert "布尔" in d["error"]
+        assert kb.get_card(card["id"])["archived"] is False
+
+    def test_unarchive_via_bool(self, ops_server):
+        card = _create_card(ops_server)
+        code, _ = _post(f"{ops_server}/api/kanban/cards/{card['id']}/archive", {})
+        assert code == 200
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/archive",
+                        {"archived": False})
+        assert code == 200
+        assert d["card"]["archived"] is False
+
+
 class TestAuth:
     def test_token_required_401(self, ops_env):
         from http.server import ThreadingHTTPServer
         server = ThreadingHTTPServer(("127.0.0.1", 0), ws.WebHandler)
-        server.token = "sec"
+        server.admin_token = "sec"
+        server.viewer_token = ""
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         host, port = server.server_address[:2]
