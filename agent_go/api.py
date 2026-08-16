@@ -82,8 +82,8 @@ def _resolve_role_api_cfg(config: dict[str, Any], role: str = "planner") -> dict
     except Exception:
         pass
     if fallback_key and config.get(fallback_key):
-        return config[fallback_key]
-    return config["plan_api"]
+        return dict(config[fallback_key])
+    return dict(config["plan_api"])
 
 
 def _resolve_planner_api_cfg(config: dict[str, Any]) -> dict[str, Any]:

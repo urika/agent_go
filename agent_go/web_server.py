@@ -794,6 +794,8 @@ def api_proxy_policies() -> dict:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         return {"ok": False, "error": str(e), "proxy_url": proxy_url}
+    if not isinstance(data, dict):
+        return {"ok": False, "error": f"代理返回非对象结构: {type(data).__name__}", "proxy_url": proxy_url}
     data["ok"] = True
     data["proxy_url"] = proxy_url
     return data

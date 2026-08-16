@@ -2925,7 +2925,7 @@ def cmd_report(args=None) -> None:
                 continue
     total_cost = round(sum(r.get("cost_usd", 0) or 0 for r in metering_records), 6)
     total_elapsed = round(sum(r.get("duration_sec", 0) or 0 for r in results), 1)
-    role_models = {}
+    role_models: dict[str, set] = {}
     for r in metering_records:
         role = r.get("role", "?")
         model = r.get("route_actual_model") or r.get("actual_model") or r.get("routed_model") or "?"
