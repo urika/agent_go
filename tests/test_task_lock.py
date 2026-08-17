@@ -144,3 +144,41 @@ class TestWebLockConflict:
                 cmd_merge(type("A", (), {"task_id": TID, "push": False, "remote": "origin"})())
         finally:
             lock.release()
+
+
+class TestNotes:
+    """M5.2.3 任务备注（协作沟通）。"""
+
+    def test_notes_empty(self, lock_server, lock_env):
+        _mk_task(lock_env, TID)
+        with urllib.request.urlopen(f"{lock_server}/api/tasks/{TID}/notes") as r:
+            d = json.loads(r.read())
+        assert d["notes"] == []
+
+    def test_add_and_read_note(self, lock_server, lock_env):
+        _mk_task(lock_env, TID)
+        code, d = _post(f"{lock_server}/api/tasks/{TID}/notes", {"text": "这个任务需要人工复核"})
+        assert code == 200
+        assert d["note"]["text"] == "这个任务需要人工复核"
+        assert d["note"]["author"] == "local"
+        with urllib.request.urlopen(f"{lock_server}/api/tasks/{TID}/notes") as r:
+            d2 = json.loads(r.read())
+        assert len(d2["notes"]) == 1
+        assert d2["notes"][0]["text"] == "这个任务需要人工复核"
+
+    def test_empty_text_rejected(self, lock_server, lock_env):
+        _mk_task(lock_env, TID)
+        code, d = _post(f"{lock_server}/api/tasks/{TID}/notes", {"text": "   "})
+        assert code == 422
+        assert "不能为空" in d["error"]
+
+    def test_notes_not_found(self, lock_server):
+        code, _ = _post(f"{lock_server}/api/tasks/{TID}/notes", {"text": "x"})
+        assert code == 404
+
+    def test_note_audited(self, lock_server, lock_env):
+        _mk_task(lock_env, TID)
+        _post(f"{lock_server}/api/tasks/{TID}/notes", {"text": "备注"})
+        audit = lock_env / "web_audit.jsonl"
+        assert audit.exists()
+        assert any("tasks.note" in l for l in audit.read_text().splitlines())

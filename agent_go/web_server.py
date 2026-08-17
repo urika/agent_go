@@ -1129,6 +1129,49 @@ def api_audit(limit: int = 100) -> dict:
     return {"records": records, "total": len(lines)}
 
 
+def api_notes(task_id: str) -> Optional[dict]:
+    """任务备注列表（M5.2 协作：多用户沟通）。追加式 notes.jsonl。"""
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    path = td / "notes.jsonl"
+    notes = []
+    if path.exists():
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    try:
+                        notes.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+    return {"task_id": task_id, "notes": notes}
+
+
+def add_note(task_id: str, author: str, text: str) -> dict:
+    """追加任务备注。author 取 web token 角色标识（admin/viewer），无 token 为 local。"""
+    td = _task_dir(task_id)
+    if td is None:
+        raise ProfileError("task not found")
+    text = (text or "").strip()
+    if not text:
+        raise ProfileError("备注内容不能为空")
+    if len(text) > 2000:
+        raise ProfileError("备注过长（≤2000 字符）")
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "author": author,
+        "text": text,
+    }
+    try:
+        with (td / "notes.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        raise ProfileError(f"备注写入失败: {e}") from e
+    return rec
+
+
 def api_config() -> dict:
     """只读展示用户配置（config.json + role_skill_map.json + 熔断器状态）。"""
     config = load_config()
@@ -1548,6 +1591,13 @@ class WebHandler(BaseHTTPRequestHandler):
                 else:
                     self._reply_json(200, data)
                 return
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "notes":
+                data = api_notes(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "pending-confirmation":
                 td = _task_dir(parts[2])
                 if td is None:
@@ -1686,6 +1736,10 @@ class WebHandler(BaseHTTPRequestHandler):
                 if action == "dispatch":
                     self._op_kanban_dispatch(card_id, body, token)
                     return
+            # POST /api/tasks/<id>/notes {text}（M5.2 协作备注）
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "notes":
+                self._op_add_note(parts[2], body, token)
+                return
         except KanbanError as e:
             _audit("error", {"path": path}, str(e), False, token)
             self._reply_json(422, {"error": str(e)})
@@ -1705,6 +1759,19 @@ class WebHandler(BaseHTTPRequestHandler):
         self._reply_json(404, {"error": f"not found: {path}"})
 
     # ── M2 写操作实现 ────────────────────────────────────────
+
+    def _op_add_note(self, task_id: str, body: dict, token: str) -> None:
+        if _task_dir(task_id) is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        text = str(body.get("text") or "").strip()
+        author = "local"
+        if token:
+            role = self._auth_role()
+            author = f"{role}:{token[:6]}"
+        rec = add_note(task_id, author, text)
+        _audit("tasks.note", {"task_id": task_id, "author": author}, rec, True, token)
+        self._reply_json(200, {"ok": True, "note": rec})
 
     def _op_run(self, body: dict, token: str) -> None:
         repo = str(body.get("repo") or "").strip()
@@ -2700,9 +2767,11 @@ async function toggleTask(id, row) {
     const data = await api('/api/tasks/'+encodeURIComponent(id));
     td.innerHTML = '<div id="pendingCard"></div>' + taskOpsBar(id, data.status, data.managed) +
       renderTaskDetail(data) +
-      '<div class="review-panel" id="reviewPanel"><div class="loading">加载审批台…</div></div>';
+      '<div class="review-panel" id="reviewPanel"><div class="loading">加载审批台…</div></div>' +
+      '<div class="review-panel" id="notesPanel"><div class="loading">加载备注…</div></div>';
     bindDetailEvents(id, tr);
     bindTaskOps(id, td);
+    loadNotes(id, td);
     loadReviewPanel(id, td);
     loadPendingCard(id, td);
     loadExtraPanels(id, td);
@@ -2828,6 +2897,41 @@ async function loadReviewPanel(id, td) {
       }
     };
   });
+}
+
+async function loadNotes(id, td) {
+  const panel = td.querySelector('#notesPanel');
+  if (!panel) return;
+  let d;
+  try { d = await api('/api/tasks/'+encodeURIComponent(id)+'/notes'); }
+  catch (e) { panel.innerHTML = '<div class="err">'+esc(e.message)+'</div>'; return; }
+  const notes = (d.notes || []);
+  const rows = notes.slice().reverse().map(n =>
+    '<div style="border-bottom:1px solid var(--border);padding:6px 0">'+
+    '<div style="font-size:11px;color:var(--dim)">'+esc(n.author)+' · '+esc((n.ts||'').replace('T',' ').slice(0,19))+'</div>'+
+    '<div style="white-space:pre-wrap">'+esc(n.text)+'</div></div>').join('');
+  panel.innerHTML =
+    '<div class="section-title">📝 任务备注（协作）</div>'+
+    '<div class="run-form" style="margin-bottom:8px">'+
+    '<input id="noteInput" class="run-input" style="flex:3" placeholder="添加备注（所有协作者可见）…">'+
+    '<button class="btn" id="noteSend">发送</button></div>'+
+    (notes.length ? '<div style="max-height:260px;overflow:auto">'+rows+'</div>' : '<div style="color:var(--dim);font-size:12px">暂无备注</div>');
+  const send = panel.querySelector('#noteSend');
+  const input = panel.querySelector('#noteInput');
+  send.onclick = async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    send.disabled = true;
+    try {
+      await postJSON('/api/tasks/'+encodeURIComponent(id)+'/notes', {text});
+      input.value = '';
+      loadNotes(id, td);
+    } catch (e) {
+      alert('❌ '+e.message);
+      send.disabled = false;
+    }
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') send.onclick(); });
 }
 
 async function loadExtraPanels(id, td) {
