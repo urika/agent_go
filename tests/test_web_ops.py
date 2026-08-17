@@ -925,7 +925,8 @@ class TestRoleAuth:
             assert self._req(base, "GET", "/api/profiles") == 200
             assert self._req(base, "POST", "/api/profile/cloud") == 200
         finally:
-            server.shutdown(); server.server_close()
+            server.shutdown()
+            server.server_close()
 
     def test_viewer_read_only(self, tmp_path, monkeypatch):
         """viewer：GET 200，写操作 403。"""
@@ -938,7 +939,8 @@ class TestRoleAuth:
             assert self._req(base, "DELETE", f"/api/tasks/{TID}", {"confirm": True}, token="view-sec") == 403
             assert self._req(base, "PUT", "/api/config", {"field": "goal", "value": {}}, token="view-sec") == 403
         finally:
-            server.shutdown(); server.server_close()
+            server.shutdown()
+            server.server_close()
 
     def test_admin_all(self, tmp_path, monkeypatch):
         """admin：GET + 写操作全通过。"""
@@ -950,7 +952,8 @@ class TestRoleAuth:
             assert self._req(base, "POST", "/api/profile/cloud", {}, token="admin-sec") == 200
             assert self._req(base, "PUT", "/api/config", {"field": "goal", "value": {}}, token="admin-sec") == 200
         finally:
-            server.shutdown(); server.server_close()
+            server.shutdown()
+            server.server_close()
 
     def test_no_token_401(self, tmp_path, monkeypatch):
         """配置了 token 但未提供 → 401。"""
@@ -961,4 +964,56 @@ class TestRoleAuth:
             assert self._req(base, "GET", "/api/profiles") == 401
             assert self._req(base, "POST", "/api/profile/cloud", {}) == 401
         finally:
-            server.shutdown(); server.server_close()
+            server.shutdown()
+            server.server_close()
+
+
+class TestReportEndpoint:
+    """M5.2.1：web 任务报告端点（复用 CLI report，单一实现）。"""
+
+    def test_report_md(self, ops_server, ops_env, monkeypatch):
+        _mk_task(ops_env, TID)
+        monkeypatch.setattr(ws, "_run_cli",
+                            lambda argv, timeout=60: {"ok": True, "exit_code": 0,
+                                                      "stdout": "# 任务报告: 测试\n- **状态**: `FAILED`\n", "stderr": ""})
+        req = urllib.request.Request(f"{ops_server}/api/tasks/{TID}/report?format=md")
+        with urllib.request.urlopen(req) as r:
+            assert r.status == 200
+            assert r.headers.get("Content-Type", "").startswith("text/markdown")
+            body = r.read().decode()
+        assert "任务报告" in body
+
+    def test_report_html(self, ops_server, ops_env, monkeypatch):
+        _mk_task(ops_env, TID)
+        monkeypatch.setattr(ws, "_run_cli",
+                            lambda argv, timeout=60: {"ok": True, "exit_code": 0,
+                                                      "stdout": "<html><body>报告</body></html>", "stderr": ""})
+        req = urllib.request.Request(f"{ops_server}/api/tasks/{TID}/report?format=html")
+        with urllib.request.urlopen(req) as r:
+            assert r.headers.get("Content-Type", "").startswith("text/html")
+
+    def test_report_invalid_format(self, ops_server, ops_env):
+        _mk_task(ops_env, TID)
+        try:
+            urllib.request.urlopen(f"{ops_server}/api/tasks/{TID}/report?format=pdf")
+            assert False
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+
+
+    def test_report_not_found(self, ops_server):
+        try:
+            urllib.request.urlopen(f"{ops_server}/api/tasks/task-20990101-000000/report?format=md")
+            assert False
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+
+    def test_report_cli_failure_500(self, ops_server, ops_env, monkeypatch):
+        _mk_task(ops_env, TID)
+        monkeypatch.setattr(ws, "_run_cli",
+                            lambda argv, timeout=60: {"ok": False, "exit_code": 1, "stdout": "", "stderr": "boom"})
+        try:
+            urllib.request.urlopen(f"{ops_server}/api/tasks/{TID}/report?format=md")
+            assert False
+        except urllib.error.HTTPError as e:
+            assert e.code == 500

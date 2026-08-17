@@ -1055,6 +1055,17 @@ def put_config_field(field: str, value: Any) -> dict:
     return {"field": field, "saved_to": str(target), "effective": "新任务生效"}
 
 
+def api_task_report(task_id: str, fmt: str) -> Optional[dict]:
+    """任务报告（M5.2.1）：复用 CLI `agent_go report --output -`（单一实现，行为一致）。"""
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    result = _run_cli(["report", task_id, "--format", fmt, "--output", "-"], timeout=60)
+    if not result["ok"]:
+        return {"ok": False, "error": result["stderr"][-200:] or result["stdout"][-200:]}
+    return {"ok": True, "content": result["stdout"]}
+
+
 def api_worktrees(task_id: str) -> Optional[dict]:
     """保留 worktree 清单（R17，inspect 同逻辑）。"""
     td = _task_dir(task_id)
@@ -1430,6 +1441,22 @@ class WebHandler(BaseHTTPRequestHandler):
                 else:
                     self._reply_json(200, data)
                 return
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "report":
+                fmt = next((unquote(p[7:]) for p in query.split("&")
+                            if p.startswith("format=")), "html")
+                if fmt not in ("md", "html"):
+                    self._reply_json(400, {"error": "format 须为 md/html"})
+                    return
+                data = api_task_report(parts[2], fmt)
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                elif not data.get("ok"):
+                    self._reply_json(500, {"error": data.get("error", "报告生成失败")})
+                else:
+                    content = data["content"]
+                    ctype = "text/html; charset=utf-8" if fmt == "html" else "text/markdown; charset=utf-8"
+                    self._reply(200, ctype, content.encode("utf-8"))
+                return
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "merge-preview":
                 data = api_merge_preview(parts[2])
                 if data is None:
@@ -1722,8 +1749,16 @@ class WebHandler(BaseHTTPRequestHandler):
         self._reply_json(200, result)
 
     def _op_resume(self, task_id: str, body: dict, token: str) -> None:
-        if _task_dir(task_id) is None:
+        td = _task_dir(task_id)
+        if td is None:
             self._reply_json(404, {"error": "task not found"})
+            return
+        # M5.2 冲突处理：任务锁被其他进程持有（CLI run/resume/merge）→ 409 前置拦截
+        from .task_lock import is_task_locked
+        if is_task_locked(td):
+            _audit("tasks.resume", {"task_id": task_id}, "冲突: 任务锁被持有", False, token)
+            self._reply_json(409, {"error": "任务被其他进程持有（正在执行/恢复/合并），无法 resume。"
+                                            "请稍后再试。"})
             return
         # D3/R6：运行中任务 resume → 409 冲突
         status = _task_status_of(task_id)
@@ -1732,11 +1767,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._reply_json(409, {"error": f"任务正在运行中（{status}），无法 resume。可先 cancel。",
                                    "status": status})
             return
-        try:
-            parallel = int(body.get("parallel") or 1)
-        except (TypeError, ValueError):
-            self._reply_json(400, {"error": "parallel 必须为正整数"})
-            return
+        parallel = int(body.get("parallel") or 1)
         task_runner.start_resume(task_id, parallel=parallel)
         result = {"task_id": task_id, "status": "resumed"}
         _audit("tasks.resume", {"task_id": task_id}, result, True, token)
@@ -1817,8 +1848,15 @@ class WebHandler(BaseHTTPRequestHandler):
         self._reply_json(200 if result["ok"] else 422, result)
 
     def _op_merge(self, task_id: str, body: dict, token: str) -> None:
-        if _task_dir(task_id) is None:
+        td = _task_dir(task_id)
+        if td is None:
             self._reply_json(404, {"error": "task not found"})
+            return
+        # M5.2 冲突处理：任务锁被持有（运行/恢复中）→ 409 前置拦截
+        from .task_lock import is_task_locked
+        if is_task_locked(td):
+            _audit("tasks.merge", {"task_id": task_id}, "冲突: 任务锁被持有", False, token)
+            self._reply_json(409, {"error": "任务被其他进程持有（正在执行/恢复），无法 merge。请稍后再试。"})
             return
         push = bool(body.get("push"))
         remote = str(body.get("remote") or "origin")
@@ -2682,6 +2720,7 @@ function taskOpsBar(id, status, managed) {
     '<button class="btn" data-op="cancel" '+(running && !unmanagedRunning ?'':'disabled')+
       (unmanagedRunning ? ' title="任务非本 web 实例启动（CLI 或孤儿进程），无法用本页取消"' : '')+'>⏹ 取消</button>'+
     '<button class="btn" data-op="clean" '+(running?'disabled':'')+'>🗑 清理</button>'+
+    '<button class="btn" data-op="report">📄 报告</button>'+
     (unmanagedRunning ? '<span class="tag" style="color:var(--yellow)">👁 外部进程，仅可观测（CLI: agent_go resume/cancel）</span>' : '')+
     '<span class="op-msg" id="opMsg"></span>'+
     '</div>';
@@ -2693,6 +2732,10 @@ function bindTaskOps(id, td) {
   td.querySelectorAll('[data-op]').forEach(btn => {
     btn.onclick = async () => {
       const op = btn.dataset.op;
+      if (op === 'report') {
+        window.open('/api/tasks/'+encodeURIComponent(id)+'/report?format=html', '_blank');
+        return;
+      }
       if (op === 'resume' && !confirm('恢复任务 '+id+'？（从断点续跑剩余子任务）')) return;
       if (op === 'cancel' && !confirm('取消任务 '+id+'？\\n将发送 SIGINT（与 Ctrl+C 同义），pipeline 收尾后停止。')) return;
       if (op === 'clean' && !confirm('清理任务 '+id+'？\\n将删除任务数据目录（worktree/tag 一并清理），不可恢复！')) return;
