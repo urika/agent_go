@@ -59,6 +59,8 @@ DEFAULT_CONFIG = {
         # ~/.agent_go/skills/<name>/SKILL.md 的 body 作为审查维度指引，实现领域化审查。
         "readonly_review": {
             "enabled": False,
+            # B5 循环智能 b：Reflexion 阈值化——retry_count ≥ threshold 才触发审查
+            "threshold": 2,
             "model": "",
             "provider": "",
             "base_url": "",

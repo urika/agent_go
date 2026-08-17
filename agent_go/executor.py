@@ -1824,23 +1824,27 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
 
             # 两阶段审查（改进方向 2）：独立只读审查 subagent——不参与实现、
             # 只做黑盒分析失败根因，消除「实现者盲区」。默认关闭（readonly_review.enabled）。
+            # B5 循环智能 b：Reflexion 阈值化——retry_count ≥ threshold（默认 2）才触发，
+            # 首次失败先给修复一个机会，避免每次都调独立模型烧钱/延迟（M2.2 ⚠️ 收敛）。
             # 审查意见注入修复 prompt；失败时 fail-open（返回 None，不阻断验证循环）。
             readonly_review = None
             _rr_cfg = _cfg.get("verification", {}).get("readonly_review", {}) or {}
+            _rr_threshold = int(_rr_cfg.get("threshold", 2) or 2)
             if _rr_cfg.get("enabled", False):
-                readonly_review = _safe_optional_call(
-                    ".review_agent", "run_readonly_review", logger,
-                    subtask, worktree, verification, failed_cmds, failed_outputs,
-                    git_diff, _cfg, logger,
-                    metering_path=_cfg_for_meter.get("_metering_path", "") if _cfg_for_meter else "",
-                    fallback=None,
-                    label="review_agent.run_readonly_review",
-                )
-                if readonly_review:
-                    log_event(logger, "readonly_review", {
-                        "sub_id": sub_id, "attempt": retry_count,
-                        "root_cause": (readonly_review.get("root_cause") or "")[:120],
-                    })
+                if retry_count >= _rr_threshold:
+                    readonly_review = _safe_optional_call(
+                        ".review_agent", "run_readonly_review", logger,
+                        subtask, worktree, verification, failed_cmds, failed_outputs,
+                        git_diff, _cfg, logger,
+                        metering_path=_cfg_for_meter.get("_metering_path", "") if _cfg_for_meter else "",
+                        fallback=None,
+                        label="review_agent.run_readonly_review",
+                    )
+                    if readonly_review:
+                        log_event(logger, "readonly_review", {
+                            "sub_id": sub_id, "attempt": retry_count,
+                            "root_cause": (readonly_review.get("root_cause") or "")[:120],
+                        })
                     # M2.2 有界 Reflexion 持久化：根因分析 + 生效策略写入 verify_state.json，
                     # 供 KnowledgeStore 消费；只影响下次 repair，不改变任务状态。
                     if task_dir:

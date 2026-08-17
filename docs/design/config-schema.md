@@ -105,6 +105,7 @@ Plan 生成专用 API 配置。非空时**完全覆盖** `plan_api`（Planner �
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `enabled` | bool | `false` | 是否启用只读审查（默认关，成本可控） |
+| `threshold` | int | `2` | Reflexion 阈值化（B5）：retry_count ≥ 该值才触发审查（首次失败先给修复机会，避免每次重试都调独立模型） |
 | `model` | str | `""` | 审查模型（空 = 复用 evaluator.model） |
 | `provider` | str | `""` | 审查 API 提供商（空 = 复用 evaluator.provider） |
 | `base_url` | str | `""` | 审查 API 端点（空 = 复用 evaluator.base_url） |

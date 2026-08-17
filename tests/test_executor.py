@@ -3182,7 +3182,51 @@ class TestReadonlyReview:
         assert "独立的只读代码审查 agent" in prompt
 
     def test_verify_changes_invokes_review_on_failure(self, temp_repo, task_dir, logger):
-        """验证失败且启用只读审查 → 审查 agent 被调用。"""
+        """验证失败且启用只读审查（threshold=1 即首次失败触发）→ 审查 agent 被调用。"""
+        from threading import Lock
+        from agent_go.executor import _verify_changes
+
+        subtask = {
+            "id": "sub-1", "title": "基础任务", "description": "执行操作",
+            "verification": "pytest tests/", "risks": [], "depends_on": [],
+            "skills": [], "agent_type": "developer", "agent_prompt": "work",
+        }
+
+        def _git_fail(cmd, **kw):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return MagicMock(returncode=0, stdout=" M main.py\n", stderr="")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return MagicMock(returncode=0, stdout="1 file changed", stderr="")
+            if any(g in cmd_str for g in ["git add", "git commit", "git tag"]):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=_git_fail), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_verification_cmd") as mock_vcmd, \
+             patch("agent_go.review_agent.run_readonly_review") as mock_review:
+            mock_fix.return_value = MagicMock(returncode=0)
+            mock_vcmd.return_value = {"command": "pytest", "exit_code": 1,
+                                      "duration_ms": 10, "attempt": 1,
+                                      "stdout_tail": "FAIL", "stderr_tail": ""}
+            mock_review.return_value = {
+                "root_cause": "实现缺陷", "blind_spot": "x", "suggestions": "y",
+                "cost_usd": 0.001, "latency_ms": 100,
+            }
+            _verify_changes(
+                "task-1", "sub-1", subtask, temp_repo, headless=True,
+                task_md="# Task", env={}, tag_name="task-1/sub-1",
+                active_pids=set(), active_pids_lock=Lock(), logger=logger,
+                task_dir=task_dir,
+                config={"verification": {"max_retries": 1,
+                                         "readonly_review": {"enabled": True, "threshold": 1}}},
+            )
+
+        assert mock_review.called, "验证失败 + 启用只读审查（threshold=1）→ 审查 agent 应被调用"
+
+    def test_verify_changes_review_threshold_skips_first_retry(self, temp_repo, task_dir, logger):
+        """B5 Reflexion 阈值化：threshold=2（默认）→ 首次重试不触发审查（省一次独立模型调用）。"""
         from threading import Lock
         from agent_go.executor import _verify_changes
 
@@ -3223,7 +3267,7 @@ class TestReadonlyReview:
                                          "readonly_review": {"enabled": True}}},
             )
 
-        assert mock_review.called, "验证失败 + 启用只读审查 → 审查 agent 应被调用"
+        assert not mock_review.called, "threshold=2（默认）→ 首次重试（retry_count=1）不应触发审查"
 
 
 class TestPermissionMinimization:
