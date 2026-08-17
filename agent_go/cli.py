@@ -385,6 +385,15 @@ def _build_parser():
     deviation_parser.add_argument("--json", action="store_true", dest="json_mode",
                                   help="Output as JSON")
 
+    # problems 子命令（M5 收尾：全局 Problem 实体查询——「越用越聪明」的查看入口）
+    problems_parser = subparsers.add_parser("problems", help="Show global Problem records (cross-task failures, B4/H3)")
+    problems_parser.add_argument("--aggregate", action="store_true",
+                                 help="Show aggregate analysis (status/recurrence/top patterns)")
+    problems_parser.add_argument("--only", default="", metavar="PROBLEM_ID",
+                                 help="Show single Problem detail (history/lifecycle)")
+    problems_parser.add_argument("--json", action="store_true", dest="json_mode",
+                                 help="Output as JSON")
+
     # mcp 子命令
     mcp_parser = subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)")
     mcp_parser.add_argument("--http", action="store_true",
@@ -3679,6 +3688,81 @@ def cmd_deviation(args) -> None:
     _con.sep("─", 60)
 
 
+def cmd_problems(args=None) -> None:
+    """M5 收尾：展示全局 Problem 实体（B4/H3——跨任务失败记忆的查看入口）。
+
+    功能：
+      - 缺省：列出全部 Problem（按 occurrence_count 降序）
+      - --aggregate：聚合分析（total/状态分布/复发数/top 模式）
+      - --only <id>：单个 Problem 详情（生命周期/历史解法/复发重开）
+      - --json：机器可读
+    """
+    from .console import _LazyConsole
+    from .problems import PROBLEM_STATES, aggregate, load
+
+    _con = _LazyConsole()
+    problems_path = AGENT_GO_DIR / "problems.jsonl"
+    problems = load(problems_path)
+    as_json = bool(getattr(args, "json_mode", False))
+
+    if as_json:
+        _con.force(json.dumps({
+            "problems": [p.__dict__ for p in problems],
+            "aggregate": aggregate(problems),
+        }, indent=2, ensure_ascii=False))
+        return
+
+    only_id = getattr(args, "only", "") or ""
+    if only_id:
+        prob = next((p for p in problems if p.id == only_id), None)
+        if not prob:
+            _con.error(f"Problem 不存在: {only_id}")
+            return
+        _con.sep("─", 60)
+        _con.title(f"🧠 Problem: {prob.id}")
+        _con.print(f"  模式: {prob.failure_pattern}   类别: {prob.failure_class or '-'}")
+        _con.print(f"  状态: {prob.status}   出现次数: {prob.occurrence_count}"
+                   f"   半衰期: {prob.stale_after_days}d"
+                   f"{'（已休眠）' if prob.is_dormant() else ''}")
+        _con.print(f"  首次: {prob.first_seen_at[:19]}   最近: {prob.last_seen_at[:19]}")
+        if prob.task_id:
+            _con.print(f"  首现任务: {prob.task_id}{' / ' + prob.subtask_id if prob.subtask_id else ''}")
+        if prob.summary:
+            _con.print(f"  摘要: {prob.summary}")
+        if prob.evidence:
+            _con.print(f"  证据: {prob.evidence[:200]}")
+        if prob.root_cause:
+            _con.print(f"  根因: {prob.root_cause}")
+        if prob.resolution_summary:
+            _con.print(f"  历史解法: {prob.resolution_summary}")
+            _con.print(f"  解决于: {prob.resolved_by}")
+        return
+
+    if getattr(args, "aggregate", False):
+        agg = aggregate(problems)
+        _con.sep("─", 60)
+        _con.title(f"📊 Problem 聚合（全局 {agg['total']} 个）")
+        _con.print(f"  状态分布: {', '.join(str(s) + '=' + str(agg['status_counts'].get(s, 0)) for s in PROBLEM_STATES)}")
+        _con.print(f"  休眠中: {agg['dormant_count']}   复发过: {agg['recurrence_count']}"
+                   f"   总出现: {agg['total_occurrences']}")
+        if agg["top_patterns"]:
+            _con.print("  Top 失败模式:")
+            for pat, cnt in agg["top_patterns"]:
+                _con.print(f"    {pat}: {cnt} 次")
+        return
+
+    if not problems:
+        _con.print("暂无 Problem 记录（~/.agent_go/problems.jsonl 为空）——失败会在执行时自动录制。")
+        return
+    _con.sep("─", 60)
+    _con.title(f"🧠 全局 Problem（{len(problems)} 个，按出现次数降序）")
+    for p in sorted(problems, key=lambda x: -x.occurrence_count):
+        icon = {"opened": "🟠", "analyzed": "🔵", "resolved": "🟢"}.get(p.status, "⚪")
+        dormant = "（休眠）" if p.is_dormant() else ""
+        _con.print(f"{icon} {p.id}  {p.failure_pattern}  ×{p.occurrence_count}  [{p.status}]{dormant}"
+                   f"{'  💡' + p.resolution_summary[:40] if p.resolution_summary else ''}")
+
+
 def cmd_router(args=None) -> None:
     """角色感知模型路由配置管理。"""
     from .config import CONFIG_PATH
@@ -4072,6 +4156,8 @@ def main() -> None:
             cmd_governance(args)
         elif args.command == "deviation":
             cmd_deviation(args)
+        elif args.command == "problems":
+            cmd_problems(args)
         elif args.command == "mcp":
             cmd_mcp(args)
         elif args.command == "web":

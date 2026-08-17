@@ -623,3 +623,63 @@ def test_cmd_run_yes_still_runs_l1_gate(tmp_path, monkeypatch, capsys):
         gen_plan.assert_not_called()
     finally:
         set_default_console(_orig_console)
+
+
+# ═══════════════════════════════════════════════════════════════
+# M5 收尾：agent_go problems CLI（全局 Problem 查询）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCmdProblems:
+    """cmd_problems：list / --aggregate / --only / --json。"""
+
+    def _setup(self, tmp_path, monkeypatch):
+        import agent_go.cli as cli
+        from agent_go.problems import record, mark_resolved
+        agdir = tmp_path / "agdir"
+        agdir.mkdir()
+        monkeypatch.setattr(cli, "AGENT_GO_DIR", agdir)
+        path = agdir / "problems.jsonl"
+        record(path, failure_pattern="shell_fail", task_id="t1")
+        record(path, failure_pattern="shell_fail", task_id="t2")
+        record(path, failure_pattern="diverge", task_id="t3")
+        mark_resolved(path, __import__("agent_go.problems", fromlist=["make_problem_id"]).make_problem_id("diverge"),
+                      resolved_by="c1", resolution_summary="已修复：worktree 继承 venv")
+        return cli
+
+    def test_list_sorted_by_occurrence(self, tmp_path, monkeypatch, capsys):
+        cli = self._setup(tmp_path, monkeypatch)
+        args = type("A", (), {"json_mode": False, "aggregate": False, "only": ""})()
+        cli.cmd_problems(args)
+        out = capsys.readouterr().out
+        assert "shell_fail" in out
+        assert "×2" in out  # 复发计数
+        assert "已修复：worktree 继承 venv" in out or "diverge" in out
+
+    def test_aggregate(self, tmp_path, monkeypatch, capsys):
+        cli = self._setup(tmp_path, monkeypatch)
+        args = type("A", (), {"json_mode": False, "aggregate": True, "only": ""})()
+        cli.cmd_problems(args)
+        out = capsys.readouterr().out
+        assert "2 个" in out  # total=2
+        assert "resolved=1" in out
+        assert "复发过: 1" in out
+
+    def test_json(self, tmp_path, monkeypatch, capsys):
+        cli = self._setup(tmp_path, monkeypatch)
+        args = type("A", (), {"json_mode": True, "aggregate": False, "only": ""})()
+        cli.cmd_problems(args)
+        out = capsys.readouterr().out
+        import json as _json
+        data = _json.loads(out)
+        assert data["aggregate"]["total"] == 2
+        assert len(data["problems"]) == 2
+
+    def test_only_detail(self, tmp_path, monkeypatch, capsys):
+        cli = self._setup(tmp_path, monkeypatch)
+        from agent_go.problems import make_problem_id
+        args = type("A", (), {"json_mode": False, "aggregate": False,
+                              "only": make_problem_id("shell_fail")})()
+        cli.cmd_problems(args)
+        out = capsys.readouterr().out
+        assert "shell_fail" in out
+        assert "出现次数: 2" in out
