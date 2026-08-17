@@ -1,0 +1,27 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "fc6d6b1e9574e351595146bee340eba55de18c6f7d09919541cbbf01c0f64f76",
+  "created_at": "2026-08-17T01:44:05.693546+00:00",
+  "immutable": true,
+  "manifest_version": 1,
+  "metric_freeze_version": 1,
+  "models": [
+    "claude-sonnet-4-6"
+  ],
+  "record_count": 6,
+  "repeat_values": [
+    1
+  ],
+  "results_sha256": "39d87e80f392e02167dd9abf704496125c4f54b7784acd3cea2fb8e2c533ce3e",
+  "source_batch": "m4-mixB-fb-r3",
+  "suite": "canonical",
+  "task_catalog_hash": "7d080b11d012c8bfa1abc2e69d22ccf490e3b93152b8ae96378fb5a38455077a",
+  "task_ids": [
+    "add-tag-system",
+    "conditional-branching-datapipeline",
+    "db-performance-optimization",
+    "race-condition-taskmgr",
+    "security-hardening-taskmgr",
+    "stage-validation-refactor-datapipeline"
+  ]
+}
