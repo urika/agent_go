@@ -1017,3 +1017,20 @@ class TestReportEndpoint:
             assert False
         except urllib.error.HTTPError as e:
             assert e.code == 500
+
+
+class TestStorageAlert:
+    """M5.3.2：api_storage 磁盘告警字段。"""
+
+    def test_no_alert_small(self, ops_env, monkeypatch):
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", ops_env)
+        d = ws.api_storage()
+        assert d["alert"] == ""
+
+    def test_alert_orphans(self, ops_env, monkeypatch):
+        monkeypatch.setattr(ws, "AGENT_GO_DIR", ops_env)
+        orphan = ops_env / "task-20260816-990000-999-zzzz"
+        orphan.mkdir()
+        (orphan / "execution.log").write_text("log only", encoding="utf-8")
+        d = ws.api_storage()
+        assert "孤儿" in d["alert"]

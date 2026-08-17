@@ -76,3 +76,26 @@ class TestBuildE2ESubtask:
         assert "端到端模式" in st["description"]
         assert "全局视野" in st["description"]
         assert "Fix race condition" in st["description"]
+
+
+class TestParallelClamp:
+    """M5.3.1：--parallel 并发上限保护（clamp 1-8）。"""
+
+    def test_normal(self):
+        from agent_go.cli import _parse_parallel
+        assert _parse_parallel("5") == 5
+
+    def test_upper_bound(self):
+        from agent_go.cli import _parse_parallel
+        assert _parse_parallel("100") == 8
+        assert _parse_parallel("9") == 8
+
+    def test_lower_bound(self):
+        from agent_go.cli import _parse_parallel
+        assert _parse_parallel("0") == 1
+        assert _parse_parallel("-3") == 1
+
+    def test_invalid_fallback(self):
+        from agent_go.cli import _parse_parallel
+        assert _parse_parallel("abc") == 3
+        assert _parse_parallel("") == 3

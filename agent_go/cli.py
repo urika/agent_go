@@ -41,6 +41,15 @@ __all__ = [
     "cmd_router",
 ]
 
+def _parse_parallel(value: str) -> int:
+    """--parallel 解析：clamp 1-8（M5.3 并发上限保护）。非法值回退 3（兼容历史行为）。"""
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        return 3
+    return max(1, min(8, p))
+
+
 def _build_parser():
     """构建 argparse parser"""
     parser = argparse.ArgumentParser(
@@ -72,7 +81,7 @@ def _build_parser():
     run_parser.add_argument("--verbose", action="store_true", help="Show debug/diagnostic output")
 
     run_parser.add_argument("--issue", type=int, dest="issue_ref", help="GitHub issue number to link")
-    run_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks (default: 1)")
+    run_parser.add_argument("--parallel", type=_parse_parallel, default=1, help="Max concurrent subtasks 1-8 (default: 1)")
     run_parser.add_argument("--e2e", action="store_true",
                             help="强制端到端模式（hard 任务不拆分子任务，保留全局上下文）")
     run_parser.add_argument("--split", action="store_true",
@@ -132,7 +141,7 @@ def _build_parser():
     resume_parser.add_argument("--yes", "-y", action="store_true", help="Skip all confirmations")
     resume_parser.add_argument("--headless", action="store_true", help="Run in headless mode")
     resume_parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output")
-    resume_parser.add_argument("--parallel", type=int, default=1, help="Max concurrent subtasks")
+    resume_parser.add_argument("--parallel", type=_parse_parallel, default=1, help="Max concurrent subtasks 1-8")
     resume_parser.add_argument("--remote", help="Push worktree branches to remote URL")
     resume_parser.add_argument("--max-retries", type=int, default=None,
                                help="验证失败后最大修复重试次数（默认 3）")
@@ -1534,7 +1543,7 @@ def cmd_resume(args=None):
     if "--parallel" in sys.argv:
         try:
             pi = sys.argv.index("--parallel")
-            parallel = max(1, int(sys.argv[pi + 1]))
+            parallel = max(1, min(8, int(sys.argv[pi + 1])))
         except (IndexError, ValueError):
             logger.debug("Invalid --parallel value, defaulting to 3")
             parallel = 3

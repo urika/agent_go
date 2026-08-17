@@ -1243,13 +1243,22 @@ def api_storage() -> dict:
             orphans.append(entry)
 
     tasks.sort(key=lambda x: int(x["size"] or 0), reverse=True)
+    total_mb = round(total / 1024 / 1024, 2)
+    # M5.3 磁盘告警：超过阈值提示清理（规模化资源管理）
+    alert = ""
+    if total_mb > 5000:
+        alert = (f"磁盘占用 {total_mb:.0f}MB 超过 5GB，建议 "
+                 "`agent_go clean --older-than 7` 清理历史任务")
+    elif orphans:
+        alert = f"检测到 {len(orphans)} 个孤儿目录（无 meta.json），建议 `agent_go clean --orphans` 清理"
     return {
         "total_size": total,
-        "total_size_mb": round(total / 1024 / 1024, 2),
+        "total_size_mb": total_mb,
         "task_count": len(tasks),
         "orphan_count": len(orphans),
         "top_tasks": tasks[:20],  # 最大的 20 个
         "orphans": orphans,
+        "alert": alert,
     }
 
 
@@ -3881,6 +3890,7 @@ async function putJSON(path, body) {
 async function loadStorage() {
   const d = await api('/api/storage');
   let html = '<div class="section-title">💾 磁盘占用</div>';
+  if (d.alert) html += '<div class="warn-banner">⚠️ '+esc(d.alert)+'</div>';
   html += '<div class="kpi-grid">'+
     kpiCard('总占用', d.total_size_mb+' MB', 'blue')+
     kpiCard('任务目录', d.task_count, '')+
