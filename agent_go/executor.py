@@ -981,6 +981,11 @@ def _load_verify_state(task_dir: Path, sub_id: str) -> Optional[dict]:
     return None
 
 
+# verify_state.json 稳定契约版本（B5=b 收口：前向兼容 KnowledgeStore）。
+# v2：+ schema_version / reflexion_triggered（B5 Reflexion 阈值化后明确根因来源）。
+VERIFY_STATE_SCHEMA_VERSION = 2
+
+
 def _persist_verify_state(
     task_dir: Path,
     sub_id: str,
@@ -992,16 +997,21 @@ def _persist_verify_state(
     *,
     failure_analysis: str = "",
     effective_strategy: str = "",
+    reflexion_triggered: bool = False,
 ) -> None:
-    """持久化验证状态到 verify_state.json。
+    """持久化验证状态到 verify_state.json（稳定契约，schema_version 版本化）。
 
-    M2.2：failure_analysis（根因分析）与 effective_strategy（生效策略）作为
-    有界 Reflexion 的产物写入，供下游 KnowledgeStore 消费。
+    M2.2 + B5=b 收口：
+      - failure_analysis（根因分析）与 effective_strategy（生效策略）作为
+        有界 Reflexion 的产物写入，供下游 KnowledgeStore 消费。
+      - schema_version 固定契约；reflexion_triggered 标记根因是否来自
+        readonly_review（阈值化 Reflexion），供 KnowledgeStore 判断来源可信度。
     """
     from datetime import datetime
     path = _verify_state_path(task_dir, sub_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     state = {
+        "schema_version": VERIFY_STATE_SCHEMA_VERSION,
         "subtask_id": sub_id,
         "verification": verification,
         "attempts": retry_count + 1,
@@ -1010,6 +1020,7 @@ def _persist_verify_state(
         "verification_results": results,
         "failure_analysis": failure_analysis,
         "effective_strategy": effective_strategy,
+        "reflexion_triggered": reflexion_triggered,
         "last_updated": datetime.now().isoformat(),
     }
     try:
@@ -1847,13 +1858,15 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         })
                     # M2.2 有界 Reflexion 持久化：根因分析 + 生效策略写入 verify_state.json，
                     # 供 KnowledgeStore 消费；只影响下次 repair，不改变任务状态。
+                    # B5=b 收口：reflexion_triggered=True 标记根因来自阈值化 Reflexion。
                     if task_dir:
                         _persist_verify_state(
                             task_dir, sub_id, verification,
                             retry_count, max_retries,
                             verification_history, verification_results,
                             failure_analysis=readonly_review.get("root_cause", ""),
-                            effective_strategy=readonly_review.get("suggestions", ""))
+                            effective_strategy=readonly_review.get("suggestions", ""),
+                            reflexion_triggered=True)
 
             fix_prompt = _build_repair_prompt(
                 task_md, failed_cmds, failed_outputs,

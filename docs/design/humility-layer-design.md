@@ -251,7 +251,7 @@ resolved 时记录葬礼（为何曾重要、如何修、可复用性）= Knowle
 ### 8.1 三层存储
 
 ```text
-任务级原始（task_dir/）：deviation.jsonl（偏差事件）、verify_state.json（根因/解法）、
+任务级原始（task_dir/）：deviation.jsonl（偏差事件）、verify_state.json（根因/解法，schema_version=2 稳定契约：failure_analysis/effective_strategy/reflexion_triggered 前向兼容 KnowledgeStore）、
   metering.jsonl（计量）、meta.json（结果 + 谦逊层聚合 + results[].problem_id 指针）、
   review.json（审查决策）、spec_snapshot.md（A4 快照）
 全局聚合（~/.agent_go/problems.jsonl）：Problem 实体（跨任务去重 + 生命周期 + 复发计数）

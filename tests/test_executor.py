@@ -3075,17 +3075,20 @@ class TestReadonlyReview:
         assert result is None
 
     def test_verify_state_persists_failure_analysis(self, tmp_path, logger):
-        """M2.2: readonly_review 的根因与策略应持久化到 verify_state.json。"""
-        from agent_go.executor import _persist_verify_state
+        """M2.2 + B5=b: readonly_review 的根因与策略应持久化到 verify_state.json（含契约版本与来源标记）。"""
+        from agent_go.executor import _persist_verify_state, VERIFY_STATE_SCHEMA_VERSION
         _persist_verify_state(
             tmp_path, "sub-1", "pytest", 1, 3,
             [{"attempt": 1}], [{"command": "pytest", "exit_code": 1}],
             failure_analysis="实现缺陷：遗漏 None 保护",
             effective_strategy="在 load() 开头加 None 守卫",
+            reflexion_triggered=True,
         )
         state = json.loads((tmp_path / "sub-1" / "verify_state.json").read_text(encoding="utf-8"))
         assert state["failure_analysis"] == "实现缺陷：遗漏 None 保护"
         assert state["effective_strategy"] == "在 load() 开头加 None 守卫"
+        assert state["schema_version"] == VERIFY_STATE_SCHEMA_VERSION
+        assert state["reflexion_triggered"] is True
 
     def test_review_skill_injected_into_prompt(self, tmp_path, logger):
         """配置 skill → skill body 注入为「领域审查维度指引」段落。"""
