@@ -397,6 +397,10 @@ def _build_parser():
                                   help="Task ID（缺省时聚合全部任务）")
     deviation_parser.add_argument("--json", action="store_true", dest="json_mode",
                                   help="Output as JSON")
+    decision_parser = subparsers.add_parser("decision", help="决策记录（decision log）：查看/审计关键配置与模型决策")
+    decision_sub = decision_parser.add_subparsers(dest="decision_subcommand", help="Decision operation")
+    decision_sub.add_parser("log", help="列出决策记录（最新在前）")
+
 
     # problems 子命令（M5 收尾：全局 Problem 实体查询——「越用越聪明」的查看入口）
     problems_parser = subparsers.add_parser("problems", help="Show global Problem records (cross-task failures, B4/H3)")
@@ -3648,6 +3652,35 @@ def cmd_governance(args) -> None:
     _con.sep("─", 60)
 
 
+def cmd_decision(args) -> None:
+    """M6.2: 决策记录（decision log）查看。"""
+    from .decision_log import list_decisions
+    sub = getattr(args, "decision_subcommand", None)
+    if sub == "log":
+        records = list_decisions(limit=100)
+        if not records:
+            console.print("暂无决策记录（~/.agent_go/decision_log.jsonl）")
+            return
+        console.print(f"\n📋 决策记录（共 {len(records)} 条，最新在前）\n")
+        for r in records:
+            ts = r.get("ts", "")[:19].replace("T", " ")
+            change = r.get("change", "")[:80]
+            source = r.get("source", "")
+            confirmer = r.get("confirmer", "")
+            console.print(f"  [{ts}] {change}")
+            if source or confirmer:
+                console.print(f"      来源: {source or '-'} | 确认: {confirmer or '-'}")
+            if r.get("goal"):
+                console.print(f"      目标: {r.get('goal', '')[:70]}")
+            if r.get("evidence_refs"):
+                console.print(f"      证据: {', '.join(r['evidence_refs'][:3])}")
+            if r.get("expected_impact"):
+                console.print(f"      预期: {r.get('expected_impact', '')[:70]}")
+            console.print()
+    else:
+        console.print("Usage: agent_go decision log")
+
+
 def cmd_deviation(args) -> None:
     """M2.5: 展示 Spec/架构/验收偏差记录与聚合。"""
     from .console import _LazyConsole
@@ -3906,6 +3939,17 @@ def _cmd_router_recommend(args) -> None:
             console.warning(f"{_role}: provider 无法推断或已跳过，未写入（用 set-role 手动配置）")
     console.success(f"已写入 {CONFIG_PATH} 的 router.roles + worker_models；"
                     f"router.enabled 请用 'agent_go router enable' 启用")
+    # M6.2：决策落 log（router recommend --apply 写回配置的关键决策）
+    try:
+        from .decision_log import record_decision
+        record_decision(
+            change="router recommend --apply：写入 router.roles + worker_models",
+            evidence_refs=[str(results_path)],
+            confirmer="cli",
+            source="router recommend --apply",
+        )
+    except Exception:
+        pass
 
 
 def _atomic_write_config(config: dict, config_path) -> None:
@@ -4169,6 +4213,8 @@ def main() -> None:
             cmd_governance(args)
         elif args.command == "deviation":
             cmd_deviation(args)
+        elif args.command == "decision":
+            cmd_decision(args)
         elif args.command == "problems":
             cmd_problems(args)
         elif args.command == "mcp":

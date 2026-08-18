@@ -188,6 +188,7 @@ def activate_local(local_url: str = DEFAULT_LOCAL_URL) -> dict[str, Any]:
     path = profile_path(LOCAL_PROFILE_NAME)
     path.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
     current_profile_file().write_text(LOCAL_PROFILE_NAME, encoding="utf-8")
+    _record_profile_decision(f"激活本地模式（profile: {LOCAL_PROFILE_NAME}）", "config local")
     return {
         "profile": LOCAL_PROFILE_NAME,
         "profile_path": str(path),
@@ -205,6 +206,7 @@ def activate_cloud() -> dict[str, Any]:
     f = current_profile_file()
     if f.exists():
         f.unlink()
+    _record_profile_decision(f"恢复云端配置（前 profile: {cur or '默认'}）", "config cloud")
     return {
         "profile": "",
         "backup_path": str(backup),
@@ -219,6 +221,7 @@ def activate_profile(name: str) -> dict[str, Any]:
         raise ProfileError(f"Profile 不存在: {path}")
     backup = _backup_current()
     current_profile_file().write_text(name, encoding="utf-8")
+    _record_profile_decision(f"激活 profile: {name}", "config activate")
     return {"profile": name, "profile_path": str(path), "backup_path": str(backup)}
 
 
@@ -241,6 +244,15 @@ def list_profiles() -> dict[str, Any]:
         "mode": "local" if current == LOCAL_PROFILE_NAME else ("custom" if current else "cloud"),
         "profiles": items,
     }
+
+
+def _record_profile_decision(change: str, source: str) -> None:
+    """M6.2：profile 切换决策落 log（失败不中断主流程）。"""
+    try:
+        from .decision_log import record_decision
+        record_decision(change=change, confirmer="cli", source=source)
+    except Exception:
+        pass
 
 
 def _profile_mode(path: Path) -> str:

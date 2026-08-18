@@ -11,7 +11,7 @@ run/resume/recover 交叉修改 worktree/meta 互斥）。本模块将其抽为�
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 
 def is_task_locked(task_dir: Path) -> bool:
@@ -36,7 +36,7 @@ class TaskLock:
     """任务级互斥锁（fcntl 非阻塞）。持有失败 raise RuntimeError（与 pipeline 语义一致）。"""
 
     def __init__(self, task_dir: Path) -> None:
-        self._lock_file: Optional[object] = None
+        self._lock_file: Optional[IO[str]] = None
         self._task_dir = task_dir
 
     def acquire(self) -> "TaskLock":

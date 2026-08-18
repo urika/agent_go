@@ -1052,6 +1052,16 @@ def put_config_field(field: str, value: Any) -> dict:
     else:
         data[field] = value
     target.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    # M6.2：配置修改决策落 log
+    try:
+        from .decision_log import record_decision
+        record_decision(
+            change=f"config 字段修改: {field}",
+            confirmer="web",
+            source="config put",
+        )
+    except Exception:
+        pass
     return {"field": field, "saved_to": str(target), "effective": "新任务生效"}
 
 
