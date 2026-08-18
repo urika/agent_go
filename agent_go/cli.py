@@ -340,6 +340,8 @@ def _build_parser():
                              help="recommend 子命令：把推荐写入 config.json 的 worker_models（默认 dry-run）")
     eval_parser.add_argument("--force", dest="force", action="store_true",
                              help="recommend --apply 时：tier 错配仍强制写入（默认 tier 错配拒绝写入）")
+    eval_parser.add_argument("--llm", dest="llm", action="store_true",
+                             help="recommend 子命令：规则初筛 + LLM 精排（M6.4，--results 关联证据）")
     # judge 子命令参数
     eval_parser.add_argument("--judge-models", dest="judge_models",
                              help="评判模型列表，逗号分隔（judge 子命令）")

@@ -1710,6 +1710,84 @@ def _recommend_roles(models: dict[str, Any]) -> dict[str, Any]:
     return {"planner": planner, "worker": worker, "reviewer": reviewer}
 
 
+def identify_deterministic_issues(models: dict[str, Any], results_records: list[dict],
+                                  budget_per_pass: float = 0.10) -> list[dict[str, Any]]:
+    """规则初筛：识别 4 类确定性问题候选（Q4 收敛 649c36e），供 LLM 精排。
+
+    1. $/pass 超预算：模型 dollar_per_pass > budget_per_pass
+    2. failure_class 集中：某 failure_class 占失败记录 >50%
+    3. 环境漂移：metering actual_model 与声明模型不一致（实际后端变化）
+    4. problems 复发：problems.py 中 opened/复发问题（跨任务失败记忆）
+
+    返回 [{"type": ..., "severity": high|medium, "detail": ..., "evidence": [...]}]
+    """
+    issues: list[dict[str, Any]] = []
+
+    # 1. $/pass 超预算
+    for name, m in models.items():
+        dpp = m.get("dollar_per_pass")
+        if dpp is not None and dpp > budget_per_pass:
+            issues.append({
+                "type": "cost_over_budget", "severity": "high",
+                "detail": f"模型 {name} 的 $/pass=${dpp:.4f} 超过预算 ${budget_per_pass:.4f}",
+                "evidence": [f"models/{name}/dollar_per_pass"],
+                "model": name, "value": dpp,
+            })
+
+    # 2. failure_class 集中（records 中某 failure_class 占比 >50%）
+    fails = [r for r in results_records if not (r.get("accepted_delivery") or r.get("binary_pass"))]
+    if fails:
+        from collections import Counter
+        fc = Counter(r.get("failure_class", "unknown") for r in fails)
+        top_class, top_count = fc.most_common(1)[0]
+        ratio = top_count / len(fails)
+        if ratio > 0.5:
+            issues.append({
+                "type": "failure_class_concentration", "severity": "medium",
+                "detail": f"失败集中于 {top_class}（{top_count}/{len(fails)} = {ratio:.0%}），提示系统性问题",
+                "evidence": [f"failure_class/{top_class}"],
+                "failure_class": top_class, "ratio": round(ratio, 3),
+            })
+
+    # 3. 环境漂移：metering actual_model 与声明 routed_model 不一致
+    drift = []
+    for r in results_records:
+        actual = r.get("actual_model")
+        routed = r.get("routed_model")
+        if actual and routed and actual != routed:
+            drift.append((routed, actual))
+    if drift:
+        from collections import Counter
+        drift_count = Counter(drift)
+        top = drift_count.most_common(1)[0]
+        issues.append({
+            "type": "environment_drift", "severity": "high",
+            "detail": f"路由模型与实际后端不一致：{top[0][0]} → {top[0][1]}（{top[1]} 次），"
+                      "疑似代理/环境漂移（如后端被改、key 失效回退）",
+            "evidence": [f"environment_drift/{top[0][0]}->{top[0][1]}"],
+            "routed_model": top[0][0], "actual_model": top[0][1], "count": top[1],
+        })
+
+    # 4. problems 复发（opened/analyzed 状态的跨任务失败记忆）
+    try:
+        from .problems import load as load_problems
+        from .config import AGENT_GO_DIR
+        probs = load_problems(AGENT_GO_DIR / "problems.jsonl")
+        recurrent = [p for p in probs if p.status in ("opened", "analyzed") and p.occurrence_count > 1]
+        if recurrent:
+            top_p = max(recurrent, key=lambda p: p.occurrence_count)
+            issues.append({
+                "type": "problem_recurrence", "severity": "medium",
+                "detail": f"问题复发：{top_p.failure_pattern}（复发 {top_p.occurrence_count} 次，根因 {top_p.root_cause}）",
+                "evidence": [f"problems/{top_p.id}"],
+                "problem_id": top_p.id, "recurrence": top_p.occurrence_count,
+            })
+    except Exception:
+        pass  # problems 不可用不影响推荐
+
+    return issues
+
+
 def build_recommendation(models: dict[str, Any]) -> dict[str, Any]:
     """统一推荐入口：从模型生产力指标一次产出 worker_models + router.roles 全套推荐。
 
@@ -1727,6 +1805,105 @@ def build_recommendation(models: dict[str, Any]) -> dict[str, Any]:
     _note = _roles.get("note")
     return {"worker_models": _wm, "roles": {k: _roles[k] for k in ("planner", "worker", "reviewer")},
             "note": _note}
+
+
+def llm_rerank_recommendation(rec: dict[str, Any], issues: list[dict[str, Any]],
+                              models: dict[str, Any], config: dict[str, Any],
+                              logger) -> tuple[dict[str, Any], dict[str, Any]]:
+    """LLM 精排（M6.4）：规则初筛候选 + 确定性问题证据 → LLM 跨维权衡精排。
+
+    规则初筛（build_recommendation）产出确定候选；本函数把候选 + identify_deterministic_issues
+    识别的 4 类问题 + 模型指标喂给 LLM，让它做跨维权衡精排并给出理由。
+    输出在 rec 基础上增加 llm_ranking（精排排序+理由）字段；--apply 仍走 apply_recommendation（人工确认）。
+    """
+    from .api import call_api
+
+    # 构造证据上下文
+    wm = rec.get("worker_models", {})
+    roles = rec.get("roles", {})
+    model_summary = []
+    for name, m in list(models.items())[:12]:
+        model_summary.append(
+            f"- {name}: pass_rate={m.get('avg_pass_rate',0):.0%}, "
+            f"$/pass=${m.get('dollar_per_pass') or 0:.4f}, "
+            f"recommended_roles={m.get('recommended_roles', [])}"
+        )
+    issue_summary = "\n".join(
+        f"- [{i['severity']}] {i['type']}: {i['detail']}" for i in issues
+    ) or "（无确定性问题）"
+
+    prompt = f"""你是模型选型与配置优化顾问。基于以下**真实证据**给出精排建议。
+
+## 模型生产力指标（bench 实测）
+{chr(10).join(model_summary)}
+
+## 规则初筛候选（确定性规则产出）
+worker_models: {json.dumps({k: (v if isinstance(v, str) else (v or {}).get('model')) for k, v in wm.items()}, ensure_ascii=False)}
+roles: {json.dumps({k: (v if isinstance(v, str) else (v or {}).get('model')) for k, v in roles.items() if v}, ensure_ascii=False)}
+
+## 确定性问题（规则识别）
+{issue_summary}
+
+## 任务
+对上述候选做**跨维权衡精排**，只输出合法 JSON（无 markdown、无解释）：
+{{
+  "worker_models": {{"easy": "...", "medium": "...", "hard": "..."}},
+  "roles": {{"planner": "...", "evaluator": "..."}},
+  "ranking": [{{"model": "...", "role": "...", "reason": "精排理由（引用证据）", "confidence": 0-1}}],
+  "issues_addressed": ["对应解决的问题类型"],
+  "cautions": ["风险提醒"]
+}}
+
+要求：
+- 精排必须基于证据（模型指标 + 确定性问题），不凭空推荐
+- 若初筛候选合理可沿用；若证据显示需调整（如 $/pass 超预算、failure_class 集中），给出替代模型
+- reason 必须引用证据（如 models/<name>/dollar_per_pass、failure_class/<class>）
+"""
+    try:
+        content = call_api(config, [{"role": "user", "content": prompt}], logger)
+    except Exception as e:
+        logger.warning(f"[llm_rerank] LLM 调用失败，回退规则候选: {e}")
+        rec["llm_ranking"] = None
+        rec["llm_error"] = str(e)
+        return rec, {"llm_ranking": None, "llm_error": str(e), "issues_addressed": [], "cautions": []}
+
+    # 解析 JSON（剥离 markdown 代码块）
+    import re as _re
+    c = content.strip()
+    c = _re.sub(r"^```(?:json)?\s*|\s*```$", "", c, flags=_re.MULTILINE).strip()
+    try:
+        start = c.find("{"); end = c.rfind("}")
+        data = json.loads(c[start:end+1])
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"[llm_rerank] 响应解析失败，回退规则候选: {e}")
+        rec["llm_ranking"] = None
+        rec["llm_error"] = f"parse: {e}"
+        return rec, {"llm_ranking": None, "llm_error": str(e), "issues_addressed": [], "cautions": []}
+
+    # 用 LLM 精排覆盖 worker_models/roles（若 LLM 给出合法值）
+    llm_wm = data.get("worker_models") or {}
+    for slot in ("easy", "medium", "hard"):
+        mname = llm_wm.get(slot)
+        if mname and mname in models:
+            existing = rec["worker_models"].get(slot)
+            if isinstance(existing, str):
+                if existing:
+                    rec["worker_models"][slot] = mname
+            elif existing:
+                rec["worker_models"][slot]["model"] = mname
+    llm_roles = data.get("roles") or {}
+    for role in ("planner", "evaluator"):
+        mname = llm_roles.get(role)
+        if mname and mname in models:
+            rec["roles"][role] = {"provider": "anthropic" if role == "planner" else "openai",
+                                   "model": mname, "base_url": "", "api_key": ""}
+
+    rec["llm_ranking"] = data.get("ranking", [])
+    rec["issues_addressed"] = data.get("issues_addressed", [])
+    rec["cautions"] = data.get("cautions", [])
+    rec["issues"] = issues
+    return rec, {"llm_ranking": rec["llm_ranking"], "llm_error": None,
+                 "issues_addressed": rec["issues_addressed"], "cautions": rec["cautions"]}
 
 
 def apply_recommendation(rec: dict[str, Any], apply_roles: bool = True,
@@ -1799,6 +1976,7 @@ def cmd_recommend(args=None) -> None:
     依赖 G1（成本感知推荐）+ G2（tier 校验）落地后才可信。绝不静默改 config：
     默认 dry-run 只展示；--apply 写入前跑 G2 校验，tier 错配时拒绝（--force 覆盖）。
     """
+    logger = logging.getLogger(__name__)
     results_path = Path(getattr(args, "results", "eval_suite/results.jsonl") or "eval_suite/results.jsonl")
     data = analyze_model_productivity(results_path)
     if "error" in data:
@@ -1807,6 +1985,25 @@ def cmd_recommend(args=None) -> None:
 
     rec = build_recommendation(data["models"])
     proposal = rec["worker_models"]
+
+    # M6.4：--llm 触发规则初筛 + LLM 精排（候选 + 4 类确定性问题证据 → LLM 跨维权衡）
+    if getattr(args, "llm", False):
+        from .config import load_config
+        _records = _read_jsonl(results_path)
+        _issues = identify_deterministic_issues(data["models"], _records)
+        console.print(f"\n🔍 规则初筛确定性问题：{len(_issues)} 类")
+        for _iss in _issues:
+            console.print(f"  [{_iss['severity']}] {_iss['type']}: {_iss['detail'][:90]}")
+        console.print("\n🤖 LLM 精排推理中...")
+        rec, _llm_info = llm_rerank_recommendation(rec, _issues, data["models"], load_config(), logger)
+        proposal = rec["worker_models"]
+        if rec.get("llm_ranking"):
+            console.print("\n📊 LLM 精排理由：")
+            for _r in rec["llm_ranking"][:5]:
+                console.print(f"  {_r.get('model','')}（{_r.get('role','')}）: {_r.get('reason','')[:100]}")
+        if rec.get("cautions"):
+            for _c in rec["cautions"][:3]:
+                console.warning(f"⚠ {_c[:100]}")
 
     # dry-run 展示
     console.print(f"\n🎯 worker_models 推荐（基于 {data['total_runs']} 次执行）")
