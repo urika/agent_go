@@ -146,9 +146,11 @@ def materialize_evidence(batch_path) -> dict:
 | 自我评估偏差（LLM 评自己产出） | insight 不评估任务成败（那由 evaluator 做）；只做跨任务规律分析 |
 | 成本失控（LLM 分析消耗） | 分析用 cheap 模型（glm-4.5-air/haiku 级）；单次分析 token 预算上限 |
 
-## 7. 讨论题（待收敛）
+## 7. 讨论题（已收敛，v0.1）
 
-1. 消费方：insight 输出供 human 看报告 / agent 读 JSON 接决策——两者都要？优先级？
-2. `--execution-goal`（任务本身目标）与 `--analysis-goal`（分析目标）是否需要独立字段，还是人只在 CLI 注入 analysis-goal？
-3. decision log 与现有 web_audit.jsonl 是否合并（统一审计视图）？
-4. M6.4 recommend 的"规则+LLM 混合"中，规则初筛边界（哪些规则可靠到可直接出候选）？
+| # | 讨论题 | 收敛决策 |
+|---|--------|---------|
+| 1 | 消费方优先级 | **双输出**：`--output` 同时支持 md 报告 + `json` 结构化；**human 报告为第一消费方**；agent 读 JSON 随 M6.4（recommend LLM 精排）自然落地，不阻塞 MVP |
+| 2 | goal 字段 | **仅 `--analysis-goal`**（CLI 注入，LLM 只读不改）；不设独立 `--execution-goal`——execution-goal 属任务执行层（run 已定义任务目标），analysis-goal 属分析层（优化什么指标），两者层级不同不并入 |
+| 3 | decision log 与 web_audit | **不合并存储**：web_audit=操作审计（op/params/result/auth，安全追责）；decision log=决策审计（change/evidence_refs/analysis-goal/expected/actual/confirmer，策略复盘）。职责不同，合井丢语义；复用 jsonl append 基建，**Web 同区并排展示** |
+| 4 | 规则初筛边界 | 规则负责**确定性可判候选生成**（可复现）；LLM 负责**跨维权衡排序/风险标注**。可靠规则：①$/pass 超预算→便宜模型/难度路由 ②failure_class 集中→针对性能力（evaluator 迁移/换 planner）③环境漂移（cloud_model change/key 过期）→环境修复 ④problems 复发→复用历史解法。**规则只出候选+确定性理由，不排序不决策** |
