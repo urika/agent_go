@@ -989,6 +989,9 @@ def cmd_eval(args=None) -> None:
        # CR-G5：bench 推荐 → worker_models 自动衔接（dry-run / --apply）
        from .bench import cmd_recommend
        cmd_recommend(args)
+    elif sub == "insight":
+       # M6.1 决策辅助 MVP：证据物化 + LLM 推理 → 结构化建议
+       cmd_insight(args)
     elif sub == "calibrate-difficulty":
        # P2：基于 bench 实测自动校准任务难度标签（dry-run / --apply 写回 YAML）
        from .bench import cmd_calibrate_difficulty
@@ -1228,3 +1231,198 @@ def _print_aggregate_perf(agg: Optional[dict[str, Any]]) -> None:
     console.print(f"  耗时分布:            P50={agg['P50_sec']}s P95={agg['P95_sec']}s P99={agg['P99_sec']}s")
     console.print(f"  平均任务耗时:        {agg['avg_task_duration_sec']}s")
     console.print("─" * 50)
+
+
+# ── M6.1 决策辅助：eval insight（证据物化 + LLM 推理 → 结构化建议）──────────
+
+_INSIGHT_OUTPUT_SCHEMA = """输出要求：只输出合法 JSON 数组（不要 markdown 包裹、不要解释文字），每个元素是一条建议，字段：
+{
+  "problem": "问题描述（简短）",
+  "evidence_refs": ["证据引用"],
+  "cause_hypothesis": "根因假设",
+  "action": "建议动作",
+  "expected_impact": "预期影响（量化目标方向）",
+  "cost_risk": "成本/风险",
+  "confidence": 0.0到1.0的数,
+  "requires_approval": true
+}
+
+【evidence_refs 只能使用以下证据路径前缀】（禁止使用其他格式）：
+- "metrics/<指标名>"：可用指标 pass_rate_diagnostic / accepted_delivery_rate / dollar_per_pass_usd / valid_cost_usd / first_pass_rate / timeout_rate
+- "failure_class/<类名>"：失败类别（如 verification_failure/timeout/infrastructure_failure/model_failure）
+- "task/<task_id>"：具体任务（如 task/add-tag-system）
+- "environment/<配置项>"：plan_model / goal_policy / worker_models / router_enabled
+- "batch"：批次整体（直接用字符串 "batch"，无需 task_id）
+证据引用必须来自上述证据上下文，不允许凭空编造数据。"""
+
+
+def _insight_llm(evidence: dict, goal: str, plan: str, config: dict, logger) -> str:
+    """LLM 推理：注入证据上下文 + 目标 + 计划候选，输出 JSON 建议列表。"""
+    from .evidence import evidence_to_prompt_context
+    from .api import call_api
+
+    ctx = evidence_to_prompt_context(evidence)
+    goal_text = goal or "提高任务通过率并控制成本"
+    plan_text = plan or "（未指定，从常见策略候选：换模型/调整降级链/难道路由/e2e 判定/验证白名单/环境修复）"
+    prompt = (
+        f"你是一个软件交付策略分析师。基于以下 bench 批次的证据，针对分析目标给出优化建议。\n\n"
+        f"===== 分析目标 =====\n{goal_text}\n\n"
+        f"===== 预设计划（行动候选） =====\n{plan_text}\n\n"
+        f"===== 证据（真实数据，仅可基于此推理） =====\n{ctx}\n===== 结束 =====\n\n"
+        f"{_INSIGHT_OUTPUT_SCHEMA}"
+    )
+    messages = [
+        {"role": "system", "content": "You are a strategy analyst. Output ONLY valid JSON. No markdown, no explanation."},
+        {"role": "user", "content": prompt},
+    ]
+    return call_api(config, messages, logger)
+
+
+def _parse_insight_suggestions(content: str) -> list[dict]:
+    """解析 LLM 返回的 JSON 建议列表（容错：markdown 包裹/前缀文字剥离）。"""
+    text = content.strip()
+    # 剥离 markdown 代码块
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [ln for ln in lines if not ln.strip().startswith("```")]
+        text = "\n".join(lines)
+    # 找第一个 [ 到最后一个 ]
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    # LLM 输出 schema {"suggestions": [...]}：提取内层列表；直接 list 输入也兼容
+    if isinstance(data, dict):
+        sug = data.get("suggestions")
+        if isinstance(sug, list):
+            return sug
+        return [data] if data else []
+    return data if isinstance(data, list) else []
+
+
+def _validate_suggestion_evidence(suggestion: dict, evidence: dict) -> list[str]:
+    """校验 evidence_refs 是否在证据包中存在（防 LLM 凭空编造）。返回缺失引用列表。
+
+    宽松匹配：支持前缀匹配（metrics/x 匹配 metrics 任一 key；task/x 匹配任务 id 包含；
+    failure_class/x 匹配失败类名；environment/x 匹配环境 key；batch 直接通过）。
+    """
+    refs = suggestion.get("evidence_refs") or []
+    missing = []
+    metrics_keys = set(evidence.get("metrics", {}).keys())
+    env_keys = set(evidence.get("environment", {}).keys())
+    task_ids = [r.get("task_id", "") for r in evidence.get("per_task", [])]
+    fc_names = set(evidence["failure_modes"]["by_failure_class"].keys())
+    for ref in refs:
+        if not isinstance(ref, str) or not ref:
+            continue
+        ref_l = ref.lower()
+        if ref_l in ("batch", "evidence", "证据"):
+            continue
+        ok = False
+        if "/" in ref:
+            top, sub = ref.split("/", 1)
+            top_l = top.lower()
+            if top_l == "metrics":
+                ok = any(sub in k or k in sub for k in metrics_keys) or sub in metrics_keys
+            elif top_l in ("failure_class", "failure_modes", "failure"):
+                ok = any(sub in f or f in sub for f in fc_names) or sub in fc_names
+            elif top_l == "environment":
+                ok = any(sub in k or k in sub for k in env_keys) or sub in env_keys
+            elif top_l in ("task", "task_id"):
+                ok = any(sub in t or t.endswith(sub) for t in task_ids)
+            else:
+                ok = any(sub in t for t in task_ids)
+        else:
+            ok = (any(ref in t or t.endswith(ref) for t in task_ids)
+                  or ref in fc_names or ref in metrics_keys)
+        if not ok:
+            missing.append(ref)
+    return missing
+
+
+def cmd_insight(args=None) -> None:
+    """eval insight（M6.1）：证据物化 + LLM 推理 → 结构化建议。
+
+    --results <batch>（必选，immutable 批次）；--analysis-goal/--analysis-plan/--output。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    results_arg = getattr(args, "results", "") or ""
+    if not results_arg.strip():
+        console.error("insight 需要 --results <batch 路径>（如 eval_suite/baselines/m4-mixB-hard）")
+        return
+    batch = results_arg.split(",")[0].strip()
+    goal = getattr(args, "analysis_goal", "") or ""
+    plan = getattr(args, "analysis_plan", "") or ""
+    output = getattr(args, "output", "") or ""
+
+    from .evidence import materialize_evidence, EvidenceError
+    try:
+        evidence = materialize_evidence(batch)
+    except EvidenceError as e:
+        console.error(f"证据物化失败: {e}")
+        return
+
+    console.print(f"📊 证据物化完成: {evidence['source_batch']} ({evidence['record_count']} 条记录, hash={evidence['evidence_hash']})")
+    console.print(f"   通过率: {evidence['metrics'].get('pass_rate_diagnostic')} | $/pass: {evidence['metrics'].get('dollar_per_pass_usd')}")
+    console.print(f"   失败模式: {list(evidence['failure_modes']['by_failure_class'].keys())}")
+
+    from .config import load_config
+    config = load_config()
+    console.print("\n🤖 LLM 分析推理中...")
+    try:
+        content = _insight_llm(evidence, goal, plan, config, logger)
+    except Exception as e:
+        console.error(f"LLM 推理失败: {e}")
+        return
+
+    suggestions = _parse_insight_suggestions(content)
+    if not suggestions:
+        console.error("LLM 返回无法解析为建议 JSON。原始响应预览：")
+        console.print(content[:300])
+        return
+
+    # 证据引用后校验
+    for s in suggestions:
+        missing = _validate_suggestion_evidence(s, evidence)
+        s["_evidence_missing"] = missing
+
+    valid = [s for s in suggestions if not s["_evidence_missing"]]
+    dropped = len(suggestions) - len(valid)
+    if dropped:
+        console.warning(f"⚠️ {dropped} 条建议因 evidence_refs 无效被丢弃（防凭空编造）")
+
+    # 输出
+    report_lines = [
+        f"# 决策辅助洞察（{evidence['source_batch']}）",
+        "",
+        f"- 分析目标: {goal or '（未指定）'}",
+        f"- 通过率: {evidence['metrics'].get('pass_rate_diagnostic')} | $/pass: {evidence['metrics'].get('dollar_per_pass_usd')}",
+        f"- 建议数: {len(valid)} 条（{dropped} 条被证据校验丢弃）",
+        "",
+    ]
+    for i, s in enumerate(valid, 1):
+        report_lines += [
+            f"## 建议 {i}: {s.get('problem', '?')}",
+            f"- 根因假设: {s.get('cause_hypothesis', '?')}",
+            f"- 证据: {', '.join(s.get('evidence_refs', []))}",
+            f"- 建议动作: {s.get('action', '?')}",
+            f"- 预期影响: {s.get('expected_impact', '?')}",
+            f"- 成本/风险: {s.get('cost_risk', '?')}",
+            f"- 置信度: {s.get('confidence', '?')} | 需人工确认: {s.get('requires_approval', True)}",
+            "",
+        ]
+    report = "\n".join(report_lines)
+
+    if output == "-" or not output:
+        console.print("\n" + report)
+    else:
+        out_path = Path(output)
+        out_path.write_text(report, encoding="utf-8")
+        console.print(f"\n✅ 洞察报告已写入: {out_path}")
+    # 结构化 JSON 输出（stdout 可管道消费）
+    console.print("\n" + json.dumps(valid, ensure_ascii=False, indent=2))

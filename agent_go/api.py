@@ -107,7 +107,12 @@ def call_api(
     api_cfg = _resolve_planner_api_cfg(config) if role == "planner" else _resolve_role_api_cfg(config, role)
     provider = api_cfg.get("provider", "anthropic")
     base_url = api_cfg["base_url"]
-    api_key = api_cfg.get("api_key") or get_api_key(config)
+    _raw_key = api_cfg.get("api_key") or ""
+    if _raw_key and "${" in _raw_key:
+        # api_cfg.api_key 是模板（${VAR}）：用 get_api_key 的环境变量解析（防字面量模板直接发出）
+        api_key = get_api_key({**config, "plan_api": {**config.get("plan_api", {}), "api_key": _raw_key}})
+    else:
+        api_key = _raw_key or get_api_key(config)
     model = api_cfg["model"]
     # 本地后端（127.0.0.1/localhost）跳过 api_key 强制检查：本地代理通常无需
     # key（已实测 localhost:4000 无 key 可用）。纯本地模式（无网络、无云 key）

@@ -84,6 +84,12 @@ agent_go deviation [task-id] [--json]             # spec/architecture/acceptance
 agent_go merge <task-id> [--push] [--remote origin]   # merge delivery branch into target
 agent_go migrate failure-metadata [--apply]       # migrate historical task metadata
 
+# Global Problem records (M5/B4+H3): cross-task failure memory — 「越用越聪明」查询入口
+agent_go problems                               # 列出全部 Problem（按出现次数降序，含休眠/解法摘要）
+agent_go problems --aggregate                   # 聚合分析（状态分布/复发数/top 失败模式）
+agent_go problems --only <problem-id>           # 单个详情（生命周期/根因/历史解法/复发重开）
+agent_go problems --json                        # 机器可读
+
 # MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)
 agent_go mcp
 agent_go mcp --http --host 127.0.0.1 --port 8090   # HTTP transport: POST /mcp + GET /mcp (SSE) + GET /health
@@ -190,7 +196,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 
 | Module | Purpose |
 |--------|---------|
-| `cli.py` | CLI commands: run, resume, recover, list, show, status, pr, merge, config, clean, inspect, review, router, cache, eval, ci, skills, agents, spec, governance, deviation, migrate, plan-history, plan-diff, replay, checkpoint, mcp, web |
+| `cli.py` | CLI commands: run, resume, recover, list, show, status, pr, merge, config, clean, inspect, review, router, cache, eval, ci, skills, agents, spec, governance, deviation, problems, migrate, plan-history, plan-diff, replay, checkpoint, mcp, web |
 | `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
 | `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
 | `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify loop |
@@ -213,6 +219,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `delivery.py` | Task-level delivery contract (M1.2) |
 | `governance.py` | SDD traceability matrix + architecture compliance (M1.4) |
 | `deviation.py` | Spec/Architecture/acceptance deviation records: model, persistence, aggregation (M2.5) |
+| `problems.py` | Cross-task Problem entity (B4/H3): 三态+复发重开, 半衰期(stale_after_days→dormant), 葬礼(resolution_summary), 全局 ~/.agent_go/problems.jsonl upsert；「越用越聪明」数据层 |
 | `status.py` | Canonical task state machine (M0-2, 8 states) |
 | `exit_codes.py` | Semantic process exit codes for CLI tools |
 | `failure.py` | Stable failure classes and policy (M0-3) |

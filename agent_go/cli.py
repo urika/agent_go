@@ -288,7 +288,7 @@ def _build_parser():
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
-    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "recommend", "judge", "validate-schema", "metric-freeze", "batch-manifest", "calibrate-difficulty", "all"],
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "recommend", "judge", "validate-schema", "metric-freeze", "batch-manifest", "calibrate-difficulty", "insight", "all"],
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
@@ -325,6 +325,10 @@ def _build_parser():
                              help="成本基线预算 = P90 × tolerance（cost-baseline 子命令，默认 1.5）")
     eval_parser.add_argument("--report-output", dest="report_output", default="",
                              help="Metric Freeze 报告输出路径（metric-freeze 子命令）")
+    eval_parser.add_argument("--analysis-goal", dest="analysis_goal", default="",
+                             help="insight 子命令：分析目标（人类可读，如 'hard 通过率>=95%% 且 $/pass<=$0.1'）")
+    eval_parser.add_argument("--analysis-plan", dest="analysis_plan", default="",
+                             help="insight 子命令：预设计划/行动候选（可省略）")
     eval_parser.add_argument("--catalog", dest="catalog", default="",
                              help="任务 catalog 路径（metric-freeze 子命令）")
     eval_parser.add_argument("--config-file", dest="config_file", default="",
