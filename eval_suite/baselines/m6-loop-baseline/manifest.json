@@ -1,0 +1,27 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "de583d75be0488ab7b760a791b05f57cfeb28de60d2887b688e68b51a3a82b5c",
+  "created_at": "2026-08-18T13:35:27.590909+00:00",
+  "immutable": true,
+  "manifest_version": 1,
+  "metric_freeze_version": 1,
+  "models": [
+    "deepseek-v4-flash"
+  ],
+  "record_count": 6,
+  "repeat_values": [
+    1
+  ],
+  "results_sha256": "26620b3337232f0bfdd2c0084a820e057fdec46fb10c0a1fdf313b063ff4f879",
+  "source_batch": "m6-loop-baseline",
+  "suite": "canonical",
+  "task_catalog_hash": "7d080b11d012c8bfa1abc2e69d22ccf490e3b93152b8ae96378fb5a38455077a",
+  "task_ids": [
+    "add-tag-system",
+    "conditional-branching-datapipeline",
+    "db-performance-optimization",
+    "race-condition-taskmgr",
+    "security-hardening-taskmgr",
+    "stage-validation-refactor-datapipeline"
+  ]
+}

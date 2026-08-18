@@ -1243,6 +1243,7 @@ _INSIGHT_OUTPUT_SCHEMA = """输出要求：只输出合法 JSON 数组（不要 
   "action": "建议动作（人类可读）",
   "action_type": "可自动应用的动作类型，从以下枚举选一：worker_models（改 worker_models 难度路由）/fallback_chain（改 worker_models_fallback_chain 降级链）/role_model（改 router.roles 角色模型）/cost_budget（改 cost_control.max_budget_usd）/manual（无法自动应用，需人工执行）",
   "action_payload": {"自动应用的参数对象，JSON 格式；manual 类型为 {}}",
+  "applies_when": "适用前提（环境/配置条件，如 'goal_policy=force 时'、'仅当 worker 为 flash 时'）。必须基于环境快照声明该建议的生效条件，避免环境变化后建议失效",
   "expected_impact": "预期影响（量化目标方向）",
   "cost_risk": "成本/风险",
   "confidence": 0.0到1.0的数,
@@ -1262,7 +1263,9 @@ _INSIGHT_OUTPUT_SCHEMA = """输出要求：只输出合法 JSON 数组（不要 
 - "task/<task_id>"：具体任务（如 task/add-tag-system）
 - "environment/<配置项>"：plan_model / goal_policy / worker_models / router_enabled
 - "batch"：批次整体（直接用字符串 "batch"，无需 task_id）
-证据引用必须来自上述证据上下文，不允许凭空编造数据。"""
+证据引用必须来自上述证据上下文，不允许凭空编造数据。
+
+【applies_when 必须声明】：每条建议必须基于环境快照（plan_model/goal_policy/worker_models 等）声明其适用前提。若建议依赖特定配置状态（如 goal_policy=force），必须写明；若建议在任何环境都适用，写 "通用"。这是防止环境变化后建议失效的关键约束。"""
 
 
 def _insight_llm(evidence: dict, goal: str, plan: str, config: dict, logger) -> str:
@@ -1513,6 +1516,7 @@ def cmd_insight(args=None) -> None:
             f"- 根因假设: {s.get('cause_hypothesis', '?')}",
             f"- 证据: {', '.join(s.get('evidence_refs', []))}",
             f"- 建议动作: {s.get('action', '?')}",
+            f"- 适用前提: {s.get('applies_when', '通用')}",
             f"- 预期影响: {s.get('expected_impact', '?')}",
             f"- 成本/风险: {s.get('cost_risk', '?')}",
             f"- 置信度: {s.get('confidence', '?')} | 需人工确认: {s.get('requires_approval', True)}",
