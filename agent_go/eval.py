@@ -1424,5 +1424,15 @@ def cmd_insight(args=None) -> None:
         out_path = Path(output)
         out_path.write_text(report, encoding="utf-8")
         console.print(f"\n✅ 洞察报告已写入: {out_path}")
+    # M6.3：无论 --output 指定与否，报告同时归档到 ~/.agent_go/insights/（web 可消费）
+    try:
+        from .config import AGENT_GO_DIR
+        ins_dir = AGENT_GO_DIR / "insights"
+        ins_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        batch_name = evidence["source_batch"].replace("/", "_")
+        (ins_dir / f"{batch_name}-{ts}.md").write_text(report, encoding="utf-8")
+    except OSError:
+        pass
     # 结构化 JSON 输出（stdout 可管道消费）
     console.print("\n" + json.dumps(valid, ensure_ascii=False, indent=2))

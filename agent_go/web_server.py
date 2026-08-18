@@ -1139,6 +1139,64 @@ def api_audit(limit: int = 100) -> dict:
     return {"records": records, "total": len(lines)}
 
 
+def api_decisions(limit: int = 100) -> dict:
+    """决策历史（M6.3）：decision_log.jsonl 倒序读取。"""
+    from .decision_log import list_decisions, decision_count
+    return {"records": list_decisions(limit), "total": decision_count()}
+
+
+_INSIGHT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _insights_dir() -> Path:
+    d = AGENT_GO_DIR / "insights"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def api_insights() -> dict:
+    """洞察报告列表（M6.3）：~/.agent_go/insights/*.md。"""
+    d = _insights_dir()
+    items = []
+    for p in sorted(d.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        items.append({
+            "name": p.stem,
+            "mtime": mtime,
+            "size": p.stat().st_size,
+        })
+    return {"reports": items}
+
+
+def api_insight_report(name: str) -> Optional[dict]:
+    """读取单个洞察报告内容。"""
+    if not _INSIGHT_NAME_RE.match(name):
+        return None
+    p = _insights_dir() / f"{name}.md"
+    if not p.exists() or not p.is_file():
+        return None
+    try:
+        content = p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return {"name": name, "content": content}
+
+
+def api_bench_batches() -> dict:
+    """可选的 insight 生成目标批次（eval_suite/baselines 下含 manifest.json 的目录）。"""
+    base = Path.cwd() / "eval_suite" / "baselines"
+    items = []
+    if base.is_dir():
+        for p in sorted(base.iterdir()):
+            if p.is_dir() and (p / "manifest.json").exists():
+                items.append(p.name)
+    return {"batches": items}
+
+
+
 def api_notes(task_id: str) -> Optional[dict]:
     """任务备注列表（M5.2 协作：多用户沟通）。追加式 notes.jsonl。"""
     td = _task_dir(task_id)
@@ -1588,6 +1646,23 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[1] == "audit":
                 self._reply_json(200, api_audit())
                 return
+            # ── M6.3 洞察与决策 ──
+            if len(parts) == 2 and parts[1] == "decisions":
+                self._reply_json(200, api_decisions())
+                return
+            if len(parts) == 2 and parts[1] == "insights":
+                self._reply_json(200, api_insights())
+                return
+            if len(parts) == 3 and parts[1] == "insights":
+                data = api_insight_report(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "report not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 2 and parts[1] == "bench-batches":
+                self._reply_json(200, api_bench_batches())
+                return
             if len(parts) == 2 and parts[1] == "proxy-policies":
                 self._reply_json(200, api_proxy_policies())
                 return
@@ -1759,6 +1834,10 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "notes":
                 self._op_add_note(parts[2], body, token)
                 return
+            # POST /api/insight/generate {batch, goal?, plan?}（M6.3 生成洞察报告）
+            if len(parts) == 3 and parts[1] == "insight" and parts[2] == "generate":
+                self._op_insight_generate(body, token)
+                return
         except KanbanError as e:
             _audit("error", {"path": path}, str(e), False, token)
             self._reply_json(422, {"error": str(e)})
@@ -1778,6 +1857,34 @@ class WebHandler(BaseHTTPRequestHandler):
         self._reply_json(404, {"error": f"not found: {path}"})
 
     # ── M2 写操作实现 ────────────────────────────────────────
+
+    def _op_insight_generate(self, body: dict, token: str) -> None:
+        """M6.3：生成洞察报告（复用 CLI eval insight，报告自动归档 insights/ 供读取）。"""
+        batch = str(body.get("batch") or "").strip()
+        if not batch:
+            self._reply_json(400, {"error": "batch 不能为空"})
+            return
+        if not re.match(r"^[A-Za-z0-9._/-]+$", batch):
+            self._reply_json(400, {"error": "batch 含非法字符"})
+            return
+        goal = str(body.get("goal") or "").strip()[:500]
+        plan = str(body.get("plan") or "").strip()[:500]
+        argv = ["eval", "insight", "--results", batch, "--output", "-"]
+        if goal:
+            argv += ["--analysis-goal", goal]
+        if plan:
+            argv += ["--analysis-plan", plan]
+        result = _run_cli(argv, timeout=600)
+        if result["ok"]:
+            # CLI 已把报告归档到 ~/.agent_go/insights/；找最新一份
+            reports = api_insights().get("reports", [])
+            latest = reports[0]["name"] if reports else ""
+            result["report_name"] = latest
+            _audit("insight.generate", {"batch": batch, "goal": goal[:80]}, result, True, token)
+            self._reply_json(200, result)
+        else:
+            _audit("insight.generate", {"batch": batch}, result["stderr"][-300:], False, token)
+            self._reply_json(422, result)
 
     def _op_add_note(self, task_id: str, body: dict, token: str) -> None:
         if _task_dir(task_id) is None:
@@ -2516,6 +2623,7 @@ _SPA_HTML = """<!DOCTYPE html>
   <nav class="nav-tabs">
     <button class="nav-tab" data-view="kanban">🗂 看板</button>
     <button class="nav-tab active" data-view="tasks">📋 任务</button>
+    <button class="nav-tab" data-view="insight">🧠 洞察</button>
     <button class="nav-tab" data-view="overview">📊 总览</button>
     <button class="nav-tab" data-view="cost">💰 成本</button>
     <button class="nav-tab" data-view="models">🤖 模型</button>
@@ -3564,6 +3672,7 @@ function switchView(name) {
   // 返回 loader 的 Promise，调用方可链式等待渲染完成
   if (name === 'tasks') return loadTasks();
   if (name === 'kanban') return loadKanban();
+  if (name === 'insight') return loadInsight();
   if (name === 'archive') return loadTasks('/api/archive');
   if (name === 'overview') return loadOverview();
   if (name === 'cost') return loadCost();
@@ -3934,6 +4043,84 @@ async function loadStorage() {
     }
   } catch (e) {}
   document.getElementById('mainView').innerHTML = html;
+}
+
+async function loadInsight() {
+  const main = document.getElementById('mainView');
+  main.innerHTML = '<div class="loading">加载中…</div>';
+  const [insights, decisions, batches] = await Promise.all([
+    api('/api/insights'), api('/api/decisions'), api('/api/bench-batches'),
+  ]);
+  let html = '<div class="section-title">🧠 决策洞察</div>';
+  // 生成表单
+  const batchOpts = (batches.batches || []).map(b => '<option value="'+esc(b)+'">'+esc(b)+'</option>').join('');
+  html += '<div class="run-form">'+
+    '<select id="insBatch" class="run-input" style="flex:2">'+batchOpts+'</select>'+
+    '<input id="insGoal" class="run-input" style="flex:2" placeholder="分析目标，如：hard 通过率保持 100% 且成本降低">'+
+    '<input id="insPlan" class="run-input" style="flex:2" placeholder="预设计划（可选）：换模型/降级链/…">'+
+    '<button class="btn primary" id="btnInsightGen">🤖 生成洞察</button>'+
+    '<span id="insMsg" style="margin-left:8px;font-size:12px"></span></div>';
+  // 报告列表
+  html += '<div class="section-title">📄 洞察报告（'+(insights.reports||[]).length+'）</div>';
+  if ((insights.reports||[]).length) {
+    html += '<table><thead><tr><th>报告</th><th>时间</th><th>大小</th><th>操作</th></tr></thead><tbody>'+
+      (insights.reports||[]).map(r =>
+        '<tr><td>'+esc(r.name)+'</td>'+
+        '<td>'+esc(new Date(r.mtime*1000).toLocaleString('zh-CN'))+'</td>'+
+        '<td>'+(r.size/1024).toFixed(1)+' KB</td>'+
+        '<td><button class="btn" data-insview="'+esc(r.name)+'">查看</button></td></tr>'
+      ).join('')+'</tbody></table>';
+  } else {
+    html += '<div class="loading">暂无报告（选择批次点「生成洞察」创建）</div>';
+  }
+  html += '<div id="insReportView"></div>';
+  // 决策历史
+  html += '<div class="section-title">📜 决策历史（'+(decisions.total||0)+'）</div>';
+  if ((decisions.records||[]).length) {
+    html += '<table><thead><tr><th>时间</th><th>变更</th><th>目标/理由</th><th>来源</th><th>确认人</th></tr></thead><tbody>'+
+      (decisions.records||[]).map(d =>
+        '<tr><td style="white-space:nowrap">'+esc((d.ts||'').replace('T',' ').slice(0,19))+'</td>'+
+        '<td style="font-size:12px">'+esc(d.change||'')+'</td>'+
+        '<td style="font-size:12px;color:var(--dim)">'+esc((d.goal||'')+(d.expected_impact ? ' → '+d.expected_impact : '')).slice(0,80)+'</td>'+
+        '<td>'+esc(d.source||'-')+'</td><td>'+esc(d.confirmer||'-')+'</td></tr>'
+      ).join('')+'</tbody></table>';
+  } else {
+    html += '<div class="loading">暂无决策记录（模型切换/配置修改/recommend 应用将自动记录）</div>';
+  }
+  main.innerHTML = html;
+  // 绑定：生成
+  const btnGen = document.getElementById('btnInsightGen');
+  if (btnGen) btnGen.onclick = async () => {
+    const batch = document.getElementById('insBatch').value;
+    const goal = document.getElementById('insGoal').value.trim();
+    const plan = document.getElementById('insPlan').value.trim();
+    const msg = document.getElementById('insMsg');
+    btnGen.disabled = true;
+    msg.textContent = '生成中（证据物化 + LLM 推理约 1-2 分钟）…'; msg.style.color = 'var(--dim)';
+    try {
+      const d = await postJSON('/api/insight/generate', {batch, goal, plan});
+      msg.textContent = '✅ 已生成: '+(d.report_name || ''); msg.style.color = 'var(--green)';
+      setTimeout(loadInsight, 1000);
+    } catch (e) {
+      msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)';
+      btnGen.disabled = false;
+    }
+  };
+  // 绑定：查看
+  document.querySelectorAll('[data-insview]').forEach(btn => {
+    btn.onclick = async () => {
+      const name = btn.dataset.insview;
+      const slot = document.getElementById('insReportView');
+      slot.innerHTML = '<div class="loading">加载报告…</div>';
+      try {
+        const d = await api('/api/insights/'+encodeURIComponent(name));
+        slot.innerHTML = '<div class="section-title">📄 '+esc(name)+'</div>'+
+          '<div class="json-view" style="max-height:520px">'+esc(d.content)+'</div>';
+      } catch (e) {
+        slot.innerHTML = '<div class="err">'+esc(e.message)+'</div>';
+      }
+    };
+  });
 }
 
 function setConn(ok) {

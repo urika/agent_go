@@ -1034,3 +1034,68 @@ class TestStorageAlert:
         (orphan / "execution.log").write_text("log only", encoding="utf-8")
         d = ws.api_storage()
         assert "孤儿" in d["alert"]
+
+
+# ── M6.3 洞察与决策展示 ──────────────────────────────────────
+
+class TestInsightDecisionApi:
+    """GET /api/decisions + /api/insights + /api/bench-batches + POST /api/insight/generate。"""
+
+    def test_decisions_empty(self, ops_server, ops_env, monkeypatch):
+        from agent_go import decision_log
+        monkeypatch.setattr(decision_log, "_log_path", lambda: ops_env / "decision_log.jsonl")
+        d = _get(f"{ops_server}/api/decisions")
+        assert d["records"] == []
+        assert d["total"] == 0
+
+    def test_decisions_with_records(self, ops_server, ops_env, monkeypatch):
+        from agent_go import decision_log
+        monkeypatch.setattr(decision_log, "_log_path", lambda: ops_env / "decision_log.jsonl")
+        decision_log.record_decision(
+            change="test change", goal="test goal",
+            evidence_refs=["a"], expected_impact="imp",
+            confirmer="tester", source="test",
+        )
+        d = _get(f"{ops_server}/api/decisions")
+        assert d["total"] == 1
+        assert d["records"][0]["change"] == "test change"
+
+    def test_insights_empty(self, ops_server):
+        d = _get(f"{ops_server}/api/insights")
+        assert d["reports"] == []
+
+    def test_insight_report_read_and_404(self, ops_server, ops_env):
+        ins = ops_env / "insights"
+        ins.mkdir()
+        (ins / "test-batch-20260817.md").write_text("# 测试报告", encoding="utf-8")
+        d = _get(f"{ops_server}/api/insights/test-batch-20260817")
+        assert d["content"] == "# 测试报告"
+        try:
+            _get(f"{ops_server}/api/insights/nonexistent")
+            assert False
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+        # 路径穿越防护
+        try:
+            _get(f"{ops_server}/api/insights/..%2Fevil")
+            assert False
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 404)
+
+    def test_bench_batches(self, ops_server, monkeypatch):
+        monkeypatch.setattr(ws.Path, "cwd", staticmethod(lambda: Path("/Users/jinsongwang/workspace/agent_go")))
+        d = _get(f"{ops_server}/api/bench-batches")
+        assert "m4-mixB-hard" in d["batches"]
+
+    def test_insight_generate_bad_batch_400(self, ops_server):
+        code, d = _post(f"{ops_server}/api/insight/generate", {"batch": ""})
+        assert code == 400
+        code, d = _post(f"{ops_server}/api/insight/generate", {"batch": "bad;name"})
+        assert code == 400
+
+    def test_insight_generate_ok(self, ops_server, ops_env, monkeypatch):
+        monkeypatch.setattr(ws, "_run_cli",
+                            lambda argv, timeout=180: {"ok": True, "exit_code": 0, "stdout": "report", "stderr": ""})
+        code, d = _post(f"{ops_server}/api/insight/generate", {"batch": "m4-mixB-hard", "goal": "测试"})
+        assert code == 200
+        assert any(a["op"] == "insight.generate" for a in _audit_lines(ops_env))
