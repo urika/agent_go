@@ -1240,12 +1240,21 @@ _INSIGHT_OUTPUT_SCHEMA = """输出要求：只输出合法 JSON 数组（不要 
   "problem": "问题描述（简短）",
   "evidence_refs": ["证据引用"],
   "cause_hypothesis": "根因假设",
-  "action": "建议动作",
+  "action": "建议动作（人类可读）",
+  "action_type": "可自动应用的动作类型，从以下枚举选一：worker_models（改 worker_models 难度路由）/fallback_chain（改 worker_models_fallback_chain 降级链）/role_model（改 router.roles 角色模型）/cost_budget（改 cost_control.max_budget_usd）/manual（无法自动应用，需人工执行）",
+  "action_payload": {"自动应用的参数对象，JSON 格式；manual 类型为 {}}",
   "expected_impact": "预期影响（量化目标方向）",
   "cost_risk": "成本/风险",
   "confidence": 0.0到1.0的数,
   "requires_approval": true
 }
+
+【action_type 对应 payload 格式】（apply 时按此执行 config 变更）：
+- worker_models: {"easy": "<model>", "medium": "<model>", "hard": "<model>"}
+- fallback_chain: {"difficulty": "easy|medium|hard", "chain": ["<model1>", "<model2>"]}
+- role_model: {"role": "planner|evaluator|worker|reviewer", "model": "<model>"}
+- cost_budget: {"max_budget_usd": <数值>}
+- manual: {}
 
 【evidence_refs 只能使用以下证据路径前缀】（禁止使用其他格式）：
 - "metrics/<指标名>"：可用指标 pass_rate_diagnostic / accepted_delivery_rate / dollar_per_pass_usd / valid_cost_usd / first_pass_rate / timeout_rate
@@ -1344,6 +1353,74 @@ def _validate_suggestion_evidence(suggestion: dict, evidence: dict) -> list[str]
     return missing
 
 
+_APPLIABLE_ACTION_TYPES = ("worker_models", "fallback_chain", "role_model", "cost_budget")
+
+
+def _apply_insight_action(action_type: str, payload: dict) -> dict:
+    """M6.5 确认后应用：把 insight 建议的 action_type+payload 落到当前生效配置文件。
+
+    已知 action_type 自动执行 config 变更；未知/manual 返回 skipped。
+    执行时：备份原配置 → 写回 → decision log 记录（含 evidence/impact）。
+    返回 {applied: bool, change: str, backup: str, error?: str}。
+    """
+    import json as _json
+    import shutil as _shutil
+    import time as _time
+    from .profiles import active_config_source
+    from .decision_log import record_decision
+
+    if action_type == "manual":
+        return {"applied": False, "change": "manual 类型（需人工执行），未自动应用", "backup": ""}
+    if action_type not in _APPLIABLE_ACTION_TYPES:
+        return {"applied": False, "change": f"未知 action_type: {action_type}（未自动应用）", "backup": ""}
+    if not isinstance(payload, dict):
+        return {"applied": False, "change": "payload 非 JSON 对象", "backup": ""}
+
+    target = active_config_source()
+    try:
+        data = _json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+    except (_json.JSONDecodeError, OSError) as e:
+        return {"applied": False, "change": f"配置文件读取失败: {e}", "backup": ""}
+
+    # 应用变更
+    if action_type == "worker_models":
+        data["worker_models"] = payload
+    elif action_type == "fallback_chain":
+        diff = str(payload.get("difficulty", "hard"))
+        chain = payload.get("chain") or []
+        data.setdefault("worker_models_fallback_chain", {})[diff] = chain
+    elif action_type == "role_model":
+        role = str(payload.get("role", ""))
+        model = str(payload.get("model", ""))
+        if not role or not model:
+            return {"applied": False, "change": "role_model 需 role+model", "backup": ""}
+        data.setdefault("router", {}).setdefault("roles", {}).setdefault(role, {})["model"] = model
+    elif action_type == "cost_budget":
+        data.setdefault("cost_control", {})["max_budget_usd"] = payload.get("max_budget_usd")
+    change_desc = f"insight apply {action_type}: {_json.dumps(payload, ensure_ascii=False)[:120]}"
+
+    # 备份 + 写回
+    ts = _time.strftime("%Y%m%d-%H%M%S")
+    backup = target.parent / f"{target.stem}.insight-backup-{ts}.json"
+    try:
+        _shutil.copy2(target, backup)
+        target.write_text(_json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        return {"applied": False, "change": f"写回失败: {e}", "backup": ""}
+
+    # decision log
+    try:
+        record_decision(
+            change=change_desc,
+            goal="insight 建议应用（M6.5 确认后自动应用）",
+            source="insight.apply",
+            confirmer="cli",
+        )
+    except Exception:
+        pass
+    return {"applied": True, "change": change_desc, "backup": str(backup)}
+
+
 def cmd_insight(args=None) -> None:
     """eval insight（M6.1）：证据物化 + LLM 推理 → 结构化建议。
 
@@ -1395,6 +1472,31 @@ def cmd_insight(args=None) -> None:
     dropped = len(suggestions) - len(valid)
     if dropped:
         console.warning(f"⚠️ {dropped} 条建议因 evidence_refs 无效被丢弃（防凭空编造）")
+
+    # M6.5：--apply <index> 应用第 index 条建议（确认后自动应用）
+    apply_idx = getattr(args, "apply_index", None)
+    if apply_idx is not None:
+        try:
+            idx = int(apply_idx)
+        except (TypeError, ValueError):
+            console.error(f"--apply 需为建议序号（1-{len(valid)}）: {apply_idx}")
+            return
+        if not (1 <= idx <= len(valid)):
+            console.error(f"--apply 序号超出范围: {idx}（共 {len(valid)} 条有效建议）")
+            return
+        sug = valid[idx - 1]
+        action_type = str(sug.get("action_type", "manual"))
+        payload = sug.get("action_payload") or {}
+        console.print(f"\n🔧 应用建议 {idx}: {sug.get('problem', '?')}")
+        console.print(f"   action_type={action_type} | payload={json.dumps(payload, ensure_ascii=False)[:100]}")
+        result = _apply_insight_action(action_type, payload)
+        if result["applied"]:
+            console.success(f"✅ 已应用: {result['change']}")
+            console.print(f"   备份: {result['backup']}")
+            console.print("   建议复跑验证: agent_go eval bench --tasks ... 后对比通过率")
+        else:
+            console.warning(f"⚠️ 未自动应用: {result['change']}")
+        return
 
     # 输出
     report_lines = [
