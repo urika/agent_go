@@ -4064,7 +4064,11 @@ async function loadInsight() {
   ]);
   let html = '<div class="section-title">🧠 决策洞察</div>';
   // 生成表单
-  const batchOpts = (batches.batches || []).map(b => '<option value="'+esc(b)+'">'+esc(b)+'</option>').join('');
+  const batchOpts = (batches.batches || []).map(b => {
+    const name = (typeof b === 'string') ? b : (b.name || '');
+    const label = (typeof b === 'string') ? b : (b.name + '（' + (b.records||0) + ' 条）');
+    return '<option value="'+esc(name)+'">'+esc(label)+'</option>';
+  }).join('');
   html += '<div class="run-form">'+
     '<select id="insBatch" class="run-input" style="flex:2">'+batchOpts+'</select>'+
     '<input id="insGoal" class="run-input" style="flex:2" placeholder="分析目标，如：hard 通过率保持 100% 且成本降低">'+
