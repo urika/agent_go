@@ -35,6 +35,7 @@
 | [product-status-assessment-2026-08-08.md](product-status-assessment-2026-08-08.md) | 产品成熟度评估（2026-08-08 快照，~60% 完成度） |
 | [web-golden-path-acceptance-2026-08-13.md](web-golden-path-acceptance-2026-08-13.md) | 纯本地 Golden Path 真实验收报告（Web 操作台 R1-R17 全链路） |
 | [design/model-selection-report.md](design/model-selection-report.md) | 模型选型报告：6 模型组合 × 6 hard 任务 bench 对比（通过率/成本/延迟） |
+| [user-guide-decision-assistant.md](user-guide-decision-assistant.md) | 决策辅助（M6）用户使用说明书：insight/recommend/decision log 用户案例 |
 | [design/model-eval-methodology.md](design/model-eval-methodology.md) | 模型评测方法论：评测流程/可信度保障/经验教训（M5.4 沉淀） |
 | [design/production-model-config.md](design/production-model-config.md) | 生产模型配置指南（方案 B：planner=K3 + evaluator=GLM 混合，6/6 hard 100%） |
 | [archive/reference/bench-analysis-2026-08-01.md](archive/reference/bench-analysis-2026-08-01.md) | 历史 Bench 分析：仅作 exploratory 数据，不作为当前 KPI 基线 |
