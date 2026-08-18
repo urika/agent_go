@@ -1085,7 +1085,8 @@ class TestInsightDecisionApi:
     def test_bench_batches(self, ops_server, monkeypatch):
         monkeypatch.setattr(ws.Path, "cwd", staticmethod(lambda: Path("/Users/jinsongwang/workspace/agent_go")))
         d = _get(f"{ops_server}/api/bench-batches")
-        assert "m4-mixB-hard" in d["batches"]
+        names = [b.get("name") for b in d["batches"]]
+        assert "m4-mixB-hard" in names
 
     def test_insight_generate_bad_batch_400(self, ops_server):
         code, d = _post(f"{ops_server}/api/insight/generate", {"batch": ""})

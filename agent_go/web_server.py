@@ -1186,14 +1186,25 @@ def api_insight_report(name: str) -> Optional[dict]:
 
 
 def api_bench_batches() -> dict:
-    """可选的 insight 生成目标批次（eval_suite/baselines 下含 manifest.json 的目录）。"""
+    """可选的 insight 生成目标批次（eval_suite/baselines 下含 manifest.json 的目录）。
+
+    返回对象列表（前端下拉展示）：name/records/created_at。
+    """
     base = Path.cwd() / "eval_suite" / "baselines"
-    items = []
+    items: list[dict[str, Any]] = []
     if base.is_dir():
-        for p in sorted(base.iterdir()):
+        for p in sorted(base.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
             if p.is_dir() and (p / "manifest.json").exists():
-                items.append(p.name)
-    return {"batches": items}
+                try:
+                    manifest = json.loads((p / "manifest.json").read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    manifest = {}
+                items.append({
+                    "name": p.name,
+                    "records": manifest.get("record_count", 0),
+                    "created_at": manifest.get("created_at", ""),
+                })
+    return {"batches": items, "count": len(items)}
 
 
 
