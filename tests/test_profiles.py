@@ -48,7 +48,9 @@ class TestGenerateLocalProfile:
         assert p["plan_api"]["provider"] == "openai"
         assert p["plan_api"]["base_url"] == "http://localhost:4000/v1/chat/completions"
         assert p["plan_api"]["api_key"] == ""
-        assert p["worker_backends"] == {m: "http://localhost:4000" for m in prof.ROUTE_MODELS}
+        assert p["plan_api"]["worker_base_url"] == "http://localhost:4000"
+        # A-1：不再生成 deprecated 的 worker_backends（单值 worker_base_url 收敛）
+        assert "worker_backends" not in p
         assert p["worker_models"]["easy"] == "claude-haiku-4-5"
         assert p["goal"]["policy"] == "force"
         assert p["evaluator"]["enabled"] is True
@@ -80,7 +82,8 @@ class TestActivateLocal:
         assert result["real_model"] == "Qwen3.6-test"
         # profile 文件 + marker + 备份
         data = json.loads((profile_env / "profiles" / "local.json").read_text())
-        assert data["worker_backends"]["claude-sonnet-4-6"] == "http://localhost:4000"
+        assert data["plan_api"]["worker_base_url"] == "http://localhost:4000"
+        assert "worker_backends" not in data
         assert (profile_env / ".current_profile").read_text() == "local"
         backups = list((profile_env / "profiles").glob("backup-*.json"))
         assert len(backups) == 1
@@ -330,3 +333,56 @@ class TestWriteApiAuth:
         finally:
             server.shutdown()
             server.server_close()
+
+
+class TestHealthCheckDiag:
+    """C7：health_check 附代理 ctx_config / backend_props（fail-open）"""
+
+    _CONFIG = {
+        "plan_api": {"base_url": "http://localhost:4000/v1/chat/completions",
+                     "local_models": ["claude-sonnet-4-6"]},
+        "worker_backends": {"claude-sonnet-4-6": "http://localhost:4000"},
+        "evaluator": {"enabled": False},
+    }
+
+    def _base_patches(self, monkeypatch):
+        monkeypatch.setattr(prof, "probe_endpoint",
+                            lambda url, key="": {"ok": True, "url": url})
+        monkeypatch.setattr(prof, "probe_local_models", lambda url: ["claude-sonnet-4-6"])
+
+    def test_ctx_config_and_props_attached(self, profile_env, monkeypatch):
+        from agent_go import diag as diag_mod
+        self._base_patches(monkeypatch)
+        monkeypatch.setattr(diag_mod, "get_ctx_config",
+                            lambda base, timeout=3.0: {"ctx_config": {"diag_enabled": True},
+                                                       "route_config": {"route_enabled": True}})
+        monkeypatch.setattr(diag_mod, "get_backend_props",
+                            lambda base, timeout=3.0: {"n_ctx": 262144, "total_slots": 1})
+        h = prof.health_check(dict(self._CONFIG))
+        lp = h["local_proxy"]
+        assert lp["ctx_config"]["diag_enabled"] is True
+        assert lp["route_config"]["route_enabled"] is True
+        assert lp["backend_props"]["n_ctx"] == 262144
+
+    def test_props_501_shows_unsupported(self, profile_env, monkeypatch):
+        from agent_go import diag as diag_mod
+        self._base_patches(monkeypatch)
+        monkeypatch.setattr(diag_mod, "get_ctx_config",
+                            lambda base, timeout=3.0: {"ctx_config": {"diag_enabled": True},
+                                                       "route_config": None})
+        monkeypatch.setattr(diag_mod, "get_backend_props",
+                            lambda base, timeout=3.0: {"supported": False})
+        h = prof.health_check(dict(self._CONFIG))
+        assert h["local_proxy"]["backend_props"] == {"supported": False}
+        assert "route_config" not in h["local_proxy"]  # None 段不写入
+
+    def test_old_proxy_fields_absent(self, profile_env, monkeypatch):
+        """旧代理（无端点）→ 新字段不出现，健康检查不受影响"""
+        from agent_go import diag as diag_mod
+        self._base_patches(monkeypatch)
+        monkeypatch.setattr(diag_mod, "get_ctx_config", lambda base, timeout=3.0: None)
+        monkeypatch.setattr(diag_mod, "get_backend_props", lambda base, timeout=3.0: None)
+        h = prof.health_check(dict(self._CONFIG))
+        lp = h["local_proxy"]
+        assert lp["ok"] is True
+        assert "ctx_config" not in lp and "backend_props" not in lp

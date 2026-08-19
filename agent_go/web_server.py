@@ -1932,10 +1932,14 @@ class WebHandler(BaseHTTPRequestHandler):
         # D3/R5a：本地模式下代理不可达 → 启动即报错（不放行到任务失败才发现）
         if read_current_profile() == "local":
             from .profiles import DEFAULT_LOCAL_URL
-            backends = (load_config().get("worker_backends") or {})
-            local_url = next((v for v in backends.values()
-                              if isinstance(v, str) and ("localhost" in v or "127.0.0.1" in v)),
-                             DEFAULT_LOCAL_URL)
+            _cfg = load_config()
+            # A-1：优先 worker_base_url（统一入口），worker_backends 为 deprecated 兼容
+            local_url = (_cfg.get("plan_api") or {}).get("worker_base_url") or ""
+            if not (isinstance(local_url, str) and ("localhost" in local_url or "127.0.0.1" in local_url)):
+                backends = (_cfg.get("worker_backends") or {})
+                local_url = next((v for v in backends.values()
+                                  if isinstance(v, str) and ("localhost" in v or "127.0.0.1" in v)),
+                                 DEFAULT_LOCAL_URL)
             try:
                 probe_local_models(local_url)
             except ProfileError as e:

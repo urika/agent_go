@@ -19,6 +19,7 @@ from .agents import load_agent_type, get_claude_command, get_agent_env
 from .git_utils import _worktree_create
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 from .artifacts import ARTIFACT_DIR_NAME
+from . import diag
 # 解耦原则：evaluator 是可选增强，不静态 import（避免核心模块强绑增强模块的传递依赖）。
 # 改为调用点（_verify_changes 内 evaluator_enabled 守卫后）动态 import。
 from .config import get_api_key
@@ -77,9 +78,11 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
     """探测本地代理后端的真实模型名。
 
     本地代理（如 llama.cpp anthropic_proxy）通过 SIGHUP 切换模型时，
-    /v1/models 只暴露固定 claude 别名，但 /status 页面暴露当前 MODEL_NAME
-    （如 mlx-community/Qwen3.6-27B-4bit）。本函数解析 /status 的第一个
-    "Model" 字段来获取真实后端模型名。
+    /v1/models 只暴露固定 claude 别名，但状态接口暴露当前 MODEL_NAME
+    （如 mlx-community/Qwen3.6-27B-4bit）。探测顺序（A-2 契约迁移）：
+      1. 结构化接口 GET /api/status（契约 api_version≥2，R1）的 backend.model_name；
+      2. 旧代理回退：解析 /status HTML 页面的第一个 "Model" 字段
+         （脆契约兼容路径，保留一个版本周期后移除）。
 
     Args:
         base_url: 本地后端 base URL（如 http://127.0.0.1:4000）
@@ -94,28 +97,36 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
     if key in _local_model_probe_cache:
         return _local_model_probe_cache[key]
     model = ""
-    try:
-        import urllib.request as _urlreq
-        status_url = key + "/status"
-        req = _urlreq.Request(status_url, headers={"User-Agent": "agent_go-probe/1.0"})
-        with _urlreq.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-        # 解析 "Model" 字段（本地后端真实模型名）。兼容多种结构：
-        #   1. <span class="label">Model</span><span class="value">...（llama.cpp 原生 / 自定义代理）
-        #   2. <th>Model</th><td>...（表格结构）
-        #   3. 纯文本 "Model: xxx" / "Model xxx"（fallback）
-        # 仅缓存成功结果——失败不缓存，代理 SIGHUP 切换/短暂不可达恢复后能重新探测。
-        m = re.search(r'<span class="label">Model</span><span class="value">([^<]+)</span>', body)
-        if not m:
-            m = re.search(r'<th[^>]*>Model</th>\s*<td[^>]*>([^<]+)</td>', body)
-        if not m:
-            m = re.search(r'Model[:：]\s*([^\s<]+)', body)
-        if not m:
-            m = re.search(r'MODEL_NAME["\s:：=]+([\w./\-]+)', body, re.I)
-        if m:
-            model = m.group(1).strip()
-    except Exception:
-        model = ""
+    # 1. 结构化路径：/api/status JSON → backend.model_name（fail-open）
+    _status = diag.fetch_json(key, "/api/status", timeout)
+    if isinstance(_status, dict):
+        _backend = _status.get("backend")
+        if isinstance(_backend, dict) and _backend.get("model_name"):
+            model = str(_backend["model_name"]).strip()
+    # 2. 兼容路径：/status HTML 解析（旧代理无 /api/status 时）
+    if not model:
+        try:
+            import urllib.request as _urlreq
+            status_url = key + "/status"
+            req = _urlreq.Request(status_url, headers={"User-Agent": "agent_go-probe/1.0"})
+            with _urlreq.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            # 解析 "Model" 字段（本地后端真实模型名）。兼容多种结构：
+            #   1. <span class="label">Model</span><span class="value">...（llama.cpp 原生 / 自定义代理）
+            #   2. <th>Model</th><td>...（表格结构）
+            #   3. 纯文本 "Model: xxx" / "Model xxx"（fallback）
+            # 仅缓存成功结果——失败不缓存，代理 SIGHUP 切换/短暂不可达恢复后能重新探测。
+            m = re.search(r'<span class="label">Model</span><span class="value">([^<]+)</span>', body)
+            if not m:
+                m = re.search(r'<th[^>]*>Model</th>\s*<td[^>]*>([^<]+)</td>', body)
+            if not m:
+                m = re.search(r'Model[:：]\s*([^\s<]+)', body)
+            if not m:
+                m = re.search(r'MODEL_NAME["\s:：=]+([\w./\-]+)', body, re.I)
+            if m:
+                model = m.group(1).strip()
+        except Exception:
+            model = ""
     if model:
         _local_model_probe_cache[key] = model
     return model
@@ -128,6 +139,70 @@ _local_verify_cache: dict[str, tuple[bool, str]] = {}
 
 # R8 路由归因探测缓存：base_url+routed_model → (route_target, route_actual_model, reason)。
 _route_attr_cache: dict[str, tuple[str, str, str]] = {}
+
+
+def _start_diag_watchdog(config, env, task_id, sub_id, logger):
+    """C4 轮级看门狗（v1：检测+上报，不杀进程）。
+
+    子任务执行期间轮询代理 session ledger（R14），发现重复轮（dup_queries 中
+    count≥阈值且 last_turn 贴近当前轮数）时记 diag_loop_detected 日志事件 +
+    worker_diag metering（loop_detected=true）。干预走既有 verify/retry 通道，
+    不由看门狗杀进程（kill_on_loop 为 v2 预留位，当前未实现）。
+    fail-open：无会话 key / 代理不可达 / 端点缺失 → 不启动或静默跳过。
+
+    返回 (stop_fn, state)；state["loop_detected"] 供 subtask result advisory。
+    """
+    state: dict = {"loop_detected": False}
+    sess_key = env.get("AGENT_GO_SESSION_KEY", "")
+    proxy_url = (env.get("ANTHROPIC_BASE_URL", "") or "").rstrip("/")
+    if not sess_key or not proxy_url or not diag.LOCAL_URL_RE.search(proxy_url):
+        return (lambda: None), state
+    wd_cfg = (_effective_config(config) or {}).get("diag_watchdog", {}) or {}
+    interval = max(5, int(wd_cfg.get("poll_interval_sec", 30) or 30))
+    dup_threshold = max(2, int(wd_cfg.get("dup_threshold", 3) or 3))
+    metering_path = env.get("AGENT_GO_METERING_PATH", "")
+    key8 = diag.session_key8(sess_key)
+    stop_event = threading.Event()
+    max_polls = max(1, 7200 // interval)  # 自限：最多轮询 2h，防异常路径泄漏空转
+
+    def _loop():
+        for _ in range(max_polls):
+            if stop_event.wait(interval):
+                return
+            try:
+                ledger = diag.get_session_ledger(proxy_url, key8)
+                if not ledger:
+                    continue  # 会话未建立/代理过旧/404 → fail-open
+                turns_seen = int(ledger.get("turns_seen") or 0)
+                for q in ledger.get("dup_queries") or []:
+                    try:
+                        cnt = int(q.get("count") or 0)
+                        last_turn = int(q.get("last_turn") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if cnt >= dup_threshold and turns_seen - last_turn <= 2:
+                        state["loop_detected"] = True
+                        detail = {"task_id": task_id, "subtask_id": sub_id,
+                                  "session_key": sess_key,
+                                  "dup_target": str(q.get("target", ""))[:120],
+                                  "dup_count": cnt, "last_dup_turn": last_turn,
+                                  "turns_seen": turns_seen}
+                        log_event(logger, "diag_loop_detected", detail)
+                        if metering_path:
+                            meter_event(metering_path, {"role": "worker_diag",
+                                                        "loop_detected": True, **detail})
+                        return  # 报一次即可
+            except Exception:
+                continue  # 看门狗自身绝不抛出
+
+    t = threading.Thread(target=_loop, daemon=True, name=f"diag-watchdog-{sub_id}")
+    t.start()
+
+    def _stop():
+        stop_event.set()
+        t.join(timeout=2)
+
+    return _stop, state
 
 
 def _probe_route_attribution(base_url: str, routed_model: str = "",
@@ -159,6 +234,8 @@ def _probe_route_attribution(base_url: str, routed_model: str = "",
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",
             "User-Agent": "agent_go-route-probe/1.0",
+            # C1 会话头（R14 key 契约）：探测流量也显式归会话，避免落 fallback 按天合并
+            diag.SESSION_HEADER: diag.session_key(os.environ.get("AGENT_GO_TASK_ID", "") or "probe", "probe"),
         })
         with _urlreq.urlopen(req, timeout=timeout) as resp:
             target = resp.headers.get("X-Proxy-Route-Target", "") or ""
@@ -2393,6 +2470,16 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         if _rt:
             env["AGENT_GO_ROUTE_TARGET"] = _rt
             env["AGENT_GO_ROUTE_REASON"] = _rr or ""
+        # C1 会话头（R14 key 契约）：worker 经 ANTHROPIC_CUSTOM_HEADERS 让 claude CLI
+        # 把 X-Claude-Code-Session-Id 带给本地代理；不发头时代理按 md5(ip:ua:date)
+        # 按天合并会话，台账/档案全被污染。key 同时透传给 subtask metering。
+        _session_key = diag.session_key(task_id, sub_id)
+        env["AGENT_GO_SESSION_KEY"] = _session_key
+        _custom_header = f"{diag.SESSION_HEADER}: {_session_key}"
+        if env.get("ANTHROPIC_CUSTOM_HEADERS"):
+            env["ANTHROPIC_CUSTOM_HEADERS"] = env["ANTHROPIC_CUSTOM_HEADERS"].rstrip("\n") + "\n" + _custom_header
+        else:
+            env["ANTHROPIC_CUSTOM_HEADERS"] = _custom_header
         if _really_local:
             env["AGENT_GO_IS_LOCAL"] = "1"
             _local_model_name = _actual_model or _probe_local_model(_worker_url_src)
@@ -2433,6 +2520,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         logger.info(f"[run_timeout] {sub_id} difficulty={difficulty} base={_run_base}s mult={_run_mult} → timeout={_initial_timeout}s")
     _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)
     _is_simple = _is_simple_task(subtask)
+    # C4 轮级看门狗：claude 执行期间轮询代理台账检测重复轮（检测+上报，不杀进程）
+    _wd_stop, _wd_state = _start_diag_watchdog(config, env, task_id, sub_id, logger)
     if _agent_loop_enabled and _is_simple and headless:
         # 解耦：动态 import + try/except——AgentLoop 是可选增强（方案 C 混合策略），
         # 模块加载或执行失败时回退到传统 claude -p 路径，不中断任务。
@@ -2491,6 +2580,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger,
             config=config, hard_timeout=_initial_timeout,
         )
+    _wd_stop()
+    if _wd_state.get("loop_detected"):
+        logger.warning(
+            f"[diag_watchdog] {sub_id} 检测到重复轮（rabbit hole 征兆），"
+            f"详见 metering worker_diag 事件；干预走既有 verify/retry 通道")
 
     # Goal Hook 生命周期：Claude 进程结束后立即清理注入文件，避免进入 commit / scope 检查。
     # retry 路径每次 re-run 前会重新 inject（GoalInjector.inject 在 _build_task_md 阶段调用），
@@ -2683,4 +2777,6 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             # S12-P0 G1：子任务级 kill_reason（none/stuck/hard_timeout/over_budget_l2/...）
             "kill_reason": verify_results.get("kill_reason") if isinstance(verify_results, dict) else None,
             # S12-P1 G4：budget_mode=degrade 降档模型产出标记
-            "degraded": bool(_is_degraded)}
+            "degraded": bool(_is_degraded),
+            # C4：轮级看门狗 advisory（重复轮检测，仅供参考不干预）
+            "loop_detected": bool(_wd_state.get("loop_detected"))}

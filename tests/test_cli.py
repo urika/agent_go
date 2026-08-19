@@ -1305,3 +1305,47 @@ class TestCmdGovernance:
                 cmd_governance(self._make_args("task-gov2"))
         joined = "\n".join(c[0][0] for c in mock_print.call_args_list if c[0])
         assert "追踪状态" in joined
+
+
+class TestInspectDiagHints:
+    """C6：inspect 输出代理诊断提示（R14-R16 curl 入口）"""
+
+    def _make_failed_task(self, home, task_id="task-diag"):
+        td = home / task_id
+        (td / "sub-1").mkdir(parents=True)
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": task_id, "task": "t", "status": "failed",
+            "subtasks": [{"id": "sub-1", "title": "步骤一"}], "results": [],
+        }), encoding="utf-8")
+        (td / "sub-1" / "result.json").write_text(json.dumps({
+            "subtask_id": "sub-1", "status": "failed", "failure_reason": "verify 失败",
+        }), encoding="utf-8")
+        (td / "sub-1" / ".preserved").write_text(json.dumps({"branch": "b"}), encoding="utf-8")
+        return task_id
+
+    def test_hints_shown_with_local_proxy(self, tmp_path, capsys):
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        home.mkdir()
+        task_id = self._make_failed_task(home)
+        args = _build_parser().parse_args(["inspect", task_id])
+        fake_cfg = {"plan_api": {"worker_base_url": "http://127.0.0.1:4000"}}
+        with patch("agent_go.cli.AGENT_GO_DIR", home), \
+             patch("agent_go.config.load_config", return_value=fake_cfg):
+            cmd_inspect(args)
+        out = capsys.readouterr().out
+        assert "代理诊断" in out
+        assert "/api/session/" in out
+        assert "ledger" in out and "archive?view=sent" in out and "metrics" in out
+
+    def test_hints_hidden_without_local_proxy(self, tmp_path, capsys):
+        from agent_go.cli import cmd_inspect
+        home = tmp_path / ".agent_go"
+        home.mkdir()
+        task_id = self._make_failed_task(home)
+        args = _build_parser().parse_args(["inspect", task_id])
+        fake_cfg = {"plan_api": {"base_url": "https://api.anthropic.com/v1/messages"}}
+        with patch("agent_go.cli.AGENT_GO_DIR", home), \
+             patch("agent_go.config.load_config", return_value=fake_cfg):
+            cmd_inspect(args)
+        assert "代理诊断" not in capsys.readouterr().out

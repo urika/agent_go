@@ -964,3 +964,118 @@ class TestPlannerApiIsolation:
         call_api(config, [{"role": "user", "content": "hi"}], logger)
         req = mock_urlopen.call_args[0][0]
         assert _json.loads(req.data.decode("utf-8"))["model"] == "fallback-model"
+
+
+# ═══════════════════════════════════════════════════════════════
+# C1/C2：会话头注入 + R13 诊断头采集
+# ═══════════════════════════════════════════════════════════════
+
+class MockResponseWithHeaders(MockResponse):
+    """带响应头的 MockResponse（R8/R13 头解析测试用）"""
+
+    def __init__(self, json_data, headers=None, status=200):
+        super().__init__(json_data, status)
+        self.headers = headers or {}
+
+
+LOCAL_ANTHROPIC_CONFIG = {
+    "plan_api": {
+        "provider": "anthropic",
+        "base_url": "http://127.0.0.1:4000/v1/messages",
+        "model": "claude-haiku-4-5",
+        "max_tokens": 64,
+    },
+    "_task_id": "task-c1c2",
+}
+
+_ANTHROPIC_RESP = {
+    "content": [{"type": "text", "text": "ok"}],
+    "usage": {"input_tokens": 1000, "output_tokens": 5},
+}
+
+
+class TestSessionHeaderInjection:
+    """C1：X-Claude-Code-Session-Id 仅对本地代理注入"""
+
+    @patch("urllib.request.urlopen")
+    def test_local_proxy_injects_session_header(self, mock_urlopen, logger):
+        mock_urlopen.return_value = MockResponseWithHeaders(dict(_ANTHROPIC_RESP))
+        config = dict(LOCAL_ANTHROPIC_CONFIG)
+        call_api(config, [{"role": "user", "content": "hi"}], logger)
+        req = mock_urlopen.call_args[0][0]
+        key = req.headers.get("X-claude-code-session-id", "")
+        assert key  # 头存在
+        assert len(key[:8]) == 8 and key[:8].isalnum()
+
+    @patch("urllib.request.urlopen")
+    def test_cloud_url_never_injects(self, mock_urlopen, logger):
+        mock_urlopen.return_value = MockResponseWithHeaders(dict(_ANTHROPIC_RESP))
+        config = {
+            "plan_api": {"provider": "anthropic",
+                         "base_url": "https://api.anthropic.com/v1/messages",
+                         "model": "claude-sonnet-4", "api_key": "sk-ant-x"},
+            "_task_id": "task-c1c2",
+        }
+        call_api(config, [{"role": "user", "content": "hi"}], logger)
+        req = mock_urlopen.call_args[0][0]
+        assert "X-claude-code-session-id" not in req.headers
+
+    @patch("urllib.request.urlopen")
+    def test_no_task_id_no_header(self, mock_urlopen, logger):
+        mock_urlopen.return_value = MockResponseWithHeaders(dict(_ANTHROPIC_RESP))
+        config = {"plan_api": dict(LOCAL_ANTHROPIC_CONFIG["plan_api"])}
+        call_api(config, [{"role": "user", "content": "hi"}], logger)
+        req = mock_urlopen.call_args[0][0]
+        assert "X-claude-code-session-id" not in req.headers
+
+
+class TestR13DiagHeaders:
+    """C2：R13 诊断头解析入 metering（缺省即缺省）"""
+
+    def _run(self, mock_urlopen, logger, tmp_path, headers):
+        mock_urlopen.return_value = MockResponseWithHeaders(dict(_ANTHROPIC_RESP), headers=headers)
+        metering = tmp_path / "metering.jsonl"
+        config = dict(LOCAL_ANTHROPIC_CONFIG)
+        config["_metering_path"] = str(metering)
+        call_api(config, [{"role": "user", "content": "hi"}], logger)
+        lines = metering.read_text(encoding="utf-8").strip().split("\n")
+        return json.loads(lines[-1])
+
+    @patch("urllib.request.urlopen")
+    def test_full_diag_headers(self, mock_urlopen, logger, tmp_path):
+        ev = self._run(mock_urlopen, logger, tmp_path, {
+            "X-Proxy-Diag-Request-Id": "req_abc123",
+            "X-Proxy-Prompt-Processed-N": "100",
+            "X-Proxy-Epoch-Count": "2",
+            "X-Proxy-Feedback-Injected": "loop_l1, blocker",
+        })
+        assert ev["diag_request_id"] == "req_abc123"
+        assert ev["prompt_processed_n"] == 100
+        assert ev["hit_ratio"] == round(1 - 100 / 1000, 4)
+        assert ev["epoch_count"] == 2
+        assert ev["feedback_injected"] == ["loop_l1", "blocker"]
+        assert ev["session_key"]
+
+    @patch("urllib.request.urlopen")
+    def test_missing_diag_headers_omitted(self, mock_urlopen, logger, tmp_path):
+        """旧代理/无注入时：诊断字段不出现（不发假值对齐）"""
+        ev = self._run(mock_urlopen, logger, tmp_path, {})
+        for k in ("diag_request_id", "prompt_processed_n", "hit_ratio",
+                  "epoch_count", "feedback_injected"):
+            assert k not in ev
+        # 会话头注入了 → session_key 仍记录
+        assert ev["session_key"]
+
+    @patch("urllib.request.urlopen")
+    def test_zero_prompt_tokens_no_hit_ratio(self, mock_urlopen, logger, tmp_path):
+        mock_urlopen.return_value = MockResponseWithHeaders(
+            {"content": [{"type": "text", "text": "ok"}],
+             "usage": {"input_tokens": 0, "output_tokens": 0}},
+            headers={"X-Proxy-Prompt-Processed-N": "0"})
+        metering = tmp_path / "metering.jsonl"
+        config = dict(LOCAL_ANTHROPIC_CONFIG)
+        config["_metering_path"] = str(metering)
+        call_api(config, [{"role": "user", "content": "hi"}], logger)
+        ev = json.loads(metering.read_text(encoding="utf-8").strip().split("\n")[-1])
+        assert ev["prompt_processed_n"] == 0
+        assert "hit_ratio" not in ev  # 分母 0 → 缺省

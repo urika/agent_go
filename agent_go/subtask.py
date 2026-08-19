@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .config import log_event
+from . import diag
 
 __all__: list[str] = []
 
@@ -685,7 +686,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         # （127.0.0.1/localhost，如本地 llama-server 代理 4000→8081）时注入
         # AGENT_GO_IS_LOCAL=1。此时 claude 响应中的 model（如 deepseek-v4-flash）
         # 是 claude 内置映射，不代表真实本地后端，用 AGENT_GO_LOCAL_MODEL
-        # （executor 从 worker_backends/local_model_names 解析）覆盖。
+        # （executor 从 worker_base_url/local_model_names 解析）覆盖。
         _is_local = env.get("AGENT_GO_IS_LOCAL", "") == "1"
         if _is_local:
             _local_model_name = env.get("AGENT_GO_LOCAL_MODEL", "") or _model
@@ -742,7 +743,31 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         if env.get("AGENT_GO_ROUTE_TARGET"):
             _metering_rec["route_target"] = env["AGENT_GO_ROUTE_TARGET"]
             _metering_rec["route_reason"] = env.get("AGENT_GO_ROUTE_REASON", "")
+        # C1 会话 key 落 metering（executor 注入 env）：与代理台账/档案的 join 键
+        if env.get("AGENT_GO_SESSION_KEY"):
+            _metering_rec["session_key"] = env["AGENT_GO_SESSION_KEY"]
         meter_event(metering_path, _metering_rec)
+        # C2 worker 侧诊断采集：claude 是黑盒子进程拿不到响应头，改为子任务结束后
+        # 按会话 key 查代理 session metrics 聚合（R16），独立 worker_diag 事件，
+        # 不动 worker 主事件语义。fail-open：代理过旧/不可达/会话未建立 → 跳过。
+        _sess_key = env.get("AGENT_GO_SESSION_KEY", "")
+        _proxy_url = (env.get("ANTHROPIC_BASE_URL", "") or "").rstrip("/")
+        if _sess_key and _proxy_url and diag.LOCAL_URL_RE.search(_proxy_url):
+            _sm = diag.get_session_metrics(_proxy_url, diag.session_key8(_sess_key))
+            if _sm:
+                _diag_rec = {
+                    "role": "worker_diag",
+                    "session_key": _sess_key,
+                    "task_id": env.get("AGENT_GO_TASK_ID", ""),
+                    "subtask_id": sub_id,
+                    "proxy_turns": _sm.get("turns"),
+                    "hit_ratio_p50": _sm.get("hit_ratio_p50"),
+                    "hit_ratio_p90": _sm.get("hit_ratio_p90"),
+                    "injection_counts": _sm.get("injection_counts") or {},
+                    "canonical_mismatch_count": _sm.get("canonical_mismatch_count", 0),
+                    "result": "success" if final_rc == 0 else "failed",
+                }
+                meter_event(metering_path, _diag_rec)
         logger.info(f"{PFX} Claude 执行计量: {claude_usage_total['prompt_tokens']}+{claude_usage_total['completion_tokens']} tokens, ${_cost:.4f}{' (本地模型, 成本 0)' if _is_local else ''}")
 
     _cp = subprocess.CompletedProcess(

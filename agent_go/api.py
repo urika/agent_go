@@ -15,6 +15,7 @@ from .role_skill_map import load_role_skill_map
 from .metrics import estimate_cost
 from .router import resolve_provider, call_with_role
 from .utils import SAFE_VERIFICATION_PREFIXES
+from . import diag
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,14 @@ def call_api(
     else:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    # C1 会话标识（R14 key 契约）：仅对本地代理注入，云端 URL 不发（防内部标识外泄）。
+    # 代理内部截断前 8 字符作为会话 join 键；无头时代理按 md5(ip:ua:date) 按天合并，
+    # 会污染台账/档案。无任务上下文（探测等）不注入。
+    _session_key = ""
+    if _is_local_url and config.get("_task_id"):
+        _session_key = diag.session_key(str(config["_task_id"]), role)
+        headers[diag.SESSION_HEADER] = _session_key
+
     # thinking 注入（声明式，P1.4）：② binding 覆盖 > ① registry 声明（接新模型零代码）
     _thinking = _resolve_thinking_payload(api_cfg, model, provider)
     if provider == "anthropic":
@@ -164,6 +173,22 @@ def call_api(
                 route_cost = float(_resp_headers.get("X-Proxy-Route-Cost", "") or 0.0)
             except (TypeError, ValueError):
                 route_cost = 0.0
+            # R13 诊断归因（llama.cpp）：非流式 HTTP 头通道（流式 SSE 尾注不消费——
+            # call_api 非流式；worker 流式数据由 executor 经 diag.get_session_metrics 取）。
+            # 缺省即缺省（代理「不发假值」语义对齐），不补 None/0 占位。
+            diag_request_id = _resp_headers.get("X-Proxy-Diag-Request-Id", "") or ""
+            try:
+                _ppn_raw = _resp_headers.get("X-Proxy-Prompt-Processed-N", "") or ""
+                prompt_processed_n = int(_ppn_raw) if _ppn_raw else None
+            except (TypeError, ValueError):
+                prompt_processed_n = None
+            try:
+                _ec_raw = _resp_headers.get("X-Proxy-Epoch-Count", "") or ""
+                epoch_count = int(_ec_raw) if _ec_raw else None
+            except (TypeError, ValueError):
+                epoch_count = None
+            _fb_raw = _resp_headers.get("X-Proxy-Feedback-Injected", "") or ""
+            feedback_injected = [k.strip() for k in _fb_raw.split(",") if k.strip()]
             try:
                 data = json.loads(raw_body)
             except json.JSONDecodeError as e:
@@ -229,6 +254,19 @@ def call_api(
                 _event["route_actual_model"] = route_actual_model
                 _event["route_reason"] = route_reason
                 _event["is_local"] = _is_local
+            # C1/C2：会话 key + R13 诊断字段（缺省不写入，兼容旧记录与旧代理）
+            if _session_key:
+                _event["session_key"] = _session_key
+            if diag_request_id:
+                _event["diag_request_id"] = diag_request_id
+            if prompt_processed_n is not None:
+                _event["prompt_processed_n"] = prompt_processed_n
+                if prompt_tokens:
+                    _event["hit_ratio"] = round(1 - prompt_processed_n / prompt_tokens, 4)
+            if epoch_count is not None:
+                _event["epoch_count"] = epoch_count
+            if feedback_injected:
+                _event["feedback_injected"] = feedback_injected
             meter_event(config.get("_metering_path"), _event)
             # R8 归因共享给下游计量（evaluator 等不调本函数 meter_event 的角色）：
             # 存 config 临时键，evaluator 的 meter_event 读取补充 route_target/is_local。

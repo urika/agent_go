@@ -401,6 +401,11 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     unknown_model_events = 0   # 既无 cost_usd 又不在 MODEL_PRICES 的事件（监控价目表覆盖度）
     fallback_events = 0        # result="fallback" 或 fallback_reason 非空（PRD §line 173 留痕字段）
     policy_violations: dict[str, int] = {}  # 政策违规类型 → 次数
+    # C3 诊断维度（R8/R13 字段，缺省即跳过，旧批次兼容）
+    route_counts: dict[str, int] = {}           # route_target 分布（cloud/local/local_forced）
+    hit_ratio_by_model: dict[str, list[float]] = {}  # R13 hit_ratio 按模型分档
+    injection_counts: dict[str, int] = {}       # feedback_injected kind 分布（含 worker_diag 聚合）
+    injected_events = 0                         # feedback_injected 非空的调用数
 
     for td in _scan_task_dirs(tasks_dir):
        # Phase 1 配套：优先读取结构化的 metering.jsonl
@@ -463,6 +468,26 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
                if ev.get("result") in ("failed", "quality_fail"):
                    errors += 1
 
+               # C3：R8 路由分布 / R13 hit_ratio / 注入标记（字段缺省即跳过）
+               _rt = ev.get("route_target", "")
+               if _rt:
+                   route_counts[_rt] = route_counts.get(_rt, 0) + 1
+               _hr = ev.get("hit_ratio")
+               if isinstance(_hr, (int, float)) and model:
+                   hit_ratio_by_model.setdefault(model, []).append(float(_hr))
+               _fb = ev.get("feedback_injected") or []
+               if _fb:
+                   injected_events += 1
+                   for _k in _fb:
+                       injection_counts[_k] = injection_counts.get(_k, 0) + 1
+               # worker_diag 聚合事件（subtask 级）：并入注入 kind 分布
+               if ev.get("role") == "worker_diag":
+                   for _k, _n in (ev.get("injection_counts") or {}).items():
+                       try:
+                           injection_counts[_k] = injection_counts.get(_k, 0) + int(_n)
+                       except (TypeError, ValueError):
+                           continue
+
        # 回退：从 execution.log 读取旧的 api_call 事件
        log_path = td / "execution.log"
        for ev in _read_log_events(log_path, "api_call"):
@@ -523,6 +548,27 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
     if completed_total > 0:
        dollar_per_pass = round(cost / completed_total, 4)
 
+    # C3 输出组装：route 分布 + cloud 回退告警 + hit_ratio 分档 + 注入分布
+    route_total = sum(route_counts.values())
+    route_distribution = {
+       k: {"count": v, "pct": round(v / route_total * 100, 1)}
+       for k, v in sorted(route_counts.items())
+    } if route_total else {}
+    route_cloud_warning = bool(route_total) and route_counts.get("cloud", 0) / route_total > 0.3
+    hit_ratio_stats: dict[str, Any] = {}
+    for _m, _vals in sorted(hit_ratio_by_model.items()):
+       _s = sorted(_vals)
+       _n = len(_s)
+       _entry: dict[str, Any] = {
+           "n": _n,
+           "mean": round(sum(_s) / _n, 4),
+           "p50": round(_s[_n // 2] if _n % 2 else (_s[_n // 2 - 1] + _s[_n // 2]) / 2, 4),
+           "p90": round(_s[min(_n - 1, int(_n * 0.9))], 4),
+       }
+       if _n < 3:
+           _entry["note"] = "样本<3，不参评"
+       hit_ratio_stats[_m] = _entry
+
     return {
        "total_calls": total_calls, "total_prompt_tokens": total_prompt, "total_completion_tokens": total_completion,
        "estimated_cost_usd": cost,
@@ -540,6 +586,14 @@ def analyze_cost(tasks_dir: Path) -> dict[str, Any]:
        "avg_cost_per_subtask": round(cost / subtask_total, 4) if subtask_total else 0,
        "completed_subtasks": completed_total,
        "dollar_per_pass_rate": dollar_per_pass,
+       # C3 诊断维度（R8/R13 消费；无数据时为空结构，不报错）
+       "route_distribution": route_distribution,
+       "route_cloud_warning": route_cloud_warning,
+       "hit_ratio_by_model": hit_ratio_stats,
+       "diagnostics": {
+           "feedback_injected_events": injected_events,
+           "injection_counts": dict(sorted(injection_counts.items())),
+       },
     }
 
 
@@ -966,6 +1020,7 @@ def cmd_eval(args=None) -> None:
                 suite=getattr(args, "bench_suite", ""),
                 catalog_path=getattr(args, "catalog", "") or None,
                 config_path=getattr(args, "config_file", "") or None,
+                proxy_context_path=getattr(args, "proxy_context", "") or None,
             )
             output = getattr(args, "manifest_output", "") or "manifest.json"
             path = write_batch_manifest(manifest, output)

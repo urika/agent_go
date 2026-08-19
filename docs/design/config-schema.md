@@ -50,7 +50,7 @@ LLM API 全局配置。所有 LLM 调用（Plan 生成、评估器、agent loop�
 | `max_tokens` | int | `4096` | 最大输出 token 数 |
 | `temperature` | float | `0.2` | 采样温度 |
 | `timeout_ms` | int | `180000` | 请求超时（毫秒） |
-| `worker_base_url` | str | `""` | Worker 子任务专用 base_url（覆盖 `base_url`，用于本地代理）。**推荐**（模型实体三层设计 P2）：worker 统一走此单值，模型→后端细粒度路由留代理侧。`worker_backends`（按模型名映射 ANTHROPIC_BASE_URL）已 **DEPRECATED**（部署拓扑放错层，与代理路由重复）——保留兼容（有则优先、无则本字段 fallback），使用时 warning 提示迁移，新配置请只用本字段 |
+| `worker_base_url` | str | `""` | Worker 子任务专用 base_url（覆盖 `base_url`，用于本地代理）。**推荐**（模型实体三层设计 P2）：worker 统一走此单值，模型→后端细粒度路由留代理侧。`worker_backends`（按模型名映射 ANTHROPIC_BASE_URL）已 **DEPRECATED**（部署拓扑放错层，与代理路由重复）——保留兼容（有则优先、无则本字段 fallback），使用时 warning 提示迁移，`config local` 自 2026-08-19 起不再生成该字段，新配置请只用本字段 |
 | `worker_max_tokens` | int | `0` | Worker 最大 token（`0` = 使用 claude CLI 默认） |
 | `local_models` | list | `[]` | 标记为本地模型的名称列表（metering cost 归零） |
 

@@ -241,6 +241,113 @@ def check_c1_backend_down(proxy: str, manage: Path) -> None:
     record("C1-recovery", "S4", "P1", "恢复：start-backend", code1 == 0, f"exit={code1}")
 
 
+# ── F 组：R13-R16 上下文工程诊断数据面（safe）────────────────────────
+# 契约：llama-defender-integration-requirements.md §3.2（2026-08-19 交付）
+
+F_SESSION_KEY = "contractF1"  # 8 字符内可区分的探测会话 key
+
+
+def http_post_diag(url: str, timeout: float = 30.0) -> tuple[int, dict, float]:
+    """POST /v1/messages 非流式，返回 (status, 响应头 dict, elapsed)。"""
+    start = time.time()
+    body = json.dumps({"model": "claude-haiku-4-5", "max_tokens": 1,
+                       "messages": [{"role": "user", "content": "hi"}]}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "X-Claude-Code-Session-Id": F_SESSION_KEY,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(256)
+            return resp.status, dict(resp.headers), time.time() - start
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers or {}), time.time() - start
+    except Exception:
+        return 0, {}, time.time() - start
+
+
+def check_f1_diag_headers(proxy: str) -> None:
+    code, headers, _ = http_post_diag(proxy + "/v1/messages")
+    if code != 200:
+        record("F1", "R13", "P1", "诊断归因头（非流式）", False, f"POST /v1/messages → {code}")
+        return
+    has_req_id = bool(headers.get("X-Proxy-Diag-Request-Id"))
+    ppn = headers.get("X-Proxy-Prompt-Processed-N", "")
+    detail = f"Request-Id={'有' if has_req_id else '无'}, Prompt-Processed-N={ppn or '缺省（后端无 timings，允许）'}"
+    record("F1", "R13", "P1", "诊断归因头（非流式）", has_req_id, detail)
+
+
+def check_f2_sessions_endpoint(proxy: str) -> None:
+    code, body, _ = http_get(proxy + "/api/sessions")
+    if not (code == 200 and isinstance(body, dict) and isinstance(body.get("sessions"), list)):
+        record("F2", "R14", "P1", "会话发现端点", False, f"/api/sessions → {code}")
+        return
+    keys = {s.get("key"): s for s in body["sessions"] if isinstance(s, dict)}
+    ours = keys.get(F_SESSION_KEY[:8])
+    ok = ours is not None and ours.get("key_source") == "header"
+    record("F2", "R14", "P1", "会话发现端点", ok,
+           f"会话数={len(keys)}，探测会话 key_source={ours.get('key_source') if ours else '未找到'}")
+
+
+def check_f3_session_detail_endpoints(proxy: str) -> None:
+    key8 = F_SESSION_KEY[:8]
+    for name, path in (("ledger", f"/api/session/{key8}/ledger"),
+                       ("metrics", f"/api/session/{key8}/metrics"),
+                       ("archive", f"/api/session/{key8}/archive?view=sent")):
+        code, body, _ = http_get(proxy + path)
+        ok = code == 200 and isinstance(body, dict)
+        record(f"F3-{name}", "R14/R15/R16", "P1", f"会话 {name} 端点", ok,
+               f"{path} → {code}")
+
+
+def check_f4_ctx_config(proxy: str) -> None:
+    code, body, _, _ = get_status(proxy)
+    if not (code == 200 and isinstance(body, dict)):
+        record("F4", "R16", "P1", "ctx_config 口径段", None, "端点缺失，跳过")
+        return
+    ctx = body.get("ctx_config")
+    ok = isinstance(ctx, dict) and "diag_enabled" in ctx
+    record("F4", "R16", "P1", "ctx_config 口径段", ok,
+           f"ctx_config={ctx}" if ok else "ctx_config 段缺失或缺 diag_enabled")
+
+
+def check_f5_backend_props(proxy: str) -> None:
+    """501 结构化降级：{"supported": false}（rapid-mlx 等不支持的后端）。"""
+    start = time.time()
+    try:
+        req = urllib.request.Request(proxy + "/api/backend/props")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            body = json.loads(resp.read().decode())
+            code = resp.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+        try:
+            body = json.loads(e.read().decode())
+        except Exception:
+            body = {}
+    except Exception as e:
+        record("F5", "R16", "P2", "backend props 反代", False, str(e)[:80])
+        return
+    _ = start
+    if code == 200:
+        record("F5", "R16", "P2", "backend props 反代", True, "200（后端支持）")
+    else:
+        ok = code == 501 and isinstance(body, dict) and body.get("supported") is False
+        record("F5", "R16", "P2", "backend props 反代（501 结构化降级）", ok,
+               f"→ {code} body={body}")
+
+
+def check_f6_metrics_history_session(proxy: str) -> None:
+    code, _, _ = http_get(proxy + f"/metrics/history?session={F_SESSION_KEY[:8]}")
+    if code == 200:
+        record("F6", "R16", "P1", "metrics/history?session= 过滤", True, "200")
+    else:
+        # known-issue（2026-08-19 实测 404）：服务方已承诺但未生效，记 SKIP 不阻塞
+        record("F6", "R16", "P1", "metrics/history?session= 过滤", None,
+               f"→ {code}（known-issue：端点已承诺未生效，待服务方补齐）")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proxy-url", default="http://127.0.0.1:4000")
@@ -273,6 +380,14 @@ def main() -> int:
     check_a12_lifecycle_events(manage)
     check_b1_readiness(proxy)
     check_b6_metrics(proxy)
+
+    print("\n── F 组：R13-R16 诊断数据面（safe）──")
+    check_f1_diag_headers(proxy)
+    check_f2_sessions_endpoint(proxy)
+    check_f3_session_detail_endpoints(proxy)
+    check_f4_ctx_config(proxy)
+    check_f5_backend_props(proxy)
+    check_f6_metrics_history_session(proxy)
 
     if args.full:
         print("\n── full 模式：变更/故障注入用例 ──")

@@ -26,7 +26,7 @@ DEFAULT_LOCAL_URL = "http://localhost:4000"
 PROBE_TIMEOUT = 2.5
 # 本地模型 TCO 默认估值（$/次），用户可在生成后自行调整
 DEFAULT_LOCAL_COST = 0.0005
-# worker 路由名固定家族（claude CLI --model 接受的名字，由 worker_backends 映射到本地代理）
+# worker 路由名固定家族（claude CLI --model 接受的名字，经 worker_base_url 走本地代理路由）
 ROUTE_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"]
 
 
@@ -137,7 +137,9 @@ def generate_local_profile(local_url: str, real_model: str = "") -> dict[str, An
             "medium": "claude-sonnet-4-6",
             "hard": "claude-opus-4-7",
         },
-        "worker_backends": {m: base for m in ROUTE_MODELS},
+        # A-1 收敛：不再生成 worker_backends（deprecated，部署拓扑归代理侧路由），
+        # 单值 plan_api.worker_base_url 即 worker 统一入口；旧配置的 worker_backends
+        # 仍由 executor 兼容块读取。
         "evaluator": {
             "enabled": True,
             "provider": "openai",
@@ -256,16 +258,21 @@ def _record_profile_decision(change: str, source: str) -> None:
 
 
 def _profile_mode(path: Path) -> str:
-    """粗判 profile 模式：worker_backends 全指向本机 → local，否则 cloud/custom。"""
+    """粗判 profile 模式：worker 入口全指向本机 → local，否则 cloud/custom。
+
+    worker 入口取值：plan_api.worker_base_url（A-1 收敛后的唯一入口）+
+    worker_backends（deprecated 兼容，旧 profile 可能仍携带）。
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return "unknown"
     backends = data.get("worker_backends") or {}
-    if backends and all(
-        isinstance(v, str) and ("localhost" in v or "127.0.0.1" in v)
-        for v in backends.values()
-    ):
+    urls = [v for v in backends.values() if isinstance(v, str)]
+    worker_base = (data.get("plan_api") or {}).get("worker_base_url") or ""
+    if isinstance(worker_base, str) and worker_base:
+        urls.append(worker_base)
+    if urls and all(("localhost" in v or "127.0.0.1" in v) for v in urls):
         return "local"
     return "cloud"
 
@@ -337,14 +344,16 @@ def health_check(config: Optional[dict] = None) -> dict[str, Any]:
         "plan": probe_endpoint(plan_url, plan_key),
     }
 
-    # worker：优先第一个指向本机的 backend，否则 worker_base_url / plan base_url
-    worker_url = ""
-    for v in backends.values():
-        if isinstance(v, str) and ("localhost" in v or "127.0.0.1" in v):
-            worker_url = v
-            break
+    # worker：优先 worker_base_url（A-1 收敛后的统一入口），否则 worker_backends
+    # （deprecated 兼容）中第一个指向本机的 backend，最后回退 plan base_url
+    worker_url = plan_api.get("worker_base_url") or ""
     if not worker_url:
-        worker_url = plan_api.get("worker_base_url") or plan_url
+        for v in backends.values():
+            if isinstance(v, str) and ("localhost" in v or "127.0.0.1" in v):
+                worker_url = v
+                break
+    if not worker_url:
+        worker_url = plan_url
     result["worker"] = probe_endpoint(worker_url, plan_key)
 
     if evaluator.get("enabled"):
@@ -363,6 +372,19 @@ def health_check(config: Optional[dict] = None) -> dict[str, Any]:
             if models:
                 local_proxy["model"] = models[0]
                 mismatch = models[0] not in local_models and models[0] not in local_cost_models
+            # C7 健康检查增强（R16）：代理口径段 + 后端规格。全部 fail-open——
+            # 旧代理无 /api/status ctx_config → 字段缺失；501 → {"supported": false} 透传显示。
+            from . import diag
+            _base = diag.local_proxy_base_url(cfg) or normalize_local_url(worker_url)
+            _ctx = diag.get_ctx_config(_base)
+            if _ctx:
+                if _ctx.get("ctx_config") is not None:
+                    local_proxy["ctx_config"] = _ctx["ctx_config"]
+                if _ctx.get("route_config") is not None:
+                    local_proxy["route_config"] = _ctx["route_config"]
+            _props = diag.get_backend_props(_base)
+            if _props:
+                local_proxy["backend_props"] = _props
         except ProfileError as e:
             local_proxy = {"ok": False, "url": normalize_local_url(worker_url), "error": str(e)}
     result["local_proxy"] = local_proxy

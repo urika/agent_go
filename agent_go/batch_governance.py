@@ -34,8 +34,13 @@ def build_batch_manifest(
     suite: str = "",
     catalog_path: str | Path | None = None,
     config_path: str | Path | None = None,
+    proxy_context_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build a manifest after validating schema and batch isolation."""
+    """Build a manifest after validating schema and batch isolation.
+
+    proxy_context_path: C5 批次口径快照（bench sidecar {results}.proxy_context.json）。
+    缺省自动拾取 sidecar；不存在则记 {"available": false}，不阻断。
+    """
     path = Path(results_path)
     records = validate_results_file(path)
     actual_batch, actual_suite = _single_batch(records)
@@ -47,6 +52,16 @@ def build_batch_manifest(
         path, source_batch=actual_batch, suite=actual_suite,
         catalog_path=catalog_path, config_path=config_path,
     )
+    # C5：代理侧口径快照（ctx_config/route_config），跨批次 A/B 可追溯
+    pc_path = Path(proxy_context_path) if proxy_context_path else path.parent / (path.name + ".proxy_context.json")
+    proxy_context: dict[str, Any] = {"available": False}
+    if pc_path.exists():
+        try:
+            loaded = json.loads(pc_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                proxy_context = loaded
+        except (OSError, json.JSONDecodeError):
+            proxy_context = {"available": False, "error": "sidecar unreadable"}
     return {
         "manifest_version": 1,
         "immutable": True,
@@ -61,6 +76,7 @@ def build_batch_manifest(
         "task_catalog_hash": report["task_catalog_hash"],
         "config_hash": report["config_hash"],
         "metric_freeze_version": report["metric_freeze_version"],
+        "proxy_context": proxy_context,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 

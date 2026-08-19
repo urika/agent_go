@@ -84,6 +84,8 @@
   - 失败 → 降级链（本地→云端 v4-pro）→ 仍失败 → blocked + 人工介入通知
 ```
 
+**dispatch 执行模型（PoC 修正）**：dispatch 必须**异步**——`POST /api/kanban/cards/<id>/dispatch` 立即返回 `{task_id, status: "started"}`，任务在后台队列执行（复用 task_runner 后台机制），状态经 SSE/轮询更新。**PoC 发现同步阻塞实现会导致 HTTP 超时**（任务执行分钟级）。这是 W2 后台队列的前提。
+
 ## 5. 通知与验证（及时性）
 
 - **完成通知**：任务 DELIVERY_READY → webhook/桌面通知（含任务名/成本/产物摘要/报告链接）
@@ -134,3 +136,31 @@
 | 本地队列资源耗尽（GPU/内存） | 串行队列 + bench-parallel 1 + 磁盘告警（M5.3） |
 | 通知淹没 | 分级通知（失败/待人工=即时，完成=聚合） |
 | 降级链成本失控 | 降级链只在 blocked 后触发 + 成本熔断（cost_control） |
+
+## 11. PoC 验证记录（2026-08-19）
+
+端到端验证通过（fp-sandbox safe_json_load 模块任务）：
+
+| 环节 | 验证 |
+|------|------|
+| 建卡 → 分类 → 流转 | ✅（brainstorm→design→implementation，SSE 联动 + 审计落 kanban.*） |
+| dispatch 派发执行 | ✅（任务 task-20260819-200901 DELIVERY_READY，sub-1 completed + verify_ok） |
+| 产物 | safe_json.py(14 行) + test_safe_json.py(17 行)（merge 到 delivery 分支） |
+| 流转 operations | ✅ |
+
+**PoC 发现并修正的偏差**：
+1. **dispatch 同步阻塞** → 改为异步（见 §4.2 修正）
+2. **API 契约**：move 端点参数 `stage`；GET /api/kanban 返回 `{stages, card_types, cards: {stage: [cards]}, total}`
+3. **交付产物**：任务完成产物在 delivery 分支，merge 后入主分支（见 §5）
+
+## 12. API 契约（看板端点）
+
+| 端点 | 方法 | 参数 | 返回 |
+|------|------|------|------|
+| `/api/kanban` | GET | - | `{stages, card_types, cards: {stage: [card]}, total}` |
+| `/api/kanban/cards` | POST | `{title, stage, card_type, repo?, task?, description?, tags?, task_ids?}` | `{ok, card}` |
+| `/api/kanban/cards/<id>` | POST | `{op: "update", ...fields}` | `{ok, card}` |
+| `/api/kanban/cards/<id>/move` | POST | `{stage}`（目标阶段名） | `{ok, card}` |
+| `/api/kanban/cards/<id>/archive` | POST | `{}` | `{ok}` |
+| `/api/kanban/cards/<id>` | DELETE | `{}` | `{ok}` |
+| `/api/kanban/cards/<id>/dispatch` | POST | `{}` | `{ok, task_id, status: "started"}`（**异步**，立即返回） |

@@ -29,6 +29,7 @@
 | **P1 R10** | `/v1/models` 能力元数据（route/real_model/thinking_supported/json_compliance/context_chars） | ① registry 数据源 | /v1/models 只回别名无能力元数据（G1） |
 | **P1 R11** | `/api/status` 增 `route_config`（cloud_model/route_enabled/cloud_key_set） | ③ 探测依据统一 | 健康检查探测依据不一致（G4） |
 | **P2 R12** | `POST /admin/reload`（HTTP 热重载） | ③ 运维 | 远程/容器场景 reload（等效 manage.sh reload） |
+| **P1 R13-R16** | 上下文工程诊断数据面：响应头扩展（Prompt-Processed-N / Epoch-Count / Feedback-Injected）+ 会话台账端点 + L4 档案查询 + /metrics 会话维度；另需透传 llama-server 原生 `timings` / `/props` / `/slots` | **④ 观测归因** | 缓存命中率 / 延迟分档 / 会话观测 / 压缩后行为复盘无数据源——详见 [llama-defender-context-engineering-design.md §10](llama-defender-context-engineering-design.md) |
 
 **四层闭环支撑**：① registry ← R10；③ 部署拓扑 ← R9/R11/R12；④ 观测归因 ← **R8（最关键，决定 bench 成本/归因可信度）**；② 角色绑定无代理依赖。
 

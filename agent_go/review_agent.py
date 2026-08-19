@@ -200,6 +200,29 @@ def run_readonly_review(
         diff=diff,
     )
 
+    # C6 复盘增强（R15）：代理 sent_view 档案摘要——模型实际所见 ≠ 客户端转录，
+    # 压缩/注入后的行为复盘以代理档案为准。fail-open：无本地代理/会话未建立 → 跳过。
+    try:
+        from . import diag
+        _base = diag.local_proxy_base_url(config or {})
+        _task_id = (config or {}).get("_task_id", "")
+        if _base and _task_id:
+            _key8 = diag.session_key8(diag.session_key(str(_task_id), subtask.get("id", "")))
+            _arch = diag.get_archive_index(_base, _key8)
+            if _arch and _arch.get("turns"):
+                _turns = _arch["turns"]
+                _inj_turns = [t.get("turn") for t in _turns if t.get("injections")]
+                _last = _turns[-1]
+                prompt += (
+                    "\n\n## 代理侧诊断（llama-defender sent_view，模型实际所见）\n"
+                    f"- 会话轮数: {_arch.get('total', len(_turns))}\n"
+                    f"- 代理注入合成内容的轮次: {_inj_turns or '无'}\n"
+                    f"- 末轮 payload: {_last.get('chars', '?')} 字符, "
+                    f"model={_last.get('model', '?')}, route={_last.get('route_target', '?')}\n"
+                )
+    except Exception:
+        pass
+
     # 领域化审查维度（方案 A）：配置的 skill 加载后追加为「审查维度指引」。
     # 空 skill / 加载失败 → 仅内置通用模板，不改变行为。
     _skill_body = _load_review_skill(rr_cfg.get("skill", ""), config, worktree)

@@ -53,3 +53,46 @@ def test_merge_rejects_different_source_batches(tmp_path):
     errors = validate_mergeable_batches([first, second])
     assert errors
     assert "source_batch" in errors[-1]["error"]
+
+
+# ── C5：proxy_context 批次口径快照 ─────────────────────────────
+
+def test_manifest_without_sidecar_marks_unavailable(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write(results, [_record()])
+    manifest = build_batch_manifest(results)
+    assert manifest["proxy_context"] == {"available": False}
+
+
+def test_manifest_picks_up_sidecar_automatically(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write(results, [_record()])
+    sidecar = tmp_path / "results.jsonl.proxy_context.json"
+    sidecar.write_text(json.dumps({
+        "available": True,
+        "ctx_config": {"diag_enabled": True, "compression_mode": "semantic"},
+        "route_config": {"route_enabled": True},
+        "captured_at": "2026-08-19T00:00:00+00:00",
+    }), encoding="utf-8")
+    manifest = build_batch_manifest(results)
+    assert manifest["proxy_context"]["available"] is True
+    assert manifest["proxy_context"]["ctx_config"]["compression_mode"] == "semantic"
+
+
+def test_manifest_explicit_proxy_context_path(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write(results, [_record()])
+    explicit = tmp_path / "snapshot.json"
+    explicit.write_text(json.dumps({"available": True, "ctx_config": {"diag_enabled": False}}),
+                        encoding="utf-8")
+    manifest = build_batch_manifest(results, proxy_context_path=explicit)
+    assert manifest["proxy_context"]["ctx_config"]["diag_enabled"] is False
+
+
+def test_manifest_unreadable_sidecar_fail_open(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write(results, [_record()])
+    sidecar = tmp_path / "results.jsonl.proxy_context.json"
+    sidecar.write_text("not json{", encoding="utf-8")
+    manifest = build_batch_manifest(results)
+    assert manifest["proxy_context"]["available"] is False

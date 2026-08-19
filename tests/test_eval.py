@@ -587,3 +587,76 @@ class TestAggregatePerformance:
         result = aggregate_performance(tmp_path)
         if result:
             assert "tasks_analyzed" in result
+
+
+# ═══════════════════════════════════════════════════════════════
+# C3：诊断维度聚合（route 分布 / hit_ratio 分档 / 注入分布）
+# ═══════════════════════════════════════════════════════════════
+
+class TestAnalyzeCostDiagnostics:
+    """analyze_cost 消费 R8 route_target / R13 hit_ratio / feedback_injected"""
+
+    def _write_metering(self, tmp_path, events):
+        task_dir = tmp_path / "task-001"
+        task_dir.mkdir(parents=True)
+        (task_dir / "metering.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in events), encoding="utf-8")
+
+    def test_route_distribution_and_cloud_warning(self, tmp_path):
+        events = [
+            {"role": "worker", "actual_model": "m1", "prompt_tokens": 10,
+             "completion_tokens": 5, "cost_usd": 0.0, "route_target": "cloud"},
+            {"role": "worker", "actual_model": "m1", "prompt_tokens": 10,
+             "completion_tokens": 5, "cost_usd": 0.0, "route_target": "local"},
+            {"role": "worker", "actual_model": "m1", "prompt_tokens": 10,
+             "completion_tokens": 5, "cost_usd": 0.0, "route_target": "local"},
+        ]
+        self._write_metering(tmp_path, events)
+        result = analyze_cost(tmp_path)
+        assert result["route_distribution"]["cloud"] == {"count": 1, "pct": 33.3}
+        assert result["route_distribution"]["local"]["count"] == 2
+        assert result["route_cloud_warning"] is True  # 33.3% > 30%
+
+    def test_hit_ratio_stats(self, tmp_path):
+        events = [
+            {"role": "planner", "actual_model": "m1", "prompt_tokens": 100,
+             "completion_tokens": 5, "cost_usd": 0.0, "hit_ratio": hr}
+            for hr in (0.90, 0.95, 0.99)
+        ]
+        self._write_metering(tmp_path, events)
+        stats = analyze_cost(tmp_path)["hit_ratio_by_model"]["m1"]
+        assert stats["n"] == 3
+        assert stats["p50"] == 0.95
+        assert "note" not in stats
+
+    def test_hit_ratio_small_sample_noted(self, tmp_path):
+        events = [{"role": "planner", "actual_model": "m1", "prompt_tokens": 100,
+                   "completion_tokens": 5, "cost_usd": 0.0, "hit_ratio": 0.9}]
+        self._write_metering(tmp_path, events)
+        stats = analyze_cost(tmp_path)["hit_ratio_by_model"]["m1"]
+        assert stats["n"] == 1
+        assert stats["note"] == "样本<3，不参评"
+
+    def test_feedback_injected_distribution(self, tmp_path):
+        events = [
+            {"role": "planner", "actual_model": "m1", "prompt_tokens": 10,
+             "completion_tokens": 5, "cost_usd": 0.0,
+             "feedback_injected": ["loop_l1", "blocker"]},
+            {"role": "worker_diag", "injection_counts": {"loop_l1": 3},
+             "session_key": "k", "result": "success"},
+        ]
+        self._write_metering(tmp_path, events)
+        diag = analyze_cost(tmp_path)["diagnostics"]
+        assert diag["feedback_injected_events"] == 1
+        assert diag["injection_counts"] == {"blocker": 1, "loop_l1": 4}
+
+    def test_old_records_without_diag_fields(self, tmp_path):
+        """旧批次（无任何新字段）→ 空结构，不报错"""
+        events = [{"role": "planner", "actual_model": "m1", "prompt_tokens": 10,
+                   "completion_tokens": 5, "cost_usd": 0.01, "result": "success"}]
+        self._write_metering(tmp_path, events)
+        result = analyze_cost(tmp_path)
+        assert result["route_distribution"] == {}
+        assert result["route_cloud_warning"] is False
+        assert result["hit_ratio_by_model"] == {}
+        assert result["diagnostics"]["injection_counts"] == {}

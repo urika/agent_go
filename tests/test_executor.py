@@ -2182,13 +2182,37 @@ class TestL1AutoTrigger:
 # ═══════════════════════════════════════════════════════════════
 
 class TestProbeLocalModel:
-    """_probe_local_model：从本地代理 /status 探测真实后端模型名"""
+    """_probe_local_model：从本地代理探测真实后端模型名（/api/status JSON 优先，HTML 兜底）"""
 
     _STATUS_HTML = """<html><body>
     <div class="row"><span class="label">Model</span><span class="value">mlx-community/Qwen3.6-27B-4bit</span></div>
     <div class="row"><span class="label">Cloud Model</span><span class="value">deepseek-v4-flash</span></div>
     <div class="row"><span class="label">Model</span><span class="value">claude-haiku-4-5</span></div>
     </body></html>"""
+
+    def test_probe_api_status_json(self, monkeypatch):
+        """A-2：优先 /api/status JSON 的 backend.model_name，不再解析 HTML。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        monkeypatch.setattr(executor.diag, "fetch_json",
+                            lambda base, path, timeout=3.0: {"backend": {"model_name": "mlx-community/Qwen3.6-27B-4bit"}})
+        # HTML 路径不应被触达
+        monkeypatch.setattr("urllib.request.urlopen",
+                            MagicMock(side_effect=AssertionError("不应回退 HTML 解析")))
+        assert _probe_local_model("http://127.0.0.1:4000") == "mlx-community/Qwen3.6-27B-4bit"
+
+    def test_probe_api_status_missing_field_falls_back_html(self, monkeypatch):
+        """A-2：/api/status 缺 backend.model_name → 回退 HTML 解析。"""
+        from agent_go import executor
+        monkeypatch.setattr(executor, "_local_model_probe_cache", {})
+        monkeypatch.setattr(executor.diag, "fetch_json",
+                            lambda base, path, timeout=3.0: {"state": "healthy"})
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = self._STATUS_HTML.encode("utf-8")
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_resp
+        monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=mock_ctx))
+        assert _probe_local_model("http://127.0.0.1:4000") == "mlx-community/Qwen3.6-27B-4bit"
 
     def test_probe_parses_first_model_field(self, monkeypatch):
         from agent_go import executor

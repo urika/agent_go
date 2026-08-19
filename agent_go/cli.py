@@ -335,6 +335,8 @@ def _build_parser():
                              help="配置文件路径，用于计算 config hash（metric-freeze 子命令）")
     eval_parser.add_argument("--manifest-output", dest="manifest_output", default="",
                              help="批次 manifest 输出路径（batch-manifest 子命令）")
+    eval_parser.add_argument("--proxy-context", dest="proxy_context", default="",
+                             help="批次口径快照 sidecar 路径（batch-manifest 子命令，缺省自动拾取 {results}.proxy_context.json）")
     # recommend 子命令参数（CR-G5：bench 推荐写回 worker_models）
     eval_parser.add_argument("--apply", dest="apply", action="store_true",
                              help="recommend 子命令：把推荐写入 config.json 的 worker_models（默认 dry-run）")
@@ -1733,6 +1735,34 @@ def cmd_inspect(args) -> None:
             console.print("(worktree 不存在 — 已清理或未创建)")
     console.sep("─", 70)
     console.print("提示: cd 到 worktree 路径查看完整文件状态")
+    _print_diag_hints(task_id, entries)
+
+
+def _print_diag_hints(task_id: str, entries: list) -> None:
+    """C6 复盘入口：失败 subtask 的代理诊断查询提示（R14/R15/R16，只读）。
+
+    视角正确性：压缩后行为复盘以代理 sent_view 为准（模型实际所见 ≠ 客户端转录）。
+    无本地代理配置时不显示。
+    """
+    failed = [e for e in entries if e.get("status") in ("failed", "blocked")]
+    if not failed:
+        return
+    try:
+        from .config import load_config
+        from . import diag
+        base_url = diag.local_proxy_base_url(load_config())
+    except Exception:
+        base_url = ""
+    if not base_url:
+        return
+    console.sep("─", 70)
+    console.print("🩺 代理诊断（llama-defender R14-R16，以代理 sent_view 为准）:")
+    for e in failed:
+        key8 = diag.session_key8(diag.session_key(task_id, e["id"]))
+        console.print(f"  {e['id']}（会话 {key8}）:")
+        console.print(f"    curl -s {base_url}/api/session/{key8}/ledger | python3 -m json.tool    # 重复轮/材料台账")
+        console.print(f"    curl -s '{base_url}/api/session/{key8}/archive?view=sent'              # 模型实际所见 payload")
+        console.print(f"    curl -s {base_url}/api/session/{key8}/metrics | python3 -m json.tool   # 命中率/延迟分档")
 
 
 def cmd_list() -> None:

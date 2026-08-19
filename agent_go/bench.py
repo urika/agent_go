@@ -33,9 +33,44 @@ from .assessment import load_all as load_all_assessments, compute_false_positive
 from .pricing import model_tier, validate_worker_tier
 from .failure import classify_failure
 from .bench_schema import validate_record
+from . import diag
 
 __all__ = ["cmd_bench", "cmd_baseline", "analyze_model_productivity"]
 console = _LazyConsole()
+
+
+def _snapshot_proxy_context(output_path: Path) -> None:
+    """C5 批次口径快照：/api/status 的 ctx_config/route_config → sidecar 文件。
+
+    sidecar 路径：{results}.proxy_context.json（batch-manifest 缺省自动拾取）。
+    无本地代理 / 端点缺失 → 写 {"available": false}，不阻断 bench。
+    """
+    from datetime import datetime, timezone
+    from .config import load_config
+
+    sidecar = output_path.parent / (output_path.name + ".proxy_context.json")
+    snapshot: dict[str, Any] = {"available": False}
+    try:
+        base_url = diag.local_proxy_base_url(load_config())
+        if base_url:
+            ctx = diag.get_ctx_config(base_url)
+            if ctx:
+                snapshot = {
+                    "available": True,
+                    "proxy_base_url": base_url,
+                    "ctx_config": ctx.get("ctx_config"),
+                    "route_config": ctx.get("route_config"),
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                }
+    except Exception:
+        snapshot = {"available": False}
+    try:
+        sidecar.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+        if snapshot.get("available"):
+            console.print(f"   批次口径快照: {sidecar.name}（ctx_config 已记录）")
+    except OSError as exc:
+        console.warning(f"批次口径快照写入失败（不阻断）: {exc}")
 
 
 def _task_version(task: dict) -> str:
@@ -399,6 +434,10 @@ def cmd_bench(args=None) -> None:
     _no_confirm = bool(getattr(args, "yes", False)) or bool(getattr(args, "eval_all", False))
     if not _preflight_model_pricing(models, interactive=not _no_confirm):
         sys.exit(1)
+
+    # C5 批次口径快照（R16 ctx_config）：代理侧压缩/注入/diag 开关快照到 sidecar，
+    # 供 batch-manifest 并入 proxy_context 段（跨批次 A/B 口径可追溯）。fail-open。
+    _snapshot_proxy_context(output_path)
 
     task_files = sorted(tasks_dir.glob("tasks/*.yaml"))
     if not task_files:
