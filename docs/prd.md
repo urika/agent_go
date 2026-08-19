@@ -399,6 +399,17 @@ metering 不可用时，strict/degrade 模式必须 fail-safe，不能将成本�
 - R9 策略可视：配置中心展示代理路由策略（模型偏好/云端模型/阈值/Key 状态）。
 - 模型选型数据依据：[model-selection-report.md](design/model-selection-report.md)（6 组合 × 6 hard 任务对比）。
 
+#### F-DIAG-1 诊断数据面消费（✅ 已实现，2026-08-19）
+
+llama-defender R13-R16 诊断数据面的消费侧落地（C1-C7，需求文档：[diag-dataplane-consumer-requirements-20260819.md](design/diag-dataplane-consumer-requirements-20260819.md)）：
+
+- **会话级可观测（C1）**：worker/planner/evaluator 请求统一携带 `X-Claude-Code-Session-Id`（md5(task:sub)[:8] + 可读后缀），代理台账/档案按会话精确可取，不再被无头请求的按天合并污染。
+- **诊断字段入计量（C2/C3）**：R13 响应头（`diag_request_id`/`prompt_processed_n`/`hit_ratio`/`epoch_count` 等）→ metering；`eval analyze_cost` 增路由分布（cloud>30% 告警）、按模型缓存命中率、注入计数值维度。
+- **轮级看门狗（C4）**：子任务执行期间轮询代理 session ledger 检测重复轮——v1 检测+上报不杀进程，干预走既有 verify/retry 通道。
+- **批次可复现（C5）**：bench 启动时快照代理 ctx_config/route_config → `{results}.proxy_context.json` sidecar，入 batch manifest（`eval batch-manifest --proxy-context`）。
+- **失败处置与健康（C6/C7）**：`inspect` 输出失败子任务的 ledger/archive/metrics 取数提示；`review --deep` 附 sent_view 档案摘要；`config status` 健康检查增 ctx_config/backend_props（501 结构化降级显示）。
+- **降级原则**：全部 fail-open——代理不可达/端点缺失/字段缺失一律跳过，绝不阻断主流程；契约由 `tools/check_llama_defender_contract.py` F 组固化（实测 20 PASS / 0 FAIL / 1 SKIP）。
+
 ### 4.6 CLI、JSON 和 MCP
 
 系统应提供：

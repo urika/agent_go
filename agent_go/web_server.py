@@ -2244,6 +2244,12 @@ class WebHandler(BaseHTTPRequestHandler):
         if confirm_mode not in ("auto", "web"):
             self._reply_json(400, {"error": "confirm_mode 须为 auto/web"})
             return
+        # W1.3 按列路由：automation=manual（架构/困难任务）→ 强制人工确认计划（web 模式），
+        # 防止本地模型直接跑困难任务；auto/pending → 按请求 confirm_mode（默认 auto 本地队列）
+        automation = card.get("automation", "pending")
+        if automation == "manual" and confirm_mode == "auto":
+            confirm_mode = "web"
+            logger.info("[kanban] 卡片 %s automation=manual → 强制 confirm_mode=web（人工确认计划）", card_id)
         # 幂等防护：卡片已有运行中任务（EXECUTING/PLANNING 或托管句柄存活）→ 拒绝重复派发
         for tid in reversed(card.get("task_ids") or []):
             st = _task_status_of(tid)
@@ -3435,6 +3441,10 @@ function kanbanCardHtml(c, stageIdx, stageCount) {
     '<div class="kc-title">'+esc(c.title)+'</div>'+
     '<div class="kc-meta"><span class="tag">'+esc(typeLabel)+'</span>';
   if (c.archived) html += '<span class="tag" style="color:var(--yellow)">🗂 已归档</span>';
+  // W1.2：automation 分类徽标（看板任务编排）
+  const auto = c.automation || 'pending';
+  const autoBadge = {auto:['🤖 自动','var(--green)'], manual:['👤 人工','var(--yellow)'], pending:['⏳ 待判定','var(--dim)']}[auto];
+  if (autoBadge) html += '<span class="tag" style="color:'+autoBadge[1]+'" title="自动化分类">'+autoBadge[0]+'</span>';
   if (repoShort) html += '<span class="tag" title="'+esc(c.repo)+'">📁 '+esc(repoShort)+'</span>';
   if (c.cron) html += '<span class="tag">⏰ '+esc(c.cron)+'</span>';
   if (c.latest_task) html += '<span class="badge '+(STATUS_COLORS[c.latest_task.status]||'st-pending')+'">'+esc(c.latest_task.status)+'</span>';

@@ -67,12 +67,12 @@
 
 | # | 严重度 | 发现 | 证据 | 影响 | 建议 |
 |---|---|---|---|---|---|
-| S-1 | **P1** | 流量自检建立在隐式脆契约上：正则解析代理日志三种文本行格式 + 日志绝对路径硬编码；日志是内部实现细节而非接口，格式变更将静默打破自检，且自检失败 `sys.exit` 中止整批 | `run_agent.py:427-486`（`:451-465` 正则）；`config/targets.yaml:15` 硬编码路径 | 代理侧任何日志格式调整都可能中断跨夜批跑 | 迁移到结构化接口：`/api/session/<key8>/metrics` + R8 头校验；日志正则降级为兜底 |
-| S-2 | P1 | 无契约测试：对比 agent_go 的 21 用例契约脚本，swe-eval 侧空白 | 全仓零 HTTP 客户端调用代理管理面 | 代理升级无验收门禁 | 补契约检查脚本（可复用 agent_go F 组用例思路） |
+| S-1 | **P1** | 流量自检建立在隐式脆契约上：正则解析代理日志三种文本行格式 + 日志绝对路径硬编码；日志是内部实现细节而非接口，格式变更将静默打破自检，且自检失败 `sys.exit` 中止整批 | `run_agent.py:427-486`（`:451-465` 正则）；`config/targets.yaml:15` 硬编码路径 | 代理侧任何日志格式调整都可能中断跨夜批跑 | 迁移到结构化接口：`/api/session/<key8>/metrics` + R8 头校验；日志正则降级为兜底。**✅ 已落地（2026-08-19，swe-eval 0b08e5e）**：`verify_proxy_traffic` 重构为双证据——R8 探测头断言路由方向+真实模型为主路径（比日志正则更强），日志正则降为兜底且格式漂移只报 `no_decision` WARNING 不再中止批跑（metrics 端点对账未采用，属可选增强） |
+| S-2 | P1 | 无契约测试：对比 agent_go 的 21 用例契约脚本，swe-eval 侧空白 | 全仓零 HTTP 客户端调用代理管理面 | 代理升级无验收门禁 | 补契约检查脚本（可复用 agent_go F 组用例思路）。**✅ 已落地（2026-08-19，swe-eval 0b08e5e）**：`scripts/check_llama_defender_contract.py` 按 swe-eval 实际依赖面裁剪为 3 用例（/v1/models、/api/status、/v1/messages 路由+会话头），实测 ALL PASS |
 | S-3 | P2 | 成本/usage 数据面未闭环：`usage`/`cost_cny`/`proxy_events` 字段定义了但恒为空 | `report.py:73-75` TODO；runs.jsonl 实测样例 | A/B 报告缺成本维度，模型选型结论不完整 | 复用 R8 头/sessions.jsonl 回填，report 增 $/resolve |
 | S-4 | P3 | 无超时/无重试/串行：harness 健壮性完全外包给代理侧 `PROXY_BACKEND_TIMEOUT`，批跑靠 `caffeinate` 续命 | `run_agent.py:325`（无 timeout）、`:557`（串行 for） | 与 agent_go 的 run_timeout/stuck 检测/kill_reason 体系有明显能力落差 | 至少加 per-run timeout + 失败重试一次 |
-| S-5 | P3 | 无依赖声明文件（无 requirements/pyproject），依赖靠 .venv 手装 | 仓库根 | 环境不可复现 | 补 requirements.txt |
-| S-6 | 提示 | 防泄漏逻辑散布三处脚本，注释为事故驱动补丁层 | run_agent / gen_synthetic / verify_synthetic | 逻辑正确但难审计 | 整理为单一防泄漏清单文档 |
+| S-5 | P3 | 无依赖声明文件（无 requirements/pyproject），依赖靠 .venv 手装 | 仓库根 | 环境不可复现 | 补 requirements.txt。**✅ 已落地（2026-08-19，swe-eval 0b08e5e）** |
+| S-6 | 提示 | 防泄漏逻辑散布三处脚本，注释为事故驱动补丁层 | run_agent / gen_synthetic / verify_synthetic | 逻辑正确但难审计 | 整理为单一防泄漏清单文档。**✅ 已落地（2026-08-19，swe-eval 0b08e5e）** |
 
 **swe-eval 侧优点（固化）**：拆库边界决策（依赖/产物/通用性/生命周期四理由）；防泄漏设计（浅克隆切对象库、orphan 合成任务、gold_identity 污染检测）；junitxml 逐条判定「宁假 FAIL 不假 PASS」的保守口径；断点续跑与原子写。
 
@@ -80,19 +80,19 @@
 
 | # | 严重度 | 发现 | 影响 | 建议 |
 |---|---|---|---|---|
-| X-1 | P1 | 两个消费方与代理的契约保障不对称：agent_go 有契约文档+契约脚本+fail-open 探测；swe-eval 全部裸奔 | 代理演进时 swe-eval 无预警 | S-1/S-2 即修复路径 |
+| X-1 | P1 | 两个消费方与代理的契约保障不对称：agent_go 有契约文档+契约脚本+fail-open 探测；swe-eval 全部裸奔 | 代理演进时 swe-eval 无预警 | S-1/S-2 即修复路径。**✅ 已落地（2026-08-19）**：随 S-1/S-2 解决，swe-eval 侧契约脚本实测 ALL PASS |
 | X-2 | P2 | 契约知识三处分散（llama.cpp docs、agent_go diag.py、swe-eval targets.yaml 注释），header 构造/截断口径两处重复实现 | 契约演进多处同步、易漏 | 契约文档为唯一权威并带 `api_version`；两个消费方 CI 各跑契约测试；header 构造显式标注契约版本 |
 
 ## 3. 改进项汇总（按优先级）
 
 | 优先级 | 项目 | 事项 |
 |---|---|---|
-| P1 | swe-eval | S-1 流量自检迁移结构化接口 + S-2 补契约测试（X-1 同步解决） |
+| ~~P1~~ | swe-eval | ~~S-1 流量自检迁移结构化接口 + S-2 补契约测试（X-1 同步解决）~~ **✅ 已落地（2026-08-19，swe-eval 0b08e5e，含 S-5/S-6）** |
 | P2 | llama-defender | L-6 `/metrics/history?session=` 补齐（已承诺） |
 | P2 | swe-eval | S-3 成本回填（$/resolve 进报告） |
 | ~~P2~~ | agent_go | ~~A-1 收敛 `worker_backends` 为单值 `worker_base_url`~~ **✅ 已落地（2026-08-19）** |
 | P2 | 跨项目 | X-2 契约单点化（api_version + 双侧契约测试） |
 | P2 | llama-defender | L-1 token 真实值优先 + 口径标注 |
 | ~~P3~~ | agent_go | ~~A-2 `/status` HTML 解析切换 `/api/status` JSON~~ **✅ 已落地（2026-08-19）**；A-3 agent_go 侧契约版本标注同步完成 |
-| P3 | swe-eval | S-4 per-run timeout/重试；S-5 requirements.txt |
+| P3 | swe-eval | S-4 per-run timeout/重试；~~S-5 requirements.txt~~（✅ 已落地）；S-6 防泄漏清单（✅ 已落地） |
 | P3 | llama-defender | L-3 截断不对称修复；L-2 观测端点快照化（中期） |

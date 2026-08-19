@@ -62,7 +62,35 @@ _CARD_ID_RE = re.compile(r"^card-[A-Za-z0-9-]+$")
 _CARD_ID_ALPHABET = string.ascii_lowercase + string.digits
 
 # update_card 允许修改的字段白名单
-_UPDATABLE_FIELDS = ("title", "description", "repo", "cron", "spec_path")
+_UPDATABLE_FIELDS = ("title", "description", "repo", "cron", "spec_path", "automation")
+
+# 自动化分类信号（W1：复用 e2e 判定框架的架构级特征信号）
+# 含这些信号 → manual（系统架构/跨文件/并发，需人工+云端）；否则按 spec 明确度
+_ARCH_SIGNALS = (
+    "refactor", "重构", "并发", "race condition", "race", "架构", "architecture",
+    "端到端", "end-to-end", "e2e", "performance", "性能优化", "跨文件", "cross-file",
+    "atomic", "原子写", "并发安全", "thread-safe", "threading", "multi-process",
+)
+
+
+def classify_automation(title: str = "", description: str = "", spec_path: str = "") -> str:
+    """看板任务自动化分类（W1）：判定卡片可自动化程度。
+
+    返回 "auto"（明确 spec 模块，本地后台队列可完成）/ "manual"（系统架构/困难，
+    需人工+云端）/ "pending"（信号不明确，默认偏人工保守）。
+
+    规则（与 e2e 判定框架一致 + spec 明确度）：
+    - 含架构级信号（refactor/并发/架构/跨文件…）→ manual
+    - spec_path 非空（有明确 Spec 文档）→ auto
+    - 其他 → pending（保守偏人工，人工可覆盖）
+    """
+    text = (f"{title} {description}").lower()
+    for sig in _ARCH_SIGNALS:
+        if sig in text:
+            return "manual"
+    if (spec_path or "").strip():
+        return "auto"
+    return "pending"
 
 BOARD_VERSION = 1
 
@@ -241,6 +269,7 @@ def create_card(title: str, type: str, stage: str = "brainstorm", repo: str = ""
             "description": description or "",
             "spec_path": spec_path or "",
             "cron": (cron or "").strip(),
+            "automation": classify_automation(title, description, spec_path),
             "task_ids": [],
             "archived": False,
             "created": now,
