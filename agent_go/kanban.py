@@ -231,6 +231,23 @@ def get_card(card_id: str) -> Optional[dict]:
     return _find_card(load_board(), card_id)
 
 
+def find_card_by_task(task_id: str) -> Optional[dict]:
+    """按关联 task_id 查卡片（task_ids 含该任务）。不存在返回 None。
+
+    board["cards"] 存储结构是扁平 list（全部卡片），非按 stage 分组的 dict。
+    """
+    if not task_id:
+        return None
+    board = load_board()
+    cards = board.get("cards", [])
+    if isinstance(cards, dict):  # 兼容历史 dict(stage→list) 结构
+        cards = [c for stage_cards in cards.values() for c in stage_cards]
+    for card in cards:
+        if isinstance(card, dict) and task_id in (card.get("task_ids") or []):
+            return card
+    return None
+
+
 def _require_card(board: dict, card_id: str) -> dict:
     card = _find_card(board, card_id)
     if card is None:

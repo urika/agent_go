@@ -418,3 +418,65 @@ class TestSseSignature:
         sig_after = ws.WebHandler._tasks_signature()
         assert sig_before != sig_after
         assert "kanban:" in sig_after
+
+
+class TestW3DesignConfirm:
+    """W3.1：design 列卡片 dispatch 只 link 不流转，confirm Y 后才流转 implementation。"""
+
+    def test_design_dispatch_stays_design(self, ops_server, ops_env, monkeypatch):
+        """design 列卡片 dispatch：只 link_task，停留 design 列（待确认）。"""
+        import agent_go.kanban as _kb
+        card = _create_card(ops_server, title="架构任务", type="implementation", repo="/tmp")
+        print("DEBUG card:", card)
+        _kb.move_card(card["id"], "design")  # 卡片在 design 列
+        TID = "task-20260820-120000-001-aaaa"
+        def fake_start_run(*args, **kwargs):
+            on_tid = kwargs.get("on_task_id")
+            if on_tid:
+                on_tid(TID)
+            return TID
+        monkeypatch.setattr(ws.task_runner, "start_run", fake_start_run)
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch", {})
+        assert code == 200
+        card_after = _kb.get_card(card["id"])
+        assert card_after["task_ids"] == [TID]
+        assert card_after["stage"] == "design"  # 停留 design 待确认
+
+    def test_confirm_y_moves_to_implementation(self, ops_server, ops_env, monkeypatch):
+        """confirm Y 后 design 列卡片流转到 implementation。"""
+        import agent_go.kanban as _kb
+        card = _create_card(ops_server, title="架构任务", type="implementation", repo="/tmp")
+        print("DEBUG card:", card)
+        _kb.move_card(card["id"], "design")
+        TID = "task-20260820-120001-002-bbbb"
+        # 任务目录 + pending
+        from . import conftest  # noqa
+        import json as _json
+        td = ops_env / TID
+        td.mkdir(parents=True)
+        (td / "meta.json").write_text(_json.dumps({"task_id": TID, "status": "EXECUTING", "status_schema_version": 1, "repo": "/tmp/r", "subtasks": [], "results": []}), encoding="utf-8")
+        (td / "pending_confirmation.json").write_text(_json.dumps({"stage": "plan", "payload": {}, "ts": "x", "timeout_sec": 1800}), encoding="utf-8")
+        # 先 link 任务到卡片（design 列）
+        _kb.link_task(card["id"], TID)
+        code, d = _post(f"{ops_server}/api/tasks/{TID}/confirm", {"stage": "plan", "decision": "Y"})
+        assert code == 200
+        card_after = _kb.get_card(card["id"])
+        assert card_after["stage"] == "implementation"
+
+    def test_confirm_n_stays_design(self, ops_server, ops_env, monkeypatch):
+        """confirm N 后卡片停留 design 列（不流转）。"""
+        import agent_go.kanban as _kb
+        card = _create_card(ops_server, title="架构任务", type="implementation", repo="/tmp")
+        print("DEBUG card:", card)
+        _kb.move_card(card["id"], "design")
+        TID = "task-20260820-120002-003-cccc"
+        import json as _json
+        td = ops_env / TID
+        td.mkdir(parents=True)
+        (td / "meta.json").write_text(_json.dumps({"task_id": TID, "status": "EXECUTING", "status_schema_version": 1, "repo": "/tmp/r", "subtasks": [], "results": []}), encoding="utf-8")
+        (td / "pending_confirmation.json").write_text(_json.dumps({"stage": "plan", "payload": {}, "ts": "x", "timeout_sec": 1800}), encoding="utf-8")
+        _kb.link_task(card["id"], TID)
+        code, d = _post(f"{ops_server}/api/tasks/{TID}/confirm", {"stage": "plan", "decision": "N"})
+        assert code == 200
+        card_after = _kb.get_card(card["id"])
+        assert card_after["stage"] == "design"

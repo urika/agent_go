@@ -2133,6 +2133,15 @@ class WebHandler(BaseHTTPRequestHandler):
             "stage": stage, "decision": decision,
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }, ensure_ascii=False), encoding="utf-8")
+        # W3.1：design 列卡片计划确认后自动流转 implementation（Y 决策时）
+        if decision == "Y":
+            try:
+                card = kanban.find_card_by_task(task_id)
+                if card and card.get("stage") == "design":
+                    kanban.move_card(card["id"], "implementation", note=f"计划确认通过（task {task_id}）")
+                    logger.info("[kanban] 卡片 %s 计划确认通过 → implementation", card["id"])
+            except Exception as _ke:
+                logger.warning("[kanban] 确认后流转失败: %s", _ke)
         result = {"task_id": task_id, "stage": stage, "decision": decision, "status": "accepted"}
         _audit("tasks.confirm", {"task_id": task_id, "stage": stage, "decision": decision},
                result, True, token)
@@ -2269,8 +2278,15 @@ class WebHandler(BaseHTTPRequestHandler):
         # 可能 >30s 导致 HTTP 超时）；task_id 解析后经 on_task_id 回调 link_task + 自动流转。
         def _on_task_id(tid: str) -> None:
             try:
-                kanban.dispatch_card(card_id, tid, note=f"派发任务 {tid}")
-                logger.info("[kanban] 卡片 %s 任务已派发: %s", card_id, tid)
+                # W3.1：design 列卡片（系统架构/困难任务）只 link 不流转——
+                # 停留 design 列待计划确认（R5b web 确认）；确认后由 _op_confirm 流转。
+                card_now = kanban.get_card(card_id)
+                if card_now and card_now.get("stage") == "design":
+                    kanban.link_task(card_id, tid)
+                    logger.info("[kanban] 卡片 %s (design) 仅链接任务 %s，待计划确认后流转", card_id, tid)
+                else:
+                    kanban.dispatch_card(card_id, tid, note=f"派发任务 {tid}")
+                    logger.info("[kanban] 卡片 %s 任务已派发: %s", card_id, tid)
             except Exception as e:
                 logger.warning("[kanban] dispatch_card 回调失败: %s", e)
         # W2.2 状态回流：任务退出后读 meta.json，完成 → operations，失败 → blocked
