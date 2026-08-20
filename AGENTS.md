@@ -101,6 +101,7 @@ agent_go status --watch
 # Model benchmark / cross-judgment / evaluation / gate
 agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3   # 启动前探测实际后端+校验定价（S12）
 agent_go eval bench --suite golden                 # 预设套件: smoke/core/decision/stress/golden/phaseD
+agent_go eval bench --with-delivery                # 本地交付 merge 闭合 accepted_delivery 判定（不推进 target 引用）
 agent_go eval bench --source-batch results_v2      # 批次标识（跨批次追溯）
 agent_go eval baseline --candidate-models M1,M2    # 对照基线：claude -p 裸跑（不走 harness）
 agent_go eval models --results eval_suite/results.jsonl

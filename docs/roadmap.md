@@ -1,12 +1,12 @@
 # agent_go Roadmap：可靠地产出可合并交付物
 
-> 版本：v4.1
-> 更新日期：2026-08-15
-> 当前阶段：M4.5 模型与执行能力 ✅ 已完成（hard 94.4%、方案 B、模型池化）；M0-M4 已 `accepted`
+> 版本：v4.2
+> 更新日期：2026-08-20
+> 当前阶段：M0-M3、M4.5（模型池化，hard 94.4%）已 `accepted`；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1 已交付；M4 goal 回溯收尾中
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
-> 当前执行清单：[m0-task-list.md](m0-task-list.md)
+> 当前执行清单：[task-list-2026-08-20.md](task-list-2026-08-20.md)（历史：[m0-task-list.md](m0-task-list.md)）
 
 ## 1. 产品目标
 
@@ -324,7 +324,7 @@ system_error
 - 无进展检测，避免重复 retry 消耗预算。
   - ✅ 已落地（2026-08-11）：回退/振荡检测 `diff_stat_hash` + `verification.revert_threshold`（默认 2），同一累积状态出现 ≥ 阈值即终止并标记 `verify_revert`；打地鼠检测 `diverge_similarity_threshold`。见 [workflow-vs-subagent-review.md](design/workflow-vs-subagent-review.md)。
 - 循环状态埋点：`diff_stat_hash`、`failure_pattern`、`effective_strategy`、`no_progress`。✅（diff_stat_hash 随 retry 记录；`verify_revert`/diverge 终止信号映射为 failure_pattern=no_progress*，写入 deviation.jsonl（deviation.py）；`effective_strategy` 由 readonly_review 写入 verify_state.json，M2.2 补全）
-- 有界 Reflexion：仅在 retry 达到阈值后分析根因，不改变默认成功语义。⚠️（readonly_review 独立模型黑盒分析，结果仅注入 repair prompt 不改变任务状态；但默认每次 retry 触发，非严格"达到阈值后"——reflexion_threshold 未实现）
+- 有界 Reflexion：仅在 retry 达到阈值后分析根因，不改变默认成功语义。✅（2026-08-16 补齐：Reflexion 阈值化 retry≥2 触发（faebd0b，B5=b 决策落地）+ verify_state 稳定契约版本化（1d00870）；readonly_review 独立模型黑盒分析，结果仅注入 repair prompt 不改变任务状态）
 
 验收：
 
@@ -464,30 +464,28 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 - 一个「执行全过但漏了验收标准」的任务被标记为合规度不足，而非 completed。
 - goal 合规度可查询、可追溯。
 
-## 7.6 阶段五：M5-M6 问题跟踪与 issue 联动（可并行）
+## 7.6 阶段五：M5 问题跟踪与 Issue 联动
 
 目标：把失败从「单任务内」升级为「跨任务可聚合」的一等公民（Problem 实体），支撑根因分析和复发率统计。
 
-| M | 内容 | 依赖 |
+| M | 内容 | 状态 |
 |---|------|------|
-| **M5 问题跟踪** | 全局 `~/.agent_go/problems.jsonl`，跨任务累积 Problem 实体（id/状态/生命周期，见 A5 决策） | 无 |
-| **M6 issue 联动** | `--track-issues` 显式开启（默认关，避免 issue 洪水，见 A6 决策）；Problem 状态机 + GitHub issue 联动 | M5 |
-
-状态：`designed`（见 `business-architecture.md` 缺口 3，M5-M6）。
+| **M5 问题跟踪** | 全局 `~/.agent_go/problems.jsonl`，跨任务累积 Problem 实体：三态 + 复发重开、半衰期（stale_after_days→dormant）、葬礼（resolution_summary）；`agent_go problems` CLI（列表/聚合/详情/JSON） | ✅ `implemented`（2026-08-16：d0335ff 数据层 + d7150a3 CLI 收尾；同时支撑谦逊层 H3 与信任指标「复发可见率」） |
+| **Issue 联动**（原 M6） | `--track-issues` 显式开启（默认关，避免 issue 洪水，见 A6 决策）；Problem 状态机 + GitHub issue 联动 | `deferred`（未启动；「M6」编号自 2026-08-17 起由决策辅助系列使用，见 §7.12，故改称 Issue 联动避免歧义） |
 
 ## 7.7 阶段六：智能闭环与自治（决策门后）
 
-目标：从「反应式」升级到「反思式」，再逐步收敛人工介入点，向全自主交付（渐进自治）演进。**此阶段必须先在决策门 B1-B5 拍板后再排期。**
+目标：从「反应式」升级到「反思式」，再逐步收敛人工介入点，向全自主交付（渐进自治）演进。
 
 ### 决策门（对应 `business-architecture.md` B 类决策）
 
-| 决策 | 问题 | 现状倾向 |
+| 决策 | 问题 | 结论 |
 |------|------|---------|
-| B2 定位 | 交付工具 vs bench 工具 | 交付工具（M1 证据） |
-| B5 循环智能层级 | 反应式 → 反思式？ | 先做最小止血 + 埋点，M3 数据支持后再上 Reflexion |
-| B4 问题跟踪定位 | issue 状态机 vs 聚合 vs Reflexion 记忆源 | 若选反思式，Problem 需承载 `failure_pattern` |
-| B1 merge 策略 | 分叉时 ff-only 失败 vs 自动 merge commit | ff-only 保守提示 + 手动命令兜底 |
-| B3 spec ROI | 0 次使用还做 4 天闭环吗 | 先 M3 冒烟 5+ 任务验证，再决定 |
+| B2 定位 | 交付工具 vs bench 工具 | ✅ 交付工具（M1 证据） |
+| B5 循环智能层级 | 反应式 → 反思式？ | ✅ 已拍板 B5=b（2026-08-16）：先做最小止血 + 埋点，Reflexion 阈值化已落地（faebd0b + 1d00870） |
+| B4 问题跟踪定位 | issue 状态机 vs 聚合 vs Reflexion 记忆源 | ✅ 聚合 + Reflexion 记忆源：M5 Problem 实体已落地（承载复发/解法），GitHub issue 联动 deferred |
+| B1 merge 策略 | 分叉时 ff-only 失败 vs 自动 merge commit | 未拍板：ff-only 保守提示 + 手动命令兜底（现状沿用） |
+| B3 spec ROI | 0 次使用还做 4 天闭环吗 | ✅ 已冒烟（2026-08-15，5 任务）：R2 追踪完整率 0→100%（4/4 有效交付）、R1 80%（唯一失败为本地 worker 能力，与 spec 无关）→ **弱正 ROI，spec 闭环保留轻量形态** |
 
 ### 能力清单（按自治度递进，每级设产品价值门禁）
 
@@ -495,18 +493,18 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 - A1 文件所有权约束：同一核心文件只允许一个 subtask 负责（规划期 + L1 门禁强制）。✅ 已实现（88d0c5a，`_is_core_file` + `core_file_shared_ownership` blocking）。
 - A2 函数级验收契约：subtask 验收绑定函数/行为级条件（`_extract_verification_commands` 扩展）。✅ 已实现（f6e2cb0，`classify_verification_scope` 五级锚定 + suite 级弱锚定告警）。
 - A3 未提交基线处理：启动检测 dirty worktree，`--baseline` 显式提交或强提示。✅ 已实现（`get_dirty_files`/`commit_baseline`；`--allow-dirty`/`--baseline`；headless 默认 fail-safe 中止；meta 记录 `baseline_dirty`/`baseline_action`）。
-- A4 M4 goal 回溯（见 §7.5）。
+- A4 M4 goal 回溯（见 §7.5，收尾中）。
 
-**阶段 B — spec 闭环验证（ROI 待证）**
-- B1 spec 持久化 + §5 结构化（Markdown checkbox + 反引号命令，见 A2 决策）。
-- B2 AST 冲突检测器（P9，97% 精度零 LLM 成本）加进 Spec Gate。
-- B3 用 5+ 真实任务冒烟，测「填写成本 / Plan 编辑次数 / 追踪完整率 / 交付成功率」。
+**阶段 B — spec 闭环验证（✅ 冒烟完成，弱正 ROI 留轻量）**
+- B1 spec 持久化 + 闭环实施。✅ 已实现（d5cc175：ID 链条/锚定门禁/spec 快照/后段注入/traceability 自动触发/do-not-touch fail-close；b01c644 冒烟实证修复：预算头寸口径 + AC 硬映射兜底 + e2e 路径）。
+- B2 AST 冲突检测器（P9，97% 精度零 LLM 成本）加进 Spec Gate。未启动（轻量形态下优先级下调）。
+- B3 5+ 真实任务冒烟。✅ 已完成（2026-08-15，结论见 B3 决策行）。
 
-**阶段 C — 智能闭环（B5 决策后）**
-- C1 数据埋点补全（verify_state schema 前向兼容 KnowledgeStore）。
-- C2 Reflexion 批评层：改「retry≥2 触发」（当前每次 retry 触发，见 M2.2 ⚠️），受 token/次数/预算约束。
-- C3 局部重规划：失败触发一次 Plan 拆分建议，默认人工确认。
-- C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。
+**阶段 C — 智能闭环（B5=b 已拍板）**
+- C1 数据埋点补全（verify_state schema 前向兼容 KnowledgeStore）。✅ 已实现（1d00870，verify_state 稳定契约版本化 + reflexion 来源标记）。
+- C2 Reflexion 批评层：改「retry≥2 触发」，受 token/次数/预算约束。✅ 已实现（faebd0b）。
+- C3 局部重规划：失败触发一次 Plan 拆分建议，默认人工确认。未启动。
+- C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。未启动（Problem/deviation/verify_state 数据已就位）。
 
 **阶段 D — 自治决策（谨慎）**
 - D1 Reviewer 灰度（高风险任务，review cost ≤ 主任务 20% 门禁）。
@@ -520,11 +518,11 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 ### 关键路径
 
 ```text
-阶段 A（工程闭环）──┬─ A4 goal 回溯（M4，进行中）
-                    └─ A5 问题跟踪（M5-M6，可并行）
-阶段 B（spec 闭环）→ 冒烟 ROI → 阶段 C（智能闭环，依赖 B5 + 埋点）
-                             → 阶段 D（自治，依赖 C + B1）
-                             → 阶段 E（仅试点）
+阶段 A（工程闭环）✅ ──┬─ A4 goal 回溯（M4，收尾中）
+                      └─ A5 问题跟踪（M5 ✅；Issue 联动 deferred）
+阶段 B（spec 闭环）✅ 冒烟弱正 ROI → 阶段 C（智能闭环：C1/C2 ✅ → C3 局部重规划 / C4 KnowledgeStore A/B）
+                               → 阶段 D（自治，依赖 C + B1 + 信任指标放行门）
+                               → 阶段 E（仅试点）
 ```
 
 ## 7.8 阶段七：模型与执行能力（M4.5 里程碑，已完成 2026-08-15）
@@ -571,6 +569,90 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 ### 与 §7.7 阶段六的关系
 
 本阶段是阶段六「智能闭环」的**执行能力底座**：模型池化 + 难度自适应 + 归因可信后，阶段 C（Reflexion/局部重规划）和阶段 D（自治决策）的「换模型/归因复盘」才有可靠基础。
+
+## 7.9 阶段八：诊断数据面消费与契约治理（已完成 2026-08-19）
+
+目标：llama-defender R13-R16 诊断数据面（会话台账/轮级指标/请求档案/ctx_config/backend props）的消费侧落地——让「代理侧可见」变成「agent_go 计量、评测、处置可用」；同步完成三项目架构 review 的 agent_go 侧整改。
+
+### 已交付
+
+| 能力 | 说明 | 证据 |
+|------|------|------|
+| **C1 会话头注入** | worker/planner/evaluator 统一携带 `X-Claude-Code-Session-Id`（md5(task:sub)[:8]+可读后缀），台账按会话精确归因 | 实测 `/api/sessions` 见 `key_source=header` |
+| **C2 诊断入计量** | R13 四头（diag_request_id/prompt_processed_n/hit_ratio/epoch_count）入 metering；子任务结束追加 `worker_diag` 事件 | metering.jsonl 实测含 session_key |
+| **C3 评测诊断维度** | `eval analyze_cost` 增 route_distribution（cloud>30% 告警）/hit_ratio_by_model/injection_counts | test_eval 增补 5 用例 |
+| **C4 轮级看门狗** | 执行期间轮询 session ledger 检测重复轮（v1 检测+上报不杀进程，干预走 verify/retry） | tests/test_diag_watchdog.py（6 用例） |
+| **C5 批次可复现** | bench 快照 ctx_config/route_config → proxy_context sidecar 入 batch manifest | `eval batch-manifest --proxy-context` |
+| **C6 失败处置提速** | `inspect` 输出 ledger/archive/metrics 取数提示；`review --deep` 附 sent_view 档案摘要 | — |
+| **C7 健康检查扩展** | `config status` 增 ctx_config/backend_props（501 结构化降级显示） | 活代理实测正确 |
+| **契约测试 F 组** | `tools/check_llama_defender_contract.py` 增 6 用例固化 R13-R16 消费面 | 20 PASS / 0 FAIL / 1 SKIP（F6=服务方 known-issue L-6） |
+| **Review 整改（A-1/A-2/A-3）** | `worker_backends` 收敛单值 `worker_base_url`；真实模型探测切 `/api/status` JSON（HTML 降级兜底）；`diag.CONTRACT_API_VERSION="2"` 契约版本标注 | ISSUE-41~43；全量 2598 测试通过 |
+
+设计原则：诊断消费**全部 fail-open**（代理不可达/端点缺失/字段缺失一律跳过，绝不阻断主流程）；header 构造/截断口径以代理侧契约文档（api_version="2"）为唯一权威。
+
+文档：[diag-dataplane-consumer-requirements-20260819.md](design/diag-dataplane-consumer-requirements-20260819.md)（需求+实施记录）、[three-project-architecture-review-20260819.md](design/three-project-architecture-review-20260819.md)（三项目 review，P1 项 swe-eval S-1/S-2 同日落地）。
+
+## 7.10 阶段九：谦逊层与信任指标（已完成 2026-08-16）
+
+目标：产品叙事从「自动化」升级为「可信的自动化」——每次自动化升级以「先证明交底可信」为前提（设计：[humility-layer-design.md](design/humility-layer-design.md)）。
+
+### 已交付
+
+| 能力 | 说明 | 证据 |
+|------|------|------|
+| **H1 交付盲区清单 + H4 未覆盖视角** | 交底报告标注「没验证什么」与未采用的备选视角 | 705e372 |
+| **H2 层间归因** | 失败可定位到「层」（修 spec / 修 plan / 调预算 / 换模型） | 8fb9182 |
+| **H3 Problem 实体数据层** | 半衰期 + 葬礼，M5 地基（见 §7.6） | d0335ff |
+| **#48 交底报告 + #49 信任指标 + #50 信任体验** | `metrics.compute_trust_metrics`：审查后修改率 / 盲区命中率 / 复发可见率 | 8339cab |
+| **#51/#52 谦逊层 UI** | Web 任务详情盲区卡片 + `inspect` 失败历史 | 98a2d59 |
+
+信任指标是阶段 D（自治决策）的放行门：审查后修改率下降 + 盲区命中率高 + 复发可见率上升——交底可信，才允许自动化升级。
+
+## 7.11 阶段十：Web 操作台全功能与协作扩展（已完成 2026-08-13 ~ 08-18）
+
+目标：把 CLI 能力完整搬到 Web 操作台（观测 + 处置 + 配置中心），并向多用户协作扩展。
+
+### 已交付
+
+- **Web 操作台全功能（R1-R17）**：观测 + 处置（run/resume/cancel/clean/review/merge/pr/confirm）+ 配置中心（local⇄cloud）+ SSE。纯本地 Golden Path 端到端验收通过（[web-golden-path-acceptance-2026-08-13.md](web-golden-path-acceptance-2026-08-13.md)：10/10 步骤、纯本地 $0.00、终态 ACCEPTED_DELIVERY、审计链完整）。
+- **协作扩展**：任务报告导出（md/html，a390192）、多用户角色（admin/viewer 双 token，a74bb1c）、任务级互斥锁 + 报告 Web 化（cccc467）、任务备注（86d409b）、规模化保护（并发上限 + 磁盘告警，62cda1e）。
+- **可靠性 P0**：多级模型降级链（evaluator fallback/fallbacks + worker_models_fallback_chain）+ 低置信度 evaluator 仲裁（5bf4bec，防假阳性/假阴性污染验证门禁）。
+- **发布准备**：QUICKSTART 5 分钟上手 + 打包验证（e38bbb2）；CI 首次全绿（ruff 64 / mypy 156 预存错误清零，04e547f/4bde81d）。
+- **生态沉淀**：模型评测方法论（1e384a0，M5.4——评测流程/可信度/教训）。
+
+注：本阶段协作扩展在提交记录中使用「M5.x」编号（M5.1 降级链样本 / M5.2 协作 / M5.3 规模化 / M5.4 生态），与 §7.6「M5 问题跟踪」是两条并行线，编号沿用历史、不再迁移。
+
+## 7.12 阶段十一：决策辅助 M6.1-M6.5（已完成 2026-08-17 ~ 08-19）
+
+目标：证据驱动的策略建议层，**不升级为自动决策执行层**（设计：[decision-assistant-design.md](design/decision-assistant-design.md)；用户指南：[user-guide-decision-assistant.md](user-guide-decision-assistant.md)）。
+
+三边界：① 目标由人定义（LLM 不改目标）；② 建议不直接执行（requires_approval，确认后走 --apply）；③ 证据强制绑定（强制 `--results` manifest 校验，无证据拒答，输出必带 `evidence_refs`）。
+
+| M | 能力 | 状态 |
+|---|------|------|
+| M6.1 | `eval insight` MVP：证据物化（失败模式/成本/环境快照，evidence.py）+ 结构化建议 | ✅ 4f743c4 |
+| M6.2 | decision log：统一决策记录（change/evidence/goal/expected/actual），可审计可复盘 | ✅ 2af73c1 |
+| M6.3 | Web 🧠 洞察 tab：洞察报表 + 决策历史展示 | ✅ fd4e218 |
+| M6.4 | 规则初筛 + LLM 精排：`router recommend` 升级为确定性问题识别 + LLM 跨维权衡 | ✅ 6c68a09 |
+| M6.5 | `insight --apply-suggestion N`：确认后自动应用（config 修改 + 备份 + 审计，可回滚） | ✅ 77ed831 |
+| M6.6 | 全自动决策 | **明确不做**（目标由人定义是产品红线） |
+
+注：本系列沿用「M6」编号，与 §7.6 原「M6 issue 联动」不同——后者已改称 Issue 联动（deferred）。
+
+## 7.13 阶段十二：看板驱动的智能任务编排（W1 已交付，2026-08-19）
+
+目标：基于看板把任务按「可自动化程度」分流到成本-能力最优路径——本地模型是「模块工厂」而非「系统架构师」（设计：[kanban-task-orchestration.md](design/kanban-task-orchestration.md)、[kanban-board.md](design/kanban-board.md)）。
+
+### 已交付
+
+- **看板 MVP + 二期**：5 阶段列 × 3 类卡片（5bd2022）；归档视图 / 跨进程锁 / 状态快照缓存 / 派发幂等（6849065）；派发原子化 `dispatch_card` 单锁 link+move + 输入卫生（fd30a73）。
+- **W1 任务分类器**：卡片 `automation` 字段（auto/manual/review）+ 分类规则（架构级关键词 / difficulty=hard → design 列云端+人工；明确 spec 模块 → implementation 列本地队列）+ dispatch 按列路由（automation=manual 强制 confirm_mode=web 人工确认计划）；PoC 验证通过（7807742）。
+
+### 后续（W2+，未排期）
+
+- 本地后台队列批量执行（implementation 列零边际成本异步跑批）。
+- 失败降级链兜底接入看板 + 通知闭环（webhook/桌面通知）。
+- operations 列交付审批与 merge 联动。
 
 ## 8. 扩展能力决策门
 
@@ -669,12 +751,24 @@ M0 产品契约与指标冻结  ✅ accepted
   -> M1 交付闭环        ✅ accepted
   -> M2 核心可靠性      ✅ accepted
   -> M3 真实任务验证    ✅ accepted
-  -> M4 goal 回溯       进行中
-  -> M5-M6 问题跟踪     可并行
-  -> 阶段 B spec 闭环   → 冒烟 ROI 决策
-  -> 阶段 C 智能闭环    → B5 决策后
-  -> 阶段 D 自治决策    → B1 决策后
+  -> M4.5 模型池化      ✅ accepted（hard 94.4%、方案 B）
+  -> 阶段八 诊断数据面   ✅ 完成（2026-08-19）
+  -> 阶段九 谦逊层       ✅ 完成（信任指标放行门已立）
+  -> 阶段十 Web 全功能   ✅ 完成（Golden Path 验收 + 协作扩展）
+  -> 阶段十一 决策辅助   ✅ M6.1-M6.5（建议层，M6.6 明确不做）
+  -> 阶段十二 看板编排   ✅ W1 分类器（W2+ 未排期）
+  -> M4 goal 回溯       收尾中
+  -> M5 问题跟踪        ✅ implemented；Issue 联动（原 M6）deferred
+  -> 阶段 B spec 闭环   ✅ 冒烟弱正 ROI，留轻量
+  -> 阶段 C 智能闭环    C1/C2 ✅（B5=b 已拍板）→ C3 局部重规划 / C4 KnowledgeStore A/B
+  -> 阶段 D 自治决策    → 信任指标放行门达标 + B1 决策后
   -> 阶段 E Spec-as-Source  仅试点
 ```
 
-在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017、canonical 35 任务通过率 60%、bench 中 `accepted_delivery=0`（交付闭环自动验证是下一阶段头号硬指标）。
+下一阶段三件事（按优先级）：
+
+1. **bench 交付闭环自动验证**：✅ 已实现（2026-08-20，`eval bench --with-delivery` 本地交付 merge 闭合 `accepted_delivery` 判定，不推进 target 引用保持 fixture repeat 可复现；delivery.py `apply_local_delivery` + 10 用例）→ 待 canonical 重跑产出首个有效 ADR 读数。**M4 goal 回溯收尾**并行。
+2. **阶段 C 续项**：C3 局部重规划（默认人工确认）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位）。
+3. **阶段 D 放行评估**：信任指标（审查后修改率 / 盲区命中率 / 复发可见率）跨任务积累达标后，启动 Reviewer 灰度与 B1 自动 merge 决策。
+
+在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017、canonical 35 任务通过率 60%；bench `accepted_delivery` 有效读数待 `--with-delivery` 重跑 canonical 后产生（执行清单：[task-list-2026-08-20.md](task-list-2026-08-20.md) N1-4）。

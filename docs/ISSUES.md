@@ -678,3 +678,49 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 3. `build_plan_repair_feedback` 新增 empty_plan 提示文案。
 
 **验证**：test_planning.py 新增 2 用例（empty_plan 阻断 + repairable、反馈文案）；全量 2170 passed。
+
+---
+
+## 2026-08-19 三项目架构 Review（agent_go 侧整改）
+
+> 来源：[three-project-architecture-review-20260819.md](design/three-project-architecture-review-20260819.md)（swe-eval / agent_go / llama-defender 分层 review），agent_go 侧发现 A-1/A-2/A-3 三项，均于当日修复。
+
+### ISSUE-41 `worker_backends` 与代理路由双写漂移（Review A-1）
+
+- **位置**：`profiles.py generate_local_profile` / `executor.py` worker_backends 兼容块 / `diag.py local_proxy_base_url` / `web_server.py` 启动前探测
+- **状态**：✅ 已修复（2026-08-19）
+- **严重度**：P2（双写漂移：代理路由变更而 agent_go 配置未同步 → 计量/路由误判）
+
+**问题**：`worker_backends`（模型名 → base_url 映射）把「部署拓扑」职责放在消费侧，与代理侧路由（`MODEL_ROUTE_PREFERENCES`）是同一职责的两处实现——改一处忘另一处即漂移（模型实体三层设计 §3 早已定性「放错层」，deprecated warning 已在，但 `config local` 仍在生成该字段，漂移源头未断）。
+
+**修复**：按既定方向收敛为单值 `worker_base_url`（细粒度模型→后端路由全部留代理侧）：
+
+1. `profiles.py generate_local_profile` 不再生成 `worker_backends`（模板里 `plan_api.worker_base_url` 本就存在，纯重复）。
+2. `diag.local_proxy_base_url`、`profiles.health_check` / `_profile_mode`、web 启动前探测全部改为 `worker_base_url` 优先。
+3. `executor` 保留 deprecated 兼容读取（有则生效 + 首次 migration warning）——旧配置无破坏。
+
+**验证**：test_profiles / test_diag 更新 4 用例（断言新优先级 + 不再生成 deprecated 字段）；全量 2598 passed。
+
+### ISSUE-42 `_probe_local_model` 解析 HTML `/status` 脆契约（Review A-2）
+
+- **位置**：`executor.py _probe_local_model`
+- **状态**：✅ 已修复（2026-08-19）
+- **严重度**：P3（脆契约依赖：HTML 结构变更即静默探测失败）
+
+**问题**：真实本地模型名探测依赖正则解析 `/status` HTML 页面的 4 种文本结构——HTML 是内部渲染细节而非接口；代理 R1 早已交付结构化 `/api/status` JSON（`backend.model_name`），属契约迁移残留尾巴。
+
+**修复**：探测顺序改为 ① `GET /api/status` JSON（经 `diag.fetch_json`，fail-open）→ `backend.model_name`；② 旧代理回退 HTML 解析（兼容路径注释标注保留一个版本周期后移除）。
+
+**验证**：test_executor 新增 2 用例（JSON 优先不再触达 HTML、字段缺失回退 HTML）；活代理实测返回真实模型名（SIGHUP 热切换场景同步验证）。
+
+### ISSUE-43 会话头契约知识分散两处实现（Review A-3 / X-2 agent_go 侧）
+
+- **位置**：`agent_go/diag.py`
+- **状态**：✅ agent_go 侧已修复（2026-08-19）；swe-eval 侧随 S-1/S-2 同日收敛，契约文档单点化（X-2）待代理侧补 `api_version` 权威声明
+- **严重度**：P3（契约演进时多处同步、易漏）
+
+**问题**：会话头构造/8 字符截断口径在 agent_go（diag.py 注释）与 swe-eval（targets.yaml 注释）各自重复实现，无版本锚点——契约升级时靠记忆同步。
+
+**修复**：`diag.CONTRACT_API_VERSION = "2"` 显式标注实现对齐的契约版本；`SESSION_HEADER`/`PROXY_KEY_LEN` 注释指向 llama.cpp 契约文档（§3.2）为唯一权威，并注明升级时同步契约脚本 F 组。
+
+**外部依赖（known-issue）**：llama-defender `/api/metrics/history?session=` 已承诺未生效（404），消费侧契约脚本 F6 用例 SKIP 标注，待服务方补齐（Review L-6）。

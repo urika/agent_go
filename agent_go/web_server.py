@@ -2292,6 +2292,25 @@ class WebHandler(BaseHTTPRequestHandler):
                     kanban.move_card(card_id, new_stage, note=f"任务 {tid} 结束（{status}）")
                     logger.info("[kanban] 状态回流 卡片 %s → %s（task %s，status=%s）",
                                 card_id, new_stage, tid, status)
+                # W2.3 完成/失败通知（notify.py 多通道：desktop/webhook/command）
+                try:
+                    from .notify import notify_event
+                    from .config import load_config as _load_cfg
+                    _cfg = _load_cfg()
+                    _evt = "on_complete" if new_stage == "operations" else (
+                        "on_blocked" if new_stage == "blocked" else "")
+                    if _evt:
+                        notify_event(_evt, {
+                            "task_id": tid,
+                            "task": meta.get("task", card.get("title", "")),
+                            "status": status,
+                            "result": new_stage,
+                            "card_id": card_id,
+                            "summary": (meta.get("summary") or "")[:200],
+                            "failure_reason": (meta.get("failure_reason") or "")[:200],
+                        }, _cfg)
+                except Exception as _ne:
+                    logger.warning("[kanban] 通知发送失败（不影响回流）: %s", _ne)
             except Exception as e:
                 logger.warning("[kanban] 状态回流失败: %s", e)
         task_runner.start_run(repo, task_text, parallel=parallel,

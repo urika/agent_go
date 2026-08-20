@@ -294,6 +294,34 @@ class TestDispatch:
         assert _kb.get_card(card["id"])["task_ids"] == [TID, TID2]
 
 
+
+    def test_dispatch_exit_notification(self, ops_server, ops_env, monkeypatch):
+        """W2.3：任务退出后状态回流 + 通知（on_complete/on_failed 经 notify_event）。"""
+        import agent_go.kanban as _kb
+        card = _create_card(ops_server, type="implementation", repo="/tmp")
+        notified = []
+        monkeypatch.setattr("agent_go.notify.notify_event",
+                            lambda event, context, config: notified.append((event, context.get("task_id"))))
+        # mock start_run：捕获 on_exit 回调，模拟任务完成后触发
+        captured = {}
+        def fake_run(repo, task, parallel=1, goal=None, confirm_mode="auto", wait_for_id=True, on_task_id=None, on_exit=None):
+            captured["on_task_id"] = on_task_id
+            captured["on_exit"] = on_exit
+            return "task-20260816-100000-999-dddd"
+        monkeypatch.setattr(ws.task_runner, "start_run", fake_run)
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch", {})
+        assert code == 200
+        # 模拟任务完成：创建 meta（DELIVERY_READY）+ 调 on_exit 回调
+        tid = "task-20260816-100000-999-dddd"
+        _mk_task(ops_env, tid, status="DELIVERY_READY")
+        captured["on_task_id"](tid)
+        captured["on_exit"](tid, 0)
+        # 验证：通知被触发（on_complete，task_id 匹配）
+        assert any(evt == "on_complete" for evt, _ in notified), notified
+        # 验证：卡片状态回流到 operations
+        assert _kb.get_card(card["id"])["stage"] == "operations"
+
+
 class TestStatusSnapshot:
     def test_snapshot_caches_and_invalidates(self, ops_env):
         """备注3：任务状态快照按 meta 签名缓存；meta 变化（状态/大小）触发重建。"""

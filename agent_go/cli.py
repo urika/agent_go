@@ -319,6 +319,8 @@ def _build_parser():
                              help="bench 并发度：同时运行的 (任务×模型×重复) 组合数（默认 2，受 API rate-limit 与本地资源约束）")
     eval_parser.add_argument("--hard-model", dest="hard_model", default="",
                              help="CR-建议#5：hard 难度子任务使用的更强模型（如 deepseek-v4-pro）；留空 = 与候选模型相同")
+    eval_parser.add_argument("--with-delivery", dest="with_delivery", action="store_true",
+                             help="bench 子命令：任务成功后做本地交付 merge，闭合 accepted_delivery 判定（不推进 target 引用，保持 fixture repeat 可复现）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
                              help="读取结果文件（models/cost-baseline/recommend 子命令，逗号分隔多个文件）")
     eval_parser.add_argument("--tolerance", dest="tolerance", type=float, default=1.5,

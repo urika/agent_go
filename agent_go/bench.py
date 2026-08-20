@@ -425,6 +425,7 @@ def cmd_bench(args=None) -> None:
     source_batch = getattr(args, "source_batch", None) or "bench"
     no_skills = bool(getattr(args, "no_skills", False))
     suite = getattr(args, "bench_suite", "") or ""
+    with_delivery = bool(getattr(args, "with_delivery", False))
 
     if not models:
         console.error("至少指定一个 --candidate-models（逗号分隔）")
@@ -503,7 +504,8 @@ def cmd_bench(args=None) -> None:
         _rec = _run_one_task(_task, _repo, _model, _task_id,
                              no_skills=no_skills, source_batch=source_batch,
                              results_path=output_path,
-                             hard_model=getattr(args, "hard_model", "") or "")
+                             hard_model=getattr(args, "hard_model", "") or "",
+                             with_delivery=with_delivery)
         # ISSUE-38：任务结束后清理 fixture 源仓库失效 worktree 注册
         # （timeout/SIGKILL 打断时 pipeline 清理不执行，注册项残留）
         _prune_fixture_worktrees(_repo)
@@ -645,7 +647,7 @@ def cmd_baseline(args=None) -> None:
 def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
                   preserve: bool = False, no_skills: bool = False,
                   source_batch: str = "", results_path: Optional[Path] = None,
-                  hard_model: str = "") -> list[dict]:
+                  hard_model: str = "", with_delivery: bool = False) -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
 
     hard_model: CR-建议#5——hard 难度子任务使用的更强模型（留空 = 与候选 model 相同）。
@@ -653,6 +655,8 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     preserve=True 时传 --preserve-worktrees 给 agent_go run，保留 worktree 供交叉评判读 diff。
     source_batch: 批次标识（如 baseline / results_v2 / smoke-*），写入每条 record。
     results_path: 结果文件路径，用于从历史记录推断子任务数做动态 timeout。
+    with_delivery: 任务成功后做本地交付 merge（闭合 accepted_delivery 判定，见
+    _apply_bench_delivery），不推进 target 引用以保持 fixture repeat 可复现。
     """
     start = time.time()
 
@@ -782,7 +786,45 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     if _resolved_td is None:
         _after_dirs = set(AGENT_GO_DIR.glob("task-*")) if AGENT_GO_DIR.exists() else set()
         _new_dirs = _after_dirs - _before_dirs
+    # --with-delivery：在采集结果前做本地交付 merge，让 meta 带上
+    # explicit_merge_commit，evaluate_accepted_delivery 才能给出真实读数。
+    if with_delivery and _resolved_td is not None:
+        _apply_bench_delivery(_resolved_td, repo)
     return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch)  # type: ignore[return-value]
+
+
+def _apply_bench_delivery(td: Path, repo: Path) -> None:
+    """--with-delivery：任务成功后做本地交付 merge，闭合 Accepted Delivery 判定。
+
+    bench 无 remote/gh，永远缺 pr_url/explicit_merge_commit → accepted_delivery
+    恒为 0（缺失理由 missing_pr_or_explicit_merge）。此处复用
+    delivery.apply_local_delivery 在 fixture 仓库内做本地 merge（默认不推进
+    target 引用，保持 repeat 可复现），meta.json 落 explicit_merge_commit。
+    全部 fail-open：任何异常只记 debug，不影响 bench 结果采集；merge 冲突
+    走 meta.delivery_failed → failure_class=delivery_failure 正常归因。
+    """
+    try:
+        meta_path = td / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("pr_url"):
+            return  # PR 与 merge 是互斥交付路径（cmd_merge 同语义）
+        if not meta.get("delivery_branch"):
+            return
+        if meta.get("status") not in ("DELIVERY_READY", "completed"):
+            return
+        if any(r.get("status") in ("failed", "blocked") for r in meta.get("results", [])):
+            return
+        from .delivery import apply_local_delivery
+        res = apply_local_delivery(Path(meta.get("repo") or str(repo)), meta)
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        if res["delivered"]:
+            console.info(f"[delivery] {meta.get('task_id', '?')} 本地交付: {res['merge_commit'][:12]}")
+        else:
+            console.warning(f"[delivery] {meta.get('task_id', '?')} 本地交付失败: {res['error'][:120]}")
+    except Exception as exc:  # fail-open：交付异常不污染采集
+        console.debug(f"[delivery] bench 本地交付异常（忽略）: {exc}")
 
 
 def _prune_fixture_worktrees(repo: Path) -> None:

@@ -281,3 +281,115 @@ def check_mergeability(
             cwd=str(repo_path), capture_output=True, text=True, timeout=30,
         )
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def apply_local_delivery(
+    repo: str | Path,
+    meta: dict[str, Any],
+    advance_target: bool = False,
+) -> dict[str, Any]:
+    """本地交付：把 delivery branch merge 进 target branch（不经 GitHub PR）。
+
+    与 ``cmd_merge`` 同语义，但为可编程调用（bench / harness）抽取为纯函数：
+    mergeability 预检 → 临时 worktree 执行 merge → 记录 ``explicit_merge_commit``。
+
+    ``advance_target=False``（默认，bench fixture 模式）时只记录 merge commit，
+    **不推进 target 分支引用**——fixture 仓库要在多次 repeat 间保持基线可复现，
+    推进 target 会让后续 run 的 worktree 从「已交付」的 HEAD 建，污染任务难度。
+    merge commit 对象留在共享 object db 中，``evaluate_accepted_delivery`` 的
+    ref 存在性校验可通过。meta 写入 ``delivery_mode="bench_local"`` 以便审计区分。
+
+    冲突/失败时不抛异常：写 ``delivery_attempted/delivery_failed/delivery_error``
+    后返回，由 ``evaluate_accepted_delivery`` 与 failure class 归因为 delivery_failure。
+
+    Returns:
+        {"delivered": bool, "merge_commit": str, "conflicts": [str], "error": str}
+    """
+    result: dict[str, Any] = {"delivered": False, "merge_commit": "", "conflicts": [], "error": ""}
+    repo_path = Path(repo)
+    delivery_branch = meta.get("delivery_branch") or ""
+    target = meta.get("target_branch") or meta.get("base_branch") or "main"
+    task_id = meta.get("task_id", "")
+
+    def _fail(error: str, conflicts: list[str] | None = None) -> dict[str, Any]:
+        result["error"] = error
+        result["conflicts"] = conflicts or []
+        meta["delivery_attempted"] = True
+        meta["delivery_failed"] = True
+        meta["delivery_error"] = error
+        return result
+
+    if not delivery_branch:
+        return _fail("无 delivery_branch，无法本地交付")
+    if not _git_ref_exists(repo_path, delivery_branch):
+        return _fail(f"delivery branch 不存在: {delivery_branch}")
+    if not _git_ref_exists(repo_path, target):
+        return _fail(f"target branch 不存在: {target}")
+
+    mc = check_mergeability(repo_path, delivery_branch, target)
+    if mc.get("error"):
+        return _fail(f"mergeability 检查失败: {mc['error']}")
+    if not mc.get("mergeable"):
+        return _fail(
+            "merge 冲突: " + ", ".join(mc.get("conflicts") or ["<未知>"]),
+            conflicts=mc.get("conflicts") or [],
+        )
+
+    # ahead == 0：delivery 相对 target 无新增 commit（如全部 no_changes）。
+    # 以 target tip 作为显式交付点，merge 为空操作。
+    if mc.get("ahead") == 0:
+        merge_commit = mc.get("base_sha") or ""
+        if not merge_commit:
+            return _fail("target branch tip 解析失败")
+        result["delivered"] = True
+        result["merge_commit"] = merge_commit
+    else:
+        tmp = Path(tempfile.mkdtemp(prefix=f"agent_go_localdelivery_{task_id}_"))
+        try:
+            add = subprocess.run(
+                ["git", "worktree", "add", "--detach", str(tmp), target],
+                cwd=str(repo_path), capture_output=True, text=True, timeout=30,
+            )
+            if add.returncode != 0:
+                return _fail(f"无法创建 merge worktree: {add.stderr.strip()[:200]}")
+            merge = subprocess.run(
+                ["git", "merge", "--no-ff", "-m",
+                 f"agent_go: local delivery of {task_id}", delivery_branch],
+                cwd=str(tmp), capture_output=True, text=True, timeout=60,
+            )
+            if merge.returncode != 0:
+                return _fail(f"merge 失败: {merge.stderr.strip()[:200]}")
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=str(tmp),
+                capture_output=True, text=True, timeout=10,
+            )
+            if head.returncode != 0 or not head.stdout.strip():
+                return _fail("merge 后 rev-parse HEAD 失败")
+            merge_commit = head.stdout.strip()
+            if advance_target:
+                update_ref = subprocess.run(
+                    ["git", "update-ref", f"refs/heads/{target}", merge_commit],
+                    cwd=str(repo_path), capture_output=True, text=True, timeout=10,
+                )
+                if update_ref.returncode != 0:
+                    return _fail(f"更新 {target} 分支失败: {update_ref.stderr.strip()[:200]}")
+            result["delivered"] = True
+            result["merge_commit"] = merge_commit
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(tmp)],
+                cwd=str(repo_path), capture_output=True, text=True, timeout=30,
+            )
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    meta["explicit_merge_commit"] = result["merge_commit"]
+    meta["delivery_attempted"] = True
+    meta["delivery_failed"] = False
+    meta["delivery_error"] = ""
+    meta["delivery_mode"] = "local_advance" if advance_target else "bench_local"
+    meta.pop("accepted_delivery_reasons", None)
+    if not any(r.get("status") in ("failed", "blocked") for r in meta.get("results", [])):
+        meta["accepted_delivery"] = True
+        if meta.get("status_schema_version"):
+            meta["status"] = "ACCEPTED_DELIVERY"
+    return result
