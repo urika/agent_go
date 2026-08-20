@@ -2273,9 +2273,30 @@ class WebHandler(BaseHTTPRequestHandler):
                 logger.info("[kanban] 卡片 %s 任务已派发: %s", card_id, tid)
             except Exception as e:
                 logger.warning("[kanban] dispatch_card 回调失败: %s", e)
+        # W2.2 状态回流：任务退出后读 meta.json，完成 → operations，失败 → blocked
+        def _on_exit(tid: str, code: int) -> None:
+            try:
+                from .status import normalize_task_status
+                import json as _json
+                meta_path = AGENT_GO_DIR / tid / "meta.json"
+                if not meta_path.exists():
+                    return
+                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                status = normalize_task_status(meta.get("status", ""), meta)
+                new_stage = None
+                if status in ("DELIVERY_READY", "ACCEPTED_DELIVERY"):
+                    new_stage = "operations"
+                elif status in ("FAILED", "BLOCKED", "VERIFICATION_FAILED", "CANCELLED"):
+                    new_stage = "blocked"
+                if new_stage:
+                    kanban.move_card(card_id, new_stage, note=f"任务 {tid} 结束（{status}）")
+                    logger.info("[kanban] 状态回流 卡片 %s → %s（task %s，status=%s）",
+                                card_id, new_stage, tid, status)
+            except Exception as e:
+                logger.warning("[kanban] 状态回流失败: %s", e)
         task_runner.start_run(repo, task_text, parallel=parallel,
                               confirm_mode=confirm_mode, wait_for_id=False,
-                              on_task_id=_on_task_id)
+                              on_task_id=_on_task_id, on_exit=_on_exit)
         result = {"ok": True, "status": "starting",
                   "note": "任务后台派发中（task_id 解析后自动关联并流转到 implementation 列）"}
         _audit("kanban.dispatch", {"card_id": card_id, "repo": repo}, result, True, token)
