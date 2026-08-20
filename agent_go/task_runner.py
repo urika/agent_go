@@ -119,12 +119,18 @@ class TaskRunner:
 
     def start_run(self, repo: str, task: str, parallel: int = 1,
                   goal: Optional[bool] = None, confirm_mode: str = "auto",
+                  wait_for_id: bool = True,
+                  on_task_id: Optional[Callable[[str], None]] = None,
                   on_exit: Optional[Callable[[str, int], None]] = None) -> str:
         """启动新任务（agent_go --json run ... --yes）。
 
         confirm_mode：auto（默认，--yes 跳过计划确认）；
                       web（R5b，--confirm-mode web，Plan/子任务确认走 web 文件协议）。
-        返回解析出的 task_id。子进程启动失败/首事件超时抛 TaskRunnerError。
+        wait_for_id：True（默认）阻塞等待 task_id 首事件后返回；
+                     False（W2.1 异步）立即返回，task_id 由后台线程解析后经 on_task_id 回调
+                     注册句柄（dispatch 场景：立即响应 HTTP，不阻塞等本地模型 plan 生成）。
+        返回解析出的 task_id（wait_for_id=False 时返回 ""，实际 id 经 on_task_id 回调）。
+        子进程启动失败/首事件超时抛 TaskRunnerError。
         """
         argv = [sys.executable, "-m", "agent_go", "--json", "run", repo, task,
                 "--parallel", str(max(1, min(8, int(parallel)))),
@@ -139,6 +145,25 @@ class TaskRunner:
             proc = self._spawn(argv)
         except OSError as e:
             raise TaskRunnerError(f"无法启动 agent_go 子进程: {e}") from e
+
+        if not wait_for_id:
+            # 异步模式：后台线程解析 task_id 并注册句柄，立即返回
+            def _async_register() -> None:
+                try:
+                    tid = self._read_task_id(proc)
+                    self._drain_remaining(proc)
+                    self._register(tid, proc)
+                    threading.Thread(target=self._reap, args=(tid, proc, on_exit), daemon=True).start()
+                    if on_task_id:
+                        try:
+                            on_task_id(tid)
+                        except Exception:
+                            logger.exception("on_task_id callback failed")
+                except Exception as e:
+                    logger.warning("异步 task_id 解析失败: %s", e)
+            threading.Thread(target=_async_register, daemon=True).start()
+            return ""
+
         task_id = self._read_task_id(proc)
         if proc.poll() is not None and proc.returncode not in (0, None):
             raise TaskRunnerError(f"任务启动后立即退出（exit {proc.returncode}）")

@@ -2265,12 +2265,20 @@ class WebHandler(BaseHTTPRequestHandler):
         if card.get("description"):
             task_text += "\n\n" + card["description"]
         task_text = task_text[:4000]
-        task_id = task_runner.start_run(repo, task_text, parallel=parallel,
-                                        confirm_mode=confirm_mode)
-        card = kanban.dispatch_card(card_id, task_id, note=f"派发任务 {task_id}")
-        result = {"ok": True, "task_id": task_id, "card": card}
-        _audit("kanban.dispatch", {"card_id": card_id, "task_id": task_id, "repo": repo},
-               {"task_id": task_id}, True, token)
+        # W2.1 异步派发：wait_for_id=False 立即返回（不阻塞等 task_id，本地模型 plan 生成
+        # 可能 >30s 导致 HTTP 超时）；task_id 解析后经 on_task_id 回调 link_task + 自动流转。
+        def _on_task_id(tid: str) -> None:
+            try:
+                kanban.dispatch_card(card_id, tid, note=f"派发任务 {tid}")
+                logger.info("[kanban] 卡片 %s 任务已派发: %s", card_id, tid)
+            except Exception as e:
+                logger.warning("[kanban] dispatch_card 回调失败: %s", e)
+        task_runner.start_run(repo, task_text, parallel=parallel,
+                              confirm_mode=confirm_mode, wait_for_id=False,
+                              on_task_id=_on_task_id)
+        result = {"ok": True, "status": "starting",
+                  "note": "任务后台派发中（task_id 解析后自动关联并流转到 implementation 列）"}
+        _audit("kanban.dispatch", {"card_id": card_id, "repo": repo}, result, True, token)
         self._reply_json(200, result)
 
     def do_PUT(self) -> None:

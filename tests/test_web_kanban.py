@@ -227,21 +227,23 @@ class TestCreateMove:
 class TestDispatch:
     def test_dispatch_ok(self, ops_server, ops_env, monkeypatch):
         monkeypatch.setattr(ws.task_runner, "start_run",
-                            lambda repo, task, parallel=1, goal=None, confirm_mode="auto": TID)
+                            lambda repo, task, parallel=1, goal=None, confirm_mode="auto", wait_for_id=True, on_task_id=None, on_exit=None: (on_task_id(TID) if on_task_id else None) or TID)
         card = _create_card(ops_server, type="implementation", repo="/tmp",
                             description="实现详情")
         code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch",
                         {"parallel": 2})
         assert code == 200
-        assert d["task_id"] == TID
-        # link_task + 自动流转到 implementation（原子 dispatch_card）
-        assert d["card"]["task_ids"] == [TID]
-        assert d["card"]["stage"] == "implementation"
-        acts = [h["action"] for h in d["card"]["history"]]
+        # W2.1 异步派发：dispatch 立即返回 starting，task_id 经 on_task_id 回调关联
+        assert d["status"] == "starting"
+        # mock 的 on_task_id 同步触发 → dispatch_card 已执行（link_task + 自动流转）
+        import agent_go.kanban as _kb
+        card_after = _kb.get_card(card["id"])
+        assert card_after["task_ids"] == [TID]
+        assert card_after["stage"] == "implementation"
+        acts = [h["action"] for h in card_after["history"]]
         assert acts[-2:] == ["link", "move"]
         audits = [a for a in _audit_lines(ops_env) if a["op"] == "kanban.dispatch"]
         assert audits and audits[0]["ok"]
-        assert audits[0]["params"]["task_id"] == TID
 
     def test_dispatch_discussion_422(self, ops_server):
         card = _create_card(ops_server, type="discussion")
@@ -284,11 +286,12 @@ class TestDispatch:
         kb.link_task(card["id"], TID)
         TID2 = "task-20260816-100000-222-cccc"
         monkeypatch.setattr(ws.task_runner, "start_run",
-                            lambda repo, task, parallel=1, goal=None, confirm_mode="auto": TID2)
+                            lambda repo, task, parallel=1, goal=None, confirm_mode="auto", wait_for_id=True, on_task_id=None, on_exit=None: (on_task_id(TID2) if on_task_id else None) or TID2)
         code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch", {})
         assert code == 200
-        assert d["task_id"] == TID2
-        assert d["card"]["task_ids"] == [TID, TID2]
+        assert d["status"] == "starting"
+        import agent_go.kanban as _kb
+        assert _kb.get_card(card["id"])["task_ids"] == [TID, TID2]
 
 
 class TestStatusSnapshot:
