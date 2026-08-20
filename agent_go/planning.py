@@ -16,7 +16,7 @@ __all__ = ["estimate_task_duration", "check_under_decomposition",
            "check_over_decomposition", "check_difficulty_mismatch", "difficulty_hint",
            "check_agent_prompt_functions", "validate_plan_quality",
            "build_plan_repair_feedback", "check_subtask_file_overlap", "check_parallel_import_relations",
-           "build_goal_contract", "_subtask_file_scope", "_is_core_file"]
+           "build_goal_contract", "compute_goal_adherence", "_subtask_file_scope", "_is_core_file"]
 
 logger = logging.getLogger(__name__)
 
@@ -994,4 +994,136 @@ def build_goal_contract(
         "constraints": sorted(constraints),
         "missing_verification_subtasks": sorted(missing_verification),
         "delivery_required": delivery_required,
+    }
+
+
+# 任务成功态集合：goal 回溯只在「执行全过」时才需要额外标记
+# （失败任务的验收缺口已由 verification/status 显性表达）。
+_SUCCESS_STATUSES = {"completed", "DELIVERY_READY", "ACCEPTED_DELIVERY"}
+
+
+def _norm_cmd(cmd: str) -> str:
+    return " ".join(str(cmd).split())
+
+
+def compute_goal_adherence(meta: dict[str, Any]) -> dict[str, Any]:
+    """M4 goal 回溯：回看 goal/acceptance/交付的合规度（确定性，零 LLM）。
+
+    与 `status` 正交（A1 决策）：不改变 verification 决定 status 的语义。
+    「执行全过但漏了验收标准」的任务在此被标记为合规度不足
+    （level != "full" 且 needs_human_review=True），而不是静默 completed。
+
+    检查维度（全部来自已持久化数据，可复算）：
+      ① 契约证据覆盖：goal_contract.completion_evidence 的每条验证命令
+         是否在 results[].verification_results 中真实执行且最终通过；
+         安全门禁拒绝（rejected）视为未验证——G8 短路不跑该命令。
+      ② 无验证子任务：missing_verification_subtasks 中「通过」的子任务
+         （没有验收证据的静默通过）。
+      ③ 验收 ID 覆盖：traceability.missing_requirement_ids（M1-6 已计算）。
+      ④ 交付要求：delivery_required=True 且任务成功态但 accepted_delivery 未达成。
+
+    Returns:
+        {
+          "level": "full" | "partial" | "low" | "unknown",
+          "score": float | None,          # 已通过检查 / 总检查数
+          "needs_human_review": bool,     # 成功态但合规度不足 → 建议人工补验收
+          "gaps": [{"type", "detail"}],
+          "detail": {...},                # 各维度清单，可审计
+        }
+    """
+    gc = meta.get("goal_contract") or {}
+    if not gc:
+        return {
+            "level": "unknown", "score": None, "needs_human_review": False,
+            "gaps": [], "detail": {}, "note": "无 goal_contract（旧任务或未生成）",
+        }
+
+    results = meta.get("results") or []
+    gaps: list[dict[str, str]] = []
+    detail: dict[str, Any] = {}
+
+    # ① 契约证据覆盖
+    shell_vrs = [
+        vr for r in results for vr in (r.get("verification_results") or [])
+        if isinstance(vr, dict) and vr.get("command")
+    ]
+    executed = [(_norm_cmd(vr.get("command", "")), vr) for vr in shell_vrs]
+    evidence = [e for e in (gc.get("completion_evidence") or []) if _norm_cmd(e)]
+    ev_missing: list[str] = []
+    ev_rejected: list[str] = []
+    ev_failed: list[str] = []
+    ev_passed = 0
+    for ev in evidence:
+        nev = _norm_cmd(ev)
+        matched = [vr for cmd, vr in executed
+                   if cmd == nev or (cmd and nev and (cmd.endswith(nev) or nev.endswith(cmd)))]
+        if not matched:
+            ev_missing.append(ev)
+        elif any(vr.get("rejected") for vr in matched) and not any(
+                vr.get("exit_code") == 0 for vr in matched):
+            ev_rejected.append(ev)
+        elif not any(vr.get("exit_code") == 0 for vr in matched):
+            ev_failed.append(ev)
+        else:
+            ev_passed += 1
+    detail["evidence"] = {
+        "total": len(evidence), "passed": ev_passed,
+        "not_executed": ev_missing, "rejected": ev_rejected, "failed": ev_failed,
+    }
+    for ev_list, gap_type, gap_msg in (
+        (ev_missing, "evidence_not_executed", "验收命令未执行"),
+        (ev_rejected, "evidence_rejected", "验收命令被安全门禁拒绝（未实际验证）"),
+        (ev_failed, "evidence_failed", "验收命令最终未通过"),
+    ):
+        for ev in ev_list:
+            gaps.append({"type": gap_type, "detail": f"{gap_msg}: {ev[:120]}"})
+
+    # ② 无验证子任务（静默通过 = 无验收证据的 completed/no_changes）
+    missing_vsubs = [
+        sid for sid in (gc.get("missing_verification_subtasks") or [])
+        if any(str(r.get("subtask_id")) == str(sid)
+               and r.get("status") in ("completed", "no_changes") for r in results)
+    ]
+    detail["silent_pass_subtasks"] = missing_vsubs
+    for sid in missing_vsubs:
+        gaps.append({"type": "silent_pass_without_verification",
+                     "detail": f"子任务 {sid} 无验证命令但标记通过"})
+
+    # ③ 验收 ID 覆盖（traceability 缺失即未追踪，M1-6 已计算）
+    ac_ids = [str(a) for a in (gc.get("acceptance_criteria_ids") or [])]
+    missing_ids = [str(i) for i in ((meta.get("traceability") or {}).get("missing_requirement_ids") or [])]
+    uncovered_ac = sorted(set(ac_ids) & set(missing_ids))
+    detail["acceptance_criteria"] = {
+        "total": len(ac_ids), "uncovered": uncovered_ac,
+    }
+    for aid in uncovered_ac:
+        gaps.append({"type": "acceptance_criterion_uncovered",
+                     "detail": f"验收标准 {aid} 未追踪到验证"})
+
+    # ④ 交付要求
+    status = meta.get("status", "")
+    delivery_required = bool(gc.get("delivery_required"))
+    delivery_met = bool(meta.get("accepted_delivery"))
+    detail["delivery"] = {"required": delivery_required, "met": delivery_met}
+    if delivery_required and status in _SUCCESS_STATUSES and not delivery_met:
+        gaps.append({"type": "delivery_unmet",
+                     "detail": "Goal 要求交付，但 accepted_delivery 未达成"})
+
+    # 计分：证据通过 + 验收 ID 覆盖 + 交付达成；无验证子任务每条记一个未通过检查
+    total = len(evidence) + len(ac_ids) + (1 if delivery_required else 0) + len(missing_vsubs)
+    passed = ev_passed + (len(ac_ids) - len(uncovered_ac)) + (1 if delivery_required and delivery_met else 0)
+    score = (passed / total) if total else (1.0 if not gaps else 0.0)
+    if not gaps:
+        level = "full"
+    elif score and score > 0:
+        level = "partial"
+    else:
+        level = "low"
+    needs_human = bool(gaps) and status in _SUCCESS_STATUSES
+    return {
+        "level": level,
+        "score": round(score, 4) if score is not None else None,
+        "needs_human_review": needs_human,
+        "gaps": gaps,
+        "detail": detail,
     }

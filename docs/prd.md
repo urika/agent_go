@@ -3,7 +3,7 @@
 > 版本：v4.1
 > 更新日期：2026-08-20
 > 配套路线图：[roadmap.md](roadmap.md)
-> 当前阶段：M0-M3、M4.5 已 `accepted`；谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1 已交付；M4 goal 回溯收尾中
+> 当前阶段：M0-M4、M4.5 已 `accepted`；谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1 已交付；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
 > 当前执行清单：[m0-task-list.md](m0-task-list.md)
@@ -631,13 +631,11 @@ system_error
 
 ## 7. 当前差距
 
-> 状态说明（2026-08-20 刷新）：原 P0 工程闭环缺口已随阶段 A（A1-A3）、M4.5 与 M5 关闭；以下为面向「全自主交付」的剩余差距。
+> 状态说明（2026-08-20 刷新）：原 P0 工程闭环缺口已随阶段 A（A1-A3）、M4.5 与 M5 关闭；bench 交付闭环（`--with-delivery`）与 M4 goal 回溯（`compute_goal_adherence`）同日关闭，并产出首个有效 ADR 基线 `delivery-20260820`（ADR=0.7045、Cost per AD=$0.0171、gate 通过）。以下为面向「全自主交付」的剩余差距。
 
 ### P0（阻断渐进自治的剩余工程缺口）
 
-- `accepted_delivery` bench 自动验证已实现（2026-08-20，`eval bench --with-delivery`：任务成功后在 fixture 仓库做本地交付 merge 闭合判定，不推进 target 引用保持 repeat 可复现）；待 canonical 重跑产出首个有效 ADR 读数后关闭。
-- goal 回溯未闭合：`completed` 仍可能「执行全过但漏了验收」（M4 收尾中）。
-- canonical 35 任务通过率 60%（方案 B 后 hard 子集 94.4%，但 canonical 全量口径未重测），难任务成功率仍是硬任务集天花板。
+- 旧口径 canonical 35 任务通过率 60%（方案 B 后 hard 子集 94.4%；新基线 delivery-20260820 为 decision 29 任务本地 27B 口径 pass_rate_diagnostic=0.75，与旧基线禁止直接混比），难任务成功率仍是硬任务集天花板。
 
 ### P1（智能闭环缺口）
 
@@ -757,11 +755,13 @@ system_error
 
 M3 完成后，基于真实数据设定下一阶段目标，不继续沿用未经验证的 `$0.05` 或 `K1 >= 97%` 硬目标。
 
-### M4：goal 回溯（进行中）
+### M4：goal 回溯
 
-状态：`implemented/dogfooding`。
+状态：`accepted`（2026-08-20）。
 
 目标：`completed` 不再只是「无 subtask 失败」的否定式判定，而是回看 goal/acceptance/overview 的合规度，避免「执行全过但漏了验收」的假交付。goal 合规度作为与 `status` 正交的维度记录（见 A1 决策），不改变 verification 决定 status 的语义。
+
+实现：`planning.compute_goal_adherence`（确定性、零 LLM，四维度：契约证据执行覆盖 / 无验证静默通过 / 验收 ID 覆盖 / 交付要求达成）→ pipeline 收尾写 `meta.goal_adherence`（level/score/gaps/needs_human_review）；review 报告、`show`、replay、Web 详情四面可见；「执行全过但漏验收」标记 `needs_human_review=True` 建议人工补验收。13 项测试（tests/test_goal_adherence.py）。
 
 ### M5：问题跟踪（✅ implemented，2026-08-16）
 

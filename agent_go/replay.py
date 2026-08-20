@@ -272,6 +272,8 @@ def _collect_summary(data: dict[str, Any]) -> dict[str, Any]:
         "total_completion_tokens": total_completion_tokens,
         "role_costs": role_costs,
         "waves": data["waves"],
+        # M4 goal 回溯：合规度随摘要输出（ASCII 与 --json 均可见）
+        "goal_adherence": (data.get("meta") or {}).get("goal_adherence") or {},
     }
 
 
@@ -295,6 +297,13 @@ def _render_ascii_timeline(data: dict[str, Any]) -> str:
     lines.append(f"   任务: {task_desc}")
     lines.append(f"   仓库: {repo}")
     lines.append(f"   时间: {created}  |  代理: {agent_type}")
+    _ga = summary.get("goal_adherence") or {}
+    if _ga.get("level") and _ga["level"] != "unknown":
+        _ga_icon = "✅" if _ga["level"] == "full" else "⚠️"
+        _ga_line = f"   Goal 合规度: {_ga_icon} {_ga['level']}（score={_ga.get('score')}）"
+        if _ga.get("needs_human_review"):
+            _ga_line += "  ⚠️ 执行全过但验收存疑，建议人工补验收"
+        lines.append(_ga_line)
 
     if data["plan_versions"]:
         last_plan = data["plan_versions"][-1]

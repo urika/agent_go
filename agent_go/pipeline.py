@@ -1068,6 +1068,18 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
         }
     except Exception as _le:
         logger.debug(f"[humility] 层间归因失败（忽略）: {_le}")
+    # M4 goal 回溯：goal 合规度正交维度（观测标记，不改变 status 语义，A1 决策）。
+    # 「执行全过但漏验收」的任务在此标记 goal_adherence.needs_human_review=True。
+    try:
+        from .planning import compute_goal_adherence
+        meta["goal_adherence"] = compute_goal_adherence(meta)
+        if meta["goal_adherence"].get("needs_human_review"):
+            logger.warning(
+                f"[goal 回溯] 合规度不足（level={meta['goal_adherence']['level']}，"
+                f"{len(meta['goal_adherence']['gaps'])} 项缺口）——执行全过但验收存疑，"
+                "建议人工补验收")
+    except Exception as _ge:
+        logger.debug(f"[goal_adherence] 计算失败（忽略）: {_ge}")
     if meta.get("status_schema_version") and not has_failed and delivery["accepted_delivery"]:
         meta["status"] = "ACCEPTED_DELIVERY"
     elif meta.get("status_schema_version") and not has_failed and delivery["delivery_failed"]:

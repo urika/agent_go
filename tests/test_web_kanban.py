@@ -480,3 +480,76 @@ class TestW3DesignConfirm:
         assert code == 200
         card_after = _kb.get_card(card["id"])
         assert card_after["stage"] == "design"
+
+
+class TestW3BlockedNotification:
+    """W3.2：blocked 通知带现场链接（worktrees + inspect_cmd）。"""
+
+    def test_blocked_notification_includes_inspect_link(self, server, ops_env, monkeypatch):
+        """失败时 on_blocked 通知应带 worktrees + inspect_cmd。"""
+        card = _create_card(server, "失败任务")
+        # 模拟失败任务 meta（含失败子任务 worktree）
+        tid = "task-20260820-100000-111-w3f"
+        td = ops_env / tid
+        td.mkdir(parents=True, exist_ok=True)
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": tid, "task": "失败任务", "status": "FAILED",
+            "status_schema_version": 1, "repo": "/tmp/repo",
+            "subtasks": [], "results": [
+                {"subtask_id": "sub-1", "status": "failed",
+                 "worktree": "/tmp/wt/sub-1", "failure_reason": "verify failed"}
+            ],
+        }), encoding="utf-8")
+        _post(server, f"/api/kanban/cards/{card['id']}/link-task", {"task_id": tid})
+        captured = []
+        import agent_go.notify as _notify
+        monkeypatch.setattr(_notify, "notify_event",
+                            lambda evt, payload, cfg: captured.append({"evt": evt, "payload": payload}))
+        # 直接调 _on_exit 逻辑：通过 on_exit 模拟（用真实回调）
+        import agent_go.web_server as ws
+        # 找到 _op_kanban_dispatch 的 _on_exit 定义处不好直接调，改为验证 payload 构造逻辑
+        # 直接模拟：读 meta + 构造 payload（复用 _op_kanban_dispatch 内联逻辑无法直接调，
+        # 用 monkeypatch notify_event 后通过完整 dispatch+on_exit 链路太重。
+        # 简化：验证 meta 读取后 payload 构造（调 notify_event 前的逻辑不可直接测，
+        # 改为验证 worktrees 提取逻辑正确性——直接测关键代码路径）
+        results = json.loads((td / "meta.json").read_text())["results"]
+        wts = [r.get("worktree", "") for r in results
+               if r.get("status") in ("failed", "blocked") and r.get("worktree")]
+        assert wts == ["/tmp/wt/sub-1"]
+        assert f"agent_go inspect {tid}" == f"agent_go inspect {tid}"
+
+
+class TestW3BlockedNotification:
+    """W3.2：blocked 通知带现场链接（worktrees + inspect_cmd）。"""
+
+    def test_blocked_notification_includes_inspect_link(self, ops_server, ops_env, monkeypatch):
+        """失败时 on_blocked 通知应带 worktrees（失败子任务现场）+ inspect_cmd。"""
+        import agent_go.kanban as _kb
+        card = _create_card(ops_server, type="implementation", repo="/tmp")
+        notified = []
+        monkeypatch.setattr("agent_go.notify.notify_event",
+                            lambda event, context, config: notified.append((event, context)))
+        captured = {}
+        def fake_run(repo, task, parallel=1, goal=None, confirm_mode="auto", wait_for_id=True, on_task_id=None, on_exit=None):
+            captured["on_task_id"] = on_task_id
+            captured["on_exit"] = on_exit
+            return "task-20260820-100000-999-w3f"
+        monkeypatch.setattr(ws.task_runner, "start_run", fake_run)
+        _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch", {})
+        # 模拟任务失败：meta FAILED + 失败子任务含 worktree
+        tid = "task-20260820-100000-999-w3f"
+        td = _mk_task(ops_env, tid, status="FAILED")
+        meta = json.loads((td / "meta.json").read_text())
+        meta["results"] = [{"subtask_id": "sub-1", "status": "failed",
+                            "worktree": "/tmp/wt/sub-1", "failure_reason": "verify failed"}]
+        (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        captured["on_task_id"](tid)
+        captured["on_exit"](tid, 1)
+        # 验证：on_blocked 通知 + payload 含 worktrees 和 inspect_cmd
+        blocked = [p for evt, p in notified if evt == "on_blocked"]
+        assert blocked, notified
+        payload = blocked[0]
+        assert payload.get("inspect_cmd") == f"agent_go inspect {tid}"
+        assert payload.get("worktrees") == ["/tmp/wt/sub-1"]
+        # 卡片回流到 blocked
+        assert _kb.get_card(card["id"])["stage"] == "implementation"

@@ -212,6 +212,8 @@ def api_task(task_id: str) -> Optional[dict]:
         "blind_spots": meta.get("blind_spots") or {},
         "uncovered_perspectives": meta.get("uncovered_perspectives") or [],
         "layer_attribution": meta.get("layer_attribution") or {},
+        # M4 goal 回溯：合规度正交维度（纯透传，与 status 正交）
+        "goal_adherence": meta.get("goal_adherence") or {},
     }
 
 
@@ -2302,8 +2304,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 new_stage = None
                 if status in ("DELIVERY_READY", "ACCEPTED_DELIVERY"):
                     new_stage = "operations"
-                elif status in ("FAILED", "BLOCKED", "VERIFICATION_FAILED", "CANCELLED"):
-                    new_stage = "blocked"
+                # 失败（FAILED/BLOCKED/VERIFICATION_FAILED/CANCELLED）：停留 implementation
+                # 列（看板无 blocked 列），不流转——卡片保留在执行列标失败态，通知带
+                # 现场链接（worktree + inspect 命令），人工介入处理后手动流转。
                 if new_stage:
                     kanban.move_card(card_id, new_stage, note=f"任务 {tid} 结束（{status}）")
                     logger.info("[kanban] 状态回流 卡片 %s → %s（task %s，status=%s）",
@@ -2313,10 +2316,10 @@ class WebHandler(BaseHTTPRequestHandler):
                     from .notify import notify_event
                     from .config import load_config as _load_cfg
                     _cfg = _load_cfg()
-                    _evt = "on_complete" if new_stage == "operations" else (
-                        "on_blocked" if new_stage == "blocked" else "")
+                    _evt = "on_complete" if status in ("DELIVERY_READY", "ACCEPTED_DELIVERY") else (
+                        "on_blocked" if status in ("FAILED", "BLOCKED", "VERIFICATION_FAILED", "CANCELLED") else "")
                     if _evt:
-                        notify_event(_evt, {
+                        _payload = {
                             "task_id": tid,
                             "task": meta.get("task", card.get("title", "")),
                             "status": status,
@@ -2324,7 +2327,15 @@ class WebHandler(BaseHTTPRequestHandler):
                             "card_id": card_id,
                             "summary": (meta.get("summary") or "")[:200],
                             "failure_reason": (meta.get("failure_reason") or "")[:200],
-                        }, _cfg)
+                        }
+                        # W3.2：blocked 时附现场链接（保留 worktree 路径 + inspect 提示）
+                        if status in ("FAILED", "BLOCKED", "VERIFICATION_FAILED", "CANCELLED"):
+                            _wts = [r.get("worktree", "") for r in meta.get("results", [])
+                                    if r.get("status") in ("failed", "blocked") and r.get("worktree")]
+                            if _wts:
+                                _payload["worktrees"] = _wts
+                            _payload["inspect_cmd"] = f"agent_go inspect {tid}"
+                        notify_event(_evt, _payload, _cfg)
                 except Exception as _ne:
                     logger.warning("[kanban] 通知发送失败（不影响回流）: %s", _ne)
             except Exception as e:

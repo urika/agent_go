@@ -1,0 +1,151 @@
+{
+  "bench_schema_version": 1,
+  "config_hash": "281f4e0fa54358bb83af4cfcbe76236e4f5ecef4f35641034788486e667e505b",
+  "generated_at": "2026-08-20T08:56:37.982212+00:00",
+  "metric_freeze_version": 1,
+  "metrics": {
+    "accepted_delivery_count": 31,
+    "accepted_delivery_rate": 0.704545,
+    "cost_per_accepted_delivery_usd": 0.017119,
+    "delivery_failure_rate": 0.0,
+    "dollar_per_pass_diagnostic_usd": 0.016082,
+    "excluded_reasons": {},
+    "excluded_task_count": 0,
+    "failure_class_counts": {
+      "budget_abort": 0,
+      "delivery_failure": 0,
+      "infrastructure_failure": 0,
+      "model_failure": 1,
+      "system_error": 0,
+      "timeout": 4,
+      "user_cancelled": 0,
+      "verification_failure": 9
+    },
+    "failure_class_summary": {
+      "capability_failure_count": 14,
+      "excluded_reasons": {},
+      "excluded_task_count": 0,
+      "failure_class_cost_usd": {
+        "budget_abort": 0.0,
+        "delivery_failure": 0.0,
+        "infrastructure_failure": 0.0,
+        "model_failure": 0.01094,
+        "system_error": 0.0,
+        "timeout": 0.008384,
+        "user_cancelled": 0.0,
+        "verification_failure": 0.147641
+      },
+      "failure_class_counts": {
+        "budget_abort": 0,
+        "delivery_failure": 0,
+        "infrastructure_failure": 0,
+        "model_failure": 1,
+        "system_error": 0,
+        "timeout": 4,
+        "user_cancelled": 0,
+        "verification_failure": 9
+      },
+      "timeout_disposition": {
+        "cleanup_race_count": 0,
+        "product_semantics": "failure",
+        "right_censored_for_cost_baseline_count": 5,
+        "timeout_failure_count": 4
+      },
+      "unclassified_count": 30,
+      "valid_task_count": 44
+    },
+    "first_pass_rate": 0.727273,
+    "human_intervention_minutes": 0.0,
+    "pass_rate_diagnostic": 0.75,
+    "pr_creation_rate": 0.0,
+    "retry_rate": 0.159091,
+    "time_to_accepted_delivery_sec": 213.806452,
+    "timeout_rate": 0.090909,
+    "valid_cost_usd": 0.530693,
+    "valid_task_count": 44
+  },
+  "models": [
+    "claude-sonnet-4-6"
+  ],
+  "record_count": 58,
+  "repeat": [
+    1,
+    2
+  ],
+  "repeat_values": [
+    1,
+    2
+  ],
+  "run_time_range": {
+    "elapsed_sec_max": 1111.45,
+    "elapsed_sec_min": 50.04,
+    "first_timestamp": null,
+    "last_timestamp": null
+  },
+  "source_batch": "delivery-20260820",
+  "source_batch_immutable": true,
+  "stress_metrics": {
+    "accepted_delivery_count": 2,
+    "accepted_delivery_rate": 0.142857,
+    "cost_per_accepted_delivery_usd": 0.007,
+    "delivery_failure_rate": 0.0,
+    "dollar_per_pass_diagnostic_usd": 0.007,
+    "excluded_reasons": {},
+    "excluded_task_count": 0,
+    "failure_class_counts": {
+      "budget_abort": 0,
+      "delivery_failure": 0,
+      "infrastructure_failure": 0,
+      "model_failure": 0,
+      "system_error": 0,
+      "timeout": 12,
+      "user_cancelled": 0,
+      "verification_failure": 1
+    },
+    "failure_class_summary": {
+      "capability_failure_count": 13,
+      "excluded_reasons": {},
+      "excluded_task_count": 0,
+      "failure_class_cost_usd": {
+        "budget_abort": 0.0,
+        "delivery_failure": 0.0,
+        "infrastructure_failure": 0.0,
+        "model_failure": 0.0,
+        "system_error": 0.0,
+        "timeout": 0.012,
+        "user_cancelled": 0.0,
+        "verification_failure": 0.001
+      },
+      "failure_class_counts": {
+        "budget_abort": 0,
+        "delivery_failure": 0,
+        "infrastructure_failure": 0,
+        "model_failure": 0,
+        "system_error": 0,
+        "timeout": 12,
+        "user_cancelled": 0,
+        "verification_failure": 1
+      },
+      "timeout_disposition": {
+        "cleanup_race_count": 0,
+        "product_semantics": "failure",
+        "right_censored_for_cost_baseline_count": 0,
+        "timeout_failure_count": 12
+      },
+      "unclassified_count": 1,
+      "valid_task_count": 14
+    },
+    "first_pass_rate": 0.142857,
+    "human_intervention_minutes": 0.0,
+    "pass_rate_diagnostic": 0.142857,
+    "pr_creation_rate": 0.0,
+    "retry_rate": 0.785714,
+    "time_to_accepted_delivery_sec": 330.21,
+    "timeout_rate": 0.857143,
+    "valid_cost_usd": 0.014,
+    "valid_task_count": 14
+  },
+  "suite": "decision",
+  "task_catalog_hash": "7d080b11d012c8bfa1abc2e69d22ccf490e3b93152b8ae96378fb5a38455077a",
+  "task_count": 29
+}

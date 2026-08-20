@@ -1801,6 +1801,13 @@ def cmd_show(args=None):
     console.print(f"📝 {meta['task']}")
     console.print(f"📁 {meta['repo']}")
     console.print(f"📊 {meta.get('status','unknown')}")
+    # M4 goal 回溯：合规度不足时显式提示（执行全过但漏验收不得静默）
+    _ga = meta.get("goal_adherence") or {}
+    if _ga.get("level") and _ga["level"] != "unknown":
+        _ga_icon = "✅" if _ga["level"] == "full" else "⚠️"
+        console.print(f"🎯 Goal 合规度: {_ga_icon} {_ga['level']}（score={_ga.get('score')}）")
+        if _ga.get("needs_human_review"):
+            console.warning("   执行全过但验收存疑，建议人工补验收（agent_go review --task 查看缺口）")
     if meta.get("reference_docs"):
         console.print(f"📎 参考文档: {', '.join(meta['reference_docs'])}")
     results = meta.get("results", [])
@@ -1993,6 +2000,17 @@ def _show_task_review(task_id: str, approve: bool = False, reject: bool = False,
         lines.append("## ⚠️ 已知盲区（系统主动交底，供审查参考）")
         lines.append("")
         lines.extend(_blind_lines)
+        lines.append("")
+
+    # M4 goal 回溯：goal 合规度（与 status 正交；执行全过但漏验收时显式标记）
+    goal_adherence = meta.get("goal_adherence") or {}
+    if goal_adherence and goal_adherence.get("level") not in (None, "unknown", "full"):
+        lines.append("## 🎯 Goal 合规度（M4 回溯，与任务状态正交）")
+        lines.append("")
+        _ga_warn = " ⚠️ **执行全过但验收存疑，建议人工补验收**" if goal_adherence.get("needs_human_review") else ""
+        lines.append(f"- 合规等级: **{goal_adherence.get('level')}**（score={goal_adherence.get('score')}）{_ga_warn}")
+        for gap in goal_adherence.get("gaps", []):
+            lines.append(f"- [{gap.get('type')}] {gap.get('detail', '')}")
         lines.append("")
 
     # 层间归因（谦逊层 H2：失败定位到「层」，回答「该修 spec、修 planner、调预算还是换模型」）

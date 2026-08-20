@@ -2,7 +2,7 @@
 
 > 版本：v4.2
 > 更新日期：2026-08-20
-> 当前阶段：M0-M3、M4.5（模型池化，hard 94.4%）已 `accepted`；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1 已交付；M4 goal 回溯收尾中
+> 当前阶段：M0-M4、M4.5（模型池化，hard 94.4%）已 `accepted`；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1 已交付；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
@@ -447,22 +447,22 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 
 完成 M3 后，基于真实数据设定下一阶段目标，而不是继续沿用未经验证的 `$0.05` 或 `K1 ≥97%` 目标。✅（M3 实测 $/任务 $0.017，$0.05 目标已达成；真实仓库通过率 91.7%）
 
-## 7.5 阶段四：M4 goal 回溯（进行中）
+## 7.5 阶段四：M4 goal 回溯
 
 目标：`completed` 不再只是「无 subtask 失败」的否定式判定，而是回看 goal/acceptance/overview 的合规度，避免「执行都过但漏了验收」的假交付。
 
-状态：`implemented/dogfooding`。对应 `business-architecture.md` 缺口 2（goal 回溯断裂）。
+状态：`accepted`（2026-08-20 收口）。对应 `business-architecture.md` 缺口 2（goal 回溯断裂）。实现：`planning.compute_goal_adherence`（确定性、零 LLM）在 pipeline 收尾写入 `meta.goal_adherence`；13 项测试（tests/test_goal_adherence.py）。
 
 ### M4.1 交付物
 
-- `completed` 判定回看 goal/acceptance/overview，缺失验收不得静默通过。
-- goal 合规度作为与 `status` 正交的维度记录（不改变 verification 决定 status 的语义，见 A1 决策）。
-- 合规度低的任务在 review/replay/status 中可见，供人判断是否需人工补验收。
+- `completed` 判定回看 goal/acceptance/overview，缺失验收不得静默通过。✅（四个维度：契约证据执行覆盖 / 无验证静默通过子任务 / 验收 ID 覆盖 / 交付要求达成）
+- goal 合规度作为与 `status` 正交的维度记录（不改变 verification 决定 status 的语义，见 A1 决策）。✅（`meta.goal_adherence`：level=full/partial/low/unknown + score + gaps + detail；失败任务不打 needs_human_review）
+- 合规度低的任务在 review/replay/status 中可见，供人判断是否需人工补验收。✅（review 报告 🎯 节 + `show` ⚠️ 提示 + replay 摘要 + Web 详情透传；`needs_human_review=True` 时明示「建议人工补验收」）
 
 ### M4.2 验收
 
-- 一个「执行全过但漏了验收标准」的任务被标记为合规度不足，而非 completed。
-- goal 合规度可查询、可追溯。
+- 一个「执行全过但漏了验收标准」的任务被标记为合规度不足，而非 completed。✅（TestSilentAcceptanceMiss 6 用例：证据未执行/被拒绝/未通过/静默通过/AC 未覆盖/交付未达成）
+- goal 合规度可查询、可追溯。✅（meta 持久化 + review/show/replay/web 四面可见，gaps 含 type+detail 可审计）
 
 ## 7.6 阶段五：M5 问题跟踪与 Issue 联动
 
@@ -493,7 +493,7 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 - A1 文件所有权约束：同一核心文件只允许一个 subtask 负责（规划期 + L1 门禁强制）。✅ 已实现（88d0c5a，`_is_core_file` + `core_file_shared_ownership` blocking）。
 - A2 函数级验收契约：subtask 验收绑定函数/行为级条件（`_extract_verification_commands` 扩展）。✅ 已实现（f6e2cb0，`classify_verification_scope` 五级锚定 + suite 级弱锚定告警）。
 - A3 未提交基线处理：启动检测 dirty worktree，`--baseline` 显式提交或强提示。✅ 已实现（`get_dirty_files`/`commit_baseline`；`--allow-dirty`/`--baseline`；headless 默认 fail-safe 中止；meta 记录 `baseline_dirty`/`baseline_action`）。
-- A4 M4 goal 回溯（见 §7.5，收尾中）。
+- A4 M4 goal 回溯（见 §7.5，✅ accepted 2026-08-20）。
 
 **阶段 B — spec 闭环验证（✅ 冒烟完成，弱正 ROI 留轻量）**
 - B1 spec 持久化 + 闭环实施。✅ 已实现（d5cc175：ID 链条/锚定门禁/spec 快照/后段注入/traceability 自动触发/do-not-touch fail-close；b01c644 冒烟实证修复：预算头寸口径 + AC 硬映射兜底 + e2e 路径）。
@@ -757,7 +757,7 @@ M0 产品契约与指标冻结  ✅ accepted
   -> 阶段十 Web 全功能   ✅ 完成（Golden Path 验收 + 协作扩展）
   -> 阶段十一 决策辅助   ✅ M6.1-M6.5（建议层，M6.6 明确不做）
   -> 阶段十二 看板编排   ✅ W1 分类器（W2+ 未排期）
-  -> M4 goal 回溯       收尾中
+  -> M4 goal 回溯       ✅ accepted（2026-08-20，compute_goal_adherence）
   -> M5 问题跟踪        ✅ implemented；Issue 联动（原 M6）deferred
   -> 阶段 B spec 闭环   ✅ 冒烟弱正 ROI，留轻量
   -> 阶段 C 智能闭环    C1/C2 ✅（B5=b 已拍板）→ C3 局部重规划 / C4 KnowledgeStore A/B
@@ -767,8 +767,8 @@ M0 产品契约与指标冻结  ✅ accepted
 
 下一阶段三件事（按优先级）：
 
-1. **bench 交付闭环自动验证**：✅ 已实现（2026-08-20，`eval bench --with-delivery` 本地交付 merge 闭合 `accepted_delivery` 判定，不推进 target 引用保持 fixture repeat 可复现；delivery.py `apply_local_delivery` + 10 用例）→ 待 canonical 重跑产出首个有效 ADR 读数。**M4 goal 回溯收尾**并行。
+1. **bench 交付闭环自动验证**：✅ 完成（2026-08-20，`eval bench --with-delivery` 本地交付 merge 闭合判定 + 首个有效 ADR 基线 `delivery-20260820`，见下方基线行）。**M4 goal 回溯**：✅ accepted（同日，`compute_goal_adherence` 正交合规度，「执行全过但漏验收」显式标记）。
 2. **阶段 C 续项**：C3 局部重规划（默认人工确认）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位）。
 3. **阶段 D 放行评估**：信任指标（审查后修改率 / 盲区命中率 / 复发可见率）跨任务积累达标后，启动 Reviewer 灰度与 B1 自动 merge 决策。
 
-在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017、canonical 35 任务通过率 60%；bench `accepted_delivery` 有效读数待 `--with-delivery` 重跑 canonical 后产生（执行清单：[task-list-2026-08-20.md](task-list-2026-08-20.md) N1-4）。
+在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。
