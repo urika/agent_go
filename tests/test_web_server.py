@@ -651,6 +651,15 @@ class TestSpaJsSyntax:
             f"单引号字符串，需写 \\\\n）：\n{r.stderr[:500]}"
         )
 
+    def test_kanban_keyboard_support_present(self):
+        """看板键盘操作（选中/双击编辑/⌘⌫ 删除）已注入 SPA（防回归）。"""
+        import agent_go.web_server as ws
+        assert "kanbanSelected" in ws._SPA_HTML
+        assert "bindKanbanKeyboard" in ws._SPA_HTML
+        assert "addEventListener('dblclick'" in ws._SPA_HTML
+        assert "deleteKanbanCard" in ws._SPA_HTML
+        assert "moveKanbanCardBy" in ws._SPA_HTML
+
 
 # ═══════════════════════════════════════════════════════════════
 # 谦逊层（#51）：api_task 透传 blind_spots / uncovered_perspectives / layer_attribution
