@@ -709,9 +709,8 @@ class TestAcceptanceWorkflow:
 
     def test_std4_batch_queue_async_dispatch(self, ops_server, monkeypatch):
         """标准 4：5 个模块卡片 → dispatch 异步派发（立即返回 starting，队列状态可追踪）。"""
-        import agent_go.kanban as _kb
         monkeypatch.setattr(ws.task_runner, "start_run",
-                            lambda *a, **k: (k.get("on_task_id") or (lambda tid: None))("task-x") or f"task-x")
+                            lambda *a, **k: (k.get("on_task_id") or (lambda tid: None))("task-x") or "task-x")
         dispatched = 0
         for i in range(5):
             card = _create_card(ops_server, title=f"批量模块 {i}", stage="implementation",
