@@ -1,8 +1,8 @@
 # agent_go Roadmap：可靠地产出可合并交付物
 
-> 版本：v4.2
-> 更新日期：2026-08-20
-> 当前阶段：M0-M4、M4.5（模型池化，hard 94.4%）已 `accepted`；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1 已交付；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立
+> 版本：v4.3
+> 更新日期：2026-08-21
+> 当前阶段：M0-M4、M4.5（模型池化，hard 94.4%）已 `accepted`；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1-W4 已交付；阶段 C C1/C2/C3 + C4 KnowledgeStore A/B smoke 与葬礼回写链路已落地；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
@@ -639,7 +639,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 
 注：本系列沿用「M6」编号，与 §7.6 原「M6 issue 联动」不同——后者已改称 Issue 联动（deferred）。
 
-## 7.13 阶段十二：看板驱动的智能任务编排（W1 已交付，2026-08-19）
+## 7.13 阶段十二：看板驱动的智能任务编排（W1-W4 已交付，2026-08-19 ~ 08-21）
 
 目标：基于看板把任务按「可自动化程度」分流到成本-能力最优路径——本地模型是「模块工厂」而非「系统架构师」（设计：[kanban-task-orchestration.md](design/kanban-task-orchestration.md)、[kanban-board.md](design/kanban-board.md)）。
 
@@ -647,12 +647,14 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 
 - **看板 MVP + 二期**：5 阶段列 × 3 类卡片（5bd2022）；归档视图 / 跨进程锁 / 状态快照缓存 / 派发幂等（6849065）；派发原子化 `dispatch_card` 单锁 link+move + 输入卫生（fd30a73）。
 - **W1 任务分类器**：卡片 `automation` 字段（auto/manual/review）+ 分类规则（架构级关键词 / difficulty=hard → design 列云端+人工；明确 spec 模块 → implementation 列本地队列）+ dispatch 按列路由（automation=manual 强制 confirm_mode=web 人工确认计划）；PoC 验证通过（7807742）。
+- **W2 派发与回流闭环**：dispatch 异步化——立即返回 + 后台执行 + 回调关联（7dc03c9）；任务完成自动流转看板卡片（7bb20fe）；完成/失败通知接入 on_exit → notify_event（a9558c7）。
+- **W3 计划确认与审批**：design 列计划确认——确认通过后才流转 implementation（b41af99）；blocked 通知带现场链接 + 失败回流逻辑修复（53e1fdb）；operations 列审批——approve 终确认 / reject 回退重做（9be4f36）。
+- **W4 自学习与成本自适应**：分类器自学习——分类准确率统计与可视化（ab5472c）；成本-质量自适应——本地队列 vs 云端 $/pass 权衡分析（6a5300d）；自动降级建议——失败卡片一键 insight 分析生成修复建议（7b78441）。
+- **验收测试**：看板工作流端到端验收——manual/auto 判定 + dispatch 流转 + 失败降级通知带现场链接（72a4708）。
 
-### 后续（W2+，未排期）
+### 后续（未排期）
 
 - 本地后台队列批量执行（implementation 列零边际成本异步跑批）。
-- 失败降级链兜底接入看板 + 通知闭环（webhook/桌面通知）。
-- operations 列交付审批与 merge 联动。
 
 ## 8. 扩展能力决策门
 
@@ -756,11 +758,11 @@ M0 产品契约与指标冻结  ✅ accepted
   -> 阶段九 谦逊层       ✅ 完成（信任指标放行门已立）
   -> 阶段十 Web 全功能   ✅ 完成（Golden Path 验收 + 协作扩展）
   -> 阶段十一 决策辅助   ✅ M6.1-M6.5（建议层，M6.6 明确不做）
-  -> 阶段十二 看板编排   ✅ W1 分类器（W2+ 未排期）
+  -> 阶段十二 看板编排   ✅ W1-W4（分类器/派发回流/计划确认审批/自学习与成本自适应）
   -> M4 goal 回溯       ✅ accepted（2026-08-20，compute_goal_adherence）
   -> M5 问题跟踪        ✅ implemented；Issue 联动（原 M6）deferred
   -> 阶段 B spec 闭环   ✅ 冒烟弱正 ROI，留轻量
-  -> 阶段 C 智能闭环    C1/C2/C3 ✅（B5=b 已拍板）→ C4 KnowledgeStore A/B
+  -> 阶段 C 智能闭环    C1/C2/C3 ✅ + C4 KnowledgeStore A/B smoke ✅（葬礼回写链路已闭环）
   -> 阶段 D 自治决策    → 信任指标放行门达标 + B1 决策后
   -> 阶段 E Spec-as-Source  仅试点
 ```
