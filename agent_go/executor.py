@@ -2925,6 +2925,36 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         except Exception:
             logger.debug("deviation 事件写入失败（非关键）", exc_info=True)
 
+    # C4 葬礼回写：重试后最终成功 → 「失败模式 + 如何被修」回写全局 Problem。
+    # 动机：record 只在最终失败时写，知识库攒不下 resolution_summary，
+    # KnowledgeStore 注入臂只有「模式」没有「解法」。此处补写葬礼数据（fail-open）。
+    resolution_problem_id = ""
+    if status == "completed" and retry_count > 0 and task_dir:
+        try:
+            from .problems import derive_retry_pattern, record_resolution
+            from .config import AGENT_GO_DIR
+            _rp = derive_retry_pattern(verification_results,
+                                       verify_results.get("kill_reason") or "")
+            if _rp:
+                _rsum = (f"验证失败后经 {retry_count} 次重试通过。"
+                         f"失败模式: {_rp[:100]}。修复涉及: {summary[:150]}")
+                _prob_r = record_resolution(
+                    AGENT_GO_DIR / "problems.jsonl",
+                    failure_pattern=_rp,
+                    failure_class="retry_recovered",
+                    task_id=task_id,
+                    subtask_id=sub_id,
+                    resolution_summary=_rsum,
+                )
+                if _prob_r:
+                    resolution_problem_id = _prob_r.id
+                    log_event(logger, "problem_resolution_written", {
+                        "sub_id": sub_id, "problem_id": _prob_r.id,
+                        "pattern": _rp[:80], "retry_count": retry_count,
+                    })
+        except Exception:
+            logger.debug("Problem 葬礼回写失败（非关键）", exc_info=True)
+
     console.emit("subtask_complete", {
         "sub_id": sub_id,
         "status": status,
@@ -2945,6 +2975,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
              "failure_class": failure_class,
              "layer_attribution": layer_attribution,
              "problem_id": problem_id,
+             # C4 葬礼回写：重试后成功时回写的 Problem id（未回写为空）
+             "resolution_problem_id": resolution_problem_id,
             "agent_type_source": subtask.get("_agent_type_source", "default"),
             "skills_unresolved": unresolved_skills,
             "retry_count": retry_count,

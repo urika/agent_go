@@ -252,6 +252,59 @@ def mark_resolved(
     return None
 
 
+def derive_retry_pattern(verification_results: list, kill_reason: str = "") -> str:
+    """从验证结果派生「重试后修复」的失败模式（与失败路径的兜底派生口径一致）。
+
+    优先级：kill_reason > 首个失败验证命令 > 首个语义评估失败原因。
+    供 C4 葬礼回写在子任务最终成功时反推「曾经失败的模式」。
+    """
+    kr = kill_reason or ""
+    if kr and kr != "none":
+        return kr
+    first_fail = next(
+        (vr.get("command", "")[:80] for vr in verification_results
+         if isinstance(vr, dict) and vr.get("exit_code", 0) not in (0, -1)
+         and not vr.get("rejected")),
+        "")
+    if first_fail:
+        return first_fail
+    return next(
+        ((vr.get("reason", "") or "")[:80] for vr in verification_results
+         if isinstance(vr, dict) and vr.get("type") == "semantic"
+         and not vr.get("passed", True)),
+        "")
+
+
+def record_resolution(
+    problems_path: Path | str,
+    *,
+    failure_pattern: str,
+    failure_class: str = "",
+    task_id: str = "",
+    subtask_id: str = "",
+    resolution_summary: str,
+) -> Optional[Problem]:
+    """C4 葬礼回写：子任务重试后最终成功 → 「失败模式 + 如何被修」回写全局 Problem。
+
+    动机：record 只在最终失败时写，知识库永远攒不下 resolution_summary，
+    KnowledgeStore（C4）注入臂因此只有「模式」没有「解法」。本函数在
+    重试后成功的场景补写葬礼数据：record（upsert，累计 occurrence）
+    → mark_resolved（最新解法覆盖）。已 resolved 的 pattern 会先按
+    record 语义复发重开、再以新解法重新 resolved。
+    """
+    if not failure_pattern or not resolution_summary:
+        return None
+    prob = record(problems_path, failure_pattern=failure_pattern,
+                  failure_class=failure_class, task_id=task_id,
+                  subtask_id=subtask_id,
+                  summary=resolution_summary[:120])
+    if prob is None:
+        return None
+    return mark_resolved(problems_path, prob.id,
+                         resolved_by=f"{task_id}/{subtask_id}",
+                         resolution_summary=resolution_summary)
+
+
 # ═══════════════════════════════════════════════════════════════
 # 聚合分析（B4 首要消费者：复发率 / top 失败模式 / 趋势）
 # ═══════════════════════════════════════════════════════════════

@@ -504,7 +504,7 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 - C1 数据埋点补全（verify_state schema 前向兼容 KnowledgeStore）。✅ 已实现（1d00870，verify_state 稳定契约版本化 + reflexion 来源标记）。
 - C2 Reflexion 批评层：改「retry≥2 触发」，受 token/次数/预算约束。✅ 已实现（faebd0b）。
 - C3 局部重规划：失败触发一次 Plan 拆分建议，默认人工确认。✅ 已实现（2026-08-21，无进展信号 verify_revert/divergence/失败模式重复触发一次拆分修复；契约遵守 F-VERIFY-6：最多一次、继承父预算（L2 预检）、replan_triggered/replan_succeeded 入 result+log_event、交互模式人工确认/headless 需 verification.replan.auto_apply=true、拆分步只注入修复 prompt 不扩大任务图；tests/test_replan.py 17 用例）。
-- C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。🔨 实现+smoke 链路验证完成（2026-08-21）：`knowledge.py` 三源提取（Problem/deviation/verify_state）注入 repair prompt，`--with-knowledge` 注入臂 + `knowledge_arm` 臂标记 + `knowledge_injected` 埋点 + 可淘汰（suppressed_ids/dormant 排除）；smoke 7×2×2 臂注入链路真实生效，但参与度仅 2/28（problems.jsonl 全 opened 无 resolution_summary），两臂指标差异为噪声级。全量 decision A/B 未跑。
+- C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。🔨 实现+smoke 链路验证完成（2026-08-21）：`knowledge.py` 三源提取（Problem/deviation/verify_state）注入 repair prompt，`--with-knowledge` 注入臂 + `knowledge_arm` 臂标记 + `knowledge_injected` 埋点 + 可淘汰（suppressed_ids/dormant 排除）；smoke 7×2×2 臂注入链路真实生效，但参与度仅 2/28（problems.jsonl 全 opened 无 resolution_summary），两臂指标差异为噪声级。✅ 同日补葬礼回写链路（`record_resolution`：重试后成功自动回写「失败模式+解法」，problem_resolution_written 埋点），知识库从此能攒「解法」级经验。全量 decision A/B 待知识库积累后重约。
 
 **阶段 D — 自治决策（谨慎）**
 - D1 Reviewer 灰度（高风险任务，review cost ≤ 主任务 20% 门禁）。
