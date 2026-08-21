@@ -428,9 +428,46 @@ def _files_from_diff_stat(summary: str) -> list[str]:
 _REWORK_OK_STATES = ("completed", "DELIVERY_READY", "ACCEPTED_DELIVERY")
 
 
+def _task_dir_ts(name: str) -> Optional[float]:
+    """从任务目录名解析时间戳（task-YYYYMMDD-HHMMSS-...）→ epoch。
+
+    解析失败返回 None（调用方回退到 meta.json mtime）。
+    """
+    import re as _re
+    _m = _re.match(r"task-(\d{8})-(\d{6})", name)
+    if not _m:
+        return None
+    try:
+        from datetime import datetime as _dt
+        return _dt.strptime(_m.group(1) + _m.group(2), "%Y%m%d%H%M%S").timestamp()
+    except ValueError:
+        return None
+
+
+def select_recent_task_dirs(task_dirs: list[Path], window: Optional[int] = 30) -> list[Path]:
+    """按任务时间戳取最近的 window 个任务目录（D-0「最近 N 个真实任务」窗口口径）。
+
+    排序键：目录名时间戳（task-YYYYMMDD-HHMMSS）> meta.json mtime > 0（无法解析排最旧）。
+    window None/<=0 表示不限（返回全量，仍按时间升序排，便于下游一致顺序）。
+    """
+    if window is None or window <= 0:
+        return task_dirs
+    def _key(td: Path) -> float:
+        ts = _task_dir_ts(td.name)
+        if ts is not None:
+            return ts
+        try:
+            return (td / "meta.json").stat().st_mtime
+        except OSError:
+            return 0.0
+    ordered = sorted(task_dirs, key=_key)
+    return ordered[-window:]
+
+
 def compute_post_delivery_rework(task_dirs: list[Path],
                                  window_days: int = 14,
-                                 now: Optional[float] = None) -> dict[str, Any]:
+                                 now: Optional[float] = None,
+                                 recent_window: Optional[int] = 30) -> dict[str, Any]:
     """交付后返工率（#49 审查后修改率的自动信号，「审查行为入流」口径改造）。
 
     动机：显式 review 决策（review.json）长期无数据——人工审查实际发生在
@@ -459,6 +496,7 @@ def compute_post_delivery_rework(task_dirs: list[Path],
     import time as _time
 
     now = now if now is not None else _time.time()
+    task_dirs = select_recent_task_dirs(task_dirs, recent_window)
     eligible = 0
     reworked = 0
     reworked_list: list[dict] = []
@@ -628,8 +666,12 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path]) -> dict[str, Any]:
     }
 
 
-def compute_trust_metrics(task_dirs: list[Path]) -> dict[str, Any]:
+def compute_trust_metrics(task_dirs: list[Path],
+                          recent_window: Optional[int] = 30) -> dict[str, Any]:
     """#49 信任指标（渐进自治放行门）：审查后修改率 / 复发可见率 / 盲区命中率。
+
+    recent_window：D-0 提案「最近 N 个真实任务」观察窗口口径，默认 30
+    （None/<=0 不限制，全量任务）。避免历史旧任务稀释新信号。
 
     数据来源：各 task_dir 的 meta.json（results[].problem_id）+ review.json（decision）。
 
@@ -650,6 +692,7 @@ def compute_trust_metrics(task_dirs: list[Path]) -> dict[str, Any]:
     modified = 0
     failed_total = 0
     failed_with_problem = 0
+    task_dirs = select_recent_task_dirs(task_dirs, recent_window)
     for td in task_dirs:
         meta_path = td / "meta.json"
         if not meta_path.exists():

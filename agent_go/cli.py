@@ -427,6 +427,8 @@ def _build_parser():
                               help="Output as JSON")
     trust_parser.add_argument("--all", action="store_true", dest="include_bench",
                               help="包含 bench/fixture 任务（默认只统计真实任务）")
+    trust_parser.add_argument("--window", type=int, default=30, dest="recent_window",
+                              help="观察窗口：最近 N 个任务（D-0 口径，默认 30；0=不限）")
 
     # mcp 子命令
     mcp_parser = subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)")
@@ -3886,6 +3888,7 @@ def cmd_trust(args=None) -> None:
     from .metrics import compute_post_delivery_rework, compute_trust_metrics
 
     _con = _LazyConsole()
+    window = int(getattr(args, "recent_window", 30) or 0)
     task_dirs = sorted(d for d in AGENT_GO_DIR.glob("task-*") if (d / "meta.json").exists())
     include_bench = bool(getattr(args, "include_bench", False))
     if not include_bench:
@@ -3900,11 +3903,13 @@ def cmd_trust(args=None) -> None:
                 real_dirs.append(d)
         task_dirs = real_dirs
 
-    r = compute_trust_metrics(task_dirs)
-    rework = compute_post_delivery_rework(task_dirs)
+    r = compute_trust_metrics(task_dirs, recent_window=window)
+    rework = compute_post_delivery_rework(task_dirs, recent_window=window)
     if bool(getattr(args, "json_mode", False)):
         _con.force(json.dumps({"scope": "all" if include_bench else "real",
-                               "task_count": len(task_dirs), **r,
+                               "task_count": len(task_dirs),
+                               "recent_window": window,
+                               **r,
                                "post_delivery_rework": rework},
                               indent=2, ensure_ascii=False))
         return
@@ -3913,7 +3918,8 @@ def cmd_trust(args=None) -> None:
         return f"{v * 100:.1f}%" if v is not None else "无数据"
 
     _con.sep("─", 62)
-    _con.title(f"🛡 信任指标（{'全部任务' if include_bench else '真实任务'} {len(task_dirs)} 个）")
+    _win = "全部" if not window else f"最近 {window}"
+    _con.title(f"🛡 信任指标（{'全部任务' if include_bench else '真实任务'} {len(task_dirs)} 个，{_win}）")
     _con.print(f"  审查后修改率: {_pct(r['review_modification_rate'])}"
                f"  （显式 review，{r['reviewed_tasks']} 个决策）")
     _con.print(f"  交付后返工率: {_pct(rework['post_delivery_rework_rate'])}"

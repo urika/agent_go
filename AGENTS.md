@@ -91,6 +91,7 @@ agent_go problems --only <problem-id>           # 单个详情（生命周期/�
 agent_go problems --json                        # 机器可读
 agent_go trust                                  # #49 信任指标（阶段 D 放行门）：审查后修改率/交付后返工率/复发可见率/盲区命中率
 agent_go trust --json                           # 机器可读；--all 含 bench 任务（默认真实任务口径）
+agent_go trust --window N                       # 观察窗口：最近 N 个任务（D-0 口径，默认 30；0=不限）
 
 # MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)
 agent_go mcp

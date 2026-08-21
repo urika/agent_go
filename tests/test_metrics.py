@@ -596,3 +596,67 @@ def test_rework_dirname_anchor_preferred_over_mtime(tmp_path):
     r = compute_post_delivery_rework([td], window_days=14, now=now)
     assert r["rework_eligible_tasks"] == 1
     assert r["reworked_tasks"] == 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# D-0 观察窗口（select_recent_task_dirs / recent_window 口径）
+# ═══════════════════════════════════════════════════════════════
+
+def test_select_recent_task_dirs_by_dirname_ts(tmp_path):
+    """按目录名时间戳取最近 N 个任务。"""
+    from agent_go.metrics import select_recent_task_dirs
+    td_old = _mk_task(tmp_path, "task-20250101-000000-000-aaaa", {"status": "completed"})
+    td_mid = _mk_task(tmp_path, "task-20250601-000000-000-bbbb", {"status": "completed"})
+    td_new = _mk_task(tmp_path, "task-20251201-000000-000-cccc", {"status": "completed"})
+    recent = select_recent_task_dirs([td_old, td_mid, td_new], window=2)
+    assert recent == [td_mid, td_new]
+    recent1 = select_recent_task_dirs([td_old, td_mid, td_new], window=1)
+    assert recent1 == [td_new]
+
+
+def test_select_recent_task_dirs_mtime_fallback(tmp_path):
+    """无目录名时间戳时回退 meta.json mtime。"""
+    from agent_go.metrics import select_recent_task_dirs
+    import time
+    t1 = _mk_task(tmp_path, "task-1", {"status": "completed"})
+    time.sleep(0.01)
+    t2 = _mk_task(tmp_path, "task-2", {"status": "completed"})
+    recent = select_recent_task_dirs([t1, t2], window=1)
+    assert recent == [t2]
+
+
+def test_select_recent_task_dirs_no_window(tmp_path):
+    """window=None/<=0 返回全量（升序）。"""
+    from agent_go.metrics import select_recent_task_dirs
+    td_old = _mk_task(tmp_path, "task-20250101-000000-000-aaaa", {"status": "completed"})
+    td_new = _mk_task(tmp_path, "task-20251201-000000-000-cccc", {"status": "completed"})
+    assert len(select_recent_task_dirs([td_old, td_new], window=None)) == 2
+    assert len(select_recent_task_dirs([td_old, td_new], window=0)) == 2
+
+
+def test_trust_metrics_recent_window_filters_old(tmp_path):
+    """recent_window 只统计最近 N 个任务（旧任务不稀释新信号）。"""
+    from agent_go.metrics import compute_trust_metrics
+    td_old = _mk_task(tmp_path, "task-20250101-000000-000-aaaa", {
+        "results": [{"subtask_id": "s1", "status": "failed", "problem_id": "p-1"}]})
+    td_new = _mk_task(tmp_path, "task-20251201-000000-000-cccc", {
+        "results": [{"subtask_id": "s1", "status": "failed"}]})
+    r = compute_trust_metrics([td_old, td_new], recent_window=1)
+    assert r["failed_subtasks"] == 1
+    assert r["recurrence_visibility_rate"] == 0.0  # 只有新任务（无 problem_id）
+    r_all = compute_trust_metrics([td_old, td_new], recent_window=None)
+    assert r_all["failed_subtasks"] == 2
+    assert r_all["recurrence_visibility_rate"] == 0.5
+
+
+def test_rework_recent_window_filters_old(tmp_path):
+    """rework 的 recent_window 同样只统计最近 N 个任务。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    td_old = _mk_delivered_task(tmp_path, "task-20250101-000000-000-aaaa", repo, _BASE)
+    td_new = _mk_delivered_task(tmp_path, "task-20251201-000000-000-cccc", repo, _BASE)
+    # 两个都已满观察期（now 覆盖两个目录名锚点）；window=1 时只统计较新的一个
+    now = _BASE + 200 * _DAY
+    r = compute_post_delivery_rework([td_old, td_new], window_days=14, now=now,
+                                     recent_window=1)
+    assert r["rework_eligible_tasks"] == 1
