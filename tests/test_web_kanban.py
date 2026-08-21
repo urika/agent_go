@@ -763,3 +763,51 @@ class TestKanbanDecompose:
         monkeypatch.setattr("agent_go.api.call_api", lambda *a, **k: "not-json")
         code, d = _post(f"{ops_server}/api/kanban/decompose", {"requirement": "test"})
         assert code == 422
+
+
+class TestLazyReconcile:
+    """惰性状态回流（W3.3 边界缺陷修复：覆盖 CLI resume/孤儿/重启路径）。"""
+
+    def test_reconcile_completed_task_moves_to_operations(self, ops_server, ops_env, monkeypatch):
+        """DELIVERY_READY 任务关联的卡片 → 惰性回流到 operations（无需 on_exit 托管句柄）。"""
+        import agent_go.kanban as _kb
+        from tests.test_web_ops import _mk_task
+        TID = "task-20260819-235959-001-aaaa"
+        _mk_task(ops_env, TID, status="DELIVERY_READY")
+        card = _create_card(ops_server, title="已完成任务", stage="implementation",
+                            type="implementation", repo="/tmp")
+        _kb.link_task(card["id"], TID)
+        # 惰性回流：GET /api/kanban 时自动修正
+        _ = _get(f"{ops_server}/api/kanban")
+        assert _kb.get_card(card["id"])["stage"] == "operations"
+
+    def test_reconcile_running_task_no_move(self, ops_server, ops_env):
+        """运行中任务（EXECUTING）→ 不流转。"""
+        import agent_go.kanban as _kb
+        from tests.test_web_ops import _mk_task
+        TID = "task-20260819-235959-002-bbbb"
+        _mk_task(ops_env, TID, status="EXECUTING")
+        card = _create_card(ops_server, title="运行中任务", stage="implementation",
+                            type="implementation", repo="/tmp")
+        _kb.link_task(card["id"], TID)
+        _get(f"{ops_server}/api/kanban")
+        assert _kb.get_card(card["id"])["stage"] == "implementation"
+
+    def test_reconcile_failed_task_stays_implementation(self, ops_server, ops_env):
+        """失败任务（FAILED）→ 停留 implementation 列（不流转）。"""
+        import agent_go.kanban as _kb
+        from tests.test_web_ops import _mk_task
+        TID = "task-20260819-235959-003-cccc"
+        _mk_task(ops_env, TID, status="FAILED")
+        card = _create_card(ops_server, title="失败任务", stage="implementation",
+                            type="implementation", repo="/tmp")
+        _kb.link_task(card["id"], TID)
+        _get(f"{ops_server}/api/kanban")
+        assert _kb.get_card(card["id"])["stage"] == "implementation"
+
+    def test_reconcile_no_task_ids_noop(self, ops_server):
+        """无 task_ids 卡片 → 无操作（不动）。"""
+        import agent_go.kanban as _kb
+        card = _create_card(ops_server, title="无任务卡片", stage="design", type="discussion")
+        _get(f"{ops_server}/api/kanban")
+        assert _kb.get_card(card["id"])["stage"] == "design"

@@ -509,3 +509,45 @@ def cost_quality_analysis() -> dict:
         else:
             suggestion = "云端 $/pass 或通过率更优 → 倾向云端（manual/cloud 路由）"
     return {"groups": groups, "suggestion": suggestion}
+
+
+# 终态状态集（meta.json status.py 归一化后的 8 态）
+_TERMINAL_STATUSES = ("DELIVERY_READY", "ACCEPTED_DELIVERY")
+_FAILED_STATUSES = ("FAILED", "BLOCKED", "VERIFICATION_FAILED", "CANCELLED")
+
+
+def reconcile_cards(status_resolver) -> list[dict]:
+    """惰性状态回流：遍历卡片 task_ids，读 meta.json 终态 → 自动流转卡片。
+
+    修复边界缺陷（状态回流此前只绑定 task_runner on_exit 托管子进程）：
+    覆盖 CLI resume/run、web 重启孤儿进程、非 dispatch 入口等所有完成路径。
+    在 GET /api/kanban 时调用（看板打开即修正）。
+
+    status_resolver: (task_id) -> str，返回归一化任务状态（web_server._task_status_of）
+    返回 [{card_id, from_stage, to_stage, task_id, status}] 流转记录（无流转则空列表）。
+    """
+    moved = []
+    board = load_board()
+    for card in board.get("cards", []):
+        if card.get("archived") or card.get("stage") == "operations":
+            continue
+        task_ids = card.get("task_ids") or []
+        if not task_ids:
+            continue
+        # 取最新任务状态（task_ids 按派发顺序追加，最后一个为最新）
+        latest_tid = task_ids[-1]
+        try:
+            status = status_resolver(latest_tid) or ""
+        except Exception:
+            continue
+        if not status or status in ("EXECUTING", "PLANNING", "PAUSED"):
+            continue  # 运行中/暂停，不流转
+        if status in _TERMINAL_STATUSES:
+            try:
+                move_card(card["id"], "operations", note=f"惰性回流：任务 {latest_tid} {status}")
+                moved.append({"card_id": card["id"], "from_stage": card.get("stage"),
+                              "to_stage": "operations", "task_id": latest_tid, "status": status})
+            except KanbanError:
+                continue
+        # 失败态停留 implementation 列（看板无 blocked 列），不流转——与 on_exit 回流语义一致
+    return moved

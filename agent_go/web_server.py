@@ -1636,6 +1636,14 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[1] == "kanban":
                 # ?archived=1 → 归档视图（含已归档卡片，供取消归档）
                 include_archived = "archived" in query
+                # 惰性状态回流：打开看板即修正卡片状态（覆盖 CLI resume/孤儿进程/web 重启
+                # 等所有完成路径，不依赖 task_runner on_exit 托管句柄）
+                try:
+                    moved = kanban.reconcile_cards(_task_status_of)
+                    if moved:
+                        logger.info("[kanban] 惰性回流修正 %d 张卡片状态", len(moved))
+                except Exception as _re:
+                    logger.warning("[kanban] 惰性回流失败（不影响读取）: %s", _re)
                 self._reply_json(200, api_kanban(include_archived=include_archived))
                 return
             if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "classification-stats":
@@ -2578,6 +2586,9 @@ class WebHandler(BaseHTTPRequestHandler):
         except kanban.KanbanError as e:
             self._reply_json(404, {"error": str(e)})
             return
+        if card is None:
+            self._reply_json(404, {"error": "卡片不存在"})
+            return
         task_ids = card.get("task_ids") or []
         if not task_ids:
             self._reply_json(422, {"error": "卡片无关联任务，无法生成降级建议"})
@@ -2955,6 +2966,7 @@ _SPA_HTML = """<!DOCTYPE html>
   .kanban-card.archived { opacity:0.55; filter:saturate(0.5); }
   .kanban-card.archived:hover { border-color:var(--yellow); }
   .kanban-card.open { border-color:var(--blue); }
+  .kanban-card.selected { border-color:var(--yellow); box-shadow:0 0 0 2px var(--yellow); }
   .kanban-card .kc-title { font-weight:500; margin-bottom:6px; }
   .kanban-card .kc-meta { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
   .kanban-card .kc-foot { display:flex; gap:6px; align-items:center; margin-top:8px; }
@@ -3733,6 +3745,7 @@ let kanbanExpanded = null;      // 展开详情的卡片 id
 let kanbanEditing = null;       // 正在编辑的卡片 id
 let kanbanNewCardStage = null;  // 正在新建卡片的列
 let kanbanShowArchived = false; // 归档视图开关（含已归档卡片，可取消归档）
+let kanbanSelected = null;      // 键盘操作选中的卡片 id
 
 async function loadKanban() {
   try {
@@ -3760,7 +3773,9 @@ function renderKanban() {
     '<input type="text" id="kanbanRepoFilter" placeholder="🔍 按 repo 筛选…" value="'+esc(kanbanRepoFilter)+'">'+
     '<button class="btn '+(kanbanShowArchived?'primary':'')+'" id="kanbanArchToggle" title="显示/隐藏已归档卡片">🗂 '+
     (kanbanShowArchived?'已归档（含）':'已归档')+'</button>'+
-    '<span class="dim">共 '+(d.total||0)+' 张卡片'+(filter?'（已筛选）':'')+'</span></div>';
+    '<span class="dim">共 '+(d.total||0)+' 张卡片'+(filter?'（已筛选）':'')+'</span>'+
+    '<span class="dim" style="margin-left:auto;font-size:11px;color:var(--dim)" title="选中卡片后可用：↑/↓ 或 j/k 移动选中 · Enter/e 编辑 · Space 展开/收起 · ←/→ 或 [/] 流转 · ⌘⌫/Delete 删除 · A 归档 · U 取消归档 · D 派发 · Esc 取消选中">'+
+    '⌨ 单击选中卡片后可用键盘（双击编辑 · ⌘⌫ 删除）</span></div>';
   // W4.1 分类器自学习：分类准确率面板（auto/manual/pending 完成率）
   const stats = d._stats;
   if (stats && stats.by_automation) {
@@ -3813,7 +3828,7 @@ function findKanbanCard(id) {
 function kanbanCardHtml(c, stageIdx, stageCount) {
   const typeLabel = ((kanbanData||{}).card_types||{})[c.type] || c.type;
   const repoShort = c.repo ? c.repo.split('/').filter(Boolean).pop() : '';
-  let html = '<div class="kanban-card'+(c.archived?' archived':'')+(kanbanExpanded===c.id?' open':'')+'"'+(c.archived?'':' draggable="true"')+' data-card="'+esc(c.id)+'">'+
+  let html = '<div class="kanban-card'+(c.archived?' archived':'')+(kanbanExpanded===c.id?' open':'')+(kanbanSelected===c.id?' selected':'')+'"'+(c.archived?'':' draggable="true"')+' data-card="'+esc(c.id)+'">'+
     '<div class="kc-title">'+esc(c.title)+'</div>'+
     '<div class="kc-meta"><span class="tag">'+esc(typeLabel)+'</span>';
   if (c.archived) html += '<span class="tag" style="color:var(--yellow)">🗂 已归档</span>';
@@ -3938,13 +3953,22 @@ function bindKanbanEvents() {
       renderKanban();
     };
   });
-  // 卡片：点击展开/收起详情 + 拖拽流转
+  // 卡片：单击选中 + 展开/收起详情，双击进入编辑，拖拽流转
   main.querySelectorAll('.kanban-card').forEach(el => {
     el.addEventListener('click', ev => {
       if (ev.target.closest('button') || ev.target.closest('.kanban-form')) return;
       const id = el.dataset.card;
+      kanbanSelected = id;
       kanbanExpanded = (kanbanExpanded === id) ? null : id;
       kanbanEditing = null;
+      renderKanban();
+    });
+    el.addEventListener('dblclick', ev => {
+      if (ev.target.closest('button') || ev.target.closest('.kanban-form')) return;
+      const id = el.dataset.card;
+      kanbanSelected = id;
+      kanbanExpanded = id;
+      kanbanEditing = id;
       renderKanban();
     });
     el.addEventListener('dragstart', ev => {
@@ -4105,6 +4129,179 @@ function bindKanbanEvents() {
   main.querySelectorAll('.kanban-task-link').forEach(el => {
     el.onclick = ev => { ev.stopPropagation(); switchView('tasks'); };
   });
+}
+
+// 看板键盘操作（绑定一次，避免 renderKanban 重复累加）：
+//   选中卡片后可用常用键操作——↑/↓ 或 j/k 移动选中，Enter/e 编辑，Space 展开/收起，
+//   ←/→ 或 [/] 流转阶段，⌘⌫/⌘Delete/Delete 删除，A 归档，U 取消归档，D 派发，Esc 取消选中。
+function bindKanbanKeyboard() {
+  if (bindKanbanKeyboard._bound) return;
+  bindKanbanKeyboard._bound = true;
+  document.addEventListener('keydown', e => {
+    if (currentView !== 'kanban') return;
+    if (!kanbanSelected) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'))
+      return;
+    const card = findKanbanCard(kanbanSelected);
+    if (!card) { kanbanSelected = null; return; }
+    const key = e.key;
+    // 编辑（Enter 或 e）
+    if (key === 'Enter' || key === 'e' || key === 'E') {
+      e.preventDefault();
+      kanbanExpanded = card.id;
+      kanbanEditing = card.id;
+      renderKanban();
+      const f = document.querySelector('.kanban-form .kf-title');
+      if (f) setTimeout(() => f.focus(), 0);
+      return;
+    }
+    // 展开/收起（Space）
+    if (key === ' ') {
+      e.preventDefault();
+      kanbanExpanded = (kanbanExpanded === card.id) ? null : card.id;
+      kanbanEditing = null;
+      renderKanban();
+      return;
+    }
+    // 流转阶段（←/→ 或 [/]）
+    if (key === 'ArrowLeft' || key === '[') {
+      e.preventDefault();
+      moveKanbanCardBy(card, -1);
+      return;
+    }
+    if (key === 'ArrowRight' || key === ']') {
+      e.preventDefault();
+      moveKanbanCardBy(card, 1);
+      return;
+    }
+    // 删除（⌘⌫ / ⌘Delete / Ctrl+⌫ / Delete）
+    if ((e.metaKey || e.ctrlKey) && (key === 'Backspace' || key === 'Delete')) {
+      e.preventDefault();
+      deleteKanbanCard(card);
+      return;
+    }
+    if (key === 'Delete') {
+      e.preventDefault();
+      deleteKanbanCard(card);
+      return;
+    }
+    // 归档 / 取消归档（a / u）
+    if (key === 'a' || key === 'A') {
+      e.preventDefault();
+      archiveKanbanCard(card, true);
+      return;
+    }
+    if (key === 'u' || key === 'U') {
+      e.preventDefault();
+      archiveKanbanCard(card, false);
+      return;
+    }
+    // 派发（d，仅 implementation/periodic 且未运行）
+    if (key === 'd' || key === 'D') {
+      e.preventDefault();
+      dispatchKanbanCard(card);
+      return;
+    }
+    // 移动选中（↑/↓ 或 j/k）
+    if (key === 'ArrowDown' || key === 'j' || key === 'J') {
+      e.preventDefault();
+      moveKanbanSelection(card, 1);
+      return;
+    }
+    if (key === 'ArrowUp' || key === 'k' || key === 'K') {
+      e.preventDefault();
+      moveKanbanSelection(card, -1);
+      return;
+    }
+    // 取消选中（Esc）
+    if (key === 'Escape') {
+      e.preventDefault();
+      kanbanSelected = null;
+      kanbanEditing = null;
+      renderKanban();
+      return;
+    }
+  });
+}
+
+// 看板键盘辅助：按可见顺序取卡片列表（跨列，受 repo 筛选/归档开关约束）
+function kanbanVisibleCards() {
+  const d = kanbanData || {stages: [], cards: {}};
+  const filter = kanbanRepoFilter.trim().toLowerCase();
+  const out = [];
+  (d.stages || []).forEach(st => {
+    (d.cards[st.key] || []).forEach(c => {
+      if (kanbanShowArchived ? true : !c.archived) {
+        if (filter && !(c.repo || '').toLowerCase().includes(filter)) return;
+        out.push(c);
+      }
+    });
+  });
+  return out;
+}
+
+function moveKanbanSelection(card, dir) {
+  const list = kanbanVisibleCards();
+  const idx = list.findIndex(c => c.id === card.id);
+  if (idx < 0) return;
+  const ni = idx + dir;
+  if (ni < 0 || ni >= list.length) return;
+  kanbanSelected = list[ni].id;
+  renderKanban();
+}
+
+function moveKanbanCardBy(card, dir) {
+  const stages = (kanbanData || {}).stages || [];
+  const idx = stages.findIndex(s => s.key === card.stage);
+  const ni = idx + dir;
+  if (ni < 0 || ni >= stages.length) return;
+  if (card.archived) return;
+  postJSON('/api/kanban/cards/'+encodeURIComponent(card.id)+'/move', {stage: stages[ni].key})
+    .then(() => { kanbanSelected = card.id; loadKanban(); })
+    .catch(err => alert('流转失败: '+err.message));
+}
+
+function deleteKanbanCard(card) {
+  if ((card.task_ids || []).length) {
+    alert('该卡片已关联任务，不能删除（可归档）。');
+    return;
+  }
+  if (!confirm('物理删除该卡片「'+card.title+'」？仅未派发过任务的卡片可删除。')) return;
+  postJSON('/api/kanban/cards/'+encodeURIComponent(card.id)+'/delete', {})
+    .then(() => {
+      kanbanSelected = null;
+      kanbanExpanded = null;
+      loadKanban();
+    })
+    .catch(err => alert('删除失败: '+err.message));
+}
+
+function archiveKanbanCard(card, archived) {
+  if (archived && !confirm('归档该卡片「'+card.title+'」？（归档后不在看板展示）')) return;
+  postJSON('/api/kanban/cards/'+encodeURIComponent(card.id)+'/archive', {archived: !!archived})
+    .then(() => {
+      if (archived) kanbanSelected = null;
+      kanbanExpanded = null;
+      loadKanban();
+    })
+    .catch(err => alert((archived?'归档':'取消归档')+'失败: '+err.message));
+}
+
+function dispatchKanbanCard(card) {
+  if (card.archived || (card.type !== 'implementation' && card.type !== 'periodic')) {
+    alert('仅实施/周期类未归档卡片可派发。');
+    return;
+  }
+  const lt = card.latest_task || {};
+  if (lt.status === 'EXECUTING' || lt.status === 'PLANNING') {
+    alert('该卡片已有运行中任务（'+lt.status+'），不可重复派发。');
+    return;
+  }
+  if (!confirm('派发卡片「'+card.title+'」到 agent_go 执行？\\n任务文本 = 卡片标题 + 描述')) return;
+  postJSON('/api/kanban/cards/'+encodeURIComponent(card.id)+'/dispatch', {parallel: 1})
+    .then(() => { setTimeout(loadKanban, 800); })
+    .catch(err => alert('派发失败: '+err.message));
 }
 
 // ── 视图切换 + 新视图渲染（P0-2 / P1 / P2）─────────────────
@@ -4609,6 +4806,7 @@ document.getElementById('searchInput').addEventListener('input', renderTasks);
 document.querySelectorAll('.nav-tab').forEach(tab => {
   tab.addEventListener('click', () => switchView(tab.dataset.view));
 });
+bindKanbanKeyboard();
 loadTasks();
 connectSSE();
 </script>
