@@ -10,6 +10,7 @@ __all__ = [
     "compute_frozen_metrics", "is_valid_metric_task",
     "aggregate_failure_classes", "local_tco_usd",
     "compute_trust_metrics", "compute_blind_spot_hit_rate",
+    "compute_post_delivery_rework",
 ]
 
 # local_model_cost 配置缓存（local_tco_usd 惰性加载一次）
@@ -408,6 +409,146 @@ def compute_mcp_tool_success_rate(events: list[dict], exclude_user_config_errors
         "success_rate": rate,
         "excluded_user_config": len(events) - n,
         "passes_threshold": bool(rate is not None and rate >= MCP_TOOL_SUCCESS_THRESHOLD),
+    }
+
+
+def _files_from_diff_stat(summary: str) -> list[str]:
+    """从 diff --stat 文本解析文件列表（与 executor._extract_files_changed 同规则，
+    此处重实现以避免 metrics ← executor 反向依赖）。"""
+    import re
+    files: list[str] = []
+    for line in (summary or "").split("\n"):
+        m = re.match(r"^\s*(\S+?)\s+\|", line)
+        if m:
+            files.append(m.group(1))
+    return files
+
+
+# 交付后返工统计的交付态集合
+_REWORK_OK_STATES = ("completed", "DELIVERY_READY", "ACCEPTED_DELIVERY")
+
+
+def compute_post_delivery_rework(task_dirs: list[Path],
+                                 window_days: int = 14,
+                                 now: Optional[float] = None) -> dict[str, Any]:
+    """交付后返工率（#49 审查后修改率的自动信号，「审查行为入流」口径改造）。
+
+    动机：显式 review 决策（review.json）长期无数据——人工审查实际发生在
+    agent_go 之外（IDE / PR / 直接改代码）。本指标不承认 review 工作流，
+    直接测量终局行为：交付的文件在观察窗口内是否又被目标分支上的
+    后续 commit 修改（= 交付物被返工，即「审查后修改」的现实代理）。
+
+    口径：
+    - 分母：状态 ∈ {completed, DELIVERY_READY, ACCEPTED_DELIVERY}、repo 可访问、
+      有可解析交付文件、且锚点时刻已满 window_days 观察期的任务。
+    - 锚点：meta.explicit_merge_commit（显式交付 merge，精确）> 任务目录名时间戳
+      （task-YYYYMMDD-HHMMSS，任务创建时刻；agent 工作在 agent_go/* 分支不进
+      target 分支 log，故创建时刻起算安全）> meta.json mtime（兜底，注意元数据
+      迁移会刷新 mtime）。显式锚点时锚点 commit 之后的任何触碰 commit 都计返工；
+      近似锚点时丢弃最旧一个触碰 commit（视为交付 merge 本身，可能高估防护）。
+    - 分子：分母任务中，交付文件在 (锚点, 锚点+window] 内被 target/base 分支上的
+      后续 commit（排除锚点自身、排除消息含 task_id 的 agent 自身 commit）修改。
+
+    fail-open：git 命令失败/仓库已删的任务不进分母。
+
+    Returns:
+        {"post_delivery_rework_rate": float|None, "rework_eligible_tasks": int,
+         "reworked_tasks": int, "window_days": int,
+         "reworked": [{"task_id", "commits"}]}
+    """
+    import time as _time
+
+    now = now if now is not None else _time.time()
+    eligible = 0
+    reworked = 0
+    reworked_list: list[dict] = []
+    for td in task_dirs:
+        meta_path = td / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if meta.get("status") not in _REWORK_OK_STATES:
+            continue
+        repo_str = str(meta.get("repo", "") or meta.get("repo_path", ""))
+        if not repo_str or not (Path(repo_str) / ".git").exists():
+            continue
+        files: list[str] = []
+        for r in meta.get("results") or []:
+            if isinstance(r, dict):
+                files.extend(_files_from_diff_stat(str(r.get("summary", ""))))
+        # 去重、防御性过滤（限长防命令行过长）
+        files = sorted({f for f in files if f and not f.startswith("/")})[:50]
+        if not files:
+            continue
+
+        anchor_commit = str(meta.get("explicit_merge_commit") or "")
+        anchor_ts: Optional[float] = None
+        if anchor_commit:
+            try:
+                ct = subprocess.run(
+                    ["git", "show", "-s", "--format=%ct", anchor_commit],
+                    cwd=repo_str, capture_output=True, text=True, timeout=10)
+                if ct.returncode == 0 and ct.stdout.strip().isdigit():
+                    anchor_ts = float(ct.stdout.strip())
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if anchor_ts is None:
+            # 任务目录名时间戳（task-YYYYMMDD-HHMMSS-...）优先于 mtime
+            # （元数据迁移会刷新 mtime，不可信）
+            import re as _re2
+            from datetime import datetime as _dt
+            _m = _re2.match(r"task-(\d{8})-(\d{6})", td.name)
+            if _m:
+                try:
+                    anchor_ts = _dt.strptime(
+                        _m.group(1) + _m.group(2), "%Y%m%d%H%M%S").timestamp()
+                except ValueError:
+                    anchor_ts = None
+        if anchor_ts is None:
+            try:
+                anchor_ts = meta_path.stat().st_mtime
+            except OSError:
+                continue
+        if now - anchor_ts < window_days * 86400:
+            continue  # 观察期不足
+        eligible += 1
+
+        target = str(meta.get("target_branch") or meta.get("base_branch") or "HEAD")
+        task_id = str(meta.get("task_id") or td.name)
+        try:
+            log = subprocess.run(
+                ["git", "log", target, f"--since={int(anchor_ts)}",
+                 "--format=%H%x00%s", "--"] + files,
+                cwd=repo_str, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if log.returncode != 0:
+            continue
+        # newest → oldest；排除锚点自身与 agent 自身（消息含 task_id）commit
+        commits = []
+        for line in log.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            sha, _, subject = line.partition("\x00")
+            if sha == anchor_commit or task_id in subject:
+                continue
+            commits.append(sha)
+        if not anchor_commit and commits:
+            # 近似锚点：最旧一个触碰 commit 视为交付 merge 本身
+            commits = commits[:-1]
+        if commits:
+            reworked += 1
+            reworked_list.append({"task_id": task_id, "commits": len(commits)})
+
+    return {
+        "post_delivery_rework_rate": round(reworked / eligible, 4) if eligible else None,
+        "rework_eligible_tasks": eligible,
+        "reworked_tasks": reworked,
+        "window_days": window_days,
+        "reworked": reworked_list[:20],
     }
 
 

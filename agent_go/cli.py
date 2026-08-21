@@ -3883,7 +3883,7 @@ def cmd_trust(args=None) -> None:
     默认只统计真实任务（repo 非 eval_suite/fixture）；--all 包含 bench 任务。
     """
     from .console import _LazyConsole
-    from .metrics import compute_trust_metrics
+    from .metrics import compute_post_delivery_rework, compute_trust_metrics
 
     _con = _LazyConsole()
     task_dirs = sorted(d for d in AGENT_GO_DIR.glob("task-*") if (d / "meta.json").exists())
@@ -3901,9 +3901,11 @@ def cmd_trust(args=None) -> None:
         task_dirs = real_dirs
 
     r = compute_trust_metrics(task_dirs)
+    rework = compute_post_delivery_rework(task_dirs)
     if bool(getattr(args, "json_mode", False)):
         _con.force(json.dumps({"scope": "all" if include_bench else "real",
-                               "task_count": len(task_dirs), **r},
+                               "task_count": len(task_dirs), **r,
+                               "post_delivery_rework": rework},
                               indent=2, ensure_ascii=False))
         return
 
@@ -3913,7 +3915,10 @@ def cmd_trust(args=None) -> None:
     _con.sep("─", 62)
     _con.title(f"🛡 信任指标（{'全部任务' if include_bench else '真实任务'} {len(task_dirs)} 个）")
     _con.print(f"  审查后修改率: {_pct(r['review_modification_rate'])}"
-               f"  （{r['reviewed_tasks']} 个 review 决策；放行方向：下降，提案 ≤20%→10%）")
+               f"  （显式 review，{r['reviewed_tasks']} 个决策）")
+    _con.print(f"  交付后返工率: {_pct(rework['post_delivery_rework_rate'])}"
+               f"  （自动信号，{rework['reworked_tasks']}/{rework['rework_eligible_tasks']} 个交付任务 "
+               f"{rework['window_days']}d 内被返工；放行方向：下降，提案 ≤20%→10%）")
     _con.print(f"  复发可见率:   {_pct(r['recurrence_visibility_rate'])}"
                f"  （{r['failed_subtasks']} 个失败子任务；放行方向：上升，提案 ≥80%）")
     _con.print(f"  盲区命中率:   {_pct(r['blind_spot_hit_rate'])}"
@@ -3922,8 +3927,8 @@ def cmd_trust(args=None) -> None:
     for sig, v in by_signal.items():
         if v.get("items"):
             _con.print(f"    - {sig}: {v['hits']}/{v['items']} 命中")
-    if r["reviewed_tasks"] < 10 or r["blind_spot_items"] < 20:
-        _con.print("  ⚠️ 样本不足（放行评估需 ≥10 个 review 决策 / ≥20 条盲区标注），"
+    if rework["rework_eligible_tasks"] < 10 or r["blind_spot_items"] < 20:
+        _con.print("  ⚠️ 样本不足（放行评估需 ≥10 个有效交付任务 / ≥20 条盲区标注），"
                    "指标仅供参考——见 docs/design/trust-metrics-baseline-2026-08-21.md")
 
 

@@ -429,3 +429,170 @@ def test_trust_metrics_blind_spot_none_without_annotations(tmp_path):
     r = compute_trust_metrics([t])
     assert r["blind_spot_hit_rate"] is None
     assert r["blind_spot_items"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# 交付后返工率（compute_post_delivery_rework，审查行为入流）
+# ═══════════════════════════════════════════════════════════════
+
+def _git(repo: Path, *args, date_ts=None):
+    import os
+    import subprocess
+    env = dict(os.environ)
+    env.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+    if date_ts is not None:
+        env["GIT_AUTHOR_DATE"] = f"@{date_ts}"
+        env["GIT_COMMITTER_DATE"] = f"@{date_ts}"
+    return subprocess.run(["git", "-C", str(repo)] + list(args),
+                          capture_output=True, text=True, env=env)
+
+
+def _mk_repo_with_file(tmp_path: Path, base_ts: int) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "base", date_ts=base_ts)
+    return repo
+
+
+def _mk_delivered_task(base: Path, name: str, repo: Path, mtime_ts: int,
+                       merge_commit: str = "", status: str = "completed") -> Path:
+    import os
+    td = base / name
+    td.mkdir()
+    meta = {
+        "task_id": name, "status": status, "repo": str(repo),
+        "results": [{"subtask_id": "s1", "status": "completed",
+                     "summary": "a.py | 2 ++\n 1 file changed, 2 insertions(+)"}],
+    }
+    if merge_commit:
+        meta["explicit_merge_commit"] = merge_commit
+    mp = td / "meta.json"
+    mp.write_text(_json.dumps(meta), encoding="utf-8")
+    os.utime(mp, (mtime_ts, mtime_ts))
+    return td
+
+
+_BASE = 1755000000  # 2025-08-12 左右
+_DAY = 86400
+
+
+def test_rework_detected_after_approx_anchor(tmp_path):
+    """近似锚点（meta mtime）：丢弃最旧触碰 commit（交付 merge），其余计返工。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_delivered_task(tmp_path, "task-a", repo, anchor)
+    # 交付 merge（anchor+1d）+ 人工返工（anchor+2d）
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge agent work", date_ts=anchor + _DAY)
+    (repo / "a.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "human fix", date_ts=anchor + 2 * _DAY)
+    now = anchor + 20 * _DAY
+    r = compute_post_delivery_rework([td], window_days=14, now=now)
+    assert r["rework_eligible_tasks"] == 1
+    assert r["reworked_tasks"] == 1
+    assert r["post_delivery_rework_rate"] == 1.0
+    assert r["reworked"][0]["commits"] == 1
+
+
+def test_rework_only_merge_commit_not_counted(tmp_path):
+    """近似锚点：仅交付 merge 一个触碰 commit → 不算返工。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_delivered_task(tmp_path, "task-a", repo, anchor)
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge agent work", date_ts=anchor + _DAY)
+    now = anchor + 20 * _DAY
+    r = compute_post_delivery_rework([td], window_days=14, now=now)
+    assert r["rework_eligible_tasks"] == 1
+    assert r["reworked_tasks"] == 0
+    assert r["post_delivery_rework_rate"] == 0.0
+
+
+def test_rework_explicit_merge_anchor_counts_all_after(tmp_path):
+    """显式锚点（explicit_merge_commit）：锚点后的触碰 commit 全部计入（含第一个）。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "explicit delivery merge", date_ts=anchor)
+    merge_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    td = _mk_delivered_task(tmp_path, "task-a", repo, anchor, merge_commit=merge_sha)
+    (repo / "a.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "human tweak", date_ts=anchor + _DAY)
+    now = anchor + 20 * _DAY
+    r = compute_post_delivery_rework([td], window_days=14, now=now)
+    assert r["reworked_tasks"] == 1
+    assert r["reworked"][0]["commits"] == 1
+
+
+def test_rework_agent_self_commit_excluded(tmp_path):
+    """消息含 task_id 的 commit（agent 自身）不计返工。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_delivered_task(tmp_path, "task-a", repo, anchor)
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge", date_ts=anchor + _DAY)
+    (repo / "a.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "follow-up for task-a", date_ts=anchor + 2 * _DAY)
+    now = anchor + 20 * _DAY
+    r = compute_post_delivery_rework([td], window_days=14, now=now)
+    assert r["reworked_tasks"] == 0
+
+
+def test_rework_window_not_elapsed_excluded(tmp_path):
+    """观察期不足 → 不进分母（rate=None）。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_delivered_task(tmp_path, "task-a", repo, anchor)
+    now = anchor + 5 * _DAY
+    r = compute_post_delivery_rework([td], window_days=14, now=now)
+    assert r["rework_eligible_tasks"] == 0
+    assert r["post_delivery_rework_rate"] is None
+
+
+def test_rework_missing_repo_excluded(tmp_path):
+    """仓库已删 → 不进分母（fail-open）。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    td = _mk_delivered_task(tmp_path, "task-a", tmp_path / "ghost", _BASE)
+    r = compute_post_delivery_rework([td], window_days=14, now=_BASE + 30 * _DAY)
+    assert r["rework_eligible_tasks"] == 0
+    assert r["post_delivery_rework_rate"] is None
+
+
+def test_rework_non_delivered_status_excluded(tmp_path):
+    """非交付态（failed/PAUSED）不进分母。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    td = _mk_delivered_task(tmp_path, "task-a", repo, _BASE, status="failed")
+    r = compute_post_delivery_rework([td], window_days=14, now=_BASE + 30 * _DAY)
+    assert r["rework_eligible_tasks"] == 0
+
+
+def test_rework_dirname_anchor_preferred_over_mtime(tmp_path):
+    """目录名时间戳锚点优先于 mtime（元数据迁移刷新 mtime 后窗口判定仍正确）。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    # 目录名时间戳 = 2025-08-12 12:00:00；mtime 故意设为「现在」（模拟元数据迁移刷新）
+    import time
+    anchor = _BASE + _DAY
+    td = _mk_delivered_task(tmp_path, "task-20250812-120000-000-abcd", repo,
+                            time.time())
+    # 对齐：目录名时间戳应解析为 2025-08-12 12:00:00 ≈ anchor 附近
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge agent work", date_ts=anchor + _DAY)
+    (repo / "a.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "human fix", date_ts=anchor + 2 * _DAY)
+    # 若错误使用 mtime（现在），窗口会判「不足」→ eligible=0；
+    # 正确使用目录名锚点 → eligible=1 且检出返工
+    now = anchor + 20 * _DAY
+    r = compute_post_delivery_rework([td], window_days=14, now=now)
+    assert r["rework_eligible_tasks"] == 1
+    assert r["reworked_tasks"] == 1

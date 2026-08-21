@@ -89,7 +89,7 @@ agent_go problems                               # 列出全部 Problem（按出�
 agent_go problems --aggregate                   # 聚合分析（状态分布/复发数/top 失败模式）
 agent_go problems --only <problem-id>           # 单个详情（生命周期/根因/历史解法/复发重开）
 agent_go problems --json                        # 机器可读
-agent_go trust                                  # #49 信任指标（阶段 D 放行门）：审查后修改率/复发可见率/盲区命中率
+agent_go trust                                  # #49 信任指标（阶段 D 放行门）：审查后修改率/交付后返工率/复发可见率/盲区命中率
 agent_go trust --json                           # 机器可读；--all 含 bench 任务（默认真实任务口径）
 
 # MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)
@@ -215,7 +215,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `router.py` | Role-aware model routing: planner/worker/reviewer, fallback + circuit breaker |
 | `models_registry.py` | 模型池（① Model Registry）：models.json 加载（mtime 缓存）+ ModelEntity（endpoint/thinking/JSON 遵从/TCO/quality_tags）+ key_ref 解析（env/secret，不存明文） |
 | `evaluator.py` | LLM semantic evaluation + failure summary for verification loop |
-| `metrics.py` | Data collection: timing/change stats, estimate_cost, aggregate_metering, trust metrics (#49 放行门三指标，含盲区命中率) |
+| `metrics.py` | Data collection: timing/change stats, estimate_cost, aggregate_metering, trust metrics (#49 放行门：review/交付后返工率/复发可见率/盲区命中率) |
 | `config.py` | Config loading, logging, API key resolution, meter_event |
 | `utils.py` | Commit formatting, slugify, shell safety, version detection, tool version probing |
 | `spec.py` | Task Spec parsing + L1 admission review (S11-P0) |
