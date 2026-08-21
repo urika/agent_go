@@ -1638,6 +1638,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 include_archived = "archived" in query
                 self._reply_json(200, api_kanban(include_archived=include_archived))
                 return
+            if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "classification-stats":
+                self._reply_json(200, kanban.classification_stats())
+                return
             # ── 配置中心 + 健康检查（M1/R3-R4）──
             if len(parts) == 2 and parts[1] == "profiles":
                 self._reply_json(200, api_profiles())
@@ -3486,7 +3489,12 @@ let kanbanShowArchived = false; // 归档视图开关（含已归档卡片，可
 
 async function loadKanban() {
   try {
-    kanbanData = await api('/api/kanban' + (kanbanShowArchived ? '?archived=1' : ''));
+    const [kb, stats] = await Promise.all([
+      api('/api/kanban' + (kanbanShowArchived ? '?archived=1' : '')),
+      api('/api/kanban/classification-stats'),
+    ]);
+    kanbanData = kb;
+    kanbanData._stats = stats;
     renderKanban();
     setConn(true);
   } catch (e) {
@@ -3504,6 +3512,16 @@ function renderKanban() {
     '<button class="btn '+(kanbanShowArchived?'primary':'')+'" id="kanbanArchToggle" title="显示/隐藏已归档卡片">🗂 '+
     (kanbanShowArchived?'已归档（含）':'已归档')+'</button>'+
     '<span class="dim">共 '+(d.total||0)+' 张卡片'+(filter?'（已筛选）':'')+'</span></div>';
+  // W4.1 分类器自学习：分类准确率面板（auto/manual/pending 完成率）
+  const stats = d._stats;
+  if (stats && stats.by_automation) {
+    const label = {auto: '🤖 自动', manual: '👤 人工', pending: '⏳ 待判定'};
+    const badges = Object.entries(stats.by_automation).map(([k, s]) => {
+      const rate = (s.pass_rate != null) ? (s.pass_rate * 100).toFixed(0) + '%' : '-';
+      return '<span class="tag" title="完成 '+(s.completed||0)+'/'+s.total+'">'+label[k]+' '+s.total+'（'+rate+'）</span>';
+    }).join(' ');
+    html += '<div class="op-bar" style="margin:6px 0 10px;font-size:12px;color:var(--dim)">分类准确率（自学习反馈）: '+badges+'</div>';
+  }
   html += '<div class="kanban-board">';
   d.stages.forEach((st, si) => {
     let cards = d.cards[st.key] || [];

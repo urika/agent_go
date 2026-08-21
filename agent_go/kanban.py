@@ -35,7 +35,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .config import AGENT_GO_DIR
 
@@ -423,3 +423,27 @@ def delete_card(card_id: str) -> None:
             raise KanbanError("卡片已派发过任务（存在关联 task_id），不可删除；可改归档")
         board["cards"] = [c for c in board["cards"] if c.get("id") != card_id]
         _save_board(board)
+
+
+def classification_stats() -> dict:
+    """分类器自学习统计（W4.1）：按 automation 分类的执行结果分布与完成率。
+
+    统计 automation（auto/manual/pending）× 卡片阶段（operations 完成 /
+    其他进行中）的分布，计算各分类的完成率，用于反馈优化分类规则
+    （auto 判定通过率低 → 规则需更保守）。
+    """
+    board = load_board()
+    cards = [c for c in board.get("cards", []) if not c.get("archived")]
+    total = len(cards)
+    by_auto: dict[str, dict[str, Any]] = {}
+    for c in cards:
+        auto = c.get("automation", "pending")
+        slot = by_auto.setdefault(auto, {"total": 0, "completed": 0, "in_progress": 0})
+        slot["total"] += 1
+        if c.get("stage") == "operations":
+            slot["completed"] += 1
+        else:
+            slot["in_progress"] += 1
+    for slot in by_auto.values():
+        slot["pass_rate"] = round(slot["completed"] / slot["total"], 3) if slot["total"] else None
+    return {"total_cards": total, "by_automation": by_auto}

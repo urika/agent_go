@@ -567,3 +567,27 @@ class TestW3OperationsReview:
         _post(f"{ops_server}/api/kanban/cards/{card['id']}/review", {"decision": "approve"})
         audits = [a for a in _audit_lines(ops_env) if a["op"] == "kanban.review"]
         assert audits and audits[0]["params"]["decision"] == "approve"
+
+
+class TestW4ClassificationStats:
+    """W4.1 分类器自学习：分类准确率统计。"""
+
+    def test_classification_stats_structure(self, ops_server, ops_env):
+        import agent_go.kanban as _kb
+        # 构造不同 automation × stage 的卡片
+        c1 = _kb.create_card(title="auto-完成", type="discussion"); _kb.update_card(c1["id"], automation="auto"); _kb.move_card(c1["id"], "operations")
+        c2 = _kb.create_card(title="auto-进行中", type="discussion"); _kb.update_card(c2["id"], automation="auto"); _kb.move_card(c2["id"], "implementation")
+        c3 = _kb.create_card(title="manual-进行中", type="discussion"); _kb.update_card(c3["id"], automation="manual"); _kb.move_card(c3["id"], "implementation")
+        c4 = _kb.create_card(title="pending-进行中", type="discussion"); _kb.update_card(c4["id"], automation="pending"); _kb.move_card(c4["id"], "design")
+        r = _get(f"{ops_server}/api/kanban/classification-stats")
+        assert r["total_cards"] >= 4
+        by = r["by_automation"]
+        assert "auto" in by and by["auto"]["completed"] >= 1
+        assert by["auto"]["pass_rate"] is not None
+        assert by["manual"]["in_progress"] >= 1
+        assert by["pending"]["in_progress"] >= 1
+
+    def test_classification_stats_empty_board(self, ops_server):
+        r = _get(f"{ops_server}/api/kanban/classification-stats")
+        assert r["total_cards"] == 0
+        assert r["by_automation"] == {}
