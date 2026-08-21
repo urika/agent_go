@@ -1832,6 +1832,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._op_kanban_create(body, token)
                 return
             # POST /api/kanban/import-spec（从 Task Spec 需求文档生成看板卡片）
+            if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "decompose":
+                self._op_kanban_decompose(body, token)
+                return
             if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "import-spec":
                 self._op_kanban_import_spec(body, token)
                 return
@@ -2199,6 +2202,115 @@ class WebHandler(BaseHTTPRequestHandler):
         _audit("kanban.create", {"card_id": card["id"], "title": title, "type": ctype},
                card, True, token)
         self._reply_json(200, {"ok": True, "card": card})
+
+    def _op_kanban_decompose(self, body: dict, token: str) -> None:
+        """需求拆解（decompose）：本地 LLM 按预设模板把复杂需求拆解为功能单元，
+        每单元生成 Task Spec（7 章节 Markdown），可选自动建看板卡片。"""
+        requirement = str(body.get("requirement") or "").strip()
+        if not requirement:
+            self._reply_json(400, {"error": "requirement 不能为空"})
+            return
+        auto_create = bool(body.get("auto_create", False))
+        repo = str(body.get("repo") or "").strip()
+        stage = str(body.get("stage") or "brainstorm")
+
+        # ── 模板 1：需求拆解为功能单元（JSON 数组）──
+        from .api import call_api
+        from .config import load_config
+        config = load_config()
+        # 本地模型做需求拆解是长推理任务（35B 级可能超默认 120s timeout）→ 加大到 300s
+        config = dict(config)
+        config["plan_api"] = dict(config.get("plan_api", {}))
+        config["plan_api"]["timeout_ms"] = int(config["plan_api"].get("timeout_ms", 120000)) * 3
+        decompose_prompt = (
+            "你是一个需求分析专家。把以下复杂业务需求拆解为可独立交付的功能单元。"
+            "每个功能单元应是单一模块/功能点（可独立实现和验证，避免跨模块耦合）。\n\n"
+            f"===== 复杂需求 =====\n{requirement}\n===== 结束 =====\n\n"
+            "输出要求：只输出合法 JSON 数组（不要 markdown 包裹），每个元素一个功能单元，字段：\n"
+            '{"title": "功能单元标题（动词短语）", "goal": "该单元的目标", '
+            '"scope_hint": "范围提示（改什么/不动什么）", "task_type": "feature|bugfix|refactor|test|docs|infra", '
+            '"priority": 1-5的数（1最高）}\n'
+            "拆解为 3-8 个功能单元，按业务逻辑排序（基础/依赖先行）。"
+        )
+        messages = [
+            {"role": "system", "content": "You are a requirements analyst. Output ONLY valid JSON array."},
+            {"role": "user", "content": decompose_prompt},
+        ]
+        try:
+            content = call_api(config, messages, logger)
+        except Exception as e:
+            _audit("kanban.decompose", {"requirement": requirement[:100]}, str(e), False, token)
+            self._reply_json(422, {"error": f"LLM 拆解失败: {e}"})
+            return
+
+        # 解析功能单元 JSON（容错 markdown 包裹）
+        import re as _re
+        units: list = []
+        try:
+            text = content.strip()
+            m = _re.search(r"\[\s*\{.*\}\s*\]", text, _re.S)
+            if m:
+                text = m.group(0)
+            data = json.loads(text)
+            if isinstance(data, dict):
+                data = data.get("units") or data.get("features") or [data]
+            units = [u for u in data if isinstance(u, dict) and u.get("title")][:8]
+        except (json.JSONDecodeError, TypeError) as e:
+            _audit("kanban.decompose", {"requirement": requirement[:100]}, f"解析失败: {e}", False, token)
+            self._reply_json(422, {"error": f"LLM 返回无法解析为功能单元 JSON: {e}"})
+            return
+        if not units:
+            self._reply_json(422, {"error": "未拆解出功能单元"})
+            return
+
+        # ── 模板 2：每单元生成 Task Spec + 可选建卡 ──
+        from .config import AGENT_GO_DIR
+        from . import kanban
+        specs_dir = AGENT_GO_DIR / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        specs_out = []
+        cards_out = []
+        for i, u in enumerate(units, 1):
+            spec_prompt = (
+                "为以下功能单元生成一份 Task Spec 需求文档（Markdown，7 章节）。\n\n"
+                f"功能单元: {u.get('title')}\n目标: {u.get('goal', '')}\n"
+                f"范围提示: {u.get('scope_hint', '')}\n类型: {u.get('task_type', 'feature')}\n\n"
+                "输出 Markdown，章节：# Task Spec: <标题>\n## §1 目标\n## §2 动机\n## §3 范围\n"
+                "## §4 约束\n## §5 验收标准（可执行命令/测试）\n## §6 参考资料\n## §7 已知风险\n"
+                "顶部加元数据行: task_type: <类型>"
+            )
+            try:
+                spec_md = call_api(config, [
+                    {"role": "system", "content": "You write Task Spec documents. Output ONLY Markdown."},
+                    {"role": "user", "content": spec_prompt},
+                ], logger)
+            except Exception as e:
+                spec_md = f"# Task Spec: {u.get('title')}\n\n(生成失败: {e})"
+            _slug = _re.sub(r"[^a-z0-9]+", "-", str(u.get("title", "")).lower()).strip("-")[:40]
+            spec_file = specs_dir / f"unit-{i}-{_slug or f'unit-{i}'}.md"
+            spec_file.write_text(spec_md, encoding="utf-8")
+            specs_out.append({"unit": u.get("title"), "spec_path": str(spec_file)})
+
+            if auto_create:
+                try:
+                    card = kanban.create_card(
+                        title=str(u.get("title", ""))[:80], type="implementation",
+                        stage=stage, repo=repo,
+                        description=f"【目标】{u.get('goal', '')}\n\n【范围】{u.get('scope_hint', '')}",
+                        spec_path=str(spec_file),
+                    )
+                    cards_out.append({"unit": u.get("title"), "card_id": card["id"],
+                                      "automation": card.get("automation")})
+                except Exception as e:
+                    cards_out.append({"unit": u.get("title"), "error": str(e)[:80]})
+
+        _audit("kanban.decompose", {"requirement": requirement[:100], "units": len(units),
+                                    "auto_create": auto_create},
+               {"units": len(units), "cards": len(cards_out)}, True, token)
+        self._reply_json(200, {
+            "ok": True, "units": units, "specs": specs_out, "cards": cards_out,
+            "note": "人工 review spec 后可用 agent_go spec validate 准入审查；卡片已进入看板编排流" if auto_create else "",
+        })
 
     def _op_kanban_import_spec(self, body: dict, token: str) -> None:
         """POST /api/kanban/import-spec：从 Task Spec 需求文档生成看板卡片。
@@ -3060,6 +3172,10 @@ function renderTasks() {
     '<select id="runConfirm" class="run-input">'+
     '<option value="auto">auto（跳过计划确认）</option>'+
     '<option value="web">web（页面确认 Plan）</option></select>'+
+    '<select id="runGoal" class="run-input" title="goal 模式：worker 退出前循环跑验证命令直到通过">'+
+    '<option value="">goal 默认（policy 判定）</option>'+
+    '<option value="on">goal 开（--goal）</option>'+
+    '<option value="off">goal 关（--no-goal）</option></select>'+
     '<button class="btn primary" id="btnRunStart">🚀 启动任务</button>'+
     '<span id="runMsg" style="margin-left:8px;font-size:12px"></span>'+
     '</div>';
@@ -3100,12 +3216,16 @@ function bindRunForm() {
     const task = document.getElementById('runTask').value.trim();
     const parallel = parseInt(document.getElementById('runParallel').value, 10) || 1;
     const confirmMode = document.getElementById('runConfirm').value;
+    const goalVal = document.getElementById('runGoal').value;
     const msg = document.getElementById('runMsg');
     if (!repo || !task) { msg.textContent = '⚠️ 请填写仓库路径和任务描述'; msg.style.color = 'var(--yellow)'; return; }
     btnRun.disabled = true;
     msg.textContent = '启动中（生成 Plan 约需数十秒）…'; msg.style.color = 'var(--dim)';
     try {
-      const d = await postJSON('/api/tasks/run', {repo, task, parallel, confirm_mode: confirmMode});
+      const body = {repo, task, parallel, confirm_mode: confirmMode};
+      if (goalVal === 'on') body.goal = true;
+      else if (goalVal === 'off') body.goal = false;
+      const d = await postJSON('/api/tasks/run', body);
       msg.textContent = '✅ 已启动: '+d.task_id+'（'+d.note+'）';
       msg.style.color = 'var(--green)';
       // U2：web 确认模式 → 自动展开新任务行并滚动定位（用户立即看到确认入口）

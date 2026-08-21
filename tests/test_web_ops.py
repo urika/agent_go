@@ -120,6 +120,20 @@ class TestRun:
         audits = _audit_lines(ops_env)
         assert any(a["op"] == "tasks.run" and a["ok"] for a in audits)
 
+    def test_run_goal_passthrough(self, ops_server, ops_env, monkeypatch):
+        """goal 三态透传：true→--goal / false→--no-goal / 缺省→None（policy 判定）。"""
+        captured = []
+        def fake_start(repo, task, parallel=1, goal=None, confirm_mode="auto"):
+            captured.append(goal)
+            return TID
+        monkeypatch.setattr(ws.task_runner, "start_run", fake_start)
+        for body in ({"repo": "/tmp", "task": "x", "goal": True},
+                     {"repo": "/tmp", "task": "x", "goal": False},
+                     {"repo": "/tmp", "task": "x"}):
+            code, d = _post(f"{ops_server}/api/tasks/run", body)
+            assert code == 200, d
+        assert captured == [True, False, None]
+
     def test_run_local_proxy_down_422(self, ops_server, ops_env, monkeypatch):
         """R5a/D3：local 模式代理不可达 → 启动即报错，不放行。"""
         (ops_env / ".current_profile").write_text("local", encoding="utf-8")

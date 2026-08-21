@@ -729,3 +729,37 @@ class TestAcceptanceWorkflow:
         assert isinstance(r2, dict)
         r3 = _get(f"{ops_server}/api/decisions")
         assert "records" in r3
+
+
+class TestKanbanDecompose:
+    """decompose 端点：本地 LLM 拆解需求→功能单元→可选建卡。"""
+
+    def test_decompose_with_auto_create(self, ops_server, monkeypatch):
+        monkeypatch.setattr("agent_go.api.call_api", lambda *a, **k: (
+            '[{"title": "用户注册", "goal": "支持注册", "scope_hint": "auth.py", "task_type": "feature", "priority": 1},'
+            '{"title": "用户登录", "goal": "支持登录", "scope_hint": "auth.py", "task_type": "feature", "priority": 2}]'
+        ) if "拆解" in str(a[1][-1].get("content","")) or "需求" in str(a[1][-1].get("content","")) else "# Task Spec: 用户注册\n\n## §1 目标\n支持注册")
+        code, d = _post(f"{ops_server}/api/kanban/decompose",
+                        {"requirement": "做一个用户中心系统", "auto_create": True, "repo": "/tmp"})
+        assert code == 200
+        assert d["ok"] is True
+        assert len(d["units"]) == 2
+        assert len(d["cards"]) == 2
+        assert d["cards"][0].get("automation") == "auto"
+
+    def test_decompose_no_create(self, ops_server, monkeypatch):
+        monkeypatch.setattr("agent_go.api.call_api", lambda *a, **k: '[{"title": "功能A", "goal": "目标A", "task_type": "feature", "priority": 1}]')
+        code, d = _post(f"{ops_server}/api/kanban/decompose",
+                        {"requirement": "一个功能", "auto_create": False})
+        assert code == 200
+        assert len(d["units"]) == 1
+        assert d["cards"] == []
+
+    def test_decompose_missing_requirement(self, ops_server):
+        code, _ = _post(f"{ops_server}/api/kanban/decompose", {"requirement": ""})
+        assert code == 400
+
+    def test_decompose_llm_invalid(self, ops_server, monkeypatch):
+        monkeypatch.setattr("agent_go.api.call_api", lambda *a, **k: "not-json")
+        code, d = _post(f"{ops_server}/api/kanban/decompose", {"requirement": "test"})
+        assert code == 422
