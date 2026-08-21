@@ -382,3 +382,32 @@ A2 在 spec.py 加的 `extract_verification_scopes`（has_anchored/has_function_
 ```
 
 **关键判断**：P0 两项是「闭环失效根因」，且便宜、确定性；P1 是「补齐物理链路」；P2 是清理。**必须 ID 链条先通，否则后面做再多追踪/回溯都是空转**。
+
+---
+
+## 十三、Review 修复落地（#39-43）与阶段 B 冒烟（截至 2026-08-21）
+
+§十二 Review 提出的 P0/P1/P2 已全部闭环，并经 5 任务冒烟实证。阶段 B 结论：**弱正 ROI，保留轻量形态**。
+
+### 13.1 修复完成表
+
+| §十二 编号 | 问题 | 修复 | 落地点 | Commit |
+|---|---|---|---|---|
+| P0-1 | REQ/AC ID 链条源头断裂 | ID 链条接通（模板 ID 引导 + `_build_spec_context` 提取 ID 注入 + `validate_spec_l1` 检查） | 闭环实施 | d5cc175 |
+| P0-2 | `extract_verification_scopes` 孤儿 API | 锚定门禁接入 L1（warning 不阻断） | 闭环实施 | d5cc175 |
+| P1-3 | `validate_spec_l1` 缺 §5 锚定/结构化检查 | §5 结构化 + 锚定检查补全 | 闭环实施 | d5cc175 |
+| P1-4 | spec 快照（A4）未实现 | spec 快照落地 | 闭环实施 | d5cc175 |
+| P1-5 | 后段介入全空 | 后段注入 + traceability 自动触发 | 闭环实施 | d5cc175 |
+| P1-6 | goal 回溯进行中 | B5=b 收口（verify_state 稳定契约版本化） | 阶段 C | 1d00870 |
+| P2-7 | 模板错别字「醇收标准」 | 修复 | 闭环实施 | d5cc175 |
+| P2-8 | 架构硬约束无确定性校验 | do-not-touch fail-close 确定性校验 | 闭环实施 | d5cc175 |
+
+### 13.2 阶段 B 冒烟结论
+
+- **5 任务冒烟**：R2 追踪完整率 0→100%，R1 80%（唯一失败为本地 worker 能力不足，与 spec 无关）。
+- **弱正 ROI**：spec 流程对非平凡任务有收益但边际有限 → **保留轻量形态**，不扩张。
+- **冒烟实证修复**（b01c644）：预算头寸口径 + AC 硬映射兜底 + e2e 路径。
+
+### 13.3 当前状态
+
+阶段 B 输入侧（解析/门禁/ID 链条）与闭环侧（快照/后段注入/traceability/do-not-touch）均已验证可用；阶段 C（Reflexion 阈值化 + verify_state 契约）已落地（faebd0b、1d00870）。

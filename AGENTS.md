@@ -280,6 +280,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 - **Output abstraction**: `Console` class (quiet/verbose modes) is injected at CLI entry and shared via module-level default. All user-facing output goes through it — no bare `print()` calls.
 - **Sandbox**: Prefers `greywall`, falls back to native `claude` (`get_claude_command` in `agents.py`, double-wrap guarded in `executor.py`).
 - **CI**: `.github/workflows/test.yml` runs pytest + `agent_go eval gate --baseline 0.05` + ruff (E,F,W) + mypy on push/PR to main. Config in `pyproject.toml`.
+- **谦逊层（Humility Layer, H1-H4）**: 正交观测层，专门记录「系统不知道自己不知道」的部分。H1/H4 交付盲区清单——`meta.json` 存 `blind_spots`（未覆盖文件/未运行命令/未验证场景）+ `uncovered_perspectives`（未覆盖视角），经交底报告（#48）、Web 任务详情盲区卡片（#51）、`inspect` 失败历史（#52）对外呈现；H2 层间归因——`layer_attribution` 字段把失败定位到「层」（修 spec / 修 plan / 调预算 / 换模型），失败可复盘（#47）；H3 Problem 实体——全局 `~/.agent_go/problems.jsonl`（三态+复发重开/半衰期/葬礼，即 M5 数据层）。信任指标（#49：审查后修改率↓/盲区命中率高/复发可见率↑）是阶段 D 自治决策的放行门；知识召回（#50）先「给人看」验证解法质量，B5=c 才做确定性注入。
 
 ## Testing
 
