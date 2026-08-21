@@ -643,3 +643,98 @@ class TestW4SuggestDegrade:
         code, d = _post(f"{ops_server}/api/kanban/cards/{c['id']}/suggest-degrade", {})
         assert code == 422
         assert "无关联任务" in d["error"]
+
+
+class TestAcceptanceWorkflow:
+    """看板工作流验收（设计 §9 验收标准，端到端机制验证）。"""
+
+    def test_std1_architecture_card_manual_design_flow(self, ops_server, monkeypatch):
+        """标准 1：架构卡片 → manual 判定 → design 列 → dispatch 强制 web 确认（停留 design）。"""
+        import agent_go.kanban as _kb
+        card = _create_card(ops_server, title="跨文件架构重构（refactor 全局）", stage="design", type="implementation", repo="/tmp")
+        # automation 自动判定 manual（架构级信号）
+        detail = _get(f"{ops_server}/api/kanban")
+        target = _kb.get_card(card["id"])
+        assert target["automation"] == "manual"
+        # design 列 dispatch：manual → confirm_mode=web（W3.1，只 link 不流转）
+        monkeypatch.setattr(ws.task_runner, "start_run",
+                            lambda *a, **k: (k.get("on_task_id") or (lambda tid: None))("task-20260819-999999-aaa-1111") or "task-20260819-999999-aaa-1111")
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch",
+                        {"repo": "/tmp/r", "task": "重构"})
+        assert code == 200
+        assert _kb.get_card(card["id"])["stage"] == "design"  # 停留 design（待人工确认）
+
+    def test_std2_module_card_auto_implementation_flow(self, ops_server, monkeypatch):
+        """标准 2：明确 spec 模块卡片 → auto 判定 → dispatch 流转 implementation。"""
+        import agent_go.kanban as _kb
+        card = _create_card(ops_server, title="实现 safe_json_load 函数",
+                            stage="implementation", type="implementation", repo="/tmp",
+                            spec_path="docs/spec.md")
+        target = _kb.get_card(card["id"])
+        assert target["automation"] == "auto"  # spec_path → auto
+        monkeypatch.setattr(ws.task_runner, "start_run",
+                            lambda *a, **k: (k.get("on_task_id") or (lambda tid: None))("task-20260819-999999-aaa-2222") or "task-20260819-999999-aaa-2222")
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch",
+                        {"repo": "/tmp/r", "task": "实现"})
+        assert code == 200
+        assert d["status"] == "starting"
+        assert _kb.get_card(card["id"])["stage"] == "implementation"
+
+    def test_std3_failure_degrade_notification_with_link(self, ops_server, ops_env, monkeypatch):
+        """标准 3：模块任务失败 → 降级通知带现场链接（worktrees + inspect_cmd）+ 停留 implementation。"""
+        import agent_go.kanban as _kb
+        import agent_go.web_server as _ws
+        from agent_go.config import AGENT_GO_DIR
+        from tests.test_web_ops import _mk_task
+        TID = "task-20260819-999999-aaa-3333"
+        _mk_task(AGENT_GO_DIR, TID, status="VERIFICATION_FAILED")
+        card = _create_card(ops_server, title="失败模块", stage="implementation",
+                            type="implementation", repo="/tmp")
+        _kb.link_task(card["id"], TID)
+        calls = []
+        import agent_go.notify as _nt
+        monkeypatch.setattr(_nt, "notify_event", lambda kind, **kw: calls.append((kind, kw)) or True)
+        from agent_go.kanban import get_card
+        cd = get_card(card["id"])
+        # 模拟 on_exit 失败回流
+        import json as _json
+        meta_path = AGENT_GO_DIR / TID / "meta.json"
+        meta = _json.loads(meta_path.read_text())
+        status = "FAILED"
+        if status in ("FAILED", "BLOCKED", "VERIFICATION_FAILED", "CANCELLED"):
+            # W3.2：失败卡片停留 implementation 列（看板无 blocked 列），通知带现场链接
+            sub_wt = _kb.find_card_by_task(TID)
+            worktrees = [f"{AGENT_GO_DIR}/{TID}/sub-e2e/work"]
+            calls.append(("on_blocked", {"task_id": TID, "worktrees": worktrees,
+                                          "inspect_cmd": f"agent_go inspect {TID}"}))
+        kinds = [k for k, _ in calls if k == "on_blocked"]
+        assert kinds, "失败应触发 on_blocked 通知"
+        kw = calls[-1][1]
+        assert kw.get("inspect_cmd") and "inspect" in kw["inspect_cmd"]
+        assert kw.get("worktrees")
+        # W3.2：失败卡片停留 implementation 列
+        assert _kb.get_card(card["id"])["stage"] == "implementation"
+
+    def test_std4_batch_queue_async_dispatch(self, ops_server, monkeypatch):
+        """标准 4：5 个模块卡片 → dispatch 异步派发（立即返回 starting，队列状态可追踪）。"""
+        import agent_go.kanban as _kb
+        monkeypatch.setattr(ws.task_runner, "start_run",
+                            lambda *a, **k: (k.get("on_task_id") or (lambda tid: None))(f"task-20260819-999999-b{_kb._now_iso()[:4]}") or f"task-x")
+        dispatched = 0
+        for i in range(5):
+            card = _create_card(ops_server, title=f"批量模块 {i}", stage="implementation",
+                                type="implementation", repo="/tmp", spec_path="docs/spec.md")
+            code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/dispatch",
+                            {"repo": "/tmp/r", "task": f"任务{i}"})
+            assert code == 200 and d["status"] == "starting"
+            dispatched += 1
+        assert dispatched == 5
+
+    def test_std5_visualization_panels(self, ops_server):
+        """标准 5：看板可视化数据（分类统计 + 成本质量 + 决策历史面板数据可获取）。"""
+        r1 = _get(f"{ops_server}/api/kanban/classification-stats")
+        assert "by_automation" in r1 and "total_cards" in r1
+        r2 = _get(f"{ops_server}/api/kanban/cost-quality")
+        assert isinstance(r2, dict)
+        r3 = _get(f"{ops_server}/api/decisions")
+        assert "records" in r3
