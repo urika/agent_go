@@ -3,7 +3,7 @@
 > 日期：2026-08-08
 > 状态：**设计稿**（待评审 → 分阶段实施）
 > 性质：对 [model-eval-routing-mechanism-2026-08-07.md](model-eval-routing-mechanism-2026-08-07.md) 第五节「现状缺口」6 条的可执行修复设计
-> 关联：[model-evaluation-and-tiering.md](model-evaluation-and-tiering.md)（分级策略）、[router-multi-provider-extension.md](router-multi-provider-extension.md)（角色路由）
+> 关联：[model-evaluation-and-tiering.md](../../design/model-evaluation-and-tiering.md)（分级策略）、[router-multi-provider-extension.md](../../design/router-multi-provider-extension.md)（角色路由）
 > 目标对齐：PRD「预算限制下高通过率、高效率」+ 原则 #5「复杂度判断在规划阶段收敛」
 
 ## 代办清单与排期

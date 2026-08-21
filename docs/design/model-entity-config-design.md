@@ -2,7 +2,7 @@
 
 > 状态：设计评审（Draft）
 > 日期：2026-08-15
-> 关联：[config-schema.md](config-schema.md)、[model-eval-routing-mechanism-2026-08-07.md](model-eval-routing-mechanism-2026-08-07.md)、`agent_go/router.py`、`agent_go/pricing.py`、`agent_go/profiles.py`、代理 `proxy_state.py MODEL_ROUTE_PREFERENCES`
+> 关联：[config-schema.md](config-schema.md)、[model-eval-routing-mechanism-2026-08-07.md](../archive/design/model-eval-routing-mechanism-2026-08-07.md)、`agent_go/router.py`、`agent_go/pricing.py`、`agent_go/profiles.py`、代理 `proxy_state.py MODEL_ROUTE_PREFERENCES`
 > 实验依据：m4 系列批次（v4-pro thinking 空响应、GLM 接入、evaluator 假阳性、worker_backends 与代理路由重复）
 
 ---

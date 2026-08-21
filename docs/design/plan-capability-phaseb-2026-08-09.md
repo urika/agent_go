@@ -1,7 +1,7 @@
 # Task Plan 能力分析与阶段 B 收敛记录
 
 > 更新日期：2026-08-09
-> 关联：[ADR-009](adr/ADR-009-bench-convergence.md) Bench 收敛、[bench-convergence-plan.md](bench-convergence-plan.md) 收敛计划、[ISSUES.md](../ISSUES.md)
+> 关联：[ADR-009](adr/ADR-009-bench-convergence.md) Bench 收敛、[bench-convergence-plan.md](../archive/design/bench-convergence-plan.md) 收敛计划、[ISSUES.md](../ISSUES.md)
 
 本文档记录两个产出：
 1. **Task Plan 能力现状评估与改进方向**（用户问题）

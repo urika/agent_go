@@ -3,7 +3,7 @@
 > 日期：2026-08-06
 > 状态：**G1/G2 已落地（2026-08-07，S12-P0 度量修复）；G3/G4/G8 已落地（2026-08-07，S12-P1 per-task 预算 + 降级 + kill_reason 感知）；G5/G6 已落地（2026-08-07，S12-P2 欠分解检测 + 按难度 timeout）；S12-P3 多维活性 + grace 复检门已落地（2026-08-07，subtask.py S2 worktree 文件活性 + S3 进程树 CPU 活性 + STUCK_GRACE_SEC=120 复检，慢工具不再被误杀）；G7 待后续 Phase**
 > 代码基线：`feat/s12-metric-fix` 分支
-> 关联文档：[bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md)（度量有效性诊断 + timeout 根因）、[k4-cost-recalibration.md](k4-cost-recalibration.md)（成本基线）、`docs/prd.md` §产品 KPI
+> 关联文档：[bench-metric-validity-2026-08-06.md](../archive/design/bench-metric-validity-2026-08-06.md)（度量有效性诊断 + timeout 根因）、[k4-cost-recalibration.md](k4-cost-recalibration.md)（成本基线）、`docs/prd.md` §产品 KPI
 
 > **当前状态（2026-08-08）**：本文的 timeout/kill 分析用于 M2 可靠性设计。旧 K4/`$/pass` 目标仅作历史背景，不作为当前产品验收门禁。
 > 目标对齐：PRD「预算限制下，任务顺利完成、高通过率、高效率」+ 原则 #5「复杂度判断在规划阶段收敛」
@@ -67,7 +67,7 @@ timeout/kill 在本系统里存在于**三个互不相同的表面**，v2/v3 分
 
 ## 三、优化策略评估（逐条对照代码）
 
-把 [timeout 根因分析](bench-metric-validity-2026-08-06.md#四专题timeout-与通过率矛盾的根因与策略) 提出的 5 条策略，逐条对照上面的 ground truth：
+把 [timeout 根因分析](../archive/design/bench-metric-validity-2026-08-06.md#四专题timeout-与通过率矛盾的根因与策略) 提出的 5 条策略，逐条对照上面的 ground truth：
 
 | # | 策略 | 现状 | 净缺口 | 工作量 |
 |---|------|------|--------|--------|
@@ -89,7 +89,7 @@ timeout/kill 在本系统里存在于**三个互不相同的表面**，v2/v3 分
 按"是否阻塞其他工作"排序：
 
 ### G1. `kill_reason` 分类打标（阻塞项，最高优先级）
-**问题**：当前 kill 发生在表面 B（idle/hard_timeout/L2/L3），但结果记录不区分原因。`_collect_result`（bench 表面 A）把所有 `timed_out` 一律计失败，于是 cleanup_race（已完成、收尾被杀）被误判——这是 [度量诊断](bench-metric-validity-2026-08-06.md) 里 65 条假失败、v3 通过率被腰斩的根因。
+**问题**：当前 kill 发生在表面 B（idle/hard_timeout/L2/L3），但结果记录不区分原因。`_collect_result`（bench 表面 A）把所有 `timed_out` 一律计失败，于是 cleanup_race（已完成、收尾被杀）被误判——这是 [度量诊断](../archive/design/bench-metric-validity-2026-08-06.md) 里 65 条假失败、v3 通过率被腰斩的根因。
 
 **设计要点**（不写代码，仅定 spec）：
 - 在子任务/任务结果里加 `kill_reason ∈ {none, stuck, hard_timeout, over_budget_l2, over_budget_l3, cleanup_race, interrupted}`。
@@ -516,7 +516,7 @@ T=600s 静默触发 → 不杀，转"待裁定宽限态"
 
 ## 十二、与现有文档/代码的关系
 
-- **[bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md)**：本文是其第四节 timeout 专题的**可执行延伸**——根因诊断 → 策略评估 → 落地路线。G1/G2 直接对应那里的"度量层缺陷 1 + 问题 4"。
+- **[bench-metric-validity-2026-08-06.md](../archive/design/bench-metric-validity-2026-08-06.md)**：本文是其第四节 timeout 专题的**可执行延伸**——根因诊断 → 策略评估 → 落地路线。G1/G2 直接对应那里的"度量层缺陷 1 + 问题 4"。
 - **[k4-cost-recalibration.md](k4-cost-recalibration.md)**：提供成本驱动因素（难度 4-5×、子任务数线性），是 G5/G6 难度口径的依据。
 - **`config.py` cost_control 块**：三层配置已就绪。**L1 冷启动默认开**（`l1_enabled=True`）；L2/L3 开启需 `enabled=True` + 冻结基线校准值（`eval cost-baseline`）。
 - **旧版 `prd.md` §产品 KPI**：K4（$/pass）目标 ≤$0.05 与历史实测差 7-14×；该目标不再是当前硬门禁，G3（per-task 预算）仍可作为可执行的单任务约束。

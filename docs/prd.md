@@ -465,7 +465,7 @@ CLI、JSON 和 MCP 必须共享核心状态语义，不得出现同一任务在�
 
 ### 4.9 看板与 Web 协作（✅ 已实现，2026-08-13~19）
 
-- **Web 操作台全功能（R1-R17）**：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ SSE。纯本地 Golden Path 端到端验收通过（[web-golden-path-acceptance-2026-08-13.md](web-golden-path-acceptance-2026-08-13.md)：10/10 步骤、$0.00、ACCEPTED_DELIVERY）。
+- **Web 操作台全功能（R1-R17）**：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ SSE。纯本地 Golden Path 端到端验收通过（[web-golden-path-acceptance-2026-08-13.md](archive/reference/web-golden-path-acceptance-2026-08-13.md)：10/10 步骤、$0.00、ACCEPTED_DELIVERY）。
 - **协作扩展**：任务报告导出（md/html）、多用户角色（admin/viewer 双 token 权限分离）、任务级互斥锁、任务备注、规模化保护（并发上限 + 磁盘告警）。
 - **看板任务管理**：`~/.agent_go/kanban.json` 单文件存储，5 阶段列（brainstorm→operations）× 3 类卡片（discussion/implementation/periodic），阶段流转 + history，task_ids 软链接执行任务（与 status.py 执行态正交，不动 meta.json）。
 - **W1 任务分类器**：卡片 `automation` 字段（auto/manual/review）+ 分类规则（架构级关键词 / difficulty=hard → design 列云端+人工；明确 spec 模块 → implementation 列本地队列）+ dispatch 按列路由（automation=manual 强制人工确认计划）。本地模型定位「模块工厂」而非「系统架构师」（设计：[kanban-task-orchestration.md](design/kanban-task-orchestration.md)）。

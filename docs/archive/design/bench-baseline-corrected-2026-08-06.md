@@ -3,7 +3,7 @@
 > 日期：2026-08-06
 > 口径：S12-P0 修正后（cleanup_race 计通过、binary_pass 修 all([])+时序、kill_reason 分类）
 > 产生方式：`eval_suite/recompute_corrected.py` 对历史 v2/v3/v4 数据离线重算
-> 关联：[bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md)、[timeout-kill-strategy-2026-08-06.md](timeout-kill-strategy-2026-08-06.md)
+> 关联：[bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md)、[timeout-kill-strategy-2026-08-06.md](../../design/timeout-kill-strategy-2026-08-06.md)
 
 > **数据状态**：历史 exploratory 分析。本文的 K1/K4/K8 和 `$ / pass` 数值不作为当前产品 KPI；当前以 Accepted Delivery、Cost per Accepted Delivery 和 M0 Metric Freeze 报告为准。
 

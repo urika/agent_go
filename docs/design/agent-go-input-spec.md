@@ -279,5 +279,5 @@ PM 把「要做什么」说清楚，agent_go 负责「怎么执行」。
 
 *关联文档：*
 - [bench-analysis-2026-08-01.md](../archive/reference/bench-analysis-2026-08-01.md) — Bench v1 数据（输入质量的成本影响，历史参考）
-- [bench-v2-data-requirements.md](bench-v2-data-requirements.md) — Bench v2 数据需求
+- [bench-v2-data-requirements.md](../archive/design/bench-v2-data-requirements.md) — Bench v2 数据需求
 - [prd.md](../prd.md) — 产品 KPI 与设计原则

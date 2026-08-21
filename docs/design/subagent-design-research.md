@@ -211,4 +211,4 @@ Claude Code 官方明确「避免文件冲突」：**分解工作使每个队友
 - AI Coding Agent 工程化：从上下文污染到多 Agent 分工
 - 单 Agent 与多 Agent 的架构取舍
 - Agentic Autonomy Levels – Addy Osmani
-- 项目内部：docs/design/bench-convergence-plan.md、docs/design/plan-capability-phaseb-2026-08-09.md
+- 项目内部：docs/archive/design/bench-convergence-plan.md、docs/design/plan-capability-phaseb-2026-08-09.md

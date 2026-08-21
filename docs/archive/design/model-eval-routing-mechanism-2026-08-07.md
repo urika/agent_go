@@ -3,10 +3,10 @@
 > 日期：2026-08-07
 > 性质：**当前代码机制调研**（how it works），非设计稿。回答两个问题：① 现在如何对模型打分评价？② 运行时如何为任务选模型？
 > 关联（互补）：
-> - [model-evaluation-and-tiering.md](model-evaluation-and-tiering.md) — 定价/分级**策略设计稿**（定价表、SWE-bench 背景、该用哪档）
-> - [router-multi-provider-extension.md](router-multi-provider-extension.md) — 角色路由多 provider 扩展设计
+> - [model-evaluation-and-tiering.md](../../design/model-evaluation-and-tiering.md) — 定价/分级**策略设计稿**（定价表、SWE-bench 背景、该用哪档）
+> - [router-multi-provider-extension.md](../../design/router-multi-provider-extension.md) — 角色路由多 provider 扩展设计
 > - [bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md) / [bench-v2-data-requirements.md](bench-v2-data-requirements.md) — 度量口径与 bench 数据规范
-> - [timeout-kill-strategy-2026-08-06.md](timeout-kill-strategy-2026-08-06.md) — kill_reason / 成本控制（影响评价口径）
+> - [timeout-kill-strategy-2026-08-06.md](../../design/timeout-kill-strategy-2026-08-06.md) — kill_reason / 成本控制（影响评价口径）
 
 ## 核心结论（TL;DR）
 

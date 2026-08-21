@@ -173,7 +173,7 @@ off/force 对比被 plan 生成方差污染（每次运行重新生成 plan）�
 
 ## 9. 第四阶段：真实困难任务集验证（弱模型 × off/force）
 
-**日期**：2026-08-12 · **目的**：用此前弱模型困难任务集（`docs/local-model-hard-tasks-prompts-20260812.md`）验证 Goal 在真实难题上的作用，并压测 force 模式边界。
+**日期**：2026-08-12 · **目的**：用此前弱模型困难任务集（`docs/archive/reference/local-model-hard-tasks-prompts-20260812.md`）验证 Goal 在真实难题上的作用，并压测 force 模式边界。
 
 ### 9.1 实验设置
 

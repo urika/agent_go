@@ -3,7 +3,7 @@
 > 阶段：M0 产品契约与指标冻结
 > 状态：已完成（2026-08-09，含首批固定基线数据）
 > 更新日期：2026-08-09
-> 关联：[prd.md](prd.md) · [roadmap.md](roadmap.md) · [bench-v2-data-requirements.md](design/bench-v2-data-requirements.md)
+> 关联：[prd.md](prd.md) · [roadmap.md](roadmap.md) · [bench-v2-data-requirements.md](archive/design/bench-v2-data-requirements.md)
 
 ## 1. M0 目标
 

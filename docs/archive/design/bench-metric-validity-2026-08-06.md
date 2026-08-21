@@ -3,7 +3,7 @@
 > 日期：2026-08-06
 > 数据来源：`eval_suite/results_v2.jsonl` / `results_v3.jsonl` / `results_v4_calib.jsonl` / `results_v4_medhaiku*.jsonl`
 > 代码来源：`agent_go/bench.py`（`analyze_model_productivity` + 单任务记录采集）
-> 关联文档：[k4-cost-recalibration.md](k4-cost-recalibration.md)、[model-evaluation-and-tiering.md](model-evaluation-and-tiering.md)、`docs/prd.md` §产品 KPI
+> 关联文档：[k4-cost-recalibration.md](../../design/k4-cost-recalibration.md)、[model-evaluation-and-tiering.md](../../design/model-evaluation-and-tiering.md)、`docs/prd.md` §产品 KPI
 > 上游分析：飞书文档《agent_go Bench 数据分析：质量 / 成本 / 效率》——本文是其**勘误与方法论附件**。
 >
 > **当前状态（2026-08-08）**：本文是历史度量审计。结论用于解释旧批次为何不可直接比较；当前 Bench 使用 task suite 分层和 Metric Freeze，产品主指标改为 Cost per Accepted Delivery。

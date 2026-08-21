@@ -41,7 +41,24 @@
 
 | 文档 | 内容 |
 |------|------|
-| [archive/github-workflow-alignment.md](archive/github-workflow-alignment.md) | 早期需求调研：Claude Code 本地开发与 GitHub PR 流程对齐 |
+| [github-workflow-alignment.md](github-workflow-alignment.md) | 早期需求调研：Claude Code 本地开发与 GitHub PR 流程对齐 |
+
+### 2026-08-21 归档（已完成的设计/评测/复盘文档）
+
+| 文档 | 内容 |
+|------|------|
+| [bench-convergence-plan.md](bench-convergence-plan.md) | Bench 收敛阶段计划和正式 baseline 门禁 |
+| [bench-v2-data-requirements.md](bench-v2-data-requirements.md) | Bench v2 数据需求规格 |
+| [bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md) | Bench 指标度量有效性诊断与战略可用性评估 |
+| [bench-baseline-corrected-2026-08-06.md](bench-baseline-corrected-2026-08-06.md) | Bench 修正基线（S12-P0 口径） |
+| [agent-go-execution-capability-assessment-2026-08-09.md](agent-go-execution-capability-assessment-2026-08-09.md) | agent_go 执行 Stage B 的能力边界和失败复盘 |
+| [goal-ab-experiment-2026-08-12.md](goal-ab-experiment-2026-08-12.md) | Goal 模式 A/B 实验报告（3 任务 × 2 模式） |
+| [model-eval-routing-mechanism-2026-08-07.md](model-eval-routing-mechanism-2026-08-07.md) | 模型评价与路由机制现状与缺口 |
+| [model-eval-routing-fixes-2026-08-07.md](model-eval-routing-fixes-2026-08-07.md) | 模型评价与路由机制缺口修复设计 |
+| [s12-code-review-2026-08-07.md](s12-code-review-2026-08-07.md) | S12 提交 Code Review |
+| [test-coverage-analysis-2026-08-08.md](test-coverage-analysis-2026-08-08.md) | 测试覆盖分析（对照 PRD + 设计文档） |
+| [test-coverage-batch-summary-2026-08-08.md](test-coverage-batch-summary-2026-08-08.md) | 测试覆盖批次汇总 |
+| [ui-verification-research-2026-08-12.md](ui-verification-research-2026-08-12.md) | UI 验证方案调研与三层定位 |
 
 ---
 

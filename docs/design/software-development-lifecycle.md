@@ -431,7 +431,7 @@ agent_go 不做什么：
 
 *关联文档：*
 - [agent-go-input-spec.md](agent-go-input-spec.md) — agent_go 输入准则（Task Spec 规范 + Spec Gate 设计）
-- [bench-v2-data-requirements.md](bench-v2-data-requirements.md) — Bench 数据需求规格
+- [bench-v2-data-requirements.md](../archive/design/bench-v2-data-requirements.md) — Bench 数据需求规格
 - [bench-analysis-2026-08-01.md](../archive/reference/bench-analysis-2026-08-01.md) — Bench v1 数据分析报告（历史参考）
 - [prd.md](../prd.md) — 产品定位、KPI、设计原则
 - [roadmap.md](../roadmap.md) — 迭代排期

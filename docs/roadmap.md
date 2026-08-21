@@ -70,7 +70,7 @@ SDD 能力按产品关键路径分三层建设，不把所有治理能力一次�
 
 M1.4 只建设最小可追踪和可审查闭环，不建设完整 KnowledgeStore、活文档或自动架构决策；这些能力必须经过 M3 真实任务验证后再决定。
 
-Bench 在进入正式 decision baseline 前，遵循 [ADR-009 Bench 收敛决策](design/adr/ADR-009-bench-convergence.md) 和 [Bench 收敛计划](design/bench-convergence-plan.md)：先完成数据/状态清理、Plan/Verifier 收敛和 Golden Tasks，再扩大任务矩阵。
+Bench 在进入正式 decision baseline 前，遵循 [ADR-009 Bench 收敛决策](design/adr/ADR-009-bench-convergence.md) 和 [Bench 收敛计划](archive/design/bench-convergence-plan.md)：先完成数据/状态清理、Plan/Verifier 收敛和 Golden Tasks，再扩大任务矩阵。
 
 ### 1.5 全自主交付目标（北极星）
 
@@ -504,7 +504,7 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 - C1 数据埋点补全（verify_state schema 前向兼容 KnowledgeStore）。✅ 已实现（1d00870，verify_state 稳定契约版本化 + reflexion 来源标记）。
 - C2 Reflexion 批评层：改「retry≥2 触发」，受 token/次数/预算约束。✅ 已实现（faebd0b）。
 - C3 局部重规划：失败触发一次 Plan 拆分建议，默认人工确认。✅ 已实现（2026-08-21，无进展信号 verify_revert/divergence/失败模式重复触发一次拆分修复；契约遵守 F-VERIFY-6：最多一次、继承父预算（L2 预检）、replan_triggered/replan_succeeded 入 result+log_event、交互模式人工确认/headless 需 verification.replan.auto_apply=true、拆分步只注入修复 prompt 不扩大任务图；tests/test_replan.py 17 用例）。
-- C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。未启动（Problem/deviation/verify_state 数据已就位）。
+- C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。🔨 实现+smoke 链路验证完成（2026-08-21）：`knowledge.py` 三源提取（Problem/deviation/verify_state）注入 repair prompt，`--with-knowledge` 注入臂 + `knowledge_arm` 臂标记 + `knowledge_injected` 埋点 + 可淘汰（suppressed_ids/dormant 排除）；smoke 7×2×2 臂注入链路真实生效，但参与度仅 2/28（problems.jsonl 全 opened 无 resolution_summary），两臂指标差异为噪声级。全量 decision A/B 未跑。
 
 **阶段 D — 自治决策（谨慎）**
 - D1 Reviewer 灰度（高风险任务，review cost ≤ 主任务 20% 门禁）。
@@ -614,7 +614,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 
 ### 已交付
 
-- **Web 操作台全功能（R1-R17）**：观测 + 处置（run/resume/cancel/clean/review/merge/pr/confirm）+ 配置中心（local⇄cloud）+ SSE。纯本地 Golden Path 端到端验收通过（[web-golden-path-acceptance-2026-08-13.md](web-golden-path-acceptance-2026-08-13.md)：10/10 步骤、纯本地 $0.00、终态 ACCEPTED_DELIVERY、审计链完整）。
+- **Web 操作台全功能（R1-R17）**：观测 + 处置（run/resume/cancel/clean/review/merge/pr/confirm）+ 配置中心（local⇄cloud）+ SSE。纯本地 Golden Path 端到端验收通过（[web-golden-path-acceptance-2026-08-13.md](archive/reference/web-golden-path-acceptance-2026-08-13.md)：10/10 步骤、纯本地 $0.00、终态 ACCEPTED_DELIVERY、审计链完整）。
 - **协作扩展**：任务报告导出（md/html，a390192）、多用户角色（admin/viewer 双 token，a74bb1c）、任务级互斥锁 + 报告 Web 化（cccc467）、任务备注（86d409b）、规模化保护（并发上限 + 磁盘告警，62cda1e）。
 - **可靠性 P0**：多级模型降级链（evaluator fallback/fallbacks + worker_models_fallback_chain）+ 低置信度 evaluator 仲裁（5bf4bec，防假阳性/假阴性污染验证门禁）。
 - **发布准备**：QUICKSTART 5 分钟上手 + 打包验证（e38bbb2）；CI 首次全绿（ruff 64 / mypy 156 预存错误清零，04e547f/4bde81d）。
@@ -691,7 +691,7 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 
 当前 `--goal` 保留为显式 force 兼容入口，`--no-goal` 保留为 off 覆盖入口，Goal 默认仍关闭；Goal 不得绕过 Plan Preflight、verification、commit、pipeline、delivery 或 Accepted Delivery 判定。
 
-**A/B 实验结论（2026-08-12，3 任务 × 2 模式小样本）**：6/6 全部 DELIVERY_READY，两臂成功率无差异；force 模式平均成本高 ~30%（仅在实际触发多轮继续时）；goal_turns 计量正确（5/0/8）。小样本不支持默认启用，`goal_policy.policy` 保持 `off`。详见 [goal-ab-experiment-2026-08-12.md](design/goal-ab-experiment-2026-08-12.md)。
+**A/B 实验结论（2026-08-12，3 任务 × 2 模式小样本）**：6/6 全部 DELIVERY_READY，两臂成功率无差异；force 模式平均成本高 ~30%（仅在实际触发多轮继续时）；goal_turns 计量正确（5/0/8）。小样本不支持默认启用，`goal_policy.policy` 保持 `off`。详见 [goal-ab-experiment-2026-08-12.md](archive/design/goal-ab-experiment-2026-08-12.md)。
 
 ### 局部重规划与策略重置
 

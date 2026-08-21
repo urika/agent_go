@@ -3,7 +3,7 @@
 > 日期：2026-08-07
 > 审查范围：S12 timeout/kill/成本控制优化的 5 个提交（P0 初始 / P0 完成 / P1 / P2 / P3）
 > 代码基线：`feat/s10-bench-v2` 分支（HEAD = `ad59d91`）
-> 关联文档：[timeout-kill-strategy-2026-08-06.md](timeout-kill-strategy-2026-08-06.md)（设计 G1–G8）、[bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md)（度量诊断）
+> 关联文档：[timeout-kill-strategy-2026-08-06.md](../../design/timeout-kill-strategy-2026-08-06.md)（设计 G1–G8）、[bench-metric-validity-2026-08-06.md](bench-metric-validity-2026-08-06.md)（度量诊断）
 
 ## 审查范围
 

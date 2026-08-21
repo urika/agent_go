@@ -1,7 +1,7 @@
 # Web 操作台全功能扩充——设计 + 需求文档（v2）
 
 > 状态：**已实施并验收**（R1-R17 全部交付，commit 75dff37/7102c9b/0ee1aa2/6dd3ce8）
-> 验收：纯本地 Golden Path 真实端到端通过——[验收报告](../web-golden-path-acceptance-2026-08-13.md)
+> 验收：纯本地 Golden Path 真实端到端通过——[验收报告](../archive/reference/web-golden-path-acceptance-2026-08-13.md)
 > 日期：2026-08-12
 > 关联：[web_server.py](../../agent_go/web_server.py)、[config.py](../../agent_go/config.py)、[mcp_server.py](../../agent_go/mcp_server.py)
 > v2 变更：补用户画像/成功指标/golden path；R5 拆分解决计划确认交互矛盾；写操作复用 MCP 任务管理层（去双轨状态）；P0 收敛至 5 项；D1-D6 细节入验收标准。
