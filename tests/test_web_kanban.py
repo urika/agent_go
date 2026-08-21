@@ -591,3 +591,19 @@ class TestW4ClassificationStats:
         r = _get(f"{ops_server}/api/kanban/classification-stats")
         assert r["total_cards"] == 0
         assert r["by_automation"] == {}
+
+
+class TestW4CostQuality:
+    """W4.2 成本-质量自适应分析。"""
+
+    def test_cost_quality_structure(self, ops_server):
+        r = _get(f"{ops_server}/api/kanban/cost-quality")
+        assert "groups" in r
+        assert "local" in r["groups"] and "cloud" in r["groups"]
+        for g in r["groups"].values():
+            assert "tasks" in g and "completed" in g and "cost" in g
+
+    def test_cost_quality_suggestion_empty(self, ops_server):
+        r = _get(f"{ops_server}/api/kanban/cost-quality")
+        # 空数据时 suggestion 为空字符串（无权衡依据）
+        assert r["suggestion"] == ""

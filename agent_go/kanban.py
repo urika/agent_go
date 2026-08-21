@@ -447,3 +447,65 @@ def classification_stats() -> dict:
     for slot in by_auto.values():
         slot["pass_rate"] = round(slot["completed"] / slot["total"], 3) if slot["total"] else None
     return {"total_cards": total, "by_automation": by_auto}
+
+
+def cost_quality_analysis() -> dict:
+    """成本-质量自适应分析（W4.2）：本地队列 vs 云端的成本-通过率权衡。
+
+    遍历卡片的 task_ids，读 task metering（worker 成本 + is_local/route_target），
+    按执行方式（local/cloud）分组统计完成任务数/总成本/完成率，输出权衡对比
+    与阈值建议（本地队列 $/pass 显著优 → 倾向本地；反之倾向云端）。
+    """
+    from .config import AGENT_GO_DIR
+    import json as _json
+
+    board = load_board()
+    cards = [c for c in board.get("cards", []) if not c.get("archived")]
+    groups: dict[str, dict] = {"local": {"tasks": 0, "completed": 0, "cost": 0.0},
+                               "cloud": {"tasks": 0, "completed": 0, "cost": 0.0},
+                               "unknown": {"tasks": 0, "completed": 0, "cost": 0.0}}
+    for c in cards:
+        done = c.get("stage") == "operations"
+        mode = "unknown"
+        cost = 0.0
+        saw_metering = False
+        for tid in c.get("task_ids", []):
+            mf = (AGENT_GO_DIR / tid / "metering.jsonl")
+            if not mf.exists():
+                continue
+            try:
+                with mf.open(encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            r = _json.loads(line)
+                        except _json.JSONDecodeError:
+                            continue
+                        if r.get("role") != "worker":
+                            continue
+                        saw_metering = True
+                        cost += float(r.get("cost_usd") or 0.0)
+                        if r.get("route_target") == "cloud" or r.get("is_local") is False:
+                            mode = "cloud"
+                        elif mode != "cloud":
+                            mode = "local"
+            except OSError:
+                continue
+        if not saw_metering:
+            continue  # 无 metering（未执行/失败）不计入成本统计
+        g = groups[mode]
+        g["tasks"] += 1
+        g["cost"] = round(g["cost"] + cost, 4)
+        if done:
+            g["completed"] += 1
+    for mode, g in groups.items():
+        g["pass_rate"] = round(g["completed"] / g["tasks"], 3) if g["tasks"] else None
+        g["cost_per_pass"] = round(g["cost"] / g["completed"], 4) if g["completed"] else None
+    # 权衡建议：本地 $/pass < 云端 $/pass 的 50% 且通过率 ≥ 云端 - 0.1 → 倾向本地
+    suggestion = ""
+    lg, cg = groups["local"], groups["cloud"]
+    if lg["completed"] and cg["completed"]:
+        if (lg["cost_per_pass"] or 9e9) < (cg["cost_per_pass"] or 9e9) * 0.5 and (lg["pass_rate"] or 0) >= (cg["pass_rate"] or 0) - 0.1:
+            suggestion = "本地队列 $/pass 显著优且通过率可接受 → 倾向本地（auto 判定可放宽）"
+        else:
+            suggestion = "云端 $/pass 或通过率更优 → 倾向云端（manual/cloud 路由）"
+    return {"groups": groups, "suggestion": suggestion}

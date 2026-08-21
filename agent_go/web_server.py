@@ -1641,6 +1641,9 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "classification-stats":
                 self._reply_json(200, kanban.classification_stats())
                 return
+            if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "cost-quality":
+                self._reply_json(200, kanban.cost_quality_analysis())
+                return
             # ── 配置中心 + 健康检查（M1/R3-R4）──
             if len(parts) == 2 and parts[1] == "profiles":
                 self._reply_json(200, api_profiles())
@@ -3489,12 +3492,14 @@ let kanbanShowArchived = false; // 归档视图开关（含已归档卡片，可
 
 async function loadKanban() {
   try {
-    const [kb, stats] = await Promise.all([
+    const [kb, stats, cq] = await Promise.all([
       api('/api/kanban' + (kanbanShowArchived ? '?archived=1' : '')),
       api('/api/kanban/classification-stats'),
+      api('/api/kanban/cost-quality'),
     ]);
     kanbanData = kb;
     kanbanData._stats = stats;
+    kanbanData._costQuality = cq;
     renderKanban();
     setConn(true);
   } catch (e) {
@@ -3521,6 +3526,19 @@ function renderKanban() {
       return '<span class="tag" title="完成 '+(s.completed||0)+'/'+s.total+'">'+label[k]+' '+s.total+'（'+rate+'）</span>';
     }).join(' ');
     html += '<div class="op-bar" style="margin:6px 0 10px;font-size:12px;color:var(--dim)">分类准确率（自学习反馈）: '+badges+'</div>';
+  }
+  // W4.2 成本-质量自适应：本地队列 vs 云端权衡面板
+  const cq = d._costQuality;
+  if (cq && cq.groups) {
+    const rows = Object.entries(cq.groups).filter(([_, g]) => g.tasks > 0).map(([mode, g]) => {
+      const rate = (g.pass_rate != null) ? (g.pass_rate * 100).toFixed(0) + '%' : '-';
+      const cpp = (g.cost_per_pass != null) ? '$' + g.cost_per_pass.toFixed(4) : '-';
+      return '<span class="tag" title="任务 '+g.tasks+'，完成 '+g.completed+'">'+mode+': '+g.tasks+' 任务 / 通过率 '+rate+' / $/pass '+cpp+'</span>';
+    }).join(' ');
+    if (rows) {
+      html += '<div class="op-bar" style="margin:0 0 10px;font-size:12px;color:var(--dim)">成本-质量权衡（W4.2 自适应）: '+rows+
+        (cq.suggestion ? ' <span style="color:var(--yellow)">💡 '+esc(cq.suggestion)+'</span>' : '')+'</div>';
+    }
   }
   html += '<div class="kanban-board">';
   d.stages.forEach((st, si) => {
