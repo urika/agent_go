@@ -575,10 +575,18 @@ class TestW4ClassificationStats:
     def test_classification_stats_structure(self, ops_server, ops_env):
         import agent_go.kanban as _kb
         # 构造不同 automation × stage 的卡片
-        c1 = _kb.create_card(title="auto-完成", type="discussion"); _kb.update_card(c1["id"], automation="auto"); _kb.move_card(c1["id"], "operations")
-        c2 = _kb.create_card(title="auto-进行中", type="discussion"); _kb.update_card(c2["id"], automation="auto"); _kb.move_card(c2["id"], "implementation")
-        c3 = _kb.create_card(title="manual-进行中", type="discussion"); _kb.update_card(c3["id"], automation="manual"); _kb.move_card(c3["id"], "implementation")
-        c4 = _kb.create_card(title="pending-进行中", type="discussion"); _kb.update_card(c4["id"], automation="pending"); _kb.move_card(c4["id"], "design")
+        c1 = _kb.create_card(title="auto-完成", type="discussion")
+        _kb.update_card(c1["id"], automation="auto")
+        _kb.move_card(c1["id"], "operations")
+        c2 = _kb.create_card(title="auto-进行中", type="discussion")
+        _kb.update_card(c2["id"], automation="auto")
+        _kb.move_card(c2["id"], "implementation")
+        c3 = _kb.create_card(title="manual-进行中", type="discussion")
+        _kb.update_card(c3["id"], automation="manual")
+        _kb.move_card(c3["id"], "implementation")
+        c4 = _kb.create_card(title="pending-进行中", type="discussion")
+        _kb.update_card(c4["id"], automation="pending")
+        _kb.move_card(c4["id"], "design")
         r = _get(f"{ops_server}/api/kanban/classification-stats")
         assert r["total_cards"] >= 4
         by = r["by_automation"]
@@ -607,3 +615,31 @@ class TestW4CostQuality:
         r = _get(f"{ops_server}/api/kanban/cost-quality")
         # 空数据时 suggestion 为空字符串（无权衡依据）
         assert r["suggestion"] == ""
+
+
+class TestW4SuggestDegrade:
+    """W4.3 自动降级建议。"""
+
+    def test_suggest_degrade_ok(self, ops_server, ops_env, monkeypatch):
+        import agent_go.kanban as _kb
+        TID = "task-20260820-100000-111-aaaa"
+        _mk_task(ops_env, TID, status="FAILED")
+        c = _kb.create_card(title="失败卡片", type="discussion")
+        _kb.link_task(c["id"], TID)
+        _kb.move_card(c["id"], "implementation")
+        # mock insight 分析（_ws.kanban === _kb 同模块，勿 mock get_card 防自指递归）
+        import agent_go.eval as _ev
+        monkeypatch.setattr(_ev, "_insight_llm",
+                            lambda *a, **k: json.dumps([{"problem": "模型能力不足", "action": "换更强模型", "confidence": 0.8}]))
+        code, d = _post(f"{ops_server}/api/kanban/cards/{c['id']}/suggest-degrade", {})
+        assert code == 200
+        assert d["task_id"] == TID
+        assert d["suggestions"]
+        assert d["suggestions"][0]["action"] == "换更强模型"
+
+    def test_suggest_degrade_no_task_422(self, ops_server, ops_env):
+        import agent_go.kanban as _kb
+        c = _kb.create_card(title="无任务", type="discussion")
+        code, d = _post(f"{ops_server}/api/kanban/cards/{c['id']}/suggest-degrade", {})
+        assert code == 422
+        assert "无关联任务" in d["error"]

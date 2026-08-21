@@ -1852,6 +1852,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 if action == "review":
                     self._op_kanban_review(card_id, body, token)
                     return
+                if action == "suggest-degrade":
+                    self._op_kanban_suggest_degrade(card_id, token)
+                    return
             # POST /api/tasks/<id>/notes {text}（M5.2 协作备注）
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "notes":
                 self._op_add_note(parts[2], body, token)
@@ -2411,6 +2414,84 @@ class WebHandler(BaseHTTPRequestHandler):
             self._reply_json(200, result)
             return
         self._reply_json(404, {"error": f"not found: {path}"})
+
+    def _op_kanban_suggest_degrade(self, card_id: str, token: str) -> None:
+        """W4.3 自动降级建议：对失败卡片调用 insight 分析失败原因，生成降级/修复建议。"""
+        import logging as _logging
+        try:
+            card = kanban.get_card(card_id)
+        except kanban.KanbanError as e:
+            self._reply_json(404, {"error": str(e)})
+            return
+        task_ids = card.get("task_ids") or []
+        if not task_ids:
+            self._reply_json(422, {"error": "卡片无关联任务，无法生成降级建议"})
+            return
+        task_id = task_ids[-1]
+        # W4.3 任务级证据组装（构造 materialize_evidence 兼容结构）
+        try:
+            from .config import AGENT_GO_DIR, load_config
+            from .eval import _insight_llm, _parse_insight_suggestions
+            td = AGENT_GO_DIR / task_id
+            meta = json.loads((td / "meta.json").read_text(encoding="utf-8")) if (td / "meta.json").exists() else {}
+            results = meta.get("results", [])
+            failed_records = [
+                {"sub_id": r.get("subtask_id"), "status": r.get("status"),
+                 "failure_reason": (r.get("failure_reason") or "")[:300],
+                 "verify_ok": r.get("verify_ok"), "retries": r.get("retry_count")}
+                for r in results if r.get("status") in ("failed", "blocked")
+            ]
+            failure_classes: dict = {}
+            for r in failed_records:
+                fc = (r.get("failure_reason") or "unknown").split(";")[0][:40]
+                failure_classes[fc] = failure_classes.get(fc, 0) + 1
+            cost = round(sum(float(r.get("cost_usd", 0) or 0) for r in results), 4)
+            config = load_config()
+            env_snapshot = {
+                "plan_model": (config.get("plan_api") or {}).get("model", ""),
+                "goal_policy": (config.get("goal") or {}).get("policy", "off"),
+                "worker_models": config.get("worker_models", {}),
+                "router_enabled": (config.get("router") or {}).get("enabled", False),
+            }
+            evidence = {
+                "schema": "insight-evidence/1",
+                "source_batch": task_id,
+                "suite": "task",
+                "manifest": {},
+                "metrics": {
+                    "task_count": len(results),
+                    "valid_cost_usd": cost,
+                    "pass_rate_diagnostic": round((len(results) - len(failed_records)) / len(results), 3) if results else 0,
+                    "failure_class_counts": failure_classes,
+                },
+                "failure_modes": {
+                    "by_failure_class": failure_classes,
+                    "by_model": {},
+                    "by_task": {r["sub_id"]: 1 for r in failed_records},
+                    "failed_records": failed_records,
+                },
+                "per_task": {},
+                "environment": env_snapshot,
+                "problems_history": [],
+                "record_count": len(results),
+                "evidence_hash": "task-level",
+            }
+            goal = f"分析任务 {task_id}（{meta.get('task','')[:60]}）失败原因并给出降级/修复建议"
+            content = _insight_llm(evidence, goal, "", config, _logging.getLogger(__name__))
+            suggestions = _parse_insight_suggestions(content)
+            if not suggestions:
+                self._reply_json(422, {"error": "LLM 分析未产出有效建议"})
+                return
+            _audit("kanban.suggest_degrade", {"card_id": card_id, "task_id": task_id},
+                   f"{len(suggestions)} 条建议", True, token)
+            self._reply_json(200, {
+                "task_id": task_id,
+                "suggestions": suggestions[:3],
+                "goal": goal,
+            })
+        except Exception as e:
+            _logging.getLogger(__name__).exception("suggest_degrade failed")
+            self._reply_json(500, {"error": f"降级建议生成失败: {e}"})
 
     def do_DELETE(self) -> None:
         """DELETE /api/tasks/<id>  {confirm: true}（R7 单任务清理）。"""
@@ -3621,6 +3702,9 @@ function kanbanDetailHtml(c) {
     html += '<button class="btn kanban-op" data-op="archive" data-card="'+esc(c.id)+'">🗄️ 归档</button>';
   if (!(c.task_ids||[]).length)
     html += '<button class="btn kanban-op" data-op="delete" data-card="'+esc(c.id)+'">🗑️ 删除</button>';
+  // W4.3 降级建议：有任务且非完成状态（失败/进行中）→ 提供降级/修复建议
+  if ((c.task_ids||[]).length && c.stage !== 'operations')
+    html += '<button class="btn kanban-op" data-op="suggest-degrade" data-card="'+esc(c.id)+'">🤖 降级建议</button>';
   // W3.3：operations 列审批按钮（approve→approved；reject/changes-requested→rejected+回退 implementation）
   if (c.stage === 'operations') {
     const ap = c.approval || 'pending';
@@ -3816,6 +3900,24 @@ function bindKanbanEvents() {
           kanbanExpanded = null;
           loadKanban();
         } catch (e) { if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; } }
+        return;
+      }
+      // W4.3 降级建议：insight 分析失败原因 → 显示建议
+      if (op === 'suggest-degrade') {
+        b.disabled = true;
+        if (msg) { msg.textContent = '🤖 分析中…'; msg.style.color = 'var(--dim)'; }
+        try {
+          const d = await postJSON('/api/kanban/cards/'+encodeURIComponent(id)+'/suggest-degrade', {});
+          if (msg) {
+            const tips = (d.suggestions||[]).map(s => '• '+s.action).join('\\n');
+            msg.textContent = '🤖 降级建议:\\n'+tips;
+            msg.style.color = 'var(--yellow)';
+            msg.style.whiteSpace = 'pre-wrap';
+          }
+        } catch (e) {
+          if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; }
+          b.disabled = false;
+        }
         return;
       }
       // W3.3：operations 列审批
