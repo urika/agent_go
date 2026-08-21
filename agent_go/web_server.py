@@ -1831,6 +1831,10 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "cards":
                 self._op_kanban_create(body, token)
                 return
+            # POST /api/kanban/import-spec（从 Task Spec 需求文档生成看板卡片）
+            if len(parts) == 3 and parts[1] == "kanban" and parts[2] == "import-spec":
+                self._op_kanban_import_spec(body, token)
+                return
             # POST /api/kanban/cards/<id>/<update|move|archive|delete|dispatch>
             if len(parts) == 5 and parts[1] == "kanban" and parts[2] == "cards":
                 card_id, action = parts[3], parts[4]
@@ -2195,6 +2199,45 @@ class WebHandler(BaseHTTPRequestHandler):
         _audit("kanban.create", {"card_id": card["id"], "title": title, "type": ctype},
                card, True, token)
         self._reply_json(200, {"ok": True, "card": card})
+
+    def _op_kanban_import_spec(self, body: dict, token: str) -> None:
+        """POST /api/kanban/import-spec：从 Task Spec 需求文档生成看板卡片。
+
+        body: {spec_path, stage?, repo?, type?} → 解析 spec → 组装卡片 → 创建。
+        """
+        from .spec import parse_spec
+        spec_path = str(body.get("spec_path") or "").strip()
+        if not spec_path:
+            self._reply_json(400, {"error": "spec_path 不能为空"})
+            return
+        spec = parse_spec(Path(spec_path))
+        if spec is None:
+            self._reply_json(422, {"error": f"Spec 解析失败或文件不存在: {spec_path}"})
+            return
+        stage = str(body.get("stage") or "brainstorm")
+        repo = str(body.get("repo") or "").strip()
+        ctype = str(body.get("type") or "implementation")
+        title = spec.title or Path(spec_path).stem
+        desc_parts = []
+        if spec.goal:
+            desc_parts.append(f"【目标】{spec.goal}")
+        if spec.acceptance:
+            desc_parts.append(f"【验收】{spec.acceptance}")
+        if spec.scope:
+            desc_parts.append(f"【范围】{spec.scope}")
+        description = "\n\n".join(desc_parts)
+        try:
+            card = kanban.create_card(
+                title=title, type=ctype, stage=stage, repo=repo,
+                description=description, spec_path=spec_path,
+            )
+        except Exception as e:
+            self._reply_json(422, {"error": f"创建卡片失败: {e}"})
+            return
+        _audit("kanban.import_spec", {"spec_path": spec_path, "card_id": card["id"]},
+               card, True, token)
+        self._reply_json(200, {"ok": True, "card": card,
+                               "flow": f"{card['stage']} → design → implementation → operations"})
 
     def _op_kanban_update(self, card_id: str, body: dict, token: str) -> None:
         if self._kanban_card_or_reply(card_id) is None:

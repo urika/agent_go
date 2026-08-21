@@ -430,6 +430,18 @@ def _build_parser():
     trust_parser.add_argument("--window", type=int, default=30, dest="recent_window",
                               help="观察窗口：最近 N 个任务（D-0 口径，默认 30；0=不限）")
 
+    # kanban 子命令（看板任务编排）
+    kanban_parser = subparsers.add_parser("kanban", help="看板任务编排（卡片管理/Spec 导入）")
+    kanban_sub = kanban_parser.add_subparsers(dest="kanban_subcommand", help="Kanban operation")
+    kanban_import_parser = kanban_sub.add_parser("import-spec", help="从 Task Spec 需求文档生成看板卡片")
+    kanban_import_parser.add_argument("spec_path", help="Task Spec 文件路径（.md）")
+    kanban_import_parser.add_argument("--stage", default="brainstorm",
+                                      help="创建后的看板列（默认 brainstorm；合法: brainstorm/requirements/design/implementation/operations）")
+    kanban_import_parser.add_argument("--repo", default="",
+                                      help="目标仓库路径（implementation 卡片必填）")
+    kanban_import_parser.add_argument("--type", default="implementation", choices=["discussion", "implementation", "periodic"],
+                                      help="卡片类型（默认 implementation）")
+
     # mcp 子命令
     mcp_parser = subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)")
     mcp_parser.add_argument("--http", action="store_true",
@@ -3160,6 +3172,48 @@ def cmd_report(args=None) -> None:
     console.success(f"报告已导出: {path}")
 
 
+def cmd_kanban_import_spec(args) -> None:
+    """kanban import-spec：从 Task Spec 需求文档生成看板卡片（进入看板编排流）。"""
+    from .spec import parse_spec
+    from . import kanban
+
+    spec_path = Path(args.spec_path)
+    spec = parse_spec(spec_path)
+    if spec is None:
+        console.error(f"Spec 解析失败或文件不存在: {spec_path}")
+        sys.exit(EX_USAGE)
+    stage = args.stage or "brainstorm"
+    repo = (args.repo or "").strip()
+    ctype = args.type or "implementation"
+
+    # 组装卡片：spec 字段 → 看板卡片字段
+    title = spec.title or spec_path.stem
+    desc_parts = []
+    if spec.goal:
+        desc_parts.append(f"【目标】{spec.goal}")
+    if spec.acceptance:
+        desc_parts.append(f"【验收】{spec.acceptance}")
+    if spec.scope:
+        desc_parts.append(f"【范围】{spec.scope}")
+    description = "\n\n".join(desc_parts)
+
+    try:
+        card = kanban.create_card(
+            title=title, type=ctype, stage=stage, repo=repo,
+            description=description,
+            spec_path=str(spec_path),
+        )
+    except Exception as e:
+        console.error(f"创建卡片失败: {e}")
+        sys.exit(EX_ERROR)
+
+    console.print(f"✅ 已从 Spec 生成看板卡片: {card['id']}")
+    console.print(f"   标题: {card['title']}")
+    console.print(f"   列: {card['stage']} | 类型: {card['type']} | automation: {card.get('automation', '-')}")
+    console.print(f"   Spec: {card.get('spec_path', '-')}")
+    console.print(f"   → 进入看板编排流（{card['stage']} → design → implementation → operations）")
+
+
 def cmd_config(args=None) -> None:
     """config 子命令：无参=打印当前配置；local/cloud 一键切换；status 健康检查（M1/R1-R4）。"""
     sub = getattr(args, "config_subcommand", None) if args else None
@@ -4290,6 +4344,12 @@ def main() -> None:
             cmd_status(args)
         elif args.command == "config":
             cmd_config(args)
+        elif args.command == "kanban":
+            sub = getattr(args, "kanban_subcommand", None)
+            if sub == "import-spec":
+                cmd_kanban_import_spec(args)
+            else:
+                console.print("Usage: agent_go kanban <import-spec> [args]")
         elif args.command == "spec":
             cmd_spec(args)
         elif args.command == "clean":
