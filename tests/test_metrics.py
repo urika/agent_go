@@ -310,3 +310,122 @@ def test_compute_trust_metrics_empty(tmp_path):
     assert r["review_modification_rate"] is None
     assert r["recurrence_visibility_rate"] is None
     assert r["failed_subtasks"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# #49 盲区命中率（compute_blind_spot_hit_rate / trust 接线）
+# ═══════════════════════════════════════════════════════════════
+
+def _mk_task(base: Path, name: str, meta: dict, review=None) -> Path:
+    td = base / name
+    td.mkdir()
+    (td / "meta.json").write_text(_json.dumps(meta), encoding="utf-8")
+    if review is not None:
+        (td / "review.json").write_text(_json.dumps(review), encoding="utf-8")
+    return td
+
+
+def test_blind_spot_hit_weak_anchor_failed(tmp_path):
+    """弱锚定标注 + 该子任务最终 failed → 命中。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "VERIFICATION_FAILED",
+        "results": [{"subtask_id": "s1", "status": "failed"}],
+        "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
+    })
+    r = compute_blind_spot_hit_rate([t])
+    assert r["blind_spot_items"] == 1
+    assert r["blind_spot_hits"] == 1
+    assert r["blind_spot_hit_rate"] == 1.0
+    assert r["by_signal"]["weakly_anchored_subtasks"] == {"items": 1, "hits": 1}
+
+
+def test_blind_spot_no_hit_when_completed(tmp_path):
+    """弱锚定标注但子任务 completed、任务交付 → 未命中。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "ACCEPTED_DELIVERY",
+        "results": [{"subtask_id": "s1", "status": "completed"}],
+        "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
+    }, review={"decision": "approved"})
+    r = compute_blind_spot_hit_rate([t])
+    assert r["blind_spot_items"] == 1
+    assert r["blind_spot_hits"] == 0
+    assert r["blind_spot_hit_rate"] == 0.0
+
+
+def test_blind_spot_hit_inconclusive_review_rejected(tmp_path):
+    """评估不确定标注 + review 被拒 → 命中（即使子任务未 failed）。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "DELIVERY_READY",
+        "results": [{"subtask_id": "s1", "status": "completed"}],
+        "blind_spots": {"inconclusive_evaluations": ["s1"]},
+    }, review={"decision": "changes_requested"})
+    r = compute_blind_spot_hit_rate([t])
+    assert r["by_signal"]["inconclusive_evaluations"] == {"items": 1, "hits": 1}
+
+
+def test_blind_spot_hit_uncovered_acceptance_goal_low(tmp_path):
+    """未覆盖验收 ID + goal_adherence=low（执行全过但漏验收）→ 命中。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "completed",
+        "results": [{"subtask_id": "s1", "status": "completed"}],
+        "goal_adherence": {"level": "low"},
+        "blind_spots": {"uncovered_acceptance_ids": ["AC-1", "AC-2"]},
+    })
+    r = compute_blind_spot_hit_rate([t])
+    assert r["by_signal"]["uncovered_acceptance_ids"] == {"items": 2, "hits": 2}
+
+
+def test_blind_spot_uncovered_acceptance_no_hit_when_delivered(tmp_path):
+    """未覆盖验收 ID 但任务完成且 goal 合规 → 未命中。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "completed",
+        "results": [{"subtask_id": "s1", "status": "completed"}],
+        "goal_adherence": {"level": "full"},
+        "blind_spots": {"uncovered_acceptance_ids": ["AC-1"]},
+    })
+    r = compute_blind_spot_hit_rate([t])
+    assert r["blind_spot_hits"] == 0
+
+
+def test_blind_spot_excludes_non_predictive_signals(tmp_path):
+    """unattributed_failures（本身是失败）与 baseline_dirty（环境位）不计入分母。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "failed",
+        "results": [{"subtask_id": "s1", "status": "failed"}],
+        "blind_spots": {"unattributed_failures": ["s1"], "baseline_dirty": True},
+    })
+    r = compute_blind_spot_hit_rate([t])
+    assert r["blind_spot_items"] == 0
+    assert r["blind_spot_hit_rate"] is None
+
+
+def test_trust_metrics_blind_spot_wired(tmp_path):
+    """compute_trust_metrics 接入盲区命中率（不再是固定 None）。"""
+    from agent_go.metrics import compute_trust_metrics
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "VERIFICATION_FAILED",
+        "results": [{"subtask_id": "s1", "status": "failed", "problem_id": "p-1"}],
+        "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
+    })
+    r = compute_trust_metrics([t])
+    assert r["blind_spot_hit_rate"] == 1.0
+    assert r["blind_spot_items"] == 1
+    assert r["blind_spot_by_signal"]["weakly_anchored_subtasks"]["hits"] == 1
+
+
+def test_trust_metrics_blind_spot_none_without_annotations(tmp_path):
+    """无盲区标注 → 命中率为 None（样本不足语义，非 0）。"""
+    from agent_go.metrics import compute_trust_metrics
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "completed",
+        "results": [{"subtask_id": "s1", "status": "completed"}],
+    })
+    r = compute_trust_metrics([t])
+    assert r["blind_spot_hit_rate"] is None
+    assert r["blind_spot_items"] == 0

@@ -9,7 +9,7 @@ __all__ = [
     "estimate_cost", "DEFAULT_PRICING", "aggregate_metering",
     "compute_frozen_metrics", "is_valid_metric_task",
     "aggregate_failure_classes", "local_tco_usd",
-    "compute_trust_metrics",
+    "compute_trust_metrics", "compute_blind_spot_hit_rate",
 ]
 
 # local_model_cost 配置缓存（local_tco_usd 惰性加载一次）
@@ -411,6 +411,82 @@ def compute_mcp_tool_success_rate(events: list[dict], exclude_user_config_errors
     }
 
 
+def compute_blind_spot_hit_rate(task_dirs: list[Path]) -> dict[str, Any]:
+    """盲区命中率：盲区标注项最终真出问题的比例（#49 放行门第三指标）。
+
+    逐信号命中规则（同任务终局判定——标注产生在 pipeline 收尾，「出问题」
+    取该任务的终局证据：子任务 failed / review 被拒 / 任务未完成 / goal 低合规）：
+
+    - weakly_anchored_subtasks 项：该子任务最终 failed，或任务 review 被
+      rejected / changes_requested。
+    - inconclusive_evaluations 项：同上（评估不确定 → 后来真失败/被拒）。
+    - uncovered_acceptance_ids 项：任务未 completed，或 goal_adherence.level == "low"
+      （M4 回溯判定「执行全过但漏验收」），或 review 被拒。
+
+    分母排除两类：unattributed_failures（本身已是失败，是「问题」而非「预测」）、
+    baseline_dirty（环境标志位，非可命中的标注项）。
+
+    Returns:
+        {"blind_spot_hit_rate": float|None, "blind_spot_items": int,
+         "blind_spot_hits": int, "by_signal": {signal: {"items": n, "hits": m}}}
+    """
+    by_signal: dict[str, dict[str, int]] = {
+        "weakly_anchored_subtasks": {"items": 0, "hits": 0},
+        "inconclusive_evaluations": {"items": 0, "hits": 0},
+        "uncovered_acceptance_ids": {"items": 0, "hits": 0},
+    }
+    for td in task_dirs:
+        meta_path = td / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        blind = meta.get("blind_spots") or {}
+        if not isinstance(blind, dict) or not any(
+                blind.get(k) for k in by_signal):
+            continue
+        failed_ids = {
+            str(r.get("subtask_id")) for r in (meta.get("results") or [])
+            if isinstance(r, dict) and r.get("status") == "failed" and r.get("subtask_id")
+        }
+        review_bad = False
+        review_path = td / "review.json"
+        if review_path.exists():
+            try:
+                decision = (json.loads(review_path.read_text(encoding="utf-8")) or {}).get("decision", "")
+                review_bad = decision in ("rejected", "changes_requested")
+            except (OSError, json.JSONDecodeError):
+                pass
+        # 任务级「出问题」：终局状态非交付/完成类（缺失状态保守不计）
+        _ok_states = {"completed", "ACCEPTED_DELIVERY", "DELIVERY_READY"}
+        task_not_completed = bool(meta.get("status")) and meta.get("status") not in _ok_states
+        goal_low = (meta.get("goal_adherence") or {}).get("level") == "low"
+
+        for sid in (blind.get("weakly_anchored_subtasks") or []):
+            by_signal["weakly_anchored_subtasks"]["items"] += 1
+            if str(sid) in failed_ids or review_bad:
+                by_signal["weakly_anchored_subtasks"]["hits"] += 1
+        for sid in (blind.get("inconclusive_evaluations") or []):
+            by_signal["inconclusive_evaluations"]["items"] += 1
+            if str(sid) in failed_ids or review_bad:
+                by_signal["inconclusive_evaluations"]["hits"] += 1
+        for ac_id in (blind.get("uncovered_acceptance_ids") or []):
+            by_signal["uncovered_acceptance_ids"]["items"] += 1
+            if task_not_completed or goal_low or review_bad:
+                by_signal["uncovered_acceptance_ids"]["hits"] += 1
+
+    items = sum(v["items"] for v in by_signal.values())
+    hits = sum(v["hits"] for v in by_signal.values())
+    return {
+        "blind_spot_hit_rate": round(hits / items, 4) if items else None,
+        "blind_spot_items": items,
+        "blind_spot_hits": hits,
+        "by_signal": by_signal,
+    }
+
+
 def compute_trust_metrics(task_dirs: list[Path]) -> dict[str, Any]:
     """#49 信任指标（渐进自治放行门）：审查后修改率 / 复发可见率 / 盲区命中率。
 
@@ -426,7 +502,8 @@ def compute_trust_metrics(task_dirs: list[Path]) -> dict[str, Any]:
     Returns:
         {"review_modification_rate": float|None, "reviewed_tasks": int,
          "recurrence_visibility_rate": float|None, "failed_subtasks": int,
-         "blind_spot_hit_rate": None}
+         "blind_spot_hit_rate": float|None, "blind_spot_items": int,
+         "blind_spot_hits": int, "blind_spot_by_signal": dict}
     """
     reviewed = 0
     modified = 0
@@ -455,10 +532,14 @@ def compute_trust_metrics(task_dirs: list[Path]) -> dict[str, Any]:
                 reviewed += 1
                 if decision in ("rejected", "changes_requested"):
                     modified += 1
+    blind = compute_blind_spot_hit_rate(task_dirs)
     return {
         "review_modification_rate": round(modified / reviewed, 4) if reviewed else None,
         "reviewed_tasks": reviewed,
         "recurrence_visibility_rate": round(failed_with_problem / failed_total, 4) if failed_total else None,
         "failed_subtasks": failed_total,
-        "blind_spot_hit_rate": None,  # 待跨任务历史积累（#49 后续接线）
+        "blind_spot_hit_rate": blind["blind_spot_hit_rate"],
+        "blind_spot_items": blind["blind_spot_items"],
+        "blind_spot_hits": blind["blind_spot_hits"],
+        "blind_spot_by_signal": blind["by_signal"],
     }

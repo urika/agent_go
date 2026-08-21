@@ -34,11 +34,17 @@
 另注意口径：problem 录制只覆盖「能力失败」（status=failed 且 verify_ok=False），
 timeout/PAUSED/blocked 不录制——分母应限「能力失败」才公平。
 
-### 3. 盲区命中率 — 机制未接线
+### 3. 盲区命中率 — ~~机制未接线~~ ✅ 已接线（2026-08-21）
 
 - 85 个真实任务有 101 条盲区标注（H1/H4 落地正常，标注在产生）。
-- 但命中率需要「任务 X 的盲区 → 任务 Y 的失败」跨任务关联，`compute_trust_metrics`
-  返回 None（注释：待跨任务历史积累）。**关联逻辑尚未实现，不是数据不够。**
+- ✅ 同日完成接线：`metrics.compute_blind_spot_hit_rate`（逐信号命中规则：弱锚定/评估不确定
+  → 子任务 failed 或 review 被拒；未覆盖验收 ID → 任务未完成 / goal_adherence=low / review 被拒；
+  分母排除 unattributed_failures 与 baseline_dirty 两类非预测性信号），接入
+  `compute_trust_metrics` 并新增 `agent_go trust` 命令（文本/--json，默认真实任务口径）。
+- **首个真实读数：0/15 命中（0%）**——15 条全部为 uncovered_acceptance_ids，
+  其任务终局均为完成/交付态。低于提案区间下限（50%）：要么标注过保守（「狼来了」风险），
+  要么 uncovered_acceptance_ids 的命中规则过宽（验收 ID 未覆盖 ≠ 出问题）。
+  样本仍 < 20 条，待积累后复核规则口径。
 
 ## 放行阈值提案（把 PRD 的「方向」落成「数值」）
 
@@ -53,8 +59,8 @@ timeout/PAUSED/blocked 不录制——分母应限「能力失败」才公平。
 1. **审查行为入流**（二选一）：a) 日常使用 `agent_go review` 做 approve/reject；
    b) 承认审查在 agent_go 外发生，改造指标口径为「merge/PR 后 N 天内的人工修改 commit 数」。
    不解决这个，审查后修改率永远无数据。
-2. **盲区命中率接线**：实现跨任务关联（同 repo 内，任务 X 盲区文件集 × 后续任务 Y 失败
-   子任务涉及文件集的交集判定），回填 `compute_trust_metrics` 的 None。
+2. ~~**盲区命中率接线**~~ ✅ 已完成（2026-08-21）：同任务终局关联（非跨任务），首个真实读数
+   0/15——暴露的问题从「没机制」变成「标注可能过保守」，见 §3。
 3. **攒真实窗口样本**：阶段 D 评估需要 ≥30 个真实任务（含失败与 review 决策）。
    当前节奏（8.16 后 5 个）需要数周自然积累，或主动用真实仓库跑一批非平凡任务。
 

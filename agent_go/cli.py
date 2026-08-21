@@ -421,6 +421,13 @@ def _build_parser():
     problems_parser.add_argument("--json", action="store_true", dest="json_mode",
                                  help="Output as JSON")
 
+    # trust 子命令（#49 信任指标：阶段 D 自治决策放行门的查看入口）
+    trust_parser = subparsers.add_parser("trust", help="Show trust metrics (review-modification / recurrence-visibility / blind-spot-hit rates)")
+    trust_parser.add_argument("--json", action="store_true", dest="json_mode",
+                              help="Output as JSON")
+    trust_parser.add_argument("--all", action="store_true", dest="include_bench",
+                              help="包含 bench/fixture 任务（默认只统计真实任务）")
+
     # mcp 子命令
     mcp_parser = subparsers.add_parser("mcp", help="Start MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)")
     mcp_parser.add_argument("--http", action="store_true",
@@ -3865,6 +3872,61 @@ def cmd_problems(args=None) -> None:
                    f"{'  💡' + p.resolution_summary[:40] if p.resolution_summary else ''}")
 
 
+def cmd_trust(args=None) -> None:
+    """#49 信任指标（阶段 D 自治决策放行门）查看入口。
+
+    三指标（metrics.compute_trust_metrics）：
+      审查后修改率 = (rejected + changes_requested) / 有 review 决策的任务数（方向：下降）
+      复发可见率   = 失败子任务带 problem_id 的比例（方向：上升）
+      盲区命中率   = 盲区标注项最终真出问题的比例（目标区间：50%~90%，防狼来了/过保守）
+
+    默认只统计真实任务（repo 非 eval_suite/fixture）；--all 包含 bench 任务。
+    """
+    from .console import _LazyConsole
+    from .metrics import compute_trust_metrics
+
+    _con = _LazyConsole()
+    task_dirs = sorted(d for d in AGENT_GO_DIR.glob("task-*") if (d / "meta.json").exists())
+    include_bench = bool(getattr(args, "include_bench", False))
+    if not include_bench:
+        real_dirs = []
+        for d in task_dirs:
+            try:
+                meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            repo = str(meta.get("repo", "") or meta.get("repo_path", ""))
+            if "fixture" not in repo and "eval_suite" not in repo:
+                real_dirs.append(d)
+        task_dirs = real_dirs
+
+    r = compute_trust_metrics(task_dirs)
+    if bool(getattr(args, "json_mode", False)):
+        _con.force(json.dumps({"scope": "all" if include_bench else "real",
+                               "task_count": len(task_dirs), **r},
+                              indent=2, ensure_ascii=False))
+        return
+
+    def _pct(v):
+        return f"{v * 100:.1f}%" if v is not None else "无数据"
+
+    _con.sep("─", 62)
+    _con.title(f"🛡 信任指标（{'全部任务' if include_bench else '真实任务'} {len(task_dirs)} 个）")
+    _con.print(f"  审查后修改率: {_pct(r['review_modification_rate'])}"
+               f"  （{r['reviewed_tasks']} 个 review 决策；放行方向：下降，提案 ≤20%→10%）")
+    _con.print(f"  复发可见率:   {_pct(r['recurrence_visibility_rate'])}"
+               f"  （{r['failed_subtasks']} 个失败子任务；放行方向：上升，提案 ≥80%）")
+    _con.print(f"  盲区命中率:   {_pct(r['blind_spot_hit_rate'])}"
+               f"  （{r['blind_spot_hits']}/{r['blind_spot_items']} 标注项命中；目标区间 50%~90%）")
+    by_signal = r.get("blind_spot_by_signal") or {}
+    for sig, v in by_signal.items():
+        if v.get("items"):
+            _con.print(f"    - {sig}: {v['hits']}/{v['items']} 命中")
+    if r["reviewed_tasks"] < 10 or r["blind_spot_items"] < 20:
+        _con.print("  ⚠️ 样本不足（放行评估需 ≥10 个 review 决策 / ≥20 条盲区标注），"
+                   "指标仅供参考——见 docs/design/trust-metrics-baseline-2026-08-21.md")
+
+
 def cmd_router(args=None) -> None:
     """角色感知模型路由配置管理。"""
     from .config import CONFIG_PATH
@@ -4273,6 +4335,8 @@ def main() -> None:
             cmd_decision(args)
         elif args.command == "problems":
             cmd_problems(args)
+        elif args.command == "trust":
+            cmd_trust(args)
         elif args.command == "mcp":
             cmd_mcp(args)
         elif args.command == "web":
