@@ -294,13 +294,15 @@ commit、verification 和 delivery 不得被压缩为单一状态。
 
 #### F-VERIFY-6 受控策略升级
 
-当前版本不允许执行失败后自动递归修改全局 Plan。执行前的 Plan 预检修复属于 F-PLAN-3；执行中的局部重规划仍是后续实验能力，必须：
+当前版本不允许执行失败后自动递归修改全局 Plan。执行前的 Plan 预检修复属于 F-PLAN-3；执行中的局部重规划已作为受控实验能力落地（2026-08-21，C3），必须：
 
 - 最多触发一次。
 - 继承父任务预算和权限。
 - 记录 `replan_triggered`、`replan_succeeded`。
 - 默认支持人工确认。
 - 不能因重规划递归扩大任务图。
+
+当前实现：无进展信号（`verify_revert` / `verify_divergence` / 失败模式重复）触发一次 Plan 拆分建议（`agent_go/replan.py`，LLM 拆分 + 确定性启发式兜底）；拆分步只注入修复 prompt，不创建新子任务节点；交互模式弹人工确认，headless/--yes 需显式 `verification.replan.auto_apply=true` 才自动执行（默认只记录建议等待人工处置）；执行前做 L2 预算预检（父任务预算已耗尽则不执行）；`replan_*` 字段入子任务 result 与 `log_event` 可审计。自动策略重置仍属于后续实验能力。
 
 ### 4.4 恢复、审查与交付
 
@@ -639,7 +641,7 @@ system_error
 
 ### P1（智能闭环缺口）
 
-- 局部重规划（执行中）仍是实验能力，无「无进展 → 重规划」自动触发（阶段 C3，未启动）。
+- 局部重规划（执行中）已落地为受控实验能力（C3，2026-08-21）：「无进展 → 一次拆分建议」已自动触发，但 headless 下自动执行仍需显式 `auto_apply=true`；效果待 A/B 验证后才考虑默认自动执行。
 - KnowledgeStore 未建：Problem / deviation / verify_state 数据已就位，A/B 实验未做（阶段 C4）。
 - Issue 联动（原 M6，`--track-issues`）未启动：Problem 尚未与 GitHub issue 打通（deferred）。
 - Reviewer 成本与质量收益未验证（阶段 D 灰度，review cost ≤ 主任务 20% 门禁）。
@@ -781,7 +783,7 @@ M3 完成后，基于真实数据设定下一阶段目标，不继续沿用未�
 
 - **阶段 A 工程闭环**：✅ 文件所有权约束、函数级验收契约、未提交基线处理。
 - **阶段 B spec 闭环**：✅ spec 持久化 + ID 链条/锚定门禁/快照/do-not-touch fail-close；5 任务冒烟 R2 追踪完整率 0→100%、R1 80%（唯一失败为本地 worker 能力，与 spec 无关）→ 弱正 ROI，保留轻量形态。
-- **阶段 C 智能闭环**：✅ Reflexion 阈值化（retry≥2）+ verify_state 契约版本化；待做：局部重规划（默认人工确认，C3）、KnowledgeStore A/B（C4）。
+- **阶段 C 智能闭环**：✅ Reflexion 阈值化（retry≥2）+ verify_state 契约版本化；✅ 局部重规划（C3，2026-08-21，无进展触发一次拆分建议，默认人工确认）；待做：KnowledgeStore A/B（C4）。
 - **阶段 D 自治决策**：Reviewer 灰度（review cost ≤ 20%）、自动 merge 策略（B1）、人只在例外点介入；放行门 = 信任指标（审查后修改率↓ / 盲区命中率高 / 复发可见率↑，见 §6.9）。
 - **阶段 E Spec-as-Source**：仅安全/受限域试点 L5（不排期）。
 

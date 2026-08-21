@@ -485,43 +485,6 @@ class TestW3DesignConfirm:
 class TestW3BlockedNotification:
     """W3.2：blocked 通知带现场链接（worktrees + inspect_cmd）。"""
 
-    def test_blocked_notification_includes_inspect_link(self, server, ops_env, monkeypatch):
-        """失败时 on_blocked 通知应带 worktrees + inspect_cmd。"""
-        card = _create_card(server, "失败任务")
-        # 模拟失败任务 meta（含失败子任务 worktree）
-        tid = "task-20260820-100000-111-w3f"
-        td = ops_env / tid
-        td.mkdir(parents=True, exist_ok=True)
-        (td / "meta.json").write_text(json.dumps({
-            "task_id": tid, "task": "失败任务", "status": "FAILED",
-            "status_schema_version": 1, "repo": "/tmp/repo",
-            "subtasks": [], "results": [
-                {"subtask_id": "sub-1", "status": "failed",
-                 "worktree": "/tmp/wt/sub-1", "failure_reason": "verify failed"}
-            ],
-        }), encoding="utf-8")
-        _post(server, f"/api/kanban/cards/{card['id']}/link-task", {"task_id": tid})
-        captured = []
-        import agent_go.notify as _notify
-        monkeypatch.setattr(_notify, "notify_event",
-                            lambda evt, payload, cfg: captured.append({"evt": evt, "payload": payload}))
-        # 直接调 _on_exit 逻辑：通过 on_exit 模拟（用真实回调）
-        import agent_go.web_server as ws
-        # 找到 _op_kanban_dispatch 的 _on_exit 定义处不好直接调，改为验证 payload 构造逻辑
-        # 直接模拟：读 meta + 构造 payload（复用 _op_kanban_dispatch 内联逻辑无法直接调，
-        # 用 monkeypatch notify_event 后通过完整 dispatch+on_exit 链路太重。
-        # 简化：验证 meta 读取后 payload 构造（调 notify_event 前的逻辑不可直接测，
-        # 改为验证 worktrees 提取逻辑正确性——直接测关键代码路径）
-        results = json.loads((td / "meta.json").read_text())["results"]
-        wts = [r.get("worktree", "") for r in results
-               if r.get("status") in ("failed", "blocked") and r.get("worktree")]
-        assert wts == ["/tmp/wt/sub-1"]
-        assert f"agent_go inspect {tid}" == f"agent_go inspect {tid}"
-
-
-class TestW3BlockedNotification:
-    """W3.2：blocked 通知带现场链接（worktrees + inspect_cmd）。"""
-
     def test_blocked_notification_includes_inspect_link(self, ops_server, ops_env, monkeypatch):
         """失败时 on_blocked 通知应带 worktrees（失败子任务现场）+ inspect_cmd。"""
         import agent_go.kanban as _kb
@@ -553,3 +516,54 @@ class TestW3BlockedNotification:
         assert payload.get("worktrees") == ["/tmp/wt/sub-1"]
         # 卡片回流到 blocked
         assert _kb.get_card(card["id"])["stage"] == "implementation"
+
+
+class TestW3OperationsReview:
+    """W3.3 operations 列审批：approve→approved；reject/changes-requested→rejected+回退 implementation。"""
+
+    def _mk_operations_card(self, ops_server):
+        import agent_go.kanban as kb
+        card = _create_card(ops_server, title="ops 卡片", type="discussion")
+        # 流转到 operations
+        kb.move_card(card["id"], "implementation")
+        kb.move_card(card["id"], "operations")
+        return card
+
+    def test_approve_stays_operations(self, ops_server, ops_env):
+        card = self._mk_operations_card(ops_server)
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/review", {"decision": "approve"})
+        assert code == 200
+        assert d["decision"] == "approve"
+        assert d["card"]["approval"] == "approved"
+        assert d["card"]["stage"] == "operations"
+
+    def test_reject_moves_back_to_implementation(self, ops_server, ops_env):
+        card = self._mk_operations_card(ops_server)
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/review", {"decision": "reject"})
+        assert code == 200
+        assert d["card"]["approval"] == "rejected"
+        assert d["card"]["stage"] == "implementation"
+
+    def test_changes_requested_moves_back(self, ops_server, ops_env):
+        card = self._mk_operations_card(ops_server)
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/review", {"decision": "changes-requested", "comment": "需要修复"})
+        assert code == 200
+        assert d["card"]["approval"] == "rejected"
+        assert d["card"]["stage"] == "implementation"
+
+    def test_non_operations_rejected(self, ops_server, ops_env):
+        card = _create_card(ops_server, title="非 ops 卡片", type="discussion")
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/review", {"decision": "approve"})
+        assert code == 422
+        assert "operations" in d["error"]
+
+    def test_invalid_decision_400(self, ops_server, ops_env):
+        card = self._mk_operations_card(ops_server)
+        code, d = _post(f"{ops_server}/api/kanban/cards/{card['id']}/review", {"decision": "maybe"})
+        assert code == 400
+
+    def test_review_audit(self, ops_server, ops_env):
+        card = self._mk_operations_card(ops_server)
+        _post(f"{ops_server}/api/kanban/cards/{card['id']}/review", {"decision": "approve"})
+        audits = [a for a in _audit_lines(ops_env) if a["op"] == "kanban.review"]
+        assert audits and audits[0]["params"]["decision"] == "approve"

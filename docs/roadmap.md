@@ -503,7 +503,7 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 **阶段 C — 智能闭环（B5=b 已拍板）**
 - C1 数据埋点补全（verify_state schema 前向兼容 KnowledgeStore）。✅ 已实现（1d00870，verify_state 稳定契约版本化 + reflexion 来源标记）。
 - C2 Reflexion 批评层：改「retry≥2 触发」，受 token/次数/预算约束。✅ 已实现（faebd0b）。
-- C3 局部重规划：失败触发一次 Plan 拆分建议，默认人工确认。未启动。
+- C3 局部重规划：失败触发一次 Plan 拆分建议，默认人工确认。✅ 已实现（2026-08-21，无进展信号 verify_revert/divergence/失败模式重复触发一次拆分修复；契约遵守 F-VERIFY-6：最多一次、继承父预算（L2 预检）、replan_triggered/replan_succeeded 入 result+log_event、交互模式人工确认/headless 需 verification.replan.auto_apply=true、拆分步只注入修复 prompt 不扩大任务图；tests/test_replan.py 17 用例）。
 - C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。未启动（Problem/deviation/verify_state 数据已就位）。
 
 **阶段 D — 自治决策（谨慎）**
@@ -760,7 +760,7 @@ M0 产品契约与指标冻结  ✅ accepted
   -> M4 goal 回溯       ✅ accepted（2026-08-20，compute_goal_adherence）
   -> M5 问题跟踪        ✅ implemented；Issue 联动（原 M6）deferred
   -> 阶段 B spec 闭环   ✅ 冒烟弱正 ROI，留轻量
-  -> 阶段 C 智能闭环    C1/C2 ✅（B5=b 已拍板）→ C3 局部重规划 / C4 KnowledgeStore A/B
+  -> 阶段 C 智能闭环    C1/C2/C3 ✅（B5=b 已拍板）→ C4 KnowledgeStore A/B
   -> 阶段 D 自治决策    → 信任指标放行门达标 + B1 决策后
   -> 阶段 E Spec-as-Source  仅试点
 ```
@@ -768,7 +768,7 @@ M0 产品契约与指标冻结  ✅ accepted
 下一阶段三件事（按优先级）：
 
 1. **bench 交付闭环自动验证**：✅ 完成（2026-08-20，`eval bench --with-delivery` 本地交付 merge 闭合判定 + 首个有效 ADR 基线 `delivery-20260820`，见下方基线行）。**M4 goal 回溯**：✅ accepted（同日，`compute_goal_adherence` 正交合规度，「执行全过但漏验收」显式标记）。
-2. **阶段 C 续项**：C3 局部重规划（默认人工确认）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位）。
+2. **阶段 C 续项**：C3 局部重规划 ✅（2026-08-21，无进展触发一次拆分建议，默认人工确认，F-VERIFY-6 契约全守）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位，在 delivery-20260820 基线上做两臂对比）。
 3. **阶段 D 放行评估**：信任指标（审查后修改率 / 盲区命中率 / 复发可见率）跨任务积累达标后，启动 Reviewer 灰度与 B1 自动 merge 决策。
 
 在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。

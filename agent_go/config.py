@@ -52,6 +52,16 @@ DEFAULT_CONFIG = {
         "block_on_failure": True,       # 验证失败是否阻断下游依赖（--no-verify-block 可关）
         "diverge_similarity_threshold": 0.3,  # 打地鼠检测：连续两次语义评估缺陷指纹相似度低于此值 → 提前终止重试
         "revert_threshold": 2,          # 回退/振荡检测：同一 worktree 累积 diff 状态出现次数 ≥ 此值 → 判定循环振荡终止
+        # C3 局部重规划（PRD F-VERIFY-6 受控策略升级）：无进展（verify_revert/
+        # divergence/失败模式重复）时生成一次 Plan 拆分建议。契约：最多一次、
+        # 继承父预算（同一 sub_id 计量，L2 上限继续约束）、默认人工确认、
+        # 不递归扩大任务图（拆分步只注入修复 prompt）。
+        "replan": {
+            "enabled": True,
+            "auto_apply": False,        # headless/--yes 下免确认自动执行拆分修复（默认只记录建议）
+            "max_children": 4,          # 拆分建议最大步数
+            "repeat_similarity_threshold": 0.7,  # 失败模式重复判定：连续语义评估缺陷指纹相似度 ≥ 此值
+        },
         # 独立只读审查 subagent（两阶段审查）：验证失败时，用独立模型做黑盒分析
         # （不参与实现，消除「实现者盲区」），审查意见注入修复 prompt。
         # 默认关闭（成本可控）；model 空 = 复用 evaluator.model。
@@ -94,6 +104,15 @@ DEFAULT_CONFIG = {
         "max_turns": 20,                # 最大对话轮数
         "max_duration": 600,            # 全局超时（秒）
         "api_timeout": 120,             # 单次 API 调用超时（秒）
+    },
+    # C4 KnowledgeStore（A/B 实验臂）：修复重试时注入跨任务历史经验
+    # （Problem/deviation/verify_state）。默认关闭 = A/B 对照臂；
+    # bench --with-knowledge 或置 enabled=true 开启注入臂。
+    # suppressed_ids：按 Problem id 屏蔽错误知识（可淘汰机制）。
+    "knowledge": {
+        "enabled": False,
+        "max_items": 3,
+        "suppressed_ids": [],
     },
     "evaluator": {
         "enabled": False,               # 默认关闭（向后兼容 + 成本可控）

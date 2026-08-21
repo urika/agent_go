@@ -321,6 +321,8 @@ def _build_parser():
                              help="CR-建议#5：hard 难度子任务使用的更强模型（如 deepseek-v4-pro）；留空 = 与候选模型相同")
     eval_parser.add_argument("--with-delivery", dest="with_delivery", action="store_true",
                              help="bench 子命令：任务成功后做本地交付 merge，闭合 accepted_delivery 判定（不推进 target 引用，保持 fixture repeat 可复现）")
+    eval_parser.add_argument("--with-knowledge", dest="with_knowledge", action="store_true",
+                             help="bench 子命令：C4 KnowledgeStore A/B 注入臂——修复重试时注入跨任务历史经验（对照臂不加此 flag）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
                              help="读取结果文件（models/cost-baseline/recommend 子命令，逗号分隔多个文件）")
     eval_parser.add_argument("--tolerance", dest="tolerance", type=float, default=1.5,

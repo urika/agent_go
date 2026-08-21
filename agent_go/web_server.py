@@ -1843,6 +1843,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 if action == "dispatch":
                     self._op_kanban_dispatch(card_id, body, token)
                     return
+                if action == "review":
+                    self._op_kanban_review(card_id, body, token)
+                    return
             # POST /api/tasks/<id>/notes {text}（M5.2 协作备注）
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "notes":
                 self._op_add_note(parts[2], body, token)
@@ -2232,6 +2235,24 @@ class WebHandler(BaseHTTPRequestHandler):
         kanban.delete_card(card_id)
         _audit("kanban.delete", {"card_id": card_id}, {"deleted": card_id}, True, token)
         self._reply_json(200, {"ok": True, "deleted": card_id})
+
+    def _op_kanban_review(self, card_id: str, body: dict, token: str) -> None:
+        """operations 列审批（W3.3）：approve→approved；reject/changes-requested→rejected + 回退 implementation。"""
+        if self._kanban_card_or_reply(card_id) is None:
+            return
+        decision = str(body.get("decision") or "")
+        if decision not in ("approve", "reject", "changes-requested"):
+            self._reply_json(400, {"error": "decision 必须是 approve/reject/changes-requested"})
+            return
+        comment = str(body.get("comment") or "")
+        try:
+            card = kanban.review_card(card_id, decision, comment)
+        except kanban.KanbanError as e:
+            self._reply_json(422, {"error": str(e)})
+            return
+        _audit("kanban.review", {"card_id": card_id, "decision": decision, "comment": comment},
+               card, True, token)
+        self._reply_json(200, {"ok": True, "card": card, "decision": decision})
 
     def _op_kanban_dispatch(self, card_id: str, body: dict, token: str) -> None:
         """派发执行：implementation/periodic 卡片 → task_runner.start_run，
@@ -3564,6 +3585,19 @@ function kanbanDetailHtml(c) {
     html += '<button class="btn kanban-op" data-op="archive" data-card="'+esc(c.id)+'">🗄️ 归档</button>';
   if (!(c.task_ids||[]).length)
     html += '<button class="btn kanban-op" data-op="delete" data-card="'+esc(c.id)+'">🗑️ 删除</button>';
+  // W3.3：operations 列审批按钮（approve→approved；reject/changes-requested→rejected+回退 implementation）
+  if (c.stage === 'operations') {
+    const ap = c.approval || 'pending';
+    if (ap === 'pending') {
+      html += '<span class="vline"></span>'+
+        '<button class="btn primary kanban-op" data-op="review-approve" data-card="'+esc(c.id)+'">✅ 通过</button>'+
+        '<button class="btn kanban-op" data-op="review-reject" data-card="'+esc(c.id)+'">❌ 拒绝</button>'+
+        '<button class="btn kanban-op" data-op="review-changes" data-card="'+esc(c.id)+'">📝 需修改</button>';
+    } else {
+      html += '<span class="tag" style="color:'+(ap==='approved'?'var(--green)':'var(--red)')+'">'+
+        (ap==='approved'?'✅ 已通过':'❌ 已拒绝（已回退 implementation）')+'</span>';
+    }
+  }
   html += '<span class="op-msg" id="kanbanMsg-'+esc(c.id)+'"></span></div>';
   const hist = (c.history||[]).slice().reverse();
   if (hist.length) {
@@ -3746,6 +3780,22 @@ function bindKanbanEvents() {
           kanbanExpanded = null;
           loadKanban();
         } catch (e) { if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; } }
+        return;
+      }
+      // W3.3：operations 列审批
+      if (op.startsWith('review-')) {
+        const decision = op.replace('review-', '');
+        const labels = {'approve':'通过','reject':'拒绝','changes-requested':'需修改'};
+        if (!confirm('审批决策「'+labels[decision]+'」？'+('reject'===decision||'changes-requested'===decision?'将回退 implementation 列重做。':'将标记为已通过。'))) return;
+        b.disabled = true;
+        try {
+          const d = await postJSON('/api/kanban/cards/'+encodeURIComponent(id)+'/review', {decision});
+          if (msg) { msg.textContent = '✅ 审批已记录: '+decision; msg.style.color = 'var(--green)'; }
+          setTimeout(loadKanban, 800);
+        } catch (e) {
+          if (msg) { msg.textContent = '❌ '+e.message; msg.style.color = 'var(--red)'; }
+          b.disabled = false;
+        }
         return;
       }
     };

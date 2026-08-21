@@ -62,7 +62,7 @@ _CARD_ID_RE = re.compile(r"^card-[A-Za-z0-9-]+$")
 _CARD_ID_ALPHABET = string.ascii_lowercase + string.digits
 
 # update_card 允许修改的字段白名单
-_UPDATABLE_FIELDS = ("title", "description", "repo", "cron", "spec_path", "automation")
+_UPDATABLE_FIELDS = ("title", "description", "repo", "cron", "spec_path", "automation", "approval")
 
 # 自动化分类信号（W1：复用 e2e 判定框架的架构级特征信号）
 # 含这些信号 → manual（系统架构/跨文件/并发，需人工+云端）；否则按 spec 明确度
@@ -297,6 +297,30 @@ def create_card(title: str, type: str, stage: str = "brainstorm", repo: str = ""
         board["cards"].append(card)
         _save_board(board)
     return card
+
+
+def review_card(card_id: str, decision: str, comment: str = "") -> dict:
+    """operations 列审批（W3.3）：approve→approved（最终确认）；reject/changes-requested→rejected + 回退 implementation。
+
+    decision 必须是 approve/reject/changes-requested。仅 operations 列卡片可审批。
+    回退时卡片 stage → implementation（重做）。
+    """
+    if decision not in ("approve", "reject", "changes-requested"):
+        raise KanbanError(f"decision 必须是 approve/reject/changes-requested: {decision}")
+    with _lock, _interprocess_lock():
+        board = load_board()
+        card = _require_card(board, card_id)
+        if card["stage"] != "operations":
+            raise KanbanError(f"仅 operations 列卡片可审批（当前 {card['stage']}）")
+        card["approval"] = "approved" if decision == "approve" else "rejected"
+        card["history"].append({"action": "review", "decision": decision,
+                                "comment": comment, "ts": _now_iso()})
+        if decision != "approve":
+            card["stage"] = "implementation"
+            card["history"].append({"action": "move", "from": "operations",
+                                    "to": "implementation", "ts": _now_iso()})
+        _save_board(board)
+        return card
 
 
 def update_card(card_id: str, **fields: str) -> dict:

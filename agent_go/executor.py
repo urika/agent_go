@@ -845,6 +845,7 @@ def _build_repair_prompt(
     semantic_feedback: Optional[dict] = None,
     scope_violation: Optional[dict] = None,
     readonly_review: Optional[dict] = None,
+    knowledge_context: Optional[dict] = None,
 ) -> str:
     """构建增强的修复提示词，注入完整失败上下文（Phase 1 验证循环）。
 
@@ -855,6 +856,7 @@ def _build_repair_prompt(
     - 历史修复尝试摘要（避免重复同样错误）
     - LLM 语义评估反馈（Phase 3）
     - 独立只读审查意见（两阶段审查：独立模型黑盒分析失败根因）
+    - 历史经验（C4 KnowledgeStore：跨任务失败记忆，可开关，A/B 实验臂）
     - 剩余机会提示
     """
     parts = [task_md, "", "---", ""]
@@ -914,6 +916,11 @@ def _build_repair_prompt(
             for _sug_line in str(readonly_review["suggestions"]).split("\n"):
                 if _sug_line.strip():
                     parts.append(f"- {_sug_line.strip()}")
+        parts.append("")
+
+    # C4 KnowledgeStore 历史经验（可开关；A/B 实验臂，knowledge.enabled=true 时注入）
+    if knowledge_context and knowledge_context.get("text"):
+        parts.append(knowledge_context["text"])
         parts.append("")
 
     # 失败命令及输出
@@ -1460,6 +1467,119 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     _diff_stat_hashes: list[str] = []
     _diff_stat_revert_threshold = int(_cfg.get("verification", {}).get(
         "revert_threshold", 2))
+
+    # C3 局部重规划（PRD F-VERIFY-6 受控策略升级）：无进展信号（verify_revert /
+    # verify_divergence / 失败模式重复）时生成一次 Plan 拆分建议并受控执行。
+    # 契约：最多一次、继承父预算（同一 sub_id 计量，L2 上限继续约束）、记录
+    # replan_triggered/replan_succeeded、默认人工确认、不递归扩大任务图
+    # （拆分步只注入修复 prompt，不创建新子任务节点）。
+    _replan_cfg = (_cfg.get("verification", {}) or {}).get("replan", {}) or {}
+    _replan_enabled = bool(_replan_cfg.get("enabled", True))
+    _replan_state: dict = {
+        "triggered": False, "executed": False, "reason": "",
+        "steps": [], "status": "",
+    }
+
+    def _attempt_local_replan(trigger_reason: str, failed_cmds: list[str],
+                              failed_outputs: list[str]) -> bool:
+        """无进展触发点调用。返回 True = 已执行一次拆分修复（循环应 continue 重新验证）。
+
+        fail-open：任何异常都只记录日志并返回 False（按原流程终止/重试），
+        绝不阻断验证循环。
+        """
+        if _replan_state["triggered"] or not _replan_enabled:
+            return False
+        _replan_state["triggered"] = True
+        _replan_state["reason"] = trigger_reason
+        try:
+            from .replan import (build_decomposition, confirm_replan,
+                                 render_replan_guidance)
+            _max_children = int(_replan_cfg.get("max_children", 4) or 4)
+            steps = build_decomposition(
+                subtask,
+                {"reason": trigger_reason,
+                 "failed_output": (failed_outputs[-1] if failed_outputs else "")},
+                config=_full_cfg, logger=logger, max_children=_max_children)
+            _replan_state["steps"] = steps
+            log_event(logger, "replan_triggered", {
+                "sub_id": sub_id, "reason": trigger_reason,
+                "steps": len(steps), "attempt": retry_count,
+            })
+            console.force(
+                f"  🧩 [局部重规划] {sub_id} 触发({trigger_reason})，"
+                f"生成 {len(steps)} 步拆分建议")
+
+            # 默认人工确认：交互模式弹确认；headless/--yes 需显式 auto_apply
+            if not headless and sys.stdin.isatty():
+                approved = confirm_replan(trigger_reason, steps)
+            else:
+                approved = bool(_replan_cfg.get("auto_apply", False))
+            if not approved:
+                _replan_state["status"] = "suggested"
+                logger.info("[局部重规划] 建议已记录，等待人工确认（未自动执行）")
+                return False
+
+            # 预算继承预检：父任务 L2 上限已耗尽时不执行（不新增预算条目）
+            _cc_replan = _cfg.get("cost_control") or {}
+            if _cc_replan.get("enabled"):
+                _meter_path_r = _full_cfg.get("_metering_path", "")
+                _budgets_r = _cc_replan.get("per_subtask_budget_usd", {}) or {}
+                _sub_budget_r = (_budgets_r.get(subtask.get("difficulty", "medium"),
+                                                _budgets_r.get("medium", 0.0))
+                                 if isinstance(_budgets_r, dict) else _budgets_r)
+                _sub_limit_r = float(_sub_budget_r or 0) * _cc_replan.get("subtask_multiplier", 2.5)
+                if _sub_limit_r > 0 and _meter_path_r:
+                    if not _metering_available(_meter_path_r):
+                        _replan_state["status"] = "budget_exhausted"
+                        logger.warning("[局部重规划] 成本计量不可用，不执行拆分修复")
+                        return False
+                    _spent_r = _meter_cost_for_sub(_meter_path_r, sub_id)
+                    if _spent_r >= _sub_limit_r:
+                        _replan_state["status"] = "budget_exhausted"
+                        logger.warning(
+                            f"[局部重规划] 父任务 L2 预算已耗尽 "
+                            f"(${_spent_r:.4f} ≥ ${_sub_limit_r:.4f})，不执行拆分修复")
+                        return False
+
+            # 执行一次拆分引导的修复尝试（不消耗 retry_count，不递归扩大任务图）
+            guidance = render_replan_guidance(steps, trigger_reason)
+            replan_prompt = _build_repair_prompt(
+                task_md, failed_cmds, failed_outputs,
+                summary, retry_count, max_retries, verification_history,
+                semantic_feedback=semantic_feedback) + "\n" + guidance
+            _difficulty_r = subtask.get("difficulty", "medium")
+            _base_timeout_r = _cfg.get("verification", {}).get("retry_timeout", 300)
+            _mult_r = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(_difficulty_r, 1.5)
+            _cap_r = {"easy": 600, "medium": 900, "hard": 1500}.get(_difficulty_r, 900)
+            _replan_timeout = min(int(_base_timeout_r * _mult_r), _cap_r)
+            if env.get("AGENT_GO_IS_LOCAL", "") == "1":
+                _replan_timeout = min(_replan_timeout * 2, 3000)
+            _replan_state["executed"] = True
+            _replan_state["status"] = "executed"
+            _latest_kill_reason[0] = None  # 不再终止，清除终止信号
+            logger.info(f"[局部重规划] 执行拆分修复（{len(steps)} 步，timeout={_replan_timeout}s）")
+            log_event(logger, "replan_executed", {
+                "sub_id": sub_id, "reason": trigger_reason, "steps": len(steps),
+            })
+            _replan_result = _run_headless(
+                replan_prompt, worktree, env, logger, f"{subtask['id']}-replan",
+                active_pids=active_pids, active_pids_lock=active_pids_lock,
+                allowed_tools=allowed_tools, hard_timeout=_replan_timeout,
+                config=_cfg)
+            _replan_kr = getattr(_replan_result, "kill_reason", None)
+            if isinstance(_replan_kr, str) and _replan_kr:
+                _latest_kill_reason[0] = _replan_kr
+            # commit 是完成边界：与 fix 重试一致，nothing to commit 属合法状态
+            subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", f"replan({sub_id}): 局部重规划拆分修复"],
+                cwd=str(worktree), capture_output=True)
+            return True
+        except Exception as _replan_err:
+            logger.warning(f"[局部重规划] 执行异常（按原流程继续）: {_replan_err}")
+            _replan_state["status"] = "error"
+            return False
+
     if verification:
         cmds = [verification] if isinstance(verification, str) else verification
 
@@ -1758,6 +1878,9 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 _diverge_threshold = float(_cfg.get("verification", {}).get(
                     "diverge_similarity_threshold", 0.3))
                 if _sim < _diverge_threshold:
+                    # C3 局部重规划：终止前给一次拆分修复机会（最多一次，受控）
+                    if _attempt_local_replan("verify_divergence", failed_cmds, failed_outputs):
+                        continue
                     verify_ok = False
                     logger.warning(
                         f"[打地鼠检测] 连续两次语义评估指出不同缺陷 "
@@ -1775,6 +1898,14 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     })
                     _latest_kill_reason[0] = "verify_divergence"
                     break
+                # C3 触发条件之「失败模式重复」：连续两次语义评估指出同一缺陷
+                # （高相似度）→ 修复方向正确但能力/复杂度不足，整体推进无法收敛。
+                # 与打地鼠对称：不终止（保持现状继续重试），仅尝试一次局部重规划；
+                # 未执行（拒绝/仅建议）时按原流程走，行为与此前完全一致。
+                _repeat_threshold = float(_replan_cfg.get("repeat_similarity_threshold", 0.8))
+                if _sim >= _repeat_threshold:
+                    if _attempt_local_replan("failure_pattern_repeat", failed_cmds, failed_outputs):
+                        continue
 
             # 回退/振荡检测（workflow-vs-subagent 改进 B-回退）：
             # 验证失败时计算 worktree 的**累积** diff stat hash（相对子任务基座）。
@@ -1788,6 +1919,9 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             if _revert_base:
                 _cur_stat_hash = _diff_stat_hash(worktree, _revert_base)
                 if _cur_stat_hash and _diff_stat_hashes.count(_cur_stat_hash) >= _diff_stat_revert_threshold:
+                    # C3 局部重规划：终止前给一次拆分修复机会（最多一次，受控）
+                    if _attempt_local_replan("verify_revert", failed_cmds, failed_outputs):
+                        continue
                     verify_ok = False
                     _latest_kill_reason[0] = "verify_revert"
                     logger.warning(
@@ -1945,12 +2079,34 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                             effective_strategy=readonly_review.get("suggestions", ""),
                             reflexion_triggered=True)
 
+            # C4 KnowledgeStore 历史经验注入（可开关，A/B 实验臂；默认关闭）。
+            # 从 Problem/deviation/verify_state 提取跨任务失败记忆，fail-open。
+            # 每次注入落 knowledge_injected 事件（来源 id 可审计、可淘汰）。
+            knowledge_context = None
+            if (_cfg.get("knowledge", {}) or {}).get("enabled", False):
+                _kn_hint = ""
+                if semantic_feedback and not semantic_feedback.get("passed", True):
+                    _kn_hint = str(semantic_feedback.get("reason", "") or "")
+                if not _kn_hint and failed_cmds:
+                    _kn_hint = failed_cmds[0]
+                knowledge_context = _safe_optional_call(
+                    ".knowledge", "build_repair_knowledge", logger,
+                    subtask, _kn_hint, task_dir, _full_cfg, logger,
+                    fallback=None, label="knowledge.build_repair_knowledge",
+                )
+                if knowledge_context and knowledge_context.get("sources"):
+                    log_event(logger, "knowledge_injected", {
+                        "sub_id": sub_id, "attempt": retry_count,
+                        "sources": knowledge_context["sources"],
+                    })
+
             fix_prompt = _build_repair_prompt(
                 task_md, failed_cmds, failed_outputs,
                 git_diff, retry_count, max_retries, verification_history,
                 semantic_feedback=semantic_feedback,
                 scope_violation=scope_violation,
-                readonly_review=readonly_review)
+                readonly_review=readonly_review,
+                knowledge_context=knowledge_context)
 
             # 修复执行带硬超时（verification.retry_timeout，按 difficulty 弹性缩放）
             _difficulty = subtask.get("difficulty", "medium")
@@ -2052,6 +2208,27 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     # M5: 评估验证质量（区分确定性测试 vs 启发式检查）
     verification_confidence = _assess_verification_confidence(verification, has_changes)
 
+    # C3 局部重规划可审计记录（PRD F-VERIFY-6）：replan_triggered / replan_succeeded
+    _replan_record = None
+    if _replan_state["triggered"]:
+        _replan_record = {
+            "replan_triggered": True,
+            "replan_reason": _replan_state["reason"],
+            "replan_steps": _replan_state["steps"],
+            "replan_executed": _replan_state["executed"],
+            "replan_status": _replan_state["status"],
+            # 只有真正执行过才判定 succeeded；仅建议未执行为 None（等待人工）
+            "replan_succeeded": (bool(verify_ok) if _replan_state["executed"] else None),
+            # 预算继承：复用父任务 sub_id 计量，未新增预算条目
+            "replan_budget_inherited": True,
+        }
+        log_event(logger, "replan_result", {
+            "sub_id": sub_id, "reason": _replan_state["reason"],
+            "executed": _replan_state["executed"],
+            "succeeded": _replan_record["replan_succeeded"],
+            "status": _replan_state["status"],
+        })
+
     return {
         "has_changes": has_changes,
         "summary": summary,
@@ -2068,6 +2245,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         "verification_state": verification_state,
         # S12-P0 G1：子任务级 kill_reason（运行时 kill 分类，供度量侧归因）
         "kill_reason": _latest_kill_reason[0] or ("none" if verify_ok else None),
+        # C3 局部重规划记录（F-VERIFY-6；未触发为 None）
+        "replan": _replan_record,
     }
 
 
@@ -2776,6 +2955,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             "verification_results": verification_results,
             # S12-P0 G1：子任务级 kill_reason（none/stuck/hard_timeout/over_budget_l2/...）
             "kill_reason": verify_results.get("kill_reason") if isinstance(verify_results, dict) else None,
+            # C3 局部重规划记录（F-VERIFY-6；未触发为 None）
+            "replan": verify_results.get("replan") if isinstance(verify_results, dict) else None,
             # S12-P1 G4：budget_mode=degrade 降档模型产出标记
             "degraded": bool(_is_degraded),
             # C4：轮级看门狗 advisory（重复轮检测，仅供参考不干预）

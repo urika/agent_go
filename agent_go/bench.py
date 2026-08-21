@@ -426,6 +426,7 @@ def cmd_bench(args=None) -> None:
     no_skills = bool(getattr(args, "no_skills", False))
     suite = getattr(args, "bench_suite", "") or ""
     with_delivery = bool(getattr(args, "with_delivery", False))
+    with_knowledge = bool(getattr(args, "with_knowledge", False))
 
     if not models:
         console.error("至少指定一个 --candidate-models（逗号分隔）")
@@ -505,7 +506,8 @@ def cmd_bench(args=None) -> None:
                              no_skills=no_skills, source_batch=source_batch,
                              results_path=output_path,
                              hard_model=getattr(args, "hard_model", "") or "",
-                             with_delivery=with_delivery)
+                             with_delivery=with_delivery,
+                             with_knowledge=with_knowledge)
         # ISSUE-38：任务结束后清理 fixture 源仓库失效 worktree 注册
         # （timeout/SIGKILL 打断时 pipeline 清理不执行，注册项残留）
         _prune_fixture_worktrees(_repo)
@@ -519,6 +521,8 @@ def cmd_bench(args=None) -> None:
             _r2.setdefault("bench_schema_version", 1)
             _r2.setdefault("task_version", _task_version(_task))
             _r2.setdefault("source_batch", source_batch)
+            # C4 KnowledgeStore A/B：臂标记（True=注入臂 / False=对照臂）
+            _r2.setdefault("knowledge_arm", with_knowledge)
             _r2.setdefault("planner_model", "")
             _r2.setdefault("judge_model", "")
             _r2.setdefault("difficulty", _task.get("difficulty", "medium"))
@@ -647,7 +651,8 @@ def cmd_baseline(args=None) -> None:
 def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
                   preserve: bool = False, no_skills: bool = False,
                   source_batch: str = "", results_path: Optional[Path] = None,
-                  hard_model: str = "", with_delivery: bool = False) -> list[dict]:
+                  hard_model: str = "", with_delivery: bool = False,
+                  with_knowledge: bool = False) -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
 
     hard_model: CR-建议#5——hard 难度子任务使用的更强模型（留空 = 与候选 model 相同）。
@@ -657,6 +662,8 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     results_path: 结果文件路径，用于从历史记录推断子任务数做动态 timeout。
     with_delivery: 任务成功后做本地交付 merge（闭合 accepted_delivery 判定，见
     _apply_bench_delivery），不推进 target 引用以保持 fixture repeat 可复现。
+    with_knowledge: C4 KnowledgeStore A/B 注入臂——临时 config 置 knowledge.enabled=true，
+    修复重试时注入跨任务历史经验（对照臂 = False）。
     """
     start = time.time()
 
@@ -723,6 +730,10 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
         if no_skills:
             config.setdefault("skills", {})["auto_discover"] = False
             config.setdefault("skills", {})["max_auto_skills"] = 0
+        # --with-knowledge：C4 KnowledgeStore A/B 注入臂
+        if with_knowledge:
+            config["knowledge"] = {"enabled": True, "max_items": 3,
+                                   "suppressed_ids": []}
         json.dump(config, tf)
         tmp_config = tf.name
 
