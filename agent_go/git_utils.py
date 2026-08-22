@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["analyze_project", "get_git_info", "get_resource_map", "init_git_repo", "resolve_project_id",
+__all__ = ["analyze_project", "get_git_info", "get_resource_map", "repo_health_signal", "get_special_file_count", "init_git_repo", "resolve_project_id",
            "get_dirty_files", "commit_baseline"]
 
 def analyze_project(repo: Path) -> str:
@@ -220,7 +220,81 @@ def get_resource_map(repo: Path, git_info: dict[str, str]) -> dict[str, Any]:
         if p.exists():
             resources["key_files"].append(pattern)
 
+    # repo 健康信号（planner/worker 识别异常根目录：非 git/临时目录/特殊文件）
+    resources["repo_health"] = repo_health_signal(repo)
+
     return resources
+
+
+def get_special_file_count(repo: Path) -> int:
+    """统计 repo 下的特殊文件（socket/FIFO/设备）数量（用于 prompt 健康信号）。
+
+    用 os.scandir 递归扫描（上层目录若含海量文件会较慢，故只下探一层 + 顶层，
+    足够暴露 /private/tmp 这类系统临时目录里的 socket）。任何错误 fail-open 返回 0。
+    """
+    import os
+    import stat as _stat
+
+    count = 0
+    try:
+        for root, dirs, files in os.walk(str(repo)):
+            parts = str(Path(root).relative_to(repo)).split(os.sep) if root != str(repo) else []
+            # 只扫顶层 + 一层子目录，避免拖慢 /private/tmp 等大目录
+            if len(parts) > 1:
+                dirs[:] = []
+                files = []
+                continue
+            for name in list(files):
+                p = Path(root) / name
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                if not (_stat.S_ISREG(st.st_mode) or _stat.S_ISDIR(st.st_mode)):
+                    count += 1
+    except (OSError, ValueError):
+        return 0
+    return count
+
+
+def repo_health_signal(repo: Path) -> str:
+    """生成一行 repo 健康信号，注入 Plan prompt，让 planner 识别异常根目录。
+
+    覆盖信号：
+    - 是否 git 项目；
+    - 顶层疑似系统/临时目录（/tmp、/private/tmp、/var/tmp、名称含 temp/tmp）；
+    - 特殊文件（socket/FIFO/设备）数量（>0 时提示：无法拷入 worktree，可能影响执行）；
+    - 顶层条目过少（空/近似空项目）。
+
+    返回单行字符串；获取失败返回空串（调用方拼接时自然忽略）。
+    """
+    if not repo.exists():
+        return f"repo 路径不存在: {repo}"
+    try:
+        top = [p for p in repo.iterdir()] if repo.is_dir() else []
+    except OSError:
+        return f"repo 目录不可读: {repo}"
+    n_top = len(top)
+    is_git = (repo / ".git").exists()
+    special = get_special_file_count(repo)
+
+    path_str = str(repo)
+    sys_temp = (path_str in ("/tmp", "/private/tmp", "/var/tmp")
+                or any("/tmp/" in path_str or f"/{tag}/" in path_str
+                       for tag in ("tmp", "temp"))
+                or path_str.endswith(("/tmp", "/temp")))
+    signals = []
+    if is_git:
+        signals.append("git 项目")
+    else:
+        signals.append("非 git 项目（执行时将整目录拷入 worktree）")
+    if sys_temp:
+        signals.append("⚠️ 疑似系统临时目录（可能含 socket/特殊文件）")
+    if special > 0:
+        signals.append(f"⚠️ 含 {special} 个特殊文件（socket/FIFO/设备，无法拷入 worktree）")
+    if n_top <= 1:
+        signals.append("⚠️ 顶层几乎为空（可能不是项目仓库）")
+    return " · ".join(signals)
 
 
 def resolve_project_id(repo: Path) -> str:

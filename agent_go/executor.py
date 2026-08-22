@@ -457,6 +457,33 @@ def _build_sandbox_env():
     return env
 
 
+def _copy_tree_skip_special(src: Path, dst: Path) -> None:
+    """复制目录树，跳过 socket / FIFO / 设备等非普通文件（防 Errno 102 崩溃）。
+
+    背景：repo 若为系统临时目录（如 /private/tmp）含 UNIX socket、tmux
+    等其他进程的 socket 文件，shutil.copytree 默认会尝试复制并抛出
+    `[Errno 102] Operation not supported on socket`，任务 0 秒失败。
+    这类特殊文件无法进入 worktree 也无意义，跳过即可。
+    """
+    import stat as _stat
+
+    def _filter(src_dir: str, names: list[str]) -> list[str]:
+        skip = []
+        for n in names:
+            p = Path(src_dir) / n
+            try:
+                st = p.stat()
+            except OSError:
+                skip.append(n)
+                continue
+            if not (_stat.S_ISREG(st.st_mode) or _stat.S_ISDIR(st.st_mode)):
+                skip.append(n)
+        return skip
+
+    shutil.copytree(str(src), str(dst), dirs_exist_ok=True,
+                    ignore=_filter, ignore_dangling_symlinks=True)
+
+
 def _create_worktree(task_id, sub_id, repo, task_dir, logger):
     """Create worktree for a subtask. Returns (worktree_path, create_time_ms)."""
     sub_dir = task_dir / sub_id
@@ -482,7 +509,7 @@ def _create_worktree(task_id, sub_id, repo, task_dir, logger):
                 logger.warning(f"分支创建失败: {checkout_result.stderr.strip()}")
     else:
         worktree.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(str(repo), str(worktree), dirs_exist_ok=True)
+        _copy_tree_skip_special(repo, worktree)
 
     return worktree, worktree_create_ms
 

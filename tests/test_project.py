@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from agent_go.git_utils import analyze_project, get_git_info, get_resource_map
+from agent_go.git_utils import analyze_project, get_git_info, get_resource_map, repo_health_signal, get_special_file_count
 
 
 class TestAnalyzeProject:
@@ -152,3 +152,68 @@ class TestAnalyzeProjectFindFallback:
 
         assert ".gitignore" in result
         assert "main.py" in result
+
+
+class TestRepoHealthSignal:
+    """repo_health_signal — repo 健康信号（提示词注入，识别异常根目录）。"""
+
+    def test_git_repo_signal(self, temp_dir):
+        """git 项目 → 无告警信号。"""
+        (temp_dir / ".git").mkdir()
+        (temp_dir / "main.py").write_text("", encoding="utf-8")
+        signal = repo_health_signal(temp_dir)
+        assert "git 项目" in signal
+        assert "临时目录" not in signal
+        assert "特殊文件" not in signal
+
+    def test_non_git_signals(self, temp_dir):
+        """非 git 项目 → 提示整目录拷贝。"""
+        (temp_dir / "main.py").write_text("", encoding="utf-8")
+        signal = repo_health_signal(temp_dir)
+        assert "非 git 项目" in signal
+
+    def test_socket_file_signal(self, temp_dir):
+        """含 socket → 提示特殊文件计数。"""
+        import os
+        import socket
+        import uuid
+        (temp_dir / "main.py").write_text("", encoding="utf-8")
+        sock_path = "/private/tmp/ag_sock_" + uuid.uuid4().hex[:8] + ".sock"
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(sock_path)
+        sock.close()
+        os.symlink(sock_path, str(temp_dir / "x.sock"))
+        signal = repo_health_signal(temp_dir)
+        assert "特殊文件" in signal
+
+    def test_empty_repo_signal(self, temp_dir):
+        """顶层几乎为空 → 提示可能不是项目。"""
+        signal = repo_health_signal(temp_dir)
+        assert "顶层几乎为空" in signal
+
+    def test_missing_repo(self, tmp_path):
+        """repo 不存在 → 明确提示。"""
+        signal = repo_health_signal(tmp_path / "nonexistent")
+        assert "不存在" in signal
+
+
+class TestGetSpecialFileCount:
+    """get_special_file_count — 特殊文件（socket/FIFO/设备）计数。"""
+
+    def test_counts_socket(self, temp_dir):
+        import os
+        import socket
+        import uuid
+        (temp_dir / "a.txt").write_text("", encoding="utf-8")
+        sock_path = "/private/tmp/ag_sock_" + uuid.uuid4().hex[:8] + ".sock"
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(sock_path)
+        sock.close()
+        os.symlink(sock_path, str(temp_dir / "x.sock"))
+        assert get_special_file_count(temp_dir) == 1
+
+    def test_zero_for_plain(self, temp_dir):
+        (temp_dir / "a.txt").write_text("", encoding="utf-8")
+        (temp_dir / "sub").mkdir()
+        (temp_dir / "sub" / "b.txt").write_text("", encoding="utf-8")
+        assert get_special_file_count(temp_dir) == 0

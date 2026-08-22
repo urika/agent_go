@@ -427,6 +427,35 @@ class TestGeneratePlan:
                                     with pytest.raises(RuntimeError, match="API Key"):
                                         generate_plan("task", Path("/tmp"), config, logger)
 
+    def test_health_signal_injected_into_prompt(self, logger):
+        """项目健康信号写入 plan prompt（⚠️ 临时目录/特殊文件可被 planner 感知）。"""
+        from agent_go.api import generate_plan
+        config = {
+            "plan_api": {"api_key": "sk-test", "provider": "anthropic",
+                         "base_url": "https://api.anthropic.com/v1/messages",
+                         "model": "test", "max_tokens": 100, "temperature": 0},
+            "cache": {"enabled": False},
+        }
+        with patch("agent_go.api.get_api_key", return_value="sk-test"):
+            with patch("agent_go.api.call_api") as mock_call:
+                mock_call.return_value = '{"overview": "test", "steps": []}'
+                with patch("agent_go.api.analyze_project", return_value="file0.py"):
+                    with patch("agent_go.api.get_git_info", return_value={
+                        "remote": "", "branch": "", "commit": ""
+                    }):
+                        with patch("agent_go.api.get_resource_map", return_value={
+                            "directories": [], "key_files": []
+                        }):
+                            with patch("agent_go.api.repo_health_signal",
+                                       return_value="非 git 项目 · ⚠️ 疑似系统临时目录（可能含 socket/特殊文件）"):
+                                with patch("agent_go.api.list_skills", return_value=[]):
+                                    with patch("agent_go.api.load_role_skill_map", return_value={}):
+                                        generate_plan("task", Path("/tmp"), config, logger, no_cache=True)
+        call_args = mock_call.call_args[0]
+        user_content = call_args[1][1]["content"]
+        assert "项目健康信号" in user_content
+        assert "疑似系统临时目录" in user_content
+
     def test_local_url_skips_api_key_check(self, logger):
         """2026-08-12 纯本地模式：base_url 指向本机时无需 API key。"""
         import os

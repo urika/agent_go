@@ -33,6 +33,7 @@ from agent_go.executor import (
     _build_architecture_context,
     _check_scope_compliance,
     _build_repair_prompt,
+    _copy_tree_skip_special,
 )
 
 
@@ -3507,3 +3508,69 @@ class TestSpecInjection:
             headless=True, config={},
         )
         assert "Spec 约束" not in task_md
+
+
+class TestCopyTreeSkipSpecial:
+    """非 git repo 整目录拷贝的 socket/FIFO 特殊文件跳过（Errno 102 防回归）。
+
+    背景：repo 为系统临时目录（如 /private/tmp）时含 UNIX socket，
+    shutil.copytree 默认复制 socket 抛 `[Errno 102] Operation not supported
+    on socket`，子任务 0 秒失败（task-20260822-125234-150-cce0）。
+    """
+
+    def _mk_src(self, tmp_path, with_socket=True):
+        import socket
+        import uuid
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("hello", encoding="utf-8")
+        (src / "subdir").mkdir()
+        (src / "subdir" / "b.txt").write_text("world", encoding="utf-8")
+        if with_socket:
+            # AF_UNIX socket 路径长度受限（~104 字符），用 /tmp 短路径
+            src_sock_dir = src / "cc-socks"
+            src_sock_dir.mkdir()
+            sock_path = "/private/tmp/ag_sock_" + uuid.uuid4().hex[:8] + ".sock"
+            sock = socket.socket(socket.AF_UNIX)
+            sock.bind(sock_path)
+            sock.close()
+            # 软链到工作区，模拟「目录内含 socket」的形态
+            import os
+            os.symlink(sock_path, str(src_sock_dir / "test.sock"))
+        return src
+
+    def test_copies_regular_files_skips_socket(self, tmp_path):
+        src = self._mk_src(tmp_path)
+        dst = tmp_path / "dst"
+        _copy_tree_skip_special(src, dst)
+        assert (dst / "a.txt").read_text(encoding="utf-8") == "hello"
+        assert (dst / "subdir" / "b.txt").read_text(encoding="utf-8") == "world"
+        # socket 文件被跳过（不抛 Errno 102，且不复制）
+        assert not (dst / "cc-socks" / "test.sock").exists()
+
+    def test_no_socket_dir_still_works(self, tmp_path):
+        src = self._mk_src(tmp_path, with_socket=False)
+        dst = tmp_path / "dst"
+        _copy_tree_skip_special(src, dst)
+        assert (dst / "a.txt").read_text(encoding="utf-8") == "hello"
+
+
+class TestCreateWorktreeNonGitWithSocket:
+    """_create_worktree 在非 git repo（含 socket）下不再崩溃。"""
+
+    def test_create_worktree_skips_socket(self, tmp_path, logger):
+        import socket
+        import uuid
+        from agent_go.executor import _create_worktree
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("hello", encoding="utf-8")
+        sock_path = "/private/tmp/ag_sock_" + uuid.uuid4().hex[:8] + ".sock"
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(sock_path)
+        sock.close()
+        os.symlink(sock_path, str(src / "x.sock"))
+        task_dir = tmp_path / "task_dir"
+        wt, _ = _create_worktree("t1", "sub-1", src, task_dir, logger)
+        assert (wt / "a.txt").read_text(encoding="utf-8") == "hello"
+        assert not (wt / "x.sock").exists()

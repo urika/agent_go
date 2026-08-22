@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .config import get_api_key, log_event, DECOMPOSE_RULES, AGENT_GO_DIR, meter_event
-from .git_utils import analyze_project, get_git_info, get_resource_map
+from .git_utils import analyze_project, get_git_info, get_resource_map, repo_health_signal
 from .skills import list_skills
 from .role_skill_map import load_role_skill_map
 from .metrics import estimate_cost
@@ -368,6 +368,7 @@ def generate_plan(task: str, repo: Path, config: dict[str, Any], logger: logging
     project_files = analyze_project(repo)
     git_info = get_git_info(repo)
     resource_map = get_resource_map(repo, git_info)
+    repo_health = repo_health_signal(repo)
 
     # ── Prompt 预算控制 ──
     MAX_SYSTEM_PROMPT_CHARS = 10000  # system prompt 上限字符数（含 Skill 表 + OUTPUT BUDGET + scope isolation 规则）
@@ -579,7 +580,7 @@ EXAMPLE (3-step plan):
         reference_docs = reference_docs[:MAX_USER_CONTENT_CHARS // 3 - 100] + "\n... [参考文档已截断]"
         logger.info(f"[PLAN] 参考文档截断: {ref_doc_chars} → {MAX_USER_CONTENT_CHARS // 3} 字符")
 
-    user_content = f"""任务：{task}\n项目路径：{repo}\nGit 信息：远程={git_info['remote']}, 分支={git_info['branch']}, 提交={git_info['commit']}\n项目文件列表：\n{project_files}\n项目资源：\n- 目录：{', '.join(resource_map['directories'])}\n- 关键文件：{', '.join(resource_map['key_files'])}"""
+    user_content = f"""任务：{task}\n项目路径：{repo}\n项目健康信号：{repo_health}\nGit 信息：远程={git_info['remote']}, 分支={git_info['branch']}, 提交={git_info['commit']}\n项目文件列表：\n{project_files}\n项目资源：\n- 目录：{', '.join(resource_map['directories'])}\n- 关键文件：{', '.join(resource_map['key_files'])}"""
 
     if supplement:
         user_content += f"\n===== 用户补充 =====\n{supplement}\n===== 结束 ====="

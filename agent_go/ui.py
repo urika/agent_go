@@ -34,6 +34,8 @@ def plan_to_md(plan: dict[str, Any]) -> str:
         lines.append(f"- Git 远程: {sr['git_remote']}")
     if sr.get("git_branch"):
         lines.append(f"- 当前分支: {sr['git_branch']}")
+    if sr.get("repo_health"):
+        lines.append(f"- 项目健康信号: {sr['repo_health']}")
     if sr.get("directories"):
         lines.append(f"- 关键目录: {', '.join(sr['directories'])}")
     if sr.get("config_files"):
@@ -328,6 +330,8 @@ def print_plan(plan: dict[str, Any], config: dict[str, Any], force: bool = False
             _parts.append(f"📁 {', '.join(sr['directories'])}")
         if _parts:
             _out(" | ".join(_parts))
+        if sr.get("repo_health"):
+            _out(f"⚠️ {sr['repo_health']}")
 
     # 步骤（紧凑 2-3 行）
     _subtitle("步骤")
@@ -628,6 +632,7 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
             resource_text = "\n".join([
                 f"Git 远程: {shared.get('git_remote', 'N/A')}" if shared.get('git_remote') else "",
                 f"当前分支: {shared.get('git_branch', 'N/A')}" if shared.get('git_branch') else "",
+                f"项目健康信号: {shared.get('repo_health', '')}" if shared.get('repo_health') else "",
                 f"关键目录: {', '.join(shared.get('directories', []))}" if shared.get('directories') else "",
                 f"配置文件: {', '.join(shared.get('config_files', []))}" if shared.get('config_files') else "",
                 f"环境变量: {', '.join(shared.get('env_vars', []))}" if shared.get('env_vars') else "",
