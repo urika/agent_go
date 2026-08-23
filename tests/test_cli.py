@@ -736,7 +736,7 @@ class TestCmdResume:
         #           parallel, issue_ref, meta, worktree_map, results_map, completed_ids
         assert [s["id"] for s in call.args[0]] == ["sub-1", "sub-2"]
         assert call.args[9] == {"sub-1": td / "sub-1" / "work"}      # worktree_map
-        assert set(call.args[10]) == {"sub-1", "sub-2"}              # results_map（从 result.json 恢复）
+        assert set(call.args[10]) == {"sub-1"}                       # results_map（failed 不 seed，乐观重跑）
         assert call.args[11] == {"sub-1"}                            # completed_ids
         assert call.kwargs["remote_url"] == "origin"                 # 取自 meta.json
         passed_config = call.args[4]
@@ -828,10 +828,38 @@ class TestCmdResume:
         # 恢复未被中断，pipeline 正常执行
         mock_pipe.assert_called_once()
         call = mock_pipe.call_args
-        # 损坏的 sub-1 被跳过，仅 sub-2 的结果进入 results_map
-        assert set(call.args[10]) == {"sub-2"}
-        # sub-2 状态为 failed，不计入 completed_ids
+        # 损坏的 sub-1 被跳过；sub-2 的 failed 结果是条件态不 seed（乐观重跑），
+        # 两者都不进入 results_map
+        assert set(call.args[10]) == set()
+        # failed 不计入 completed_ids
         assert call.args[11] == set()
+
+    def test_resume_failed_not_seeded_unblocks_downstream(self, tmp_path):
+        """resume 不 seed 历史 failed 结果——下游不再被「过期失败」级联阻断。
+
+        回归：task-20260821-174050-200-c0e8 场景。上游 sub-1 首跑因 socket 拷贝
+        (Errno 102) 崩失败，resume 重跑时如果保留 failed 结果进 results_map，
+        wave-0 级联阻断会用过期失败把下游 sub-2 永久标 blocked（即使 sub-1
+        本次重跑成功也无法解锁）。修复：failed 结果不 seed（乐观重跑），
+        级联按本次重跑的真实结果重新评估。
+        """
+        home = tmp_path / ".agent_go"
+        task_id = "task-cascade"
+        meta = self._base_meta(task_id, tmp_path / "repo")
+        meta["results"] = [
+            {"subtask_id": "sub-1", "status": "failed", "failure_reason": "socket err"},
+            {"subtask_id": "sub-2", "status": "blocked",
+             "failure_reason": "上游依赖失败，级联阻断", "blocked_by": ["sub-1"]},
+        ]
+        td = self._make_task(home, task_id, meta)
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        args = _build_parser().parse_args(["resume", task_id, "--yes"])
+        mock_pipe = self._run_resume(
+            home, args, ["agent_go", "resume", task_id, "--yes"], config)
+        # blocked 被解锁（未 seed）、failed 被清空（未 seed）→ results_map 为空，
+        # completed_ids 为空 → sub-1/sub-2 都进入 remaining 待重跑
+        assert set(mock_pipe.call_args.args[10]) == set()
+        assert mock_pipe.call_args.args[11] == set()
 
 
 class TestCmdInspect:

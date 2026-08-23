@@ -518,6 +518,21 @@ def _create_worktree(task_id, sub_id, repo, task_dir, logger):
                 logger.warning(f"分支创建失败: {checkout_result.stderr.strip()}")
     else:
         worktree.mkdir(parents=True, exist_ok=True)
+        # 非 git 目标：若 worktree 已存在但非 git worktree（前次失败留下的
+        # 部分拷贝），cherry 合并会尝试覆盖只读目标文件 → Errno 13。
+        # 直接清空重建，避免把上次失败的残留拷贝进本次工作区。
+        if any(worktree.iterdir()):
+            logger.info("worktree 存在但非 git worktree（上次失败残留），清空重建")
+            for _p in list(worktree.iterdir()):
+                if _p.name == ".git":
+                    continue
+                if _p.is_dir() and not _p.is_symlink():
+                    shutil.rmtree(_p, ignore_errors=True)
+                else:
+                    try:
+                        _p.unlink()
+                    except OSError:
+                        pass
         _copy_tree_skip_special(repo, worktree)
         # 非 git 目标 → worktree 副本本地 git init + 首次 commit，
         # 保证完成边界（commit+tag）与下游 merge 可用（等价于源侧 --auto-init）。

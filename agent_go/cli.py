@@ -1534,6 +1534,16 @@ def cmd_resume(args=None):
         if r.get("status") == "blocked":
             logger.info(f"[resume] 解锁 blocked 子任务 {wid}（上游状态已变，重新评估）")
             continue
+        # resume 语义修复 2：failed 同样是条件态，不是终态——failed 子任务本身
+        # 会被本 resume 重跑（不在 completed_ids → 进入 remaining），若把历史失败
+        # 结果 seed 进 results_map，wave-0 级联阻断会用「过期失败」把其下游永久
+        # 标 blocked（sub 已重跑成功也无法解锁）。故 failed 结果也不 seed，让
+        # pipeline 基于本次重跑的真实结果重新评估级联：
+        #   - 上游重跑成功 → 下游进入 wave 正常执行
+        #   - 上游重跑仍失败 → pipeline 自然重新标 blocked
+        if r.get("status") == "failed":
+            logger.info(f"[resume] 清空 failed 结果 {wid}（乐观重跑，级联按本次结果重估）")
+            continue
         results_map[wid] = r
         if r.get("status") == "completed":
             completed_ids.add(wid)

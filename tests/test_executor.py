@@ -3623,3 +3623,32 @@ class TestCreateWorktreeNonGitWithSocket:
         r = subprocess.run(["git", "-C", str(wt), "tag", "t1/sub-1-test"],
                            capture_output=True, text=True)
         assert r.returncode == 0
+
+    def test_stale_non_git_worktree_cleared_before_copy(self, tmp_path, logger):
+        """非 git worktree 残留（上次失败的部分拷贝、含只读文件）→ 清空重建。
+
+        回归：task-20260821-202322-543-1b2f。前次失败在 worktree 留下只读文件
+        （源仓库 .git/objects 权限 0o444），resume 重跑时 `_copy_tree_skip_special`
+        copytree(dirs_exist_ok=True) 覆盖只读目标 → `[Errno 13] Permission denied`
+        崩溃。修复：worktree 存在但非 git worktree 时先清空再拷贝。
+        """
+        from agent_go.executor import _create_worktree
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("hello", encoding="utf-8")
+        task_dir = tmp_path / "task_dir"
+        # 先行一次完整创建（产生正式 worktree + .git）
+        wt, _ = _create_worktree("t1", "sub-1", src, task_dir, logger)
+        assert (wt / ".git").exists()
+        # 模拟失败残留：删掉 .git（变成非 git worktree 的部分拷贝），
+        # 塞一个只读文件 + 一个旧内容文件
+        import shutil as _sh
+        _sh.rmtree(str(wt / ".git"), ignore_errors=True)
+        (wt / "stale_ro.txt").write_text("stale", encoding="utf-8")
+        os.chmod(wt / "stale_ro.txt", 0o444)
+        (wt / "a.txt").write_text("OLD-content", encoding="utf-8")
+        # 重跑 _create_worktree：应清空残留、重新拷贝源内容
+        wt2, _ = _create_worktree("t1", "sub-1", src, task_dir, logger)
+        assert (wt2 / ".git").exists()
+        assert (wt2 / "a.txt").read_text(encoding="utf-8") == "hello"
+        assert not (wt2 / "stale_ro.txt").exists()
