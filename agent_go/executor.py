@@ -2978,8 +2978,28 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             _rp = derive_retry_pattern(verification_results,
                                        verify_results.get("kill_reason") or "")
             if _rp:
-                _rsum = (f"验证失败后经 {retry_count} 次重试通过。"
-                         f"失败模式: {_rp[:100]}。修复涉及: {summary[:150]}")
+                # 根因级解法总结（C4 回写质量升级，fail-open；
+                # knowledge.resolution_llm=false 关闭，LLM 失败降级 diffstat 级）
+                _llm_sum = None
+                try:
+                    from .problems import summarize_resolution
+                    _first_fail_out = next(
+                        (vr.get("stdout_tail", "") for vr in verification_results
+                         if isinstance(vr, dict) and vr.get("exit_code", 0) not in (0, -1)
+                         and not vr.get("rejected")), "")
+                    _llm_sum = summarize_resolution(
+                        _rp, _first_fail_out,
+                        f"{summary[:150]}（子任务: {subtask.get('title', '')[:80]}）",
+                        config=_effective_config(config), logger=logger)
+                except Exception:
+                    logger.debug("resolution LLM 总结失败（非关键）", exc_info=True)
+                if _llm_sum:
+                    _rsum = (f"验证失败后经 {retry_count} 次重试通过。"
+                             f"根因: {_llm_sum['root_cause']}。解法: {_llm_sum['fix_approach']}。"
+                             f"（失败模式: {_rp[:80]}；修复涉及: {summary[:100]}）")
+                else:
+                    _rsum = (f"验证失败后经 {retry_count} 次重试通过。"
+                             f"失败模式: {_rp[:100]}。修复涉及: {summary[:150]}")
                 _prob_r = record_resolution(
                     AGENT_GO_DIR / "problems.jsonl",
                     failure_pattern=_rp,
@@ -2987,6 +3007,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                     task_id=task_id,
                     subtask_id=sub_id,
                     resolution_summary=_rsum,
+                    root_cause=(_llm_sum or {}).get("root_cause", ""),
                 )
                 if _prob_r:
                     resolution_problem_id = _prob_r.id

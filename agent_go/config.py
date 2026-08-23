@@ -109,10 +109,14 @@ DEFAULT_CONFIG = {
     # （Problem/deviation/verify_state）。默认关闭 = A/B 对照臂；
     # bench --with-knowledge 或置 enabled=true 开启注入臂。
     # suppressed_ids：按 Problem id 屏蔽错误知识（可淘汰机制）。
+    # resolution_llm：葬礼回写时用 LLM 把「失败报错+修复内容」总结为根因+做法
+    # （根因级 resolution_summary，保护未来 A/B 判定效度）；fail-open，
+    # 失败/关闭自动降级为 diffstat 级摘要。默认开启（单次调用成本可忽略）。
     "knowledge": {
         "enabled": False,
         "max_items": 3,
         "suppressed_ids": [],
+        "resolution_llm": True,
     },
     "evaluator": {
         "enabled": False,               # 默认关闭（向后兼容 + 成本可控）

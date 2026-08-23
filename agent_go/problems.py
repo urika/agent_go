@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -238,6 +239,7 @@ def mark_resolved(
     *,
     resolved_by: str,
     resolution_summary: str,
+    root_cause: str = "",
 ) -> Optional[Problem]:
     """→ resolved（H3 葬礼：resolution_summary 必填，记录「为何曾重要、如何被修」）。"""
     path = Path(problems_path)
@@ -247,9 +249,61 @@ def mark_resolved(
             p.status = "resolved"
             p.resolved_by = resolved_by[:200]
             p.resolution_summary = resolution_summary[:500]
+            if root_cause:
+                p.root_cause = root_cause[:500]
             _save(path, problems)
             return p
     return None
+
+
+def summarize_resolution(
+    failure_pattern: str,
+    failure_output: str,
+    fix_summary: str,
+    *,
+    config: Optional[dict] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[dict]:
+    """LLM 根因级解法总结（C4 回写质量升级）：{'root_cause', 'fix_approach'}。
+
+    动机：diffstat 级 resolution_summary（「修过 X 文件 +N 行」）没有根因语义，
+    KnowledgeStore 注入时 worker 拿不到「为什么错、怎么修对」。此处用一次 LLM
+    调用把「失败报错 + 修复内容」总结为根因+做法；总结的根因同时是更好的
+    匹配信号（缓解验证命令串 pattern 粒度太粗的问题）。
+
+    fail-open：开关关闭（knowledge.resolution_llm=false）/ 未配置模型 /
+    调用或解析失败 → 返回 None，调用方降级为 diffstat 级摘要。
+    """
+    lg = logger or logging.getLogger(__name__)
+    cfg = config or {}
+    if not (cfg.get("knowledge", {}) or {}).get("resolution_llm", True):
+        return None
+    api_cfg = cfg.get("planner_api") or cfg.get("plan_api") or {}
+    if not api_cfg.get("model"):
+        return None
+    try:
+        from .api import call_api
+        prompt = (
+            "你是故障复盘助手。一个编码子任务在自动验证中失败，经重试后修复成功。"
+            "根据以下信息总结「根因」和「解法」，各一句话（各≤60字，说清为什么错、怎么修对）。\n"
+            f"失败模式: {failure_pattern[:120]}\n"
+            f"首次失败输出(节选): {failure_output[:800]}\n"
+            f"修复内容: {fix_summary[:300]}\n"
+            '只输出 JSON: {"root_cause": "...", "fix_approach": "..."}，不要输出其他内容。'
+        )
+        text = call_api(cfg, [{"role": "user", "content": prompt}], lg) or ""
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        data = json.loads(text[start:end + 1])
+        rc = str(data.get("root_cause") or "").strip()[:200]
+        fa = str(data.get("fix_approach") or "").strip()[:200]
+        if not rc or not fa:
+            return None
+        return {"root_cause": rc, "fix_approach": fa}
+    except Exception as e:
+        lg.warning(f"[problems] resolution LLM 总结失败（降级 diffstat 级）: {e}")
+        return None
 
 
 def derive_retry_pattern(verification_results: list, kill_reason: str = "") -> str:
@@ -283,6 +337,7 @@ def record_resolution(
     task_id: str = "",
     subtask_id: str = "",
     resolution_summary: str,
+    root_cause: str = "",
 ) -> Optional[Problem]:
     """C4 葬礼回写：子任务重试后最终成功 → 「失败模式 + 如何被修」回写全局 Problem。
 
@@ -291,6 +346,7 @@ def record_resolution(
     重试后成功的场景补写葬礼数据：record（upsert，累计 occurrence）
     → mark_resolved（最新解法覆盖）。已 resolved 的 pattern 会先按
     record 语义复发重开、再以新解法重新 resolved。
+    root_cause：LLM 根因总结（summarize_resolution），非空时落 Problem.root_cause。
     """
     if not failure_pattern or not resolution_summary:
         return None
@@ -302,7 +358,8 @@ def record_resolution(
         return None
     return mark_resolved(problems_path, prob.id,
                          resolved_by=f"{task_id}/{subtask_id}",
-                         resolution_summary=resolution_summary)
+                         resolution_summary=resolution_summary,
+                         root_cause=root_cause)
 
 
 # ═══════════════════════════════════════════════════════════════

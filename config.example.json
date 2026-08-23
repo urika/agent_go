@@ -61,7 +61,8 @@
     "_comment": "C4 KnowledgeStore A/B 实验臂：修复重试时注入跨任务历史经验；默认关闭=对照臂",
     "enabled": false,
     "max_items": 3,
-    "suppressed_ids": []
+    "suppressed_ids": [],
+    "resolution_llm": true
   },
 
   "evaluator": {

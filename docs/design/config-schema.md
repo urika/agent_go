@@ -10,7 +10,7 @@ API key 解析优先级：环境变量 `AGENT_GO_API_KEY` > `config.json` `plan_
 
 ---
 
-## 顶层配置块一览（20 个）
+## 顶层配置块一览（21 个）
 
 | # | 配置块 | 默认开关 | 用途 |
 |---|---|---|---|
@@ -34,6 +34,7 @@ API key 解析优先级：环境变量 `AGENT_GO_API_KEY` > `config.json` `plan_
 | 18 | `cache` | `enabled: true` | Plan 缓存 |
 | 19 | `router` | `enabled: false` | 角色（planner/worker/reviewer）→ provider/model 路由 |
 | 20 | `mcp_servers` | — | 外部 MCP server 配置 |
+| 21 | `knowledge` | `enabled: false` | C4 KnowledgeStore A/B 臂 + 葬礼回写质量 |
 
 ---
 
@@ -365,6 +366,19 @@ Plan 缓存。
 | `enabled` | bool | 否 | 是否启用（默认 `true`） |
 | `tool_filter` | list | 否 | 允许调用的工具白名单 |
 | `scope` | str | 否 | 作用域（`subtask` / `task`） |
+
+---
+
+## 21. `knowledge`
+
+C4 KnowledgeStore：修复重试时向 repair prompt 注入跨任务历史经验（Problem/deviation/verify_state），及葬礼回写的解法质量控制。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 注入臂开关（false=A/B 对照臂；`bench --with-knowledge` 等价开启） |
+| `max_items` | int | `3` | 单次注入的最大经验条数 |
+| `suppressed_ids` | list | `[]` | 按 Problem id 屏蔽错误知识（可淘汰机制） |
+| `resolution_llm` | bool | `true` | 葬礼回写时用 LLM 把「失败报错+修复内容」总结为根因+做法（根因级 `resolution_summary`）；fail-open，失败/关闭降级为 diffstat 级摘要 |
 
 ---
 

@@ -89,3 +89,64 @@ class TestRecordResolution:
                 {"knowledge": {"enabled": True}}, logger)
         assert result["sources"], "回写的 Problem 应可被注入匹配"
         assert "source venv" in result["text"], "解法摘要应进入注入文本"
+
+    def test_root_cause_persisted(self, tmp_path):
+        """LLM 根因总结经 record_resolution 落盘到 Problem.root_cause。"""
+        path = tmp_path / "problems.jsonl"
+        prob = record_resolution(
+            path, failure_pattern="pytest tests/ 失败",
+            task_id="task-1", subtask_id="sub-1",
+            resolution_summary="根因: 模块未实现。解法: 新建 storage.py。",
+            root_cause="模块未实现")
+        assert prob is not None
+        loaded = load(path)
+        assert loaded[0].root_cause == "模块未实现"
+        # 复发重开再 resolved：新 root_cause 覆盖
+        record_resolution(path, failure_pattern="pytest tests/ 失败",
+                          task_id="task-2", subtask_id="sub-1",
+                          resolution_summary="根因: 竞态。解法: 加锁。",
+                          root_cause="竞态条件")
+        assert load(path)[0].root_cause == "竞态条件"
+
+
+class TestSummarizeResolution:
+    """LLM 根因级解法总结：开关 / 无模型 / 成功 / 非 JSON / 异常 全路径 fail-open。"""
+
+    def test_disabled_by_config(self):
+        from agent_go.problems import summarize_resolution
+        with patch("agent_go.api.call_api") as m:
+            r = summarize_resolution("p", "out", "fix",
+                                     config={"knowledge": {"resolution_llm": False},
+                                             "planner_api": {"model": "x"}})
+        assert r is None
+        m.assert_not_called()
+
+    def test_no_model_noop(self):
+        from agent_go.problems import summarize_resolution
+        assert summarize_resolution("p", "out", "fix", config={}) is None
+        assert summarize_resolution("p", "out", "fix",
+                                    config={"knowledge": {}}) is None
+
+    def test_llm_success(self, logger):
+        from agent_go.problems import summarize_resolution
+        cfg = {"knowledge": {"resolution_llm": True}, "planner_api": {"model": "x"}}
+        with patch("agent_go.api.call_api",
+                   return_value='前言 {"root_cause": "import 路径错", "fix_approach": "补 __init__.py"} 后记'):
+            r = summarize_resolution("pytest 失败", "ModuleNotFoundError", "新建文件",
+                                     config=cfg, logger=logger)
+        assert r == {"root_cause": "import 路径错", "fix_approach": "补 __init__.py"}
+
+    def test_llm_non_json_degrades(self, logger):
+        from agent_go.problems import summarize_resolution
+        cfg = {"knowledge": {"resolution_llm": True}, "planner_api": {"model": "x"}}
+        with patch("agent_go.api.call_api", return_value="这不是 JSON"):
+            assert summarize_resolution("p", "o", "f", config=cfg, logger=logger) is None
+        # 缺字段也降级
+        with patch("agent_go.api.call_api", return_value='{"root_cause": "x"}'):
+            assert summarize_resolution("p", "o", "f", config=cfg, logger=logger) is None
+
+    def test_llm_exception_degrades(self, logger):
+        from agent_go.problems import summarize_resolution
+        cfg = {"knowledge": {"resolution_llm": True}, "planner_api": {"model": "x"}}
+        with patch("agent_go.api.call_api", side_effect=RuntimeError("api down")):
+            assert summarize_resolution("p", "o", "f", config=cfg, logger=logger) is None
