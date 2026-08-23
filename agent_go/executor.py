@@ -16,7 +16,7 @@ from .config import log_event, safe_input, meter_event, write_censored_event
 from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call, classify_verification_scope
 from .subtask import _git_merge_upstream, _run_headless
 from .agents import load_agent_type, get_claude_command, get_agent_env
-from .git_utils import _worktree_create
+from .git_utils import _worktree_create, init_git_repo
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 from .artifacts import ARTIFACT_DIR_NAME
 from . import diag
@@ -458,12 +458,14 @@ def _build_sandbox_env():
 
 
 def _copy_tree_skip_special(src: Path, dst: Path) -> None:
-    """复制目录树，跳过 socket / FIFO / 设备等非普通文件（防 Errno 102 崩溃）。
+    """复制目录树，跳过 socket/FIFO/设备及不可读条目（防崩溃）。
 
     背景：repo 若为系统临时目录（如 /private/tmp）含 UNIX socket、tmux
     等其他进程的 socket 文件，shutil.copytree 默认会尝试复制并抛出
     `[Errno 102] Operation not supported on socket`，任务 0 秒失败。
-    这类特殊文件无法进入 worktree 也无意义，跳过即可。
+    还有跨用户目录场景：他人拥有的只读文件/目录（如并发 eval 在 /private/tmp
+    下的 goal_e2e_repo）stat() 成功但 open 时 `[Errno 13] Permission denied`。
+    这类无法复制的内容进不了 worktree 也无意义，跳过即可。
     """
     import stat as _stat
 
@@ -477,6 +479,13 @@ def _copy_tree_skip_special(src: Path, dst: Path) -> None:
                 skip.append(n)
                 continue
             if not (_stat.S_ISREG(st.st_mode) or _stat.S_ISDIR(st.st_mode)):
+                skip.append(n)
+                continue
+            # 不可读条目（他人只读文件 / 只读目录）跳过，copytree 会 Errno 13
+            if not os.access(p, os.R_OK):
+                skip.append(n)
+                continue
+            if _stat.S_ISDIR(st.st_mode) and not os.access(p, os.X_OK):
                 skip.append(n)
         return skip
 
@@ -510,6 +519,12 @@ def _create_worktree(task_id, sub_id, repo, task_dir, logger):
     else:
         worktree.mkdir(parents=True, exist_ok=True)
         _copy_tree_skip_special(repo, worktree)
+        # 非 git 目标 → worktree 副本本地 git init + 首次 commit，
+        # 保证完成边界（commit+tag）与下游 merge 可用（等价于源侧 --auto-init）。
+        if not (worktree / ".git").exists():
+            ok_init, init_msg = init_git_repo(worktree)
+            if not ok_init:
+                logger.warning(f"worktree git init 失败（完成边界不可用）: {init_msg}")
 
     return worktree, worktree_create_ms
 

@@ -3554,6 +3554,32 @@ class TestCopyTreeSkipSpecial:
         _copy_tree_skip_special(src, dst)
         assert (dst / "a.txt").read_text(encoding="utf-8") == "hello"
 
+    def test_skips_unreadable_files_and_dirs(self, tmp_path):
+        """他人只读文件/目录（Errno 13）跳过，不再崩溃（goal_e2e_repo 场景）。"""
+        import os as _os
+        import stat as _stat
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("hello", encoding="utf-8")
+        # 不可读文件（chmod 000）
+        secret = src / "secret.txt"
+        secret.write_text("secret", encoding="utf-8")
+        _os.chmod(secret, 0)
+        # 不可读目录（chmod 000，含子文件）
+        nd = src / "noperm_dir"
+        nd.mkdir()
+        (nd / "x.txt").write_text("x", encoding="utf-8")
+        _os.chmod(nd, 0)
+        try:
+            dst = tmp_path / "dst"
+            _copy_tree_skip_special(src, dst)
+        finally:
+            _os.chmod(secret, 0o644)
+            _os.chmod(nd, 0o755)
+        assert (dst / "a.txt").read_text(encoding="utf-8") == "hello"
+        assert not (dst / "secret.txt").exists()
+        assert not (dst / "noperm_dir").exists()
+
 
 class TestCreateWorktreeNonGitWithSocket:
     """_create_worktree 在非 git repo（含 socket）下不再崩溃。"""
@@ -3574,3 +3600,26 @@ class TestCreateWorktreeNonGitWithSocket:
         wt, _ = _create_worktree("t1", "sub-1", src, task_dir, logger)
         assert (wt / "a.txt").read_text(encoding="utf-8") == "hello"
         assert not (wt / "x.sock").exists()
+
+    def test_non_git_worktree_gets_local_git(self, tmp_path, logger):
+        """非 git 目标：worktree 副本自动 git init + 首次 commit（完成边界可用）。
+
+        回归：task-20260822-125234-150-cce0 在 copytree 修复后仍因 worktree
+        无 .git 而在完成边界失败（git tag 失败 → 禁止传递成功结果）。
+        """
+        from agent_go.executor import _create_worktree
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("hello", encoding="utf-8")
+        task_dir = tmp_path / "task_dir"
+        wt, _ = _create_worktree("t1", "sub-1", src, task_dir, logger)
+        # worktree 副本已 git init
+        assert (wt / ".git").exists()
+        # 已有 init commit，且能打 tag（完成边界依赖）
+        import subprocess
+        r = subprocess.run(["git", "-C", str(wt), "log", "--oneline"],
+                           capture_output=True, text=True)
+        assert r.returncode == 0 and "init" in r.stdout
+        r = subprocess.run(["git", "-C", str(wt), "tag", "t1/sub-1-test"],
+                           capture_output=True, text=True)
+        assert r.returncode == 0
