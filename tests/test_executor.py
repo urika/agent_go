@@ -298,6 +298,45 @@ class TestRunSubtask:
     @patch("agent_go.executor._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
+    def test_crash_but_verified_flag(self, mock_wt_create, mock_subprocess,
+                                     mock_headless, mock_metrics, mock_load_agent,
+                                     temp_repo, task_dir, fast_logger,
+                                     basic_subtask):
+        """claude 异常退出(rc=143/SIGTERM)但产出验证通过 → completed + crash_but_verified=True 落盘"""
+        mock_wt_create.return_value = (True, "")
+        mock_headless.return_value = make_subprocess_mock(returncode=143)
+        mock_metrics.return_value = {
+            "files_changed": 1, "insertions": 1, "deletions": 1,
+            "new_files": 0, "modified_files": 1, "actual_files": ["src/main.py"],
+        }
+
+        def subprocess_side_effect(args, **kwargs):
+            cmd_str = " ".join(args) if isinstance(args, list) else str(args)
+            if "status" in cmd_str and "--porcelain" in cmd_str:
+                return make_subprocess_mock(stdout="M  src/main.py\n")
+            if "diff" in cmd_str and "--stat" in cmd_str:
+                return make_subprocess_mock(stdout="src/main.py | 2 +-")
+            if "numstat" in cmd_str:
+                return make_subprocess_mock(stdout="1\t1\tsrc/main.py")
+            return make_subprocess_mock()
+
+        mock_subprocess.side_effect = subprocess_side_effect
+
+        result = run_subtask("test-task", basic_subtask, temp_repo, task_dir,
+                             fast_logger, headless=True)
+
+        assert result["status"] == "completed", (
+            f"crash 但产出验证通过应计 completed，实际: {result['status']}"
+        )
+        assert result["crash_but_verified"] is True, (
+            "crash_but_verified 应落盘 True"
+        )
+
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.executor.collect_change_stats")
+    @patch("agent_go.executor._run_headless")
+    @patch("subprocess.run")
+    @patch("agent_go.executor._worktree_create")
     def test_failed_status(self, mock_wt_create, mock_subprocess,
                            mock_headless, mock_metrics, mock_load_agent,
                            temp_repo, task_dir, fast_logger,
@@ -1019,10 +1058,11 @@ class TestRunSubtask:
             "subtask_id", "status", "exit_code", "summary", "worktree",
             "sandbox_type", "verify_ok", "duration_sec", "agent_type_source",
             "skills_unresolved", "retry_count", "timing", "change_stats",
-            "merge_results", "verification_results",
+            "merge_results", "verification_results", "crash_but_verified",
         ]
         for key in required_keys:
             assert key in result, f"返回值应包含 '{key}' 字段"
+        assert result["crash_but_verified"] is False, "正常完成时 crash_but_verified 应为 False"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor._run_headless")

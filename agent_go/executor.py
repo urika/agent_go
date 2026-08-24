@@ -1354,8 +1354,12 @@ def _diff_stat_hash(worktree: Path, base_ref: str = "HEAD") -> Optional[str]:
 
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
-                    task_dir=None, config=None, interrupt_event=None, initial_kill_reason=None):
-    """Verify changes, commit if needed, run verification commands. Returns verification dict."""
+                    task_dir=None, config=None, interrupt_event=None, initial_kill_reason=None,
+                    pre_work_head=""):
+    """Verify changes, commit if needed, run verification commands. Returns verification dict.
+
+    pre_work_head: 上游 merge 完成后、claude 启动前的 HEAD（ISSUE-51），作为语义评估
+    累积 diff 的 base——避免任务级 base_commit 把上游子任务的改动算进当前子任务。"""
     # S12-P0 G1：追踪本子任务最后一次 _run_headless 的 kill_reason（运行时 kill 分类）。
     # initial_kill_reason 来自首次 _run_claude 的 result（_run_headless 在 subprocess 内运行）。
     _latest_kill_reason = [initial_kill_reason]
@@ -1502,6 +1506,10 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     _full_cfg: dict = _effective_config(config)
     evaluator_cfg = _full_cfg.get("evaluator", {})
     evaluator_enabled = bool(evaluator_cfg.get("enabled", False))
+
+    # ISSUE-51：语义评估用浅拷贝注入子任务级 diff base（pre_work_head）。
+    # 不改共享 config——并发 subtask 各自的 pre_work_head 不同，直接写会串扰。
+    _eval_cfg: dict = {**_full_cfg, "_pre_work_head": pre_work_head} if pre_work_head else _full_cfg
 
     # L1: 自动启用语义评估 — 对 heuristic/manual 验证即使未配置也强制开启
     auto_triggered = False
@@ -1732,7 +1740,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 semantic_feedback = _safe_optional_call(
                     ".evaluator", "evaluate_semantic", logger,
                     subtask, worktree, verification,
-                    verification_history, _full_cfg, logger,
+                    verification_history, _eval_cfg, logger,
                     fallback={
                         "passed": True,
                         "confidence": 0.5,
@@ -1765,7 +1773,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         f"用完整 diff 重试 evaluator"
                     )
                     try:
-                        _retry_cfg = dict(_full_cfg)
+                        _retry_cfg = dict(_eval_cfg)
                         _retry_cfg["_no_diff_truncation"] = True  # evaluator 内部禁用 diff 截断
                         _retry_feedback = _safe_optional_call(
                             ".evaluator", "evaluate_semantic", logger,
@@ -2477,6 +2485,19 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     console.emit("subtask_activity", {"sub_id": sub_id, "activity": "Merging upstream"})
     clone_time = time.time() - clone_start
 
+    # ISSUE-51：记录上游 merge 完成后、claude 启动前的 HEAD 作为语义评估 diff 的 base。
+    # 任务级 base_commit 会把上游子任务 merge 进来的改动算进当前子任务的累积 diff，
+    # judge 会拿上游改动误判当前子任务的文件约束（「不得修改 X」）违规。
+    # 首个子任务（无上游）时 pre_work_head == 任务 base_commit，口径不变。
+    pre_work_head = ""
+    try:
+        _pwh = subprocess.run(["git", "rev-parse", "HEAD"],
+                              cwd=str(worktree), capture_output=True, text=True)
+        if _pwh.returncode == 0:
+            pre_work_head = _pwh.stdout.strip()
+    except Exception as _pwh_err:
+        logger.debug(f"[eval-base] pre_work_head 捕获失败（回退任务级 base_commit）: {_pwh_err}")
+
     # P4-2: 检查点快照 — 在 Claude 执行前保存 worktree 文件快照
     # （catch 所有异常，不影响主线流程）
     try:
@@ -2552,6 +2573,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         env["AGENT_GO_GOAL_ENABLED"] = "1" if goal_cfg.get("enabled", True) else "0"
         env["AGENT_GO_GOAL_MAX_TURNS"] = str(goal_cfg.get("max_turns", 20))
         env["AGENT_GO_GOAL_TIMEOUT"] = str(goal_cfg.get("timeout_seconds", 600))
+        # B（2026-08-23）：验证命令文本（path 已重写）传给 watchdog 做「验证轮」判定，
+        # 使 goal turn 只在 Bash 执行验证命令时计数，而非所有工具调用。
+        if verification:
+            _vhint = verification if isinstance(verification, str) else " && ".join(str(v) for v in verification)
+            env["AGENT_GO_VERIFY_HINT"] = _vhint[:200]
 
         # 关键修复（用户需求）：把 plan_api 的 API 信息通过环境变量传给 claude 子进程。
         # 这样配置 plan_api=deepseek 后，claude -p 会用 deepseek 的 base_url + api_key（只要该端点是 Anthropic 兼容的，如 kimi-coding / 自建网关）。
@@ -2840,6 +2866,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         allowed_tools=agent.claude_config.get("allowed_tools", []) if agent else None,
         task_dir=task_dir, config=config, interrupt_event=interrupt_event,
         initial_kill_reason=getattr(result, "kill_reason", None),
+        pre_work_head=pre_work_head,
     )
     summary = verify_results["summary"]
     metrics_changes = verify_results["metrics_changes"]
@@ -3065,6 +3092,8 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             "verification_results": verification_results,
             # S12-P0 G1：子任务级 kill_reason（none/stuck/hard_timeout/over_budget_l2/...）
             "kill_reason": verify_results.get("kill_reason") if isinstance(verify_results, dict) else None,
+            # infra 异常但产出验证通过（claude rc≠0 如 SIGTERM/kill）：落盘保留审计 + failure_class 不被清理
+            "crash_but_verified": verify_results.get("crash_but_verified", False) if isinstance(verify_results, dict) else False,
             # C3 局部重规划记录（F-VERIFY-6；未触发为 None）
             "replan": verify_results.get("replan") if isinstance(verify_results, dict) else None,
             # S12-P1 G4：budget_mode=degrade 降档模型产出标记
