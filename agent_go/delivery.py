@@ -392,4 +392,7 @@ def apply_local_delivery(
         meta["accepted_delivery"] = True
         if meta.get("status_schema_version"):
             meta["status"] = "ACCEPTED_DELIVERY"
+    # ISSUE-52：交付状态已变更，重算 goal 回溯消除 delivery_unmet 时序假阳性
+    from .planning import refresh_goal_adherence
+    refresh_goal_adherence(meta)
     return result

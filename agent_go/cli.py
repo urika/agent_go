@@ -1242,7 +1242,9 @@ def cmd_run(args=None):
     _plan_requirements = []
     if isinstance(confirmed_plan, dict):
         _plan_requirements = confirmed_plan.get("acceptance_criteria_ids") or confirmed_plan.get("requirements") or []
-    plan_quality = validate_plan_quality(confirmed, _plan_requirements, do_not_touch=spec_do_not_touch)
+    # 传 repo 启用 L1.5 符号级冲突判定（ISSUE-45：与 preflight 修复循环同口径，
+    # 符号级并行冲突在两道门都阻断）；P2 函数引用/import 关系检查同步生效（warning 级）。
+    plan_quality = validate_plan_quality(confirmed, _plan_requirements, repo=repo, do_not_touch=spec_do_not_touch)
 
     # Goal Policy Resolver（goal-mechanism-design.md §3.3/§4）：
     # 用户覆盖 > config.goal.policy > 系统确定性策略 > 默认 off。
@@ -1333,9 +1335,16 @@ def cmd_run(args=None):
         meta["baseline_dirty_files"] = config.get("_baseline_dirty_files", [])
     (task_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    _unresolved_plan_issues = [
-        *plan_quality["blocking_issues"],
-        *plan_quality.get("repairable_issues", []),
+    # repairable_issues 是 blocking_issues + warnings 的类型过滤子集（planning.py），
+    # 直接拼接会把每条 blocking issue 计两次（ISSUE-50②：实测 meta 2 文件存 4 条）。
+    _unresolved_plan_issues = list(plan_quality["blocking_issues"])
+    _seen_issue_keys = {
+        (i.get("type"), i.get("subtask_id"), i.get("file"), i.get("reason"))
+        for i in _unresolved_plan_issues
+    }
+    _unresolved_plan_issues += [
+        i for i in plan_quality.get("repairable_issues", [])
+        if (i.get("type"), i.get("subtask_id"), i.get("file"), i.get("reason")) not in _seen_issue_keys
     ]
     if _unresolved_plan_issues and not _e2e:
         if dry_run:
@@ -2649,6 +2658,8 @@ def cmd_pr(args=None):
                 meta["accepted_delivery"] = True
                 if meta.get("status_schema_version"):
                     meta["status"] = "ACCEPTED_DELIVERY"
+                from .planning import refresh_goal_adherence  # ISSUE-52
+                refresh_goal_adherence(meta)
                 (task_dir / "meta.json").write_text(
                     json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             else:
@@ -2671,6 +2682,8 @@ def cmd_pr(args=None):
                     meta["accepted_delivery"] = True
                     if meta.get("status_schema_version"):
                         meta["status"] = "ACCEPTED_DELIVERY"
+                    from .planning import refresh_goal_adherence  # ISSUE-52
+                    refresh_goal_adherence(meta)
                     (task_dir / "meta.json").write_text(
                         json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
                     console.print("PR 元数据已持久化，任务标记为 ACCEPTED_DELIVERY")
@@ -2688,6 +2701,8 @@ def cmd_pr(args=None):
                         r.get("status") in ("failed", "blocked") for r in meta.get("results", [])
                     ):
                         meta["status"] = "DELIVERY_FAILED"
+                    from .planning import refresh_goal_adherence  # ISSUE-52
+                    refresh_goal_adherence(meta)
                     (task_dir / "meta.json").write_text(
                         json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         finally:
@@ -2774,6 +2789,8 @@ def cmd_merge(args=None):
             meta["accepted_delivery"] = True
             if meta.get("status_schema_version"):
                 meta["status"] = "ACCEPTED_DELIVERY"
+            from .planning import refresh_goal_adherence  # ISSUE-52
+            refresh_goal_adherence(meta)
             (task_dir / "meta.json").write_text(
                 json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             console.success(f"PR {_pr_url} 已在 GitHub 合并，已同步 explicit_merge_commit={_merged[:12]}")
@@ -2863,6 +2880,8 @@ def cmd_merge(args=None):
                 meta["accepted_delivery"] = True
                 if meta.get("status_schema_version"):
                     meta["status"] = "ACCEPTED_DELIVERY"
+            from .planning import refresh_goal_adherence  # ISSUE-52
+            refresh_goal_adherence(meta)
             (task_dir / "meta.json").write_text(
                 json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             console.success(f"已合并到 {target}: {merge_commit[:12]}")

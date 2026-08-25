@@ -134,13 +134,14 @@ class TestGetClaudeCommand:
         assert cmd == ["claude", "/tmp/work"]
 
     def test_interactive_with_greywall(self):
-        """交互模式，有 greywall 包装"""
+        """交互模式，有 greywall 包装（观察期 --watch，docs/design/sandbox-greywall.md）"""
         agent = AgentType(type_name="developer")
         with patch("shutil.which", return_value="/usr/local/bin/greywall"):
             cmd = get_claude_command(agent, Path("/tmp/work"), headless=False)
         assert cmd[0] == "greywall"
-        assert cmd[1] == "--"
-        assert cmd[2] == "claude"
+        assert cmd[1] == "--watch"
+        assert cmd[2] == "--"
+        assert cmd[3] == "claude"
 
     def test_interactive_bypass_permission(self):
         """交互模式 bypassPermissions"""

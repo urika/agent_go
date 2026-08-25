@@ -436,7 +436,7 @@ class TestGreywallWrap:
 
         cmd = captured["cmd"]
         assert sum(1 for tok in cmd if "greywall" in tok) == 1
-        assert cmd[0] == "greywall" and cmd[1] == "--"
+        assert cmd[0] == "greywall" and cmd[1] == "--watch" and cmd[2] == "--"
 
     def test_native_without_greywall(self, tmp_path, null_logger, monkeypatch):
         """无 greywall 时直接运行 claude，sandbox_type=native"""

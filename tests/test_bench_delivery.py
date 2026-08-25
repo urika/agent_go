@@ -212,3 +212,57 @@ class TestApplyBenchDelivery:
 
         saved = json.loads(meta_path.read_text(encoding="utf-8"))
         assert "delivery_attempted" not in saved
+
+
+class TestGoalAdherenceRefreshOnDelivery:
+    """ISSUE-52：bench --with-delivery 交付成功后 goal_adherence 重算，
+
+    消除 pipeline 结束时落盘的 delivery_unmet 时序假阳性。
+    """
+
+    def _meta_with_contract(self, repo, branch, commit, base):
+        return _meta(repo, branch, commit, base,
+                     goal_contract={
+                         "goal_description": "交付型任务",
+                         "acceptance_criteria_ids": [],
+                         "completion_evidence": [],
+                         "constraints": [],
+                         "missing_verification_subtasks": [],
+                         "delivery_required": True,
+                     })
+
+    def test_stale_delivery_unmet_cleared_after_local_delivery(self, fixture_repo):
+        from agent_go.planning import compute_goal_adherence
+
+        branch, commit, base = _make_delivery_branch(fixture_repo)
+        meta = self._meta_with_contract(fixture_repo, branch, commit, base)
+        # 模拟 pipeline 结束时的初次计算（交付前 accepted_delivery 缺失/False）
+        meta["goal_adherence"] = compute_goal_adherence(meta)
+        assert any(g["type"] == "delivery_unmet"
+                   for g in meta["goal_adherence"]["gaps"])
+
+        result = apply_local_delivery(fixture_repo, meta)
+
+        assert result["delivered"] is True
+        ga = meta["goal_adherence"]
+        assert not any(g["type"] == "delivery_unmet" for g in ga["gaps"])
+        assert ga["level"] == "full"
+        assert ga["needs_human_review"] is False
+
+    def test_bench_hook_persists_refreshed_goal_adherence(self, fixture_repo, tmp_path):
+        from agent_go.planning import compute_goal_adherence
+
+        branch, commit, base = _make_delivery_branch(fixture_repo)
+        td = tmp_path / "task-x"
+        td.mkdir(parents=True)
+        meta = self._meta_with_contract(fixture_repo, branch, commit, base)
+        meta["goal_adherence"] = compute_goal_adherence(meta)
+        meta_path = td / "meta.json"
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+        _apply_bench_delivery(td, fixture_repo)
+
+        saved = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert saved["status"] == "ACCEPTED_DELIVERY"
+        assert saved["goal_adherence"]["level"] == "full"
+        assert saved["goal_adherence"]["needs_human_review"] is False

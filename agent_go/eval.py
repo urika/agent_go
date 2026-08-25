@@ -808,6 +808,7 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
     interrupted = 0
     resumed = 0
     greywall = 0
+    greywatch = 0
     native = 0
     headless = 0
     total_retries = 0
@@ -837,6 +838,8 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
                blocked += 1
            if r.get("sandbox_type") == "greywall":
                greywall += 1
+           elif r.get("sandbox_type") == "greywatch":
+               greywatch += 1
            elif r.get("sandbox_type") == "native":
                native += 1
            else:
@@ -862,12 +865,13 @@ def analyze_reliability(tasks_dir: Path) -> dict[str, Any]:
                if status == "completed":
                    interrupted_then_completed += 1
 
-    total_sandbox = greywall + native + headless
+    total_sandbox = greywall + greywatch + native + headless
     return {
        "tasks_total": tasks_total, "completed": completed, "failed": failed,
        "success_rate": round(completed / tasks_total * 100) if tasks_total else 0,
-       "sandbox": {"greywall": greywall, "native": native, "headless": headless,
-                    "greywall_pct": round(greywall / total_sandbox * 100) if total_sandbox else 0},
+       "sandbox": {"greywall": greywall, "greywatch": greywatch, "native": native,
+                    "headless": headless,
+                    "greywall_pct": round((greywall + greywatch) / total_sandbox * 100) if total_sandbox else 0},
        "retries_total": total_retries,
        "retry_rate": round(total_retries / subtask_total * 100) if subtask_total else 0,
        "retry_success_rate": round(retried_success / retried * 100) if retried else 100,
@@ -1227,7 +1231,7 @@ def _print_reliability_report(r: dict[str, Any]) -> None:
     console.print("─" * 50)
     console.print(f"  任务完成率:          {r['success_rate']}% ({r['completed']}/{r['tasks_total']})")
     sand = r["sandbox"]
-    console.print(f"  Sandbox:             greywall={sand['greywall_pct']}% native={sand['native']}/{sand['headless']}")
+    console.print(f"  Sandbox:             greywall={sand['greywall_pct']}% (watch={sand.get('greywatch', 0)}) native={sand['native']}/{sand['headless']}")
     console.print(f"  重试次数:            {r['retries_total']}")
     console.print(f"  重试率:              {r['retry_rate']}%")
     console.print(f"  重试修复成功率:      {r['retry_success_rate']}%")

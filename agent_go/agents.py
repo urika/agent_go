@@ -167,7 +167,9 @@ def get_claude_command(
             cmd.extend(["--allowedTools", ",".join(allowed)])
         return cmd
 
-    cmd = (["greywall", "--"] if greywall else [])
+    # 观察期策略（2026-08-25 拍板，docs/design/sandbox-greywall.md）：
+    # 交互式路径走 greywall --watch（全放行全记录），观察期结束后去掉 --watch 收紧。
+    cmd = (["greywall", "--watch", "--"] if greywall else [])
     cmd.extend(["claude", str(worktree)])
 
     permission_mode = agent.claude_config.get("permission_mode", "default")

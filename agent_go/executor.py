@@ -876,11 +876,12 @@ def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, ac
         if agent:
             claude_cmd = get_claude_command(agent, worktree, headless=False)
         else:
-            claude_cmd = (["greywall", "--"] if greywall_bin else []) + ["claude", str(worktree)]
+            # 观察期策略同 agents.py：--watch 全放行全记录
+            claude_cmd = (["greywall", "--watch", "--"] if greywall_bin else []) + ["claude", str(worktree)]
 
         try:
             result = subprocess.run(claude_cmd, env=env, cwd=str(worktree))
-            sandbox_type = "greywall" if greywall_bin else "native"
+            sandbox_type = "greywatch" if greywall_bin else "native"
         except FileNotFoundError:
             console.warning("Greywall 未安装，降级原生")
             result = subprocess.run(["claude", str(worktree)], env=env, cwd=str(worktree))

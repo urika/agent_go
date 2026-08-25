@@ -4,7 +4,7 @@
 （needs_human_review=True），而不是静默 completed。合规度与 status 正交。
 """
 
-from agent_go.planning import compute_goal_adherence
+from agent_go.planning import compute_goal_adherence, refresh_goal_adherence
 
 
 def _meta(goal_contract=None, results=None, status="DELIVERY_READY", **overrides):
@@ -195,3 +195,45 @@ class TestOrthogonality:
         result = compute_goal_adherence(meta)
         assert not any(g["type"] == "delivery_unmet" for g in result["gaps"])
         assert result["level"] == "full"
+
+
+class TestRefreshGoalAdherence:
+    """ISSUE-52：交付状态变更后重算，消除 delivery_unmet 时序假阳性。"""
+
+    def test_refresh_clears_stale_delivery_unmet_after_delivery(self):
+        # pipeline 结束时：交付未达成，delivery_unmet 缺口落盘
+        meta = _meta(accepted_delivery=False)
+        stale = compute_goal_adherence(meta)
+        assert any(g["type"] == "delivery_unmet" for g in stale["gaps"])
+        assert stale["needs_human_review"] is True
+        meta["goal_adherence"] = stale
+
+        # 交付成功（merge / pr / bench --with-delivery 路径）后重算
+        meta["accepted_delivery"] = True
+        meta["status"] = "ACCEPTED_DELIVERY"
+        refresh_goal_adherence(meta)
+
+        ga = meta["goal_adherence"]
+        assert ga["level"] == "full"
+        assert ga["gaps"] == []
+        assert ga["needs_human_review"] is False
+
+    def test_refresh_keeps_real_gaps(self):
+        # 交付达成但验收证据未执行：真缺口不被重算抹掉
+        meta = _meta(results=[
+            {"subtask_id": "1", "status": "completed", "verify_ok": True,
+             "verification_results": []},
+        ])
+        refresh_goal_adherence(meta)
+        ga = meta["goal_adherence"]
+        assert any(g["type"] == "evidence_not_executed" for g in ga["gaps"])
+        assert ga["needs_human_review"] is True
+
+    def test_refresh_is_fail_open(self, monkeypatch):
+        def _boom(_meta):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("agent_go.planning.compute_goal_adherence", _boom)
+        meta = _meta()
+        refresh_goal_adherence(meta)  # 不抛异常（观测层不阻断交付）
+        assert "goal_adherence" not in meta

@@ -724,3 +724,85 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 **修复**：`diag.CONTRACT_API_VERSION = "2"` 显式标注实现对齐的契约版本；`SESSION_HEADER`/`PROXY_KEY_LEN` 注释指向 llama.cpp 契约文档（§3.2）为唯一权威，并注明升级时同步契约脚本 F 组。
 
 **外部依赖（known-issue）**：llama-defender `/api/metrics/history?session=` 已承诺未生效（404），消费侧契约脚本 F6 用例 SKIP 标注，待服务方补齐（Review L-6）。
+
+### ISSUE-44 A1 `core_file_shared_ownership` 串行误杀（拆分规则 Review P0-1）
+
+- **位置**：`planning.py check_subtask_file_overlap`（:182 blocking 判定）+ `api.py:496-502` prompt「核心源文件即使串行也必须合并」
+- **状态**：✅ 已修复（2026-08-24，第一刀）
+- **严重度**：P0（三臂 bench 174 run 中 10 run 因此 0 执行即 BLOCKED）
+
+**问题**：规则前提「串行先后重写同一实现文件会互相覆盖」与 agent_go 自身的串行 artifact passing（下游 merge 上游 tag 后增量编辑）矛盾——覆盖风险只存在于并行无依赖场景（已由 `file_overlap_without_dependency` 覆盖）。小仓库（核心文件 ≤3）任何 ≥2 步分层拆分必然共享核心文件 → 合法甜区被绝杀；planner 修复 1 轮后仍给出同结构（该结构本就正确）→ 修复循环无解。且与 G5 欠分解（hard ≥3 子任务）直接冲突。prompt 层与确定性门同源同错。
+
+**修复**：A1 从 blocking 降 warning（移出 PLAN_REPAIRABLE_ISSUE_TYPES 与 plan_conflict_count，failure.py 层归因集合同步移除）；prompt 原则 1 改为「并行互斥、串行可分层」；tests/test_planning.py 2 用例改写。
+
+### ISSUE-45 符号级 L1.5 与文件级 A1 职责倒挂（拆分规则 Review P0-2）
+
+- **位置**：`spec.py detect_step_conflicts`（:712-797）vs `planning.py` A1 文件级阻断
+- **状态**：✅ 已修复（2026-08-24，第二刀）
+- **严重度**：P0（同一场景两道门判定相反）
+
+**问题**：spec.py L1.5 有更细粒度的 AST 符号级冲突检测（同文件不同符号=安全），`--yes` 下直接放行；planning.py A1 是粗粒度文件级，反而 blocking。同一场景先被细门放行、后被粗门拦死。
+
+**修复**：符号级冲突接入 validate_plan_quality 确定性门——并行（无依赖路径）符号冲突 → blocking `symbol_conflict`（repairable，进修复循环），同链串行 → warning `symbol_conflict_with_dependency`（与 ISSUE-44 同哲学）；cli.py 最终门禁补传 repo=repo 使两道门同口径。tests/test_planning.py +3 用例。
+
+### ISSUE-46 G6 过度分解两套实现 + 死代码 + 文档失真（拆分规则 Review P0-3）
+
+- **位置**：`planning.py check_over_decomposition`（:598，warning-only，cli 无调用点）vs `validate_plan_quality` 内嵌版（:451-462，blocking）；`docs/spec.md:112` 仍描述前者为生效告警
+- **状态**：✅ 已修复（2026-08-24，第一刀）
+- **严重度**：P0（同一定性问题一个告警一个阻断，文档描述死代码）
+
+**修复**：已删除独立函数（含 `__all__` 导出与 6 个死函数测试），保留 validate_plan_quality 内嵌 blocking 版（已有 2 用例覆盖）；docs/spec.md 已修正。
+
+### ISSUE-47 REQ-1 Planner 不沿模块边界分解（拆分规则 Review P0-4，已登记未落地）
+
+- **位置**：`docs/design/planner-gaps-and-requirements.md:25-45`（P0，~0.5d，只改 system prompt 文案）
+- **状态**：✅ 已修复（2026-08-24，第二刀）
+- **严重度**：P0（planner 默认按技术层切分，无模块边界指令）
+
+**问题**：现行 prompt 只有粒度数字（2-5 步），无「Spec/设计文档划分模块边界时 steps 应沿模块边界分解」的指令。
+
+**修复**：分解粒度规则段新增「沿模块边界分解（REQ-1）」条目（同一模块改动聚到一个步骤、不按技术层横切）；Spec 硬约束块同步加「Spec 已划分模块边界时沿模块边界分解」（api.py，第二刀）。
+
+### ISSUE-48 步骤数指导口径四处不一致（拆分规则 Review P1-5）
+
+- **位置**：`api.py:429`「2-5 steps」vs `api.py:672` 降级 prompt「2-4」vs `api.py:490` 粒度表上限「3-5」vs `docs/design/split-design-benchmark-2026-08-10.md:71`「2-4」
+- **状态**：✅ 已修复（2026-08-24，第二刀）
+- **严重度**：P1
+
+**修复**：主 prompt「2-5 steps」改为「以《分解粒度规则》为准（1-5 步）」；降级 prompt 对齐粒度表（1/1-2/2-4 档，最多 4 个）。
+
+### ISSUE-49 G5 欠分解不看仓库规模（拆分规则 Review P1-6）
+
+- **位置**：`planning.py DIFFICULTY_BASE_SUBTASKS`（hard=3）/ `check_under_decomposition`
+- **状态**：✅ 已修复（2026-08-24，第二刀）
+- **严重度**：P1（小仓库上逼出伪拆分，与 ISSUE-44 合力堵死合法计划）
+
+**修复**：`check_under_decomposition` 阈值 = min(难度基准, max(1, 有效文件数))，子任务未声明文件时回退基准（tests +2 用例）。
+
+### ISSUE-50 门禁杂项：repairable 双轨 / cli.py:1338 重复计数 / REQ-AC 覆盖互吞（拆分规则 Review P1-7/P2-8）
+
+- **位置**：①`planning.py` PLAN_REPAIRABLE_ISSUE_TYPES 决定 warning 是否可升级为阻断（verification_command_rejected 双轨）；②`cli.py:1338` `_unresolved_plan_issues = blocking + repairable` 交集重复计数；③`planning.py:400` REQ/AC 覆盖率并集互吞
+- **状态**：✅ 全部已修复（②第一刀；①③ 2026-08-24 第二刀）
+- **严重度**：②P1（每条 blocking issue 打印/存储/计数两次，实测 meta 2 文件 4 条）；①③ P2
+
+**修复**：②已按 (type, subtask_id, file, reason) 去重（cli.py，第一刀）；①repairable 集合拆为 `_PLAN_REPAIRABLE_BLOCKING_TYPES`/`_PLAN_REPAIRABLE_WARNING_TYPES` 两个显式命名集合并注明双轨语义（第二刀）；③REQ/AC 覆盖率按 ID 前缀分列上报（plan_requirement_coverage/plan_acceptance_coverage），阻断判定保持并集口径不变（tests +1 用例）。
+
+### ISSUE-51 语义评估 diff base 用任务级 base_commit，上游子任务改动污染当前子任务判定（三臂 bench P1）
+
+- **位置**：`evaluator.py:468`（`config.get("_base_commit")`）← `pipeline.py:422`（注入 `meta["base_commit"]`，任务级基点）← `_get_worktree_diff` 累积 diff 分支
+- **状态**：✅ 已修复（2026-08-24）
+- **严重度**：P1（判定假失败：27B 臂 add-edit-command r2 / add-priority-filter r2 两 run 被判 semantic=False，judge 理由明写「功能正确但违反约束」——违规改动实为上游 sub-1 merge 产物；同类假失败历史上可能更多）
+
+**问题**：sub-2 的 worktree 开工时已 merge 上游 tag，worker 提交后 `git diff HEAD` 为空，回退 `git diff base..HEAD`（base=任务基点）→ 上游 sub-1 的改动全在 diff 里，judge 拿上游改动判当前子任务的文件约束（「不得修改 src/storage.py」等）违规。
+
+**修复**：executor 在上游 merge 完成后、claude 启动前记录 `git rev-parse HEAD` 为 `pre_work_head`，经 `_verify_changes` 透传，以浅拷贝注入评估 config 的 `_pre_work_head`（不改共享 config，避免并发 subtask 串扰）；evaluator 优先取 `_pre_work_head` 回退 `_base_commit`。首个子任务（无上游）时 pre_work_head == base_commit，口径不变。
+
+### ISSUE-52 goal_adherence 在交付后不重算，delivery_unmet 时序假阳性（goal 回溯 P2）
+
+- **位置**：`pipeline.py:1075`（pipeline 结束时初次计算）vs `delivery.py:392` / `cli.py:2658,2680,2783,2872`（交付成功写 `accepted_delivery=True` 的各路径）
+- **状态**：✅ 已修复（2026-08-25）
+- **严重度**：P2（观测层假阳性：`[goal 回溯] 合规度不足（level=partial，1 项缺口）` 警告误导人工补验收；bench --with-delivery 任务必现）
+
+**问题**：goal 回溯在 pipeline 结束时计算并落盘 `meta["goal_adherence"]`，而交付动作（bench `--with-delivery` 本地 merge、`agent_go merge`、`agent_go pr`）发生在子进程/pipeline 结束之后。计算时 `accepted_delivery=False` → delivery_required 任务被打 `delivery_unmet` 缺口 + `needs_human_review=True`；交付成功后无人重算，标记陈旧残留（实测 task-20260823-122234-962-0d04：status=ACCEPTED_DELIVERY 但 goal_adherence 仍 partial）。
+
+**修复**：planning.py 新增 `refresh_goal_adherence(meta)`（重算并原地更新，fail-open 不阻断交付）；在全部 5 处交付状态变更点写 meta.json 前调用——delivery.py `apply_local_delivery`、cli.py pr 成功/pr 已存在/merge 同步已合并 PR/merge 成功，以及 pr 失败置 `accepted_delivery=False` 路径（保持观测一致）。pipeline 结束时的初次计算保持不变。

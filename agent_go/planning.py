@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 __all__ = ["estimate_task_duration", "check_under_decomposition",
-           "check_over_decomposition", "check_difficulty_mismatch", "difficulty_hint",
+           "check_difficulty_mismatch", "difficulty_hint",
            "check_agent_prompt_functions", "validate_plan_quality",
            "build_plan_repair_feedback", "check_subtask_file_overlap", "check_parallel_import_relations",
            "build_goal_contract", "compute_goal_adherence", "_subtask_file_scope", "_is_core_file"]
@@ -28,18 +28,27 @@ DIFFICULTY_BASE_SUBTASKS = {"easy": 1, "medium": 2, "hard": 3}
 
 # These issues are deterministic Plan defects. They may be sent back to the
 # planner once before execution; unresolved issues still block the task.
-PLAN_REPAIRABLE_ISSUE_TYPES = {
-    "verification_command_rejected",
-    "verification_file_mismatch",
+#
+# 双轨显式化（ISSUE-50①）：repairable 集合内有两类严重度——
+#   ① blocking track：本身即 blocking issue，修复未决直接阻断；
+#   ② warning track：本身是 warning（不阻断），但因列入 repairable，
+#      修复循环未决后升级为阻断（cli.py 最终门禁按 repairable 未决拦截）。
+# issue 级别与「是否阻断」的关联在此显式声明，不再靠名单隐式推断。
+_PLAN_REPAIRABLE_BLOCKING_TYPES = frozenset({
     "scope_conflict",
     "dependency_cycle",
     "requirement_coverage_incomplete",
     "unverifiable_upstream",
     "file_overlap_without_dependency",
-    "core_file_shared_ownership",
+    "symbol_conflict",
     "over_decomposition",
     "empty_plan",
-}
+})
+_PLAN_REPAIRABLE_WARNING_TYPES = frozenset({
+    "verification_command_rejected",
+    "verification_file_mismatch",
+})
+PLAN_REPAIRABLE_ISSUE_TYPES = _PLAN_REPAIRABLE_BLOCKING_TYPES | _PLAN_REPAIRABLE_WARNING_TYPES
 
 
 def build_plan_repair_feedback(plan_quality: dict[str, Any], max_chars: int = 2400) -> str:
@@ -63,8 +72,6 @@ def build_plan_repair_feedback(plan_quality: dict[str, Any], max_chars: int = 24
             reason = (reason or "验证命令不在安全白名单") + "；不要使用 bash/sh -c 或自然语言前缀，python -c 必须为单行，优先使用 python -m <模块> 或测试框架。"
         if issue_type == "empty_plan":
             reason = (reason or "Plan 产出 0 个执行步骤") + "；steps 不能为空——不要把任务要求的交付物 JSON 当作执行计划，必须输出包含可执行 steps 的 Plan schema。"
-        if issue_type == "core_file_shared_ownership":
-            reason = (reason or "核心源文件被多个子任务先后修改") + "；同一核心实现文件只允许一个子任务负责——如需多个改动，合并为一个子任务，不要用 dependencies 串行重写同一源文件。"
         prefix = f"[{issue_type}]"
         if subtask_id:
             prefix += f" subtask={subtask_id}"
@@ -89,10 +96,10 @@ def _subtask_file_scope(st: dict) -> set[str]:
     return files
 
 
-# A1 文件所有权约束：核心实现文件只允许一个子任务负责实现。
-# 核心文件 = 有源码扩展名且非测试文件；测试/配置/文档等辅助文件可被多个子任务
-# 先后触碰（串行合法），但核心源文件被先后重写会导致改动互相覆盖、语义验收
-# 无法对应最终 diff（见 agent-go-execution-capability-assessment-2026-08-09.md 发现 1）。
+# A1 文件所有权约束（2026-08-24 降级为 warning，ISSUE-44）：核心实现文件被同链
+# 串行子任务共享是合法分层改法（下游 merge 上游 tag 后增量编辑，非重写覆盖），
+# 仅作 warning 供归因；并行无序共享才阻断（file_overlap_without_dependency）。
+# 核心文件 = 有源码扩展名且非测试文件。
 _SOURCE_EXTS = {
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs",
     ".java", ".kt", ".kts", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx",
@@ -149,10 +156,14 @@ def check_subtask_file_overlap(subtasks: list[dict]) -> dict[str, Any]:
     判定：
     - 某文件被 ≥2 个子任务引用，且其中至少一对子任务之间无依赖路径
       （无法保证顺序执行）→ blocking issue（file_overlap_without_dependency）。
-    - 所有共享该文件的子任务都在同一条依赖链上（顺序执行，upstream 会 merge）：
-      - 若为**核心实现文件**（A1）→ blocking issue（core_file_shared_ownership）：
-        即使串行，先后重写同一实现文件仍会互相覆盖、语义验收无法对应最终 diff。
-      - 若为测试/配置/文档等辅助文件 → warning（file_overlap_with_dependency）。
+      真正的交叉污染只存在于这种并行无序场景。
+    - 所有共享该文件的子任务都在同一条依赖链上（顺序执行，upstream 会 merge
+      后增量编辑，不是重写）→ warning：
+      - 核心实现文件 → warning（core_file_shared_ownership）。2026-08-24 由
+        blocking 降级（ISSUE-44）：串行 merge 机制下分层共享是合法甜区，
+        原 blocking 前提（串行重写互相覆盖）不成立；三臂 bench 10 个 run
+        因此 0 执行即 BLOCKED。保留 warning 供归因/复盘。
+      - 测试/配置/文档等辅助文件 → warning（file_overlap_with_dependency）。
 
     Returns:
         {"issues": [...], "warnings": [...]}
@@ -185,12 +196,12 @@ def check_subtask_file_overlap(subtasks: list[dict]) -> dict[str, Any]:
                 "file": file,
                 "subtask_ids": owners,
                 "reason": (
-                    f"核心源文件 {file} 被多个子任务 {'/'.join(owners)} 先后修改——"
-                    f"即使依赖串行，先后重写同一实现文件仍会导致改动互相覆盖、"
-                    f"语义验收无法对应最终 diff。建议合并为一个子任务。"
+                    f"核心源文件 {file} 被多个子任务 {'/'.join(owners)} 先后修改"
+                    "（同一依赖链，串行 merge 后增量编辑）。串行合法，"
+                    "仍有集成/归因风险，建议确认改动区域不重叠。"
                 ),
             }
-            issues.append(entry)
+            warnings.append(entry)
         elif all_chained:
             entry = {
                 "type": "file_overlap_with_dependency",
@@ -358,6 +369,8 @@ def validate_plan_quality(
     seen_ids: set[str] = set()
     graph: dict[str, list[str]] = {}
     covered: set[str] = set()
+    covered_req: set[str] = set()
+    covered_ac: set[str] = set()
     spec_forbidden = {str(f) for f in (do_not_touch or []) if f}
 
     # 0 子任务 = 假成功源（goal_ab 实验实证：planner 把交付物 JSON schema 误当
@@ -397,8 +410,10 @@ def validate_plan_quality(
                     "reason": (f"子任务 {sid} 的 files 命中了 Spec §3「明确不动的区域」"
                                f"：{', '.join(_spec_overlap)}"),
                 })
-        covered.update(str(value) for value in st.get("acceptance_criteria_ids", []) or [])
-        covered.update(str(value) for value in st.get("requirement_ids", []) or [])
+        covered_ac.update(str(value) for value in st.get("acceptance_criteria_ids", []) or [])
+        covered_req.update(str(value) for value in st.get("requirement_ids", []) or [])
+        covered.update(covered_ac)
+        covered.update(covered_req)
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -424,6 +439,17 @@ def validate_plan_quality(
     coverage = None if not unique_requirements else round(len(unique_requirements & covered) / len(unique_requirements), 6)
     if unique_requirements and coverage is not None and coverage < 1.0:
         issues.append({"type": "requirement_coverage_incomplete", "missing": sorted(unique_requirements - covered)})
+    # REQ/AC 覆盖率分列（ISSUE-50③）：covered 并集同时吞两类 ID，旧口径 REQ 可被
+    # AC 覆盖、反之亦然，两类覆盖率不可区分。按 ID 前缀拆开后分别上报；
+    # 阻断判定保持并集口径不变（行为兼容）。
+    _req_ids = {r for r in unique_requirements if not r.upper().startswith("AC")}
+    _ac_ids = unique_requirements - _req_ids
+    requirement_coverage = (
+        None if not _req_ids else round(len(_req_ids & covered_req) / len(_req_ids), 6)
+    )
+    acceptance_coverage = (
+        None if not _ac_ids else round(len(_ac_ids & covered_ac) / len(_ac_ids), 6)
+    )
 
     # G8: 独立可验证性检查（Split Design Benchmark 实证：claude/opencode 均以
     # 「能否独立验证」作为拆分/合并判据，如 storage 新方法脱离 cmd_done 无法验证 → 必合）
@@ -447,6 +473,47 @@ def validate_plan_quality(
     overlap_result = check_subtask_file_overlap(subtasks)
     issues.extend(overlap_result.get("issues") or [])
     warnings.extend(overlap_result.get("warnings") or [])
+
+    # L1.5 符号级冲突接入确定性门（ISSUE-45）：spec.detect_step_conflicts 的
+    # AST 符号级判定是比文件级更细的高置信信号——同一顶层符号被多个 step 修改
+    # 几乎必然集成失败（arXiv:2603.24284）。职责划分与 ISSUE-44 同哲学：
+    #   无依赖路径（并行）的符号冲突 → blocking（symbol_conflict，repairable）；
+    #   同链串行的符号冲突 → warning（串行 merge 后增量编辑合法，提示归因风险）。
+    # 文件级冲突不在此重复（已由 G7 覆盖）。fail-open：检测异常不阻断。
+    if repo:
+        try:
+            from .spec import detect_step_conflicts
+            for conflict in detect_step_conflicts(subtasks, Path(repo)):
+                if conflict.severity != "symbol":
+                    continue
+                c_steps = [str(s) for s in conflict.steps]
+                _chained = all(
+                    _has_dependency_path(graph, a, b) or _has_dependency_path(graph, b, a)
+                    for i, a in enumerate(c_steps)
+                    for b in c_steps[i + 1:]
+                )
+                if _chained:
+                    warnings.append({
+                        "type": "symbol_conflict_with_dependency",
+                        "file": conflict.file,
+                        "subtask_ids": c_steps,
+                        "symbols": conflict.symbols,
+                        "reason": (f"符号 {'/'.join(conflict.symbols)} 被同链串行子任务 "
+                                   f"{'/'.join(c_steps)} 先后修改（{conflict.file}）。"
+                                   "串行合法，仍有集成/归因风险，建议确认改动区域不重叠。"),
+                    })
+                else:
+                    issues.append({
+                        "type": "symbol_conflict",
+                        "file": conflict.file,
+                        "subtask_ids": c_steps,
+                        "symbols": conflict.symbols,
+                        "reason": (f"符号级冲突：符号 {'/'.join(conflict.symbols)} 被无依赖关系的"
+                                   f"子任务 {'/'.join(c_steps)} 并行修改（{conflict.file}）——"
+                                   "几乎必然集成失败，建议合并为一个子任务或添加依赖串行。"),
+                    })
+        except Exception as _sc_exc:
+            logger.debug("[plan_quality] L1.5 符号级冲突检测失败（跳过）: %s", _sc_exc)
 
     # G6 升级：小改动（有效文件数 ≤2）但 ≥3 子任务 → 过度分解 → blocking
     # （bench 实证：fix-missing-default 5 行改动拆 3 个 → 成本翻倍且失败）
@@ -541,12 +608,12 @@ def validate_plan_quality(
         "warnings": warnings,
         "plan_conflict_count": sum(1 for issue in issues if issue["type"] in {
             "scope_conflict", "dependency_cycle", "file_overlap_without_dependency",
-            "core_file_shared_ownership", "unverifiable_upstream",
+            "symbol_conflict", "unverifiable_upstream",
         }),
         "plan_warning_count": len(warnings),
         "plan_repairable_issue_count": len(repairable_issues),
-        "plan_requirement_coverage": coverage,
-        "plan_acceptance_coverage": coverage,
+        "plan_requirement_coverage": requirement_coverage,
+        "plan_acceptance_coverage": acceptance_coverage,
     }
 
 
@@ -567,6 +634,11 @@ def check_under_decomposition(subtasks: list[dict], logger: Optional[logging.Log
     V1：硬编码阈值 difficulty_base_subtasks（hard=3）。仅告警提示，不强改 Plan
     （不覆盖 LLM 的分解决定——「确需少量子任务的 hard 任务」是合法场景）。
 
+    V2（ISSUE-49，2026-08-24）：阈值被有效文件数封顶——小仓库（核心文件 ≤2）
+    不存在 3 路独立拆分空间，hard≥3 的硬阈值只会逼出共享文件的伪拆分
+    （与 ISSUE-44 同根因）。阈值 = min(难度基准, max(1, 有效文件数))；
+    子任务未声明文件作用域时回退难度基准（不误伤）。
+
     Returns:
         True 若检测到欠分解（触发告警）；False 正常。
     """
@@ -581,6 +653,9 @@ def check_under_decomposition(subtasks: list[dict], logger: Optional[logging.Log
     if not has_hard:
         return False
     threshold = DIFFICULTY_BASE_SUBTASKS.get("hard", 3)
+    file_count = len(_subtask_file_scope_all(subtasks))
+    if file_count > 0:
+        threshold = min(threshold, max(1, file_count))
     if total < threshold:
         _hard_ids = [
             st.get("id", "?") for st in subtasks
@@ -592,65 +667,6 @@ def check_under_decomposition(subtasks: list[dict], logger: Optional[logging.Log
             f"建议再分解或为 hard 子任务配置强模型（worker_models.hard）。"
         )
         return True
-    return False
-
-
-def check_over_decomposition(subtasks: list[dict], total_files: int = 0,
-                            logger: Optional[logging.Logger] = None) -> bool:
-    """G6 规划期过度分解检测：简单任务拆成过多串行步骤 → 拓扑波次叠加延迟。
-
-    M0 smoke 发现的 fix-missing-default（5 行改动，1 个文件）被拆成 3 个串行子任务
-    → 3-wave 拓扑 = 总耗时 sum(各步) → 触达 420s 超时线。
-
-    启发式：
-    - 收集所有子任务的文件作用域（files + files_hint）
-    - 若实际改动面积极小（≤2 个文件）但子任务数 ≥3 → 过度分解
-    - 若 difficulty 全线 easy 但子任务数 ≥3 → 过度分解
-
-    V1：硬编码阈值，warning-only（不覆盖 LLM 的分解决定）。
-
-    Returns:
-        True 若检测到过度分解（触发告警）；False 正常。
-    """
-    _lg = logger or logging.getLogger(__name__)
-    if not subtasks:
-        return False
-    total = len(subtasks)
-    if total < 3:
-        return False
-
-    # 收集所有子任务涉及的文件
-    all_files: set[str] = set()
-    for st in subtasks:
-        if not isinstance(st, dict):
-            continue
-        files = set(st.get("files", []) or [])
-        files_hint = str(st.get("files_hint", "") or "")
-        if files_hint and files_hint != "*":
-            files.update(f.strip() for f in files_hint.split(",") if f.strip())
-        all_files.update(f for f in files if f)
-
-    # 合并显式传入的文件数
-    effective_file_count = max(len(all_files), total_files)
-
-    # 检查：文件数少但子任务多
-    if effective_file_count <= 2 and len(all_files) > 0 and total >= 3:
-        _lg.warning(
-            f"[G6] 过度分解告警: {total} 个子任务仅涉及 {effective_file_count} 个文件 "
-            f"({', '.join(sorted(all_files)[:5])})——这可能是不必要的过度分解，"
-            f"串行步骤会叠加延迟。建议合并为 1-2 个子任务。"
-        )
-        return True
-
-    # 检查：全线 easy 但子任务多
-    difficulties = [st.get("difficulty", "") for st in subtasks if isinstance(st, dict)]
-    if difficulties and all(d == "easy" for d in difficulties) and total >= 3:
-        _lg.warning(
-            f"[G6] 过度分解告警: {total} 个 easy 子任务——简单改动无需多个步骤。"
-            f"建议合并为 1-2 个子任务以减少拓扑波次延迟。"
-        )
-        return True
-
     return False
 
 
@@ -1127,3 +1143,18 @@ def compute_goal_adherence(meta: dict[str, Any]) -> dict[str, Any]:
         "gaps": gaps,
         "detail": detail,
     }
+
+
+def refresh_goal_adherence(meta: dict[str, Any]) -> None:
+    """交付状态变更后重算 goal_adherence 并原地更新（ISSUE-52）。
+
+    pipeline 结束时的初次计算早于交付动作（bench --with-delivery 本地 merge /
+    `agent_go merge` / `agent_go pr`），彼时 accepted_delivery=False 算出的
+    delivery_unmet 缺口会在交付成功后陈旧残留。各交付路径在写 meta.json 前
+    调用本函数重算，使 goal_adherence 与 accepted_delivery 同时序。
+    fail-open：观测层永不阻断交付。
+    """
+    try:
+        meta["goal_adherence"] = compute_goal_adherence(meta)
+    except Exception:
+        pass
