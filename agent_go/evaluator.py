@@ -465,7 +465,11 @@ def _default_semantic_eval(subtask, worktree, verification, previous_attempts, c
     eval_config["plan_api"] = eval_api_cfg
     eval_config.pop("_metering_path", None)
 
-    diff = _get_worktree_diff(worktree, base_commit=config.get("_base_commit", ""))
+    # ISSUE-51：优先用子任务级 pre_work_head（上游 merge 后、claude 启动前的 HEAD）
+    # 作为累积 diff 的 base；任务级 _base_commit 会把上游子任务的改动算进当前
+    # 子任务的 diff，导致文件约束被上游改动误判违规。无 pre_work_head 时回退旧口径。
+    _diff_base = config.get("_pre_work_head") or config.get("_base_commit", "")
+    diff = _get_worktree_diff(worktree, base_commit=_diff_base)
     no_truncation = bool(config.get("_no_diff_truncation"))
     prompt = _build_eval_prompt(subtask, verification, diff, previous_attempts, no_truncation)
     messages = [{"role": "user", "content": prompt}]
@@ -689,8 +693,9 @@ def _get_worktree_diff(worktree: Path, base_commit: str = "") -> str:
 
     累积语义（ISSUE：修复分多次 commit 时语义评估误判）：
     1. 工作区未提交 → `git diff HEAD`（未提交变更）
-    2. 工作区干净 → 优先用显式 base_commit（子任务基座，真实仓库有效）
-       → 否则 `git diff <root>..HEAD`（根 commit 累积 diff，fixture 有效）。
+    2. 工作区干净 → 优先用显式 base_commit（ISSUE-51：调用方应传子任务开工点
+       pre_work_head——上游 merge 后的 HEAD，使累积 diff 只含本子任务改动；
+       回退为任务级 base_commit）→ 否则 `git diff <root>..HEAD`（根 commit 累积 diff，fixture 有效）。
     修复分多次 commit 时，评估器能看到此前已提交的签名/结构修改。
     """
     import subprocess

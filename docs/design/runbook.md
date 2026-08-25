@@ -120,6 +120,7 @@ recover 和 resume 使用 task 级文件锁（`.task.lock`，fcntl.flock），�
 | `metering_unavailable` | metering 写入失败，保护性停止 | 否（基础设施） |
 | `system_error` | 内部异常 | 否（基础设施） |
 | `infra` | API 故障、网络错误（cost=0） | 否 |
+| `plan_gate_blocked` | plan 质量门拦截（planner 计划未过确定性预检，未进入执行；bench 记录级） | 否（planner/harness 侧，能力观测未发生） |
 
 ### 3.2 排查步骤
 

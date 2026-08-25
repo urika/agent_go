@@ -18,7 +18,9 @@ task: |
   verification 命令中的断言即为全部验收标准。
 verification:
   - "python3 -c \"import sys; sys.path.insert(0, 'src'); from pathlib import Path; from src.storage import TaskStorage; from src.models import Task; import src.cli as cli; p=Path('/tmp/test_batch.json'); p.unlink(missing_ok=True); cli.DATA_FILE=p; s=TaskStorage(p); s.save(Task('a', task_id='t1')); s.save(Task('b', task_id='t2')); s.save(Task('c', task_id='t3')); n=cli.cmd_done(['t1','t2','missing']); assert n==2, n; loaded=s.load_all(); st={t.id:t.status for t in loaded}; assert st['t1']=='done'; assert st['t2']=='done'; assert st['t3']=='todo'; n2=cli.cmd_done('t3'); assert n2==1; p.unlink(missing_ok=True); print('OK')\""
-timeout: 700
+# 2026-08-24：700 → 900。35B 补跑实测：plan 拆 2 子任务时总耗时 ~646s 贴线
+# （bench grace 提前 60s SIGTERM，700 有效窗口 640s），r2 靠 cleanup_race 才计过。
+timeout: 900
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

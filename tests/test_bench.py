@@ -490,6 +490,82 @@ def test_collect_result_semantic_real_failure_not_skipped(tmp_path):
     assert r["per_subtask"][0]["semantic_ok"] is False
 
 
+def test_collect_result_semantic_retry_last_verdict_wins(tmp_path):
+    """重试累积的语义判定取末次有效值：首轮 False、重试后 True → semantic_pass=True。
+
+    复现 2026-08-24 三臂 bench 实测误判：verification_results 跨重试追加，
+    旧逻辑取首个 semantic 条目 → 重试通过、合法 completed 的子任务被判
+    binary_pass=False（27B 臂 refactor-to-dict / add-simple-caching 两 run）。
+    """
+    td = tmp_path / "task-sem-retry"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True, "retry_count": 1,
+         "verification_results": [
+             {"type": "semantic", "passed": False, "reason": "首轮实现有缺陷"},
+             {"type": "semantic", "passed": True, "reason": "重试后完整实现目标"},
+         ]},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["semantic_pass"] is True
+    assert r["binary_pass"] is True
+    assert r["per_subtask"][0]["semantic_ok"] is True
+
+
+def test_collect_result_semantic_retry_last_failure_counts(tmp_path):
+    """末次有效判定为失败 → semantic_pass=False（即使首轮曾通过）。"""
+    td = tmp_path / "task-sem-retry-fail"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True, "retry_count": 1,
+         "verification_results": [
+             {"type": "semantic", "passed": True},
+             {"type": "semantic", "passed": False, "reason": "重试后仍不符合验收语义"},
+         ]},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["semantic_pass"] is False
+    assert r["binary_pass"] is False
+
+
+def test_collect_result_semantic_skipped_entries_not_verdict(tmp_path):
+    """跳过条目不参与「末次」选取：末条为 API 故障跳过时取前一条有效判定。"""
+    td = tmp_path / "task-sem-skip-seq"
+    _write_meta_with_semantic(td, "Task", [
+        {"id": "sub-1", "status": "completed", "verify_ok": True,
+         "verification_results": [
+             {"type": "semantic", "passed": True},
+             {"type": "semantic", "passed": False,
+              "reason": "语义评估 API 调用失败无法执行: API 请求失败 (HTTP 403)"},
+         ]},
+    ])
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["semantic_pass"] is True
+
+
+def test_collect_result_plan_gate_blocked_not_capability_failure(tmp_path):
+    """plan 质量门拦截（0 子任务执行）→ kill_reason=plan_gate_blocked、
+    failure_class=system_error（不计能力失败）、binary_pass=False。
+
+    复现 2026-08-24 三臂 bench：core_file_shared_ownership 门拦截的 run
+    被误归 interrupted_or_unknown 计入模型失败（三臂共 10 个 run）。
+    """
+    td = tmp_path / "task-plan-gate"
+    td.mkdir(parents=True)
+    (td / "meta.json").write_text(json.dumps({
+        "task": "Task", "status": "BLOCKED",
+        "failure_reason": "plan_quality_blocked",
+        "failure_class": "verification_failure",  # cli 运行时写入，bench 应覆盖
+        "blocked_without_result": True,
+        "results": [],
+        "subtasks": [{"id": "sub-1", "title": "t1"}, {"id": "sub-2", "title": "t2"}],
+    }), encoding="utf-8")
+    (td / "metering.jsonl").write_text(
+        json.dumps({"role": "planner", "cost_usd": 0.02}) + "\n", encoding="utf-8")
+    r = _collect_result("t", "m", 1.0, 0, "", exact_td=td, expected_task="Task")
+    assert r["binary_pass"] is False
+    assert r["kill_reason"] == "plan_gate_blocked"
+    assert r["failure_class"] == "system_error"
+
+
 def test_collect_result_p1_fields_backward_compat(tmp_path):
     """旧 meta（无 semantic/subtasks）→ 新字段不崩溃且为默认值。"""
     td = tmp_path / "task-p1-compat"

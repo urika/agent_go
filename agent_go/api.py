@@ -426,7 +426,7 @@ REQUIREMENTS:
 - **CRITICAL — Scope isolation**: Each step's `files` MUST include every file that step reads or modifies. If verification needs a file that belongs to another step, add a dependency.
 - **CRITICAL — Risk isolation**: Each step's `risks` must ONLY describe problems that occur DURING that step's own execution. NEVER list another step's task as a risk.
 - **Common mistake to avoid**: If step-1 adds caching and needs a fixture, the fixture belongs in step-1's `files` OR step-2 must be a dependency of step-1. Do NOT put "step-2 needs to add a fixture" in step-1's `risks`.
-- 2-5 steps, independently executable
+- 步骤数量以《分解粒度规则》为准（小改动 1 步，跨模块最多 5 步），independently executable
 - Each step MUST have: agent_type, difficulty, agent_prompt
 - Include rationale, scope_boundary, requirement_ids, and acceptance_criteria_ids when the Spec provides stable IDs.
 - agent_type: developer=coding, architect=read-only design, reviewer=code review, tester=testing
@@ -488,16 +488,19 @@ EXAMPLE (3-step plan):
         "  - 单文件、20-50 行或 ≤2 个文件 → 1-2 个步骤\n"
         "  - 多文件、50+ 行 → 2-4 个步骤\n"
         "  - 跨模块架构改动（重构/迁移/跨服务）→ 3-5 个步骤\n"
+        "- **沿模块边界分解（REQ-1）**：当 Task Spec 或设计文档已划分模块边界时，"
+        "steps 应沿模块边界组织——同一模块的改动聚到一个步骤，不要按技术层横切"
+        "（如「所有模型层改动」「所有接口层改动」横跨多个模块）。\n"
         "- **不要为同一文件的简单改动拆出独立的「编写测试」步骤**——测试应与实现合并到同一步骤\n"
         "- **不要为单行/极少量改动（如改默认值、修 typo、加 null guard）创建多个步骤**\n"
         "- 每个步骤应产出有意义、可独立验证的工作单元\n"
         "\n"
         "## 拆分三原则（Split Design Principles，必须同时满足）\n"
-        "1. **文件互斥（File Mutual Exclusion）**：不同步骤不要修改同一文件。"
-        "如果两个改动必须落在同一文件，合并为一个步骤。\n"
-        "   - **核心源文件（实现代码，如 src/**.py、*.ts、*.go）只允许一个步骤负责实现**——"
-        "即使加 dependencies 串行，先后重写同一实现文件仍会互相覆盖、语义验收无法对应最终 diff，"
-        "必须合并为一个步骤。\n"
+        "1. **并行互斥，串行可分层（File Overlap Rules）**：无依赖关系的并行步骤绝不能修改同一文件"
+        "（并行改同一文件必然交叉污染）。如果两个改动必须落在同一文件，加 dependencies 串行或合并为一个步骤。\n"
+        "   - **核心源文件（实现代码，如 src/**.py、*.ts、*.go）允许同一依赖链上的步骤串行分层修改**——"
+        "下游步骤会在上游产物合并后做增量编辑（如先改数据层、再接线到入口），这是合法拆分；"
+        "但并行步骤共享核心源文件是硬性禁止。\n"
         "   - 测试/配置/文档等辅助文件（tests/**.py、*.json、*.yaml、*.md）允许多个步骤先后触碰，"
         "确需分离时用 dependencies 串行执行。\n"
         "2. **独立可验证（Independent Verifiability）**：每个步骤的 verification 必须能独立运行"
@@ -567,6 +570,7 @@ EXAMPLE (3-step plan):
                 f"- steps[].files 必须在 Spec §3「需要改动」范围内，不得触及「明确不动」的区域\n"
                 f"- steps[].verification 应覆盖 Spec §5 的验收标准\n"
                 f"- Spec §7 的已知风险写入对应 step 的 risks 字段，高风险步骤 difficulty 标记为 hard\n"
+                f"- Spec 已划分模块边界时，steps 沿模块边界分解（同一模块的改动聚到一个步骤）\n"
             )
             logger.info(f"[PLAN] 注入 Task Spec 约束: {len(spec_context)} 字符")
         else:
@@ -669,7 +673,7 @@ def decompose_fallback(task: str, repo: Path, config: dict[str, Any], logger: lo
         payload = json.dumps({
             "model": local_name,
             "messages": [
-                {"role": "system", "content": "拆分为2-4个子任务。输出JSON数组，每个元素包含title、description、files_hint、agent_prompt。"},
+                {"role": "system", "content": "按改动规模拆分子任务（与主 Plan 粒度规则同口径）：单文件小改动 1 个，≤2 文件 1-2 个，多文件 2-4 个，最多 4 个。输出JSON数组，每个元素包含title、description、files_hint、agent_prompt。"},
                 {"role": "user", "content": f"任务: {task}"}
             ],
             "temperature": 0.3,

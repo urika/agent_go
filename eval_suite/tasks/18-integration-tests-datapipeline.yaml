@@ -22,7 +22,10 @@ task: |
 verification:
   - "python -m pytest tests/test_cli_integration.py tests/test_cli.py -q"
   - "python -c \"from pathlib import Path; assert Path('tests/fixtures/sample.csv').exists(); print('fixtures OK')\""
-timeout: 600
+# 2026-08-24：600 → 900。三臂 bench 实测本任务为 600s 量级——云端两臂、27B r1
+# 全部贴线撞墙（bench grace 提前 60s SIGTERM，有效 540s），27B r2 未完工被截断。
+# hard e2e 任务对慢后端（本地 4bit 串行）需更长窗口。
+timeout: 900
 
 # S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
 cost_control:

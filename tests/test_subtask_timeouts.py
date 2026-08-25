@@ -10,12 +10,8 @@
 """
 
 import json
-import threading
-import time
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 
-import pytest
+from unittest.mock import patch, MagicMock
 
 from agent_go.subtask import _run_headless
 
@@ -197,3 +193,110 @@ class TestGoalWatchdogTimeout:
                 logger, "sub-goal-to",
             )
         proc.kill.assert_called()
+
+
+# ═══════════════════════════════════════════════════════════════
+# B（2026-08-23）：goal turn 计数语义——只数「验证循环轮数」（Bash 且命令
+# 命中 AGENT_GO_VERIFY_HINT 的 token 交集 ≥2），非验证工具调用不消耗预算；
+# hint 为空回退旧口径（全部工具调用计数）；GOAL_TIMEOUT 按难度缩放。
+# ═══════════════════════════════════════════════════════════════
+
+def _tool_use_lines(tool_name: str, command: str = ""):
+    """构造一次工具调用的 stream-json 事件行（start → input delta → stop）。"""
+    lines = [json.dumps({"type": "stream_event", "event": {
+        "type": "content_block_start", "content_block": {"name": tool_name}}})]
+    if command:
+        lines.append(json.dumps({"type": "stream_event", "event": {
+            "type": "content_block_delta",
+            "delta": {"type": "input_json_delta",
+                      "partial_json": json.dumps({"command": command})}}}))
+    lines.append(json.dumps({"type": "stream_event", "event": {
+        "type": "content_block_stop"}}))
+    return lines
+
+
+_VERIFY_HINT = "python -m pytest tests/test_cache.py -q"
+_GOAL_ENV = {"AGENT_GO_GOAL_ENABLED": "1", "AGENT_GO_GOAL_MAX_TURNS": "3",
+             "AGENT_GO_VERIFY_HINT": _VERIFY_HINT}
+
+
+class TestGoalWatchdogVerifyRounds:
+    """验证轮计数：Bash 执行验证命令才消耗 max_turns 预算。"""
+
+    @patch("subprocess.Popen")
+    def test_verify_bash_counts_round(self, mock_popen, logger, tmp_path):
+        """3 次 Bash 验证调用达到 MAX_GOAL_TURNS=3 → goal_turns_exceeded kill。"""
+        events = []
+        for _ in range(3):
+            events += _tool_use_lines("Bash", "python -m pytest tests/test_cache.py -q")
+        proc = _make_alive_proc(events)
+        mock_popen.return_value = proc
+
+        with patch("agent_go.subtask.time.sleep", lambda s: None), \
+             patch("agent_go.config.load_config", return_value={}), \
+             patch("agent_go.subtask.log_event") as mock_log:
+            _run_headless("task", tmp_path, dict(_GOAL_ENV), logger, "sub-vr")
+
+        proc.kill.assert_called()
+        assert any(c.args[1] == "goal_turns_exceeded" for c in mock_log.call_args_list)
+
+    @patch("subprocess.Popen")
+    def test_non_verify_tools_not_counted(self, mock_popen, logger, tmp_path):
+        """Read / 非验证 Bash 调用不消耗轮数预算 → 正常结束不 kill。"""
+        events = []
+        for _ in range(6):  # 远超 MAX_GOAL_TURNS=3，但都不是验证调用
+            events += _tool_use_lines("Read")
+            events += _tool_use_lines("Bash", "ls -la src/")
+        events.append(json.dumps({"type": "result", "subtype": "success",
+                                  "usage": {"input_tokens": 1}}))
+        proc = _make_proc(events)
+        mock_popen.return_value = proc
+
+        with patch("agent_go.subtask.time.sleep", lambda s: None), \
+             patch("agent_go.config.load_config", return_value={}), \
+             patch("agent_go.subtask.log_event") as mock_log:
+            _run_headless("task", tmp_path, dict(_GOAL_ENV), logger, "sub-nvr")
+
+        proc.kill.assert_not_called()
+        assert not any(c.args[1] == "goal_turns_exceeded" for c in mock_log.call_args_list)
+
+    @patch("subprocess.Popen")
+    def test_no_hint_fallback_counts_all(self, mock_popen, logger, tmp_path):
+        """无 VERIFY_HINT → 回退旧口径：任意工具调用都计数（防死循环兜底）。"""
+        events = []
+        for _ in range(3):
+            events += _tool_use_lines("Read")  # Read 也计
+        proc = _make_alive_proc(events)
+        mock_popen.return_value = proc
+        env = {"AGENT_GO_GOAL_ENABLED": "1", "AGENT_GO_GOAL_MAX_TURNS": "3"}
+
+        with patch("agent_go.subtask.time.sleep", lambda s: None), \
+             patch("agent_go.config.load_config", return_value={}), \
+             patch("agent_go.subtask.log_event") as mock_log:
+            _run_headless("task", tmp_path, env, logger, "sub-nohint")
+
+        proc.kill.assert_called()
+        assert any(c.args[1] == "goal_turns_exceeded" for c in mock_log.call_args_list)
+
+    @patch("subprocess.Popen")
+    def test_goal_timeout_scales_with_difficulty(self, mock_popen, logger, tmp_path):
+        """GOAL_TIMEOUT 按 AGENT_GO_DIFFICULTY 缩放：10s × hard(2.5) → limit=25。"""
+        proc = _make_alive_proc()
+        mock_popen.return_value = proc
+
+        with patch("agent_go.subtask.time.sleep", lambda s: None), \
+             patch("agent_go.subtask.time.time", side_effect=_time_factory()), \
+             patch("agent_go.config.load_config", return_value={}), \
+             patch("agent_go.subtask.log_event") as mock_log:
+            _run_headless(
+                "task", tmp_path,
+                {"AGENT_GO_GOAL_ENABLED": "1", "AGENT_GO_GOAL_TIMEOUT": "10",
+                 "AGENT_GO_DIFFICULTY": "hard"},
+                logger, "sub-goal-scale",
+            )
+
+        proc.kill.assert_called()
+        timeout_events = [c for c in mock_log.call_args_list
+                          if c.args[1] == "goal_timeout"]
+        assert timeout_events, "应触发 goal_timeout"
+        assert timeout_events[0].args[2]["limit"] == 25  # 10 × 2.5

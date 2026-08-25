@@ -1,0 +1,22 @@
+{
+  "available": true,
+  "proxy_base_url": "http://localhost:4000",
+  "ctx_config": {
+    "diag_enabled": true,
+    "engine_enabled": false,
+    "compression_mode": "semantic",
+    "compress_enabled": true,
+    "compression_profile": "aggressive",
+    "bm25_enabled": true,
+    "feedback_injection_enabled": false,
+    "epoch_S": null,
+    "window_K": null
+  },
+  "route_config": {
+    "route_enabled": true,
+    "cloud_model": "deepseek-v4-flash",
+    "cloud_key_set": true,
+    "cloud_concurrent": 2
+  },
+  "captured_at": "2026-08-24T07:15:06.626541+00:00"
+}

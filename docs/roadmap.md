@@ -490,7 +490,7 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 ### 能力清单（按自治度递进，每级设产品价值门禁）
 
 **阶段 A — 补齐工程闭环（最高优先）**
-- A1 文件所有权约束：同一核心文件只允许一个 subtask 负责（规划期 + L1 门禁强制）。✅ 已实现（88d0c5a，`_is_core_file` + `core_file_shared_ownership` blocking）。
+- A1 文件所有权约束：同一核心文件只允许一个 subtask 负责（规划期 + L1 门禁强制）。✅ 已实现（88d0c5a，`_is_core_file` + `core_file_shared_ownership` blocking）。⚠️ 2026-08-24 降级为 warning（ISSUE-44：串行 merge 机制下分层共享合法，blocking 误杀合法计划，三臂 bench 10 run 0 执行即 BLOCKED）；并行无序共享仍 blocking（`file_overlap_without_dependency`）。
 - A2 函数级验收契约：subtask 验收绑定函数/行为级条件（`_extract_verification_commands` 扩展）。✅ 已实现（f6e2cb0，`classify_verification_scope` 五级锚定 + suite 级弱锚定告警）。
 - A3 未提交基线处理：启动检测 dirty worktree，`--baseline` 显式提交或强提示。✅ 已实现（`get_dirty_files`/`commit_baseline`；`--allow-dirty`/`--baseline`；headless 默认 fail-safe 中止；meta 记录 `baseline_dirty`/`baseline_action`）。
 - A4 M4 goal 回溯（见 §7.5，✅ accepted 2026-08-20）。

@@ -522,6 +522,16 @@ def _tool_start(name: str) -> str:
     })
 
 
+def _tool_stop() -> str:
+    """content_block_stop（工具调用结束）事件行——goal 轮数在 stop 处计数（B 语义）。"""
+    return _stream_event({"type": "content_block_stop"})
+
+
+def _tool_call(name: str) -> list:
+    """一次完整工具调用（start + stop）：goal watchdog 计数的最小事件对。"""
+    return [_tool_start(name), _tool_stop()]
+
+
 def _make_proc(stdout_lines=(), stderr_lines=(), returncode=0, pid=42000):
     """构造 mock claude 进程：stdout/stderr 逐行吐出给定内容后 EOF，poll 立即返回。"""
     mock_proc = MagicMock()
@@ -780,7 +790,8 @@ class TestGoalWatchdog:
         env = {"AGENT_GO_GOAL_ENABLED": "1",
                "AGENT_GO_GOAL_MAX_TURNS": "100",
                "AGENT_GO_GOAL_TIMEOUT": "600"}
-        mock_popen.return_value = _make_proc([_tool_start("Bash") for _ in range(10)])
+        mock_popen.return_value = _make_proc(
+            [line for _ in range(10) for line in _tool_call("Bash")])
         handler = _ListHandler()
         logger.addHandler(handler)
         try:
@@ -800,7 +811,7 @@ class TestGoalWatchdog:
                "AGENT_GO_GOAL_TIMEOUT": "600"}
         consumed = threading.Event()
         mock_popen.return_value = _make_watchdog_proc(
-            [_tool_start("Bash") for _ in range(5)], consumed
+            [line for _ in range(5) for line in _tool_call("Bash")], consumed
         )
         handler = _ListHandler()
         logger.addHandler(handler)

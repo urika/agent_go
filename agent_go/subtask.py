@@ -155,6 +155,30 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         except ValueError:
             pass
 
+    # B（2026-08-23）：goal watchdog 计数语义修正——数「验证循环轮数」而非
+    # 「工具调用次数」。原口径下 worker 读文件/探索也消耗 max_turns 预算，
+    # e2e hard 任务（多模块）正常干活即撞限（decision suite add-caching-layer
+    # 两臂四连挂）。现在仅 Bash 调用且命令与验证命令（AGENT_GO_VERIFY_HINT，
+    # executor 注入的 path 重写后文本）token 交集 ≥2 时计一轮；
+    # hint 为空回退旧口径（防死循环兜底不丢）。
+    _verify_hint = (env.get("AGENT_GO_VERIFY_HINT") or "").lower()
+    _hint_tokens = set(re.findall(r"[a-z0-9_./-]+", _verify_hint)) if _verify_hint else set()
+
+    def _is_verify_round(tool_name: str, ti: str) -> bool:
+        if not _hint_tokens:
+            return True  # 无验证命令信息 → 旧口径：所有工具调用计数
+        if tool_name != "Bash":
+            return False
+        m = re.search(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)', ti)
+        cmd = (m.group(1) if m else ti).lower()
+        cmd_tokens = set(re.findall(r"[a-z0-9_./-]+", cmd))
+        return len(_hint_tokens & cmd_tokens) >= 2
+
+    # B 配套：GOAL_TIMEOUT 按难度缩放（hard e2e 全程 10-30 分钟，600s 必误杀）。
+    # 作用于最终生效值（含 env/磁盘配置），与 retry_timeout 的难度系数口径一致。
+    _goal_diff = (env.get("AGENT_GO_DIFFICULTY") or "medium").lower()
+    GOAL_TIMEOUT = int(GOAL_TIMEOUT * {"easy": 1.0, "medium": 1.5, "hard": 2.5}.get(_goal_diff, 1.5))
+
     PFX = f"[{sub_id}]"
     if active_pids is None:
         active_pids = set()
@@ -413,11 +437,6 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                         current_tool[0] = tool_name
                         tool_input[0] = ""
                         logger.info(f"{PFX} [{tool_name}] ...")
-                        # Phase 2: 统计 goal 工具调用轮数
-                        if GOAL_WATCHDOG_ENABLED:
-                            goal_turn_count[0] += 1
-                            if goal_turn_count[0] % 5 == 0:
-                                logger.info(f"{PFX} goal turn count: {goal_turn_count[0]}/{MAX_GOAL_TURNS}")
 
                 elif it == "content_block_delta":
                     delta = inner.get("delta", {})
@@ -436,6 +455,13 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                         ti = tool_input[0]
                         preview = ti[:200] if len(ti) > 200 else ti
                         logger.debug(f"{PFX} [{current_tool[0]}] 完成: {preview}")
+                        # Phase 2/B: goal 轮数统计——仅「验证循环」计数（Bash + 命令命中
+                        # 验证 hint 的 token 交集）；读文件/探索性调用不消耗预算。
+                        # 计数点在 stop（此时 tool_input 已完整，start 时 input 尚未到达）。
+                        if GOAL_WATCHDOG_ENABLED and _is_verify_round(current_tool[0], ti):
+                            goal_turn_count[0] += 1
+                            if goal_turn_count[0] % 5 == 0:
+                                logger.info(f"{PFX} goal turn count: {goal_turn_count[0]}/{MAX_GOAL_TURNS}")
                         # P1-5: 提取工具活动快照（供进度行消费）
                         if shared_activity is not None:
                             _target = _extract_activity_target(current_tool[0], ti)

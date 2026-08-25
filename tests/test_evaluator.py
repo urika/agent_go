@@ -159,6 +159,47 @@ class TestGetWorktreeDiff:
         assert "old.py" not in diff_with_base, "base_commit 不应包含基座前的历史"
         assert "legacy.py" not in diff_with_base
 
+    def test_pre_work_head_excludes_upstream_changes(self, tmp_path):
+        """ISSUE-51 场景：base=pre_work_head（上游 merge 后 HEAD）时，累积 diff 只含
+        本子任务改动，不含上游子任务 merge 进来的改动。
+
+        复现 27B 臂假失败：sub-2 的 base 若取任务级 base_commit，上游 sub-1 改的
+        models.py 会进入 diff，judge 误判 sub-2 违反「仅允许修改 cli.py」约束。
+        """
+        import subprocess
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True, check=True)
+        # 任务级基点（run 启动时）
+        (repo / "models.py").write_text("class Task:\n    pass\n", encoding="utf-8")
+        (repo / "cli.py").write_text("def main():\n    pass\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "fixture init"], cwd=str(repo), capture_output=True, check=True)
+        task_base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                                   capture_output=True, text=True, check=True).stdout.strip()
+        # 上游 sub-1 的改动（merge 进 sub-2 worktree）
+        (repo / "models.py").write_text("class Task:\n    priority = 0\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "sub-1: add priority field"], cwd=str(repo), capture_output=True, check=True)
+        # pre_work_head：上游 merge 完成后、claude 启动前
+        pre_work_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                                       capture_output=True, text=True, check=True).stdout.strip()
+        # 本子任务 sub-2 的改动（已提交，工作区干净）
+        (repo / "cli.py").write_text("def main():\n    print('filter')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "sub-2: add filter command"], cwd=str(repo), capture_output=True, check=True)
+
+        # 任务级 base：上游 models.py 改动混进 diff（假失败根源）
+        diff_task_base = _get_worktree_diff(repo, base_commit=task_base)
+        assert "models.py" in diff_task_base, "任务级 base 会含上游改动（旧口径）"
+        # pre_work_head：只含本子任务 cli.py 改动
+        diff_pwh = _get_worktree_diff(repo, base_commit=pre_work_head)
+        assert "cli.py" in diff_pwh
+        assert "models.py" not in diff_pwh, "pre_work_head 应排除上游 merge 产物"
+        assert "priority" not in diff_pwh
+
 
 # ═══════════════════════════════════════════════════════════════
 # evaluate_semantic 主体测试（mock LLM API + git diff）
@@ -211,6 +252,21 @@ class TestEvaluateSemantic:
         assert result["passed"] is False
         assert result["reason"] == "缺少文档更新"
         assert result["suggestions"] == "补充 README 说明"
+
+    def test_prefers_pre_work_head_as_diff_base(self, tmp_path, logger):
+        """ISSUE-51：config 同时有 _pre_work_head 与 _base_commit 时，
+        语义评估 diff 的 base 应取 _pre_work_head；无 _pre_work_head 时回退 _base_commit。"""
+        config = _make_eval_config(_base_commit="task-base-123", _pre_work_head="pre-work-456")
+        with patch("agent_go.evaluator._get_worktree_diff", return_value="diff --git a/f.py") as mock_diff, \
+             patch("agent_go.evaluator.call_api", return_value=_PASS_JSON):
+            evaluate_semantic(_EVAL_SUBTASK, tmp_path, "pytest tests/", [], config, logger)
+        assert mock_diff.call_args.kwargs.get("base_commit") == "pre-work-456"
+
+        config2 = _make_eval_config(_base_commit="task-base-123")
+        with patch("agent_go.evaluator._get_worktree_diff", return_value="diff --git a/f.py") as mock_diff2, \
+             patch("agent_go.evaluator.call_api", return_value=_PASS_JSON):
+            evaluate_semantic(_EVAL_SUBTASK, tmp_path, "pytest tests/", [], config2, logger)
+        assert mock_diff2.call_args.kwargs.get("base_commit") == "task-base-123"
 
     def test_api_failure_fallback_not_passed(self, tmp_path, logger):
         """API 调用抛异常时不假通过：返回 failed，cost 为 0，reason 含错误信息。"""

@@ -1,6 +1,6 @@
 """S12-P2 G5/G6/P2：规划期分解质量检测测试（欠分解 + 过度分解 + 验证命令降级 + 函数引用检查）。"""
 from agent_go.planning import (
-    check_under_decomposition, check_over_decomposition,
+    check_under_decomposition,
     DIFFICULTY_BASE_SUBTASKS, validate_plan_quality,
     check_agent_prompt_functions,
 )
@@ -264,73 +264,6 @@ def test_valid_commands_no_warning():
     assert len(result["blocking_issues"]) == 0
 
 
-# ── G6 过度分解检测 ───────────────────────────────────────────
-
-def test_over_decomposition_few_files_many_subtasks():
-    """G6: ≤2 个文件但 ≥3 个子任务 → 过度分解告警。"""
-    subtasks = [
-        {"id": "sub-1", "files": ["src/utils.py"], "difficulty": "easy"},
-        {"id": "sub-2", "files": ["src/utils.py"], "difficulty": "easy"},
-        {"id": "sub-3", "files": ["tests/test_utils.py"], "difficulty": "easy"},
-    ]
-    # 2 个文件（src/utils.py, tests/test_utils.py），3 个子任务 → 过度分解
-    warns = _capture_warnings(lambda lg: check_over_decomposition(subtasks, logger=lg))
-    assert len(warns) >= 1
-    assert any("G6" in w and "过度分解" in w for w in warns)
-
-
-def test_over_decomposition_all_easy_many_subtasks():
-    """G6: 全线 easy 但 ≥3 个子任务 → 过度分解告警。"""
-    subtasks = [
-        {"id": "sub-1", "difficulty": "easy", "files": ["a.py"]},
-        {"id": "sub-2", "difficulty": "easy", "files": ["b.py"]},
-        {"id": "sub-3", "difficulty": "easy", "files": ["c.py"]},
-    ]
-    # 3 个文件（>2），文件数不触发，但全线 easy + 3 子任务 → 仍应告警
-    warns = _capture_warnings(lambda lg: check_over_decomposition(subtasks, logger=lg))
-    assert len(warns) >= 1
-    assert any("G6" in w and "过度分解" in w for w in warns)
-
-
-def test_no_over_decomposition_for_large_task():
-    """G6: 多文件 hard 子任务不应触发过度分解告警。"""
-    subtasks = [
-        {"id": "sub-1", "difficulty": "hard", "files": ["src/auth.py", "src/db.py"]},
-        {"id": "sub-2", "difficulty": "hard", "files": ["src/api.py", "src/models.py"]},
-        {"id": "sub-3", "difficulty": "medium", "files": ["tests/test_auth.py"]},
-    ]
-    # 多文件 + mixed difficulty → 不触发
-    warns = _capture_warnings(lambda lg: check_over_decomposition(subtasks, logger=lg))
-    assert warns == []
-
-
-def test_no_over_decomposition_two_subtasks():
-    """G6: <3 个子任务不触发过度分解检测。"""
-    subtasks = [
-        {"id": "sub-1", "difficulty": "easy", "files": ["src/utils.py"]},
-        {"id": "sub-2", "difficulty": "easy", "files": ["tests/test_utils.py"]},
-    ]
-    warns = _capture_warnings(lambda lg: check_over_decomposition(subtasks, logger=lg))
-    assert warns == []
-
-
-def test_over_decomposition_empty():
-    assert check_over_decomposition([]) is False
-
-
-def test_over_decomposition_with_total_files_param():
-    """G6: 显式传入 total_files 参数应参与文件数计算。"""
-    subtasks = [
-        {"id": "sub-1", "difficulty": "easy"},
-        {"id": "sub-2", "difficulty": "easy"},
-        {"id": "sub-3", "difficulty": "easy"},
-    ]
-    # 子任务不指定 files，但 total_files=2 → 应触发过度分解
-    warns = _capture_warnings(lambda lg: check_over_decomposition(subtasks, total_files=2, logger=lg))
-    assert len(warns) >= 1
-    assert any("G6" in w for w in warns)
-
-
 # ═══════════════════════════════════════════════════════════════
 # P2: agent_prompt 函数引用静态检查
 # ═══════════════════════════════════════════════════════════════
@@ -492,28 +425,35 @@ def test_file_overlap_with_dependency_is_warning():
     assert not any(i["type"] == "file_overlap_without_dependency" for i in full["blocking_issues"])
 
 
-def test_core_file_shared_ownership_is_blocking():
-    """A1: 核心源文件被多个子任务在同一依赖链上先后修改 → blocking。"""
+def test_core_file_shared_ownership_is_warning_not_blocking():
+    """A1（ISSUE-44 降级）: 核心源文件被同链串行子任务共享 → warning，不阻断、不计冲突。
+
+    串行 merge 机制下分层共享是合法甜区（下游 merge 上游 tag 后增量编辑）；
+    并行无序共享才阻断（file_overlap_without_dependency）。
+    """
     subtasks = [
         {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests"},
         {"id": "sub-2", "files": ["src/storage.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
     ]
     result = check_subtask_file_overlap(subtasks)
-    assert any(i["type"] == "core_file_shared_ownership" for i in result["issues"])
+    assert result["issues"] == []
+    assert any(w["type"] == "core_file_shared_ownership" for w in result["warnings"])
     full = validate_plan_quality(subtasks)
-    assert full["status"] == "blocked"
-    assert any(i["type"] == "core_file_shared_ownership" for i in full["blocking_issues"])
+    assert full["status"] == "warning"
+    assert not any(i["type"] == "core_file_shared_ownership" for i in full["blocking_issues"])
+    assert any(w["type"] == "core_file_shared_ownership" for w in full["warnings"])
+    assert full["plan_conflict_count"] == 0
 
 
-def test_core_file_shared_ownership_is_repairable():
-    """A1: core_file_shared_ownership 属于可修复问题类型，进入 preflight 修订。"""
+def test_core_file_shared_ownership_not_repairable():
+    """A1（ISSUE-44 降级）: 不再属于可修复问题类型，不进入 preflight 修订/阻断。"""
     subtasks = [
         {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests"},
         {"id": "sub-2", "files": ["src/storage.py"], "depends_on": ["sub-1"], "verification": "pytest tests"},
     ]
     full = validate_plan_quality(subtasks)
     repairable_types = {i["type"] for i in full["repairable_issues"]}
-    assert "core_file_shared_ownership" in repairable_types
+    assert "core_file_shared_ownership" not in repairable_types
 
 
 def test_is_core_file_classification():
@@ -779,3 +719,89 @@ def test_build_goal_contract_empty_subtasks():
     contract = build_goal_contract("task", [], delivery_required=False)
     assert contract["delivery_required"] is False
     assert contract["completion_evidence"] == []
+
+
+# ── 第二刀（2026-08-24）：L1.5 符号级冲突入门 / G5 仓库规模封顶 / REQ-AC 覆盖率分列 ──
+
+def _write_symbol_repo(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir(parents=True)
+    (src / "storage.py").write_text(
+        "def save():\n    pass\n\ndef load():\n    pass\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_symbol_conflict_parallel_is_blocking(tmp_path):
+    """ISSUE-45：无依赖关系的子任务并行修改同一顶层符号 → blocking + repairable。"""
+    repo = _write_symbol_repo(tmp_path)
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "description": "修改 save 增加缓存",
+         "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/storage.py"], "description": "重构 save 的批量写入路径",
+         "verification": "pytest tests"},
+    ]
+    full = validate_plan_quality(subtasks, repo=repo)
+    assert any(i["type"] == "symbol_conflict" for i in full["blocking_issues"])
+    assert full["status"] == "blocked"
+    assert "symbol_conflict" in {i["type"] for i in full["repairable_issues"]}
+    assert full["plan_conflict_count"] >= 1
+
+
+def test_symbol_conflict_serial_chain_is_warning(tmp_path):
+    """ISSUE-45：同一依赖链上的串行符号修改 → warning，不阻断（与 ISSUE-44 同哲学）。"""
+    repo = _write_symbol_repo(tmp_path)
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "description": "修改 save 增加缓存",
+         "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/storage.py"], "depends_on": ["sub-1"],
+         "description": "在 save 缓存基础上接线到 CLI", "verification": "pytest tests"},
+    ]
+    full = validate_plan_quality(subtasks, repo=repo)
+    assert not any(i["type"] == "symbol_conflict" for i in full["blocking_issues"])
+    assert any(w["type"] == "symbol_conflict_with_dependency" for w in full["warnings"])
+    assert full["status"] == "warning"
+
+
+def test_symbol_conflict_no_repo_skipped():
+    """无 repo 时符号级检测不生效（fail-open），其余检查不受影响。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/storage.py"], "verification": "pytest tests"},
+        {"id": "sub-2", "files": ["src/models.py"], "verification": "pytest tests"},
+    ]
+    full = validate_plan_quality(subtasks)
+    assert not any(i["type"] == "symbol_conflict" for i in full["blocking_issues"])
+
+
+def test_under_decomposition_capped_by_file_count():
+    """ISSUE-49：有效文件数 2 < hard 基准 3 → 阈值封顶为 2，2 个子任务不告警。"""
+    subtasks = [
+        {"id": "sub-1", "difficulty": "hard", "files": ["src/models.py"]},
+        {"id": "sub-2", "difficulty": "medium", "files": ["src/cli.py"]},
+    ]
+    warns = _capture_warnings(lambda lg: check_under_decomposition(subtasks, logger=lg))
+    assert warns == []
+
+
+def test_under_decomposition_not_capped_when_files_sufficient():
+    """ISSUE-49：有效文件数 5 ≥ 基准 3 → 阈值不封顶，2 个子任务仍告警。"""
+    subtasks = [
+        {"id": "sub-1", "difficulty": "hard",
+         "files": ["src/a.py", "src/b.py", "src/c.py"]},
+        {"id": "sub-2", "difficulty": "medium",
+         "files": ["src/d.py", "src/e.py"]},
+    ]
+    warns = _capture_warnings(lambda lg: check_under_decomposition(subtasks, logger=lg))
+    assert len(warns) >= 1
+    assert any("G5" in w for w in warns)
+
+
+def test_requirement_acceptance_coverage_split():
+    """ISSUE-50③：REQ/AC 覆盖率分列——只覆盖 REQ 时 req=1.0、ac=0.0，并集口径仍阻断。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/a.py"], "verification": "pytest tests",
+         "requirement_ids": ["REQ-1"]},
+    ]
+    full = validate_plan_quality(subtasks, requirements=["REQ-1", "AC-1"])
+    assert full["plan_requirement_coverage"] == 1.0
+    assert full["plan_acceptance_coverage"] == 0.0
+    assert any(i["type"] == "requirement_coverage_incomplete" for i in full["blocking_issues"])

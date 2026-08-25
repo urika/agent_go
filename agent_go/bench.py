@@ -760,6 +760,9 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
              "--yes", "--headless", "--preserve-worktrees",
              "--parallel", "1",   # S10-P2：顺序执行，消除并发对 elapsed/cost 的干扰
              "--no-cache",        # 质量校验：禁用 plan cache，确保 planner metering 完整采集（planner_model 字段）
+             "--no-goal",         # A 隔离（2026-08-23）：goal policy auto 在 headless+hard 下会静默
+                                 # 启用 /goal 循环 + watchdog（20 次工具调用即杀），e2e hard 任务
+                                 # 必撞限（add-caching-layer 四连挂）——bench 对照不引入 goal 变量
              "--config", tmp_config],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=str(workspace_dir),
@@ -988,26 +991,34 @@ def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = No
 def _subtask_semantic_ok(subtask_result: dict) -> Optional[bool]:
     """判断单个子任务是否通过语义评估（verification_results 中 type=='semantic'）。
 
-    语义评估执行失败被跳过时视为 None（未执行），而不是 False —— 否则会错误地
-    「因 API 故障而判失败」，污染 binary_pass。识别跳过的两种信号：
+    verification_results 跨重试累积：每个重试轮次都会追加自己的 semantic 条目。
+    取**最后一个有效**判定（反映最终代码状态），而非首个——否则首轮语义失败、
+    重试后通过的子任务（status=completed）会被陈旧的首次判定误判为 semantic_pass=False
+    （2026-08-24 三臂 bench 实测：27B 臂 refactor-to-dict / add-simple-caching
+    两 run 因此误判 binary_pass=False）。
+
+    语义评估执行失败被跳过的条目**不参与**判定（视为未执行），而不是 False ——
+    否则会错误地「因 API 故障而判失败」，污染 binary_pass。识别跳过的两种信号：
       1. evaluator_skipped=True 字段（新版本 evaluator 返回）
       2. reason 含「API 调用失败 / 已跳过 / 失败（已跳过）」特征（旧版本 executor
          写入 verification_results 时丢弃了 evaluator_skipped，只留 reason 特征）
 
     Returns:
-        True/False 若有有效语义评估结果；None 若未启用、无结果或评估被跳过。
+        最后一个有效 semantic 条目的 passed（True/False）；无有效结果 → None。
     """
+    verdict: Optional[bool] = None
     for vr in (subtask_result.get("verification_results") or []):
-        if isinstance(vr, dict) and vr.get("type") == "semantic":
-            # 跳过信号 1：evaluator_skipped 字段
-            if vr.get("evaluator_skipped"):
-                return None
-            # 跳过信号 2：reason 特征（API 故障 / 显式跳过）
-            reason = (vr.get("reason") or "").lower()
-            if any(k in reason for k in ("api 调用失败", "api 请求失败", "调用失败", "已跳过", "failed (skipped)", "评估失败（已跳过）")):
-                return None
-            return bool(vr.get("passed"))
-    return None
+        if not (isinstance(vr, dict) and vr.get("type") == "semantic"):
+            continue
+        # 跳过信号 1：evaluator_skipped 字段
+        if vr.get("evaluator_skipped"):
+            continue
+        # 跳过信号 2：reason 特征（API 故障 / 显式跳过）
+        reason = (vr.get("reason") or "").lower()
+        if any(k in reason for k in ("api 调用失败", "api 请求失败", "调用失败", "已跳过", "failed (skipped)", "评估失败（已跳过）")):
+            continue
+        verdict = bool(vr.get("passed"))
+    return verdict
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1268,6 +1279,12 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     # cleanup_race 计通过、预算熔断单列、infra 不计能力失败。
     # 优先采用运行时写入的子任务级 kill_reason（G1：subtask/executor/pipeline 决策点写），
     # 无运行时记录时按数据反推（方案 B 兜底）。
+    # plan 质量门拦截（plan_quality_blocked）：planner 计划未过确定性预检，
+    # 未进入执行（results 为空）——harness/planner 侧事件，能力观测未发生，
+    # 单列 kill_reason，不计 worker 能力失败（2026-08-24 三臂 bench 实测：
+    # 三臂共 10 个 run 被 core_file_shared_ownership 门拦截后被误归为
+    # interrupted_or_unknown 计入模型失败）。
+    _plan_gate_blocked = meta.get("failure_reason") == "plan_quality_blocked"
     _runtime_kill = [r.get("kill_reason") for r in results if r.get("kill_reason")]
     if _runtime_kill:
         # 任务级取子任务 kill_reason 中最"严重"的一个。
@@ -1289,6 +1306,8 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         kill_reason = "cleanup_race"
     elif all_passed:
         kill_reason = "none"
+    elif _plan_gate_blocked:
+        kill_reason = "plan_gate_blocked"
     elif timed_out:
         kill_reason = "stuck_or_hardtimeout"
     elif (total_cost or 0) == 0:
@@ -1303,6 +1322,11 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         [classify_failure(r, meta, timed_out=timed_out) for r in results],
         {**meta, "delivery_failed": delivery["delivery_failed"]},
     )
+    if _plan_gate_blocked:
+        # 覆盖 cli 写入的 meta 级 failure_class（runtime 侧保留「验证生成缺陷」
+        # 语义不变）；bench 能力口径中 plan 门拦截 = 观测未发生 → system_error
+        # （FAILURE_POLICY: capability_failure=False）。
+        failure_class = "system_error"
     if not failure_class and timed_out and not _cleanup_race:
         failure_class = "timeout"
     if not failure_class and exit_code != 0 and not results:

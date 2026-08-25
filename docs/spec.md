@@ -109,11 +109,12 @@ _sanitize_preserved_worktree(wt) → S12 失败清理：净化保留 worktree（
 ```
 estimate_task_duration(subtasks, parallel, tasks_dir)     → 历史子任务耗时中位数 × 拓扑波次 (M4)
 check_under_decomposition(subtasks, logger)               → G5 欠分解检测（hard + 子任务数<阈值 → 告警）
-check_over_decomposition(subtasks, total_files, logger)   → G6 过度分解检测（≤2文件 ≥3任务 或 全线easy ≥3任务 → 告警）
 check_difficulty_mismatch(subtasks, logger)               → CR-G4 难度交叉核对（planner vs 启发式跨两档告警）
 difficulty_hint(subtask)                                   → CR-G4 启发式难度推断（关键词 + 多文件信号）
 check_agent_prompt_functions(subtasks, repo, logger)      → P2 agent_prompt 函数引用静态检查（对比项目源码）
-validate_plan_quality(subtasks, requirements, repo)       → 确定性预执行检查（scope/dep/requirement + P2 集成）
+validate_plan_quality(subtasks, requirements, repo)       → 确定性预执行检查（scope/dep/requirement + P2 集成；
+                                                             含 G6 过度分解 blocking：≥3 子任务且 ≤2 文件；
+                                                             A1 核心文件串行共享为 warning 级，ISSUE-44）
 ```
 
 ## executor.py — 子任务执行器

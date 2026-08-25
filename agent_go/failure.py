@@ -35,6 +35,9 @@ KILL_REASON_CLASS = {
     "cancelled": "user_cancelled",
     "delivery_failed": "delivery_failure",
     "interrupted_or_unknown": "system_error",
+    # plan 质量门拦截（planner 计划未过确定性预检，未进入执行）：harness/planner
+    # 侧事件，能力观测未发生 → system_error（capability_failure=False）。
+    "plan_gate_blocked": "system_error",
 }
 
 # Capability denominator excludes failures where the harness or user, rather
@@ -150,7 +153,6 @@ _PLANNER_BLOCKING_TYPES = frozenset({
     "spec_do_not_touch_violation",
     "scope_conflict",
     "file_overlap_without_dependency",
-    "core_file_shared_ownership",
 })
 
 # 功能层：模型/验证能力不足的 failure_class
