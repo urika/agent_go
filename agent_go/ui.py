@@ -608,7 +608,8 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
                      min_difficulty: str = "") -> list[dict[str, Any]]:
     """Plan → 子任务，注入 Agent Prompt、资源清单、依赖关系。
     同时应用角色-Skill 映射规则进行兜底匹配。
-    default_skills: 任务级自动发现的 skill 名列表，用于回填无 skill 的 subtask。
+    default_skills: 任务级自动发现的 skill 名列表，用于回填无 skill 的 subtask
+                    （回填前经子任务级相关性复检，ISSUE-53）。
     disable_rule_skills: True 时完全禁用 role_skill_map + default_skills 的 skill 注入
                          （仅保留 LLM 显式声明的 skills），用于获取纯净基线。
     task_type_override: CR-G3 任务级 task_type（来自 Spec `task_type:` 字段），
@@ -666,9 +667,26 @@ def plan_to_subtasks(plan: dict[str, Any], logger: logging.Logger, repo: Optiona
             # 回填任务级自动发现的 skill：subtask 无 skill 时补上 default_skills
             _merged_skills = list(rule_result["skills"])
             if default_skills and not _merged_skills:
-                _merged_skills = [s for s in default_skills if s in {s["name"] for s in installed}]
+                # ISSUE-53：任务级匹配 ≠ 子任务相关（如「修 bug + 发飞书通知」，
+                # lark-im 只应进发通知的子任务）。回填前用子任务文本复检，
+                # 只保留子任务级也命中的；复检异常时不回填（注入是可选增强）。
+                _installed_names = {s["name"] for s in installed}
+                try:
+                    from .skills import discover_skills as _rediscover
+                    _sub_text = " ".join([
+                        str(step.get("title", "")), str(step.get("description", "")),
+                        str(step.get("agent_prompt", ""))])
+                    _sub_hits = {s.name for s in _rediscover(
+                        _sub_text, repo, max_skills=len(default_skills))}
+                except Exception as _re_err:
+                    _sub_hits = set()
+                    logger.warning(f"[skill_backfill] {subtask_id}: 子任务级复检失败（不回填）: {_re_err}")
+                _merged_skills = [s for s in default_skills
+                                  if s in _installed_names and s in _sub_hits]
                 if _merged_skills:
                     logger.info(f"[skill_backfill] {subtask_id}: 无 skill，回填默认 {_merged_skills}")
+                else:
+                    logger.info(f"[skill_backfill] {subtask_id}: 任务级默认 {default_skills} 未通过子任务级复检，不回填")
 
         # 自动检测缓存相关步骤，追加测试隔离提示
         _risks = list(step.get("risks", []))

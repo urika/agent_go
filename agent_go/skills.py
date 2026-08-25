@@ -267,9 +267,13 @@ def discover_skills(task: str, project_root: Optional[Path] = None, max_skills: 
     1. 计算每个词在**当前已安装 skill 集合**中的文档频率 df（出现在几个 skill 描述中）。
     2. 匹配分 = Σ 1/df：只出现在一个 skill 的专属词（如「风控」「银行」）得高分，
        出现在大量 skill 的泛词（如「生成」「整理」「报告」）得分趋近 0。
-    3. 硬门槛：共同词 ≥2 且 IDF 分 ≥1.0（相当于至少一个专属词）。
+    3. 硬门槛：共同词 ≥2 且 IDF 分 ≥2.0（约相当于至少两个专属词命中）。
        —— 避免「银行业智能风控报告」任务误配 lark-workflow-meeting-summary
        （报告/整理/生成 均为泛词，IDF 分 0.75 <1.0）或 byted-ark-seedance-skill。
+       门槛从 1.0 提到 2.0（ISSUE-53）：中文 bigram 硬切产生的碎片词
+       （「当用」「中的」）与同形异义巧合词（cmd_list 函数「签名」 vs 通讯录
+       个人「签名」）都是 df=1，旧门槛下单个巧合词即破门；2.0 要求两个
+       独立证据，单巧合不再误配。
     4. 按 IDF 分降序取前 max_skills 个。
     """
     all_skills = list_skills(project_root)
@@ -284,6 +288,9 @@ def discover_skills(task: str, project_root: Optional[Path] = None, max_skills: 
         "and", "the", "a", "an", "of", "for", "in", "with", "to",
         "py", "str", "txt", "all", "any", "its", "it", "are", "is",
         "be", "by", "on", "at", "as", "or", "not", "no", "each",
+        # 中文语法碎片/高频泛词（ISSUE-53）：bigram 硬切的产物或
+        # lark 系 skill 通用句式（「当用户…时」），无语义区分度
+        "当用", "户提", "时的", "中的", "一个", "当前", "用户", "以及", "如果",
     }
 
     # 文档频率：词 → 出现在多少个 skill description 中（本集合内计算，测试隔离）
@@ -300,11 +307,13 @@ def discover_skills(task: str, project_root: Optional[Path] = None, max_skills: 
         overlap = (desc_words & task_words) - _skip
         # 排除纯数字（任务编号/规则序号，无语义），防数字误配
         overlap = {w for w in overlap if not w.isdigit()}
+        # 排除单字符碎片（bigram 尾部残留，如「为」），无语义区分度（ISSUE-53）
+        overlap = {w for w in overlap if len(w) >= 2}
         if len(overlap) < 2:
             continue
         # IDF 加权分：专属词（df 小）主导，泛词（df 大）趋零
         score = sum(1.0 / doc_freq[w] for w in overlap)
-        if score < 1.0:
+        if score < 2.0:
             continue
         s = load_skill(info["name"], project_root)
         if s:

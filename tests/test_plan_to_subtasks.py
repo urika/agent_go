@@ -141,3 +141,58 @@ def test_cognitive_and_permission_defaults(tmp_path, logger):
     assert subs[0]["allowed_tools"] == []
     assert subs[0]["permission_mode"] == ""
     assert subs[0]["task_type"] is None
+
+
+class TestSkillBackfillRecheck:
+    """ISSUE-53：default_skills（任务级自动匹配）回填前需通过子任务级相关性复检。
+
+    实测案例：Python CLI 修复任务被任务级匹配的三个 lark skill 全量回填进
+    子任务。修复后：子任务文本复检不命中的不回填，命中的才回填。
+    """
+
+    @staticmethod
+    def _make_skill(tmp_path, name, description):
+        d = tmp_path / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n# {name}\nbody",
+            encoding="utf-8")
+
+    @staticmethod
+    def _plan(title, desc):
+        return {"shared_resources": {}, "dependencies": {},
+                "steps": [{"id": 1, "title": title, "description": desc,
+                           "files": ["src/cli.py"], "verification": "",
+                           "skills": [], "agent_prompt": ""}]}
+
+    def test_unrelated_default_skills_not_backfilled(self, tmp_path, logger):
+        from unittest.mock import patch
+        self._make_skill(tmp_path, "lark-im",
+                         "飞书即时通讯：当用户要发消息、查看或搜索聊天记录时使用")
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            subtasks = plan_to_subtasks(
+                self._plan("修复 cmd_list 默认状态", "修改 src/cli.py 的 cmd_list 函数签名"),
+                logger, repo=None, default_skills=["lark-im"])
+        assert subtasks[0]["skills"] == []
+
+    def test_related_default_skills_backfilled(self, tmp_path, logger):
+        from unittest.mock import patch
+        self._make_skill(tmp_path, "lark-im",
+                         "飞书即时通讯：当用户要发消息、查看或搜索聊天记录时使用")
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            subtasks = plan_to_subtasks(
+                self._plan("发送飞书消息通知", "完成后发送飞书消息通知相关人员"),
+                logger, repo=None, default_skills=["lark-im"])
+        assert subtasks[0]["skills"] == ["lark-im"]
+
+    def test_recheck_failure_skips_backfill(self, tmp_path, logger):
+        """复检异常时不回填（注入是可选增强，宁缺毋滥）"""
+        from unittest.mock import patch
+        self._make_skill(tmp_path, "lark-im",
+                         "飞书即时通讯：当用户要发消息、查看或搜索聊天记录时使用")
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path), \
+                patch("agent_go.skills.discover_skills", side_effect=RuntimeError("boom")):
+            subtasks = plan_to_subtasks(
+                self._plan("发送飞书消息通知", "完成后发送飞书消息通知相关人员"),
+                logger, repo=None, default_skills=["lark-im"])
+        assert subtasks[0]["skills"] == []

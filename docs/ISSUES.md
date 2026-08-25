@@ -806,3 +806,13 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 **问题**：goal 回溯在 pipeline 结束时计算并落盘 `meta["goal_adherence"]`，而交付动作（bench `--with-delivery` 本地 merge、`agent_go merge`、`agent_go pr`）发生在子进程/pipeline 结束之后。计算时 `accepted_delivery=False` → delivery_required 任务被打 `delivery_unmet` 缺口 + `needs_human_review=True`；交付成功后无人重算，标记陈旧残留（实测 task-20260823-122234-962-0d04：status=ACCEPTED_DELIVERY 但 goal_adherence 仍 partial）。
 
 **修复**：planning.py 新增 `refresh_goal_adherence(meta)`（重算并原地更新，fail-open 不阻断交付）；在全部 5 处交付状态变更点写 meta.json 前调用——delivery.py `apply_local_delivery`、cli.py pr 成功/pr 已存在/merge 同步已合并 PR/merge 成功，以及 pr 失败置 `accepted_delivery=False` 路径（保持观测一致）。pipeline 结束时的初次计算保持不变。
+
+### ISSUE-53 auto_discover 中文误配：bigram 碎片 + 同形异义巧合词击穿 IDF 门槛，无关 skill 全量回填子任务（skill 注入 P1）
+
+- **位置**：`skills.py discover_skills`（匹配算法）+ `ui.py plan_to_subtasks`（default_skills 全量回填）
+- **状态**：✅ 已修复（2026-08-25）
+- **严重度**：P1（无关 skill 注入污染 worker 上下文——实测 task-20260823-122419-106-b1a0：Python CLI 修复任务被注入 lark-contact/lark-apps/lark-openapi-explorer 三段飞书指引；凡开 auto_discover 且 skill 池偏科（25+ lark 系）的任务均易触发）
+
+**问题**：双重失灵。①匹配层：`_tokenize_words` 中文 bigram 硬切产生「当用/中的/为」碎片词；df=1 的「专属词」实为同形异义巧合（cmd_list 函数「签名」 vs 通讯录个人「签名」、「错误」处理 vs「错误量」、main「调用」 vs API「调用」），旧门槛 score≥1.0 下单个巧合词即破门；`_skip` 停用词表全英文对中文零防护。②回填层：任务级匹配的 default_skills 不加子任务级复检，全量回填进每个无 skill 的子任务——任务级相关 ≠ 子任务相关。
+
+**修复**：①skills.py——`_skip` 补中文碎片/泛词（当用/户提/时的/中的/一个/当前/用户/以及/如果），overlap 排除单字符碎片，门槛 score≥2.0（≈两个独立专属词证据）；②ui.py——default_skills 回填前用子任务文本（title+description+agent_prompt）复检，只保留子任务级也命中的，复检异常不回填（宁缺毋滥）。tests/test_discover_skills.py +4 用例、tests/test_plan_to_subtasks.py +3 用例，真实案例（38 skill 池 + 原任务文本）验证零误配。

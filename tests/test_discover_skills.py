@@ -170,3 +170,55 @@ class TestDiscoverSkills(_MakeSkillDirMixin):
             result3 = discover_skills("编写 React 前端组件，处理状态管理和路由")
             names3 = [s.name for s in result3]
             assert "frontend-react" in names3, f"前端任务应匹配 frontend-react: {names3}"
+
+
+class TestIssue53HomographFalsePositive(_MakeSkillDirMixin):
+    """ISSUE-53: 同形异义巧合词 + bigram 碎片不得击穿匹配门槛。
+
+    实测案例：任务「修改 cmd_list 函数签名」被误配 lark-contact（通讯录个人
+    签名）/lark-apps（错误量）/lark-openapi-explorer（API 调用）——df=1 的
+    巧合词（签名/错误/调用）一个即达旧门槛 1.0。修复：门槛 2.0（≈两个独立
+    专属词证据）+ 中文碎片停用词 + 单字符过滤。
+    """
+
+    def test_homograph_coincidence_no_match(self, tmp_path):
+        self._make_skill_dir(tmp_path, "lark-contact",
+                             "飞书通讯录：当用户提到一个名字要发消息，或查个人签名、部门时使用")
+        self._make_skill_dir(tmp_path, "lark-apps",
+                             "妙搭应用开发：当用户要开发一个系统或应用，查询错误量、访问量时使用")
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            result = discover_skills("修复 src/cli.py 的 cmd_list 函数签名默认值错误")
+            names = [s.name for s in result]
+            assert "lark-contact" not in names, f"函数签名误配通讯录签名: {names}"
+            assert "lark-apps" not in names, f"默认值错误误配错误量监控: {names}"
+
+    def test_lark_style_pool_python_task_no_match(self, tmp_path):
+        """lark 系 skill 池（「当用户…时」句式）下，纯 Python 修复任务零命中"""
+        self._make_skill_dir(tmp_path, "lark-im",
+                             "飞书即时通讯：当用户要发消息、查看或搜索聊天记录时使用")
+        self._make_skill_dir(tmp_path, "lark-doc",
+                             "飞书云文档：当用户给出文档 URL，需要查看、创建、编辑文档时使用")
+        self._make_skill_dir(tmp_path, "lark-task",
+                             "飞书任务：当用户需要创建待办事项、查看任务列表、跟踪任务进度时使用")
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            result = discover_skills("修复 planning.py 的 validate_plan_quality 函数误报")
+            assert result == []
+
+    def test_two_strong_words_still_match(self, tmp_path):
+        """两个及以上专属词命中的合法匹配不受门槛提高影响"""
+        self._make_skill_dir(tmp_path, "bank-risk",
+                             "银行业智能风控信息收集整理，生成风控研究报告")
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            result = discover_skills("收集银行业风控资料并生成报告")
+            assert "bank-risk" in [s.name for s in result]
+
+    def test_single_char_fragment_filtered(self, tmp_path):
+        """单字符碎片（如「为」）不参与计分——否则它与任意一个 df=1 词组合
+        即可凑够 ≥2 词 + score 2.0 破门"""
+        self._make_skill_dir(tmp_path, "lark-drive",
+                             "飞书云空间：管理 Drive 文件，导入 Word 为 docx")
+        with patch("agent_go.skills.AGENT_GO_SKILLS_DIR", tmp_path):
+            # 「为」被标点隔离成单字符 token；不过滤时 overlap={为,文件}
+            # score=2.0 恰好达标误配，过滤后仅剩 {文件} 不足 2 词
+            result = discover_skills("把 a 为 b 写进文件")
+            assert result == []
