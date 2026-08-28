@@ -800,3 +800,183 @@ def test_rework_recent_window_filters_old(tmp_path):
     r = compute_post_delivery_rework([td_old, td_new], window_days=14, now=now,
                                      recent_window=1)
     assert r["rework_eligible_tasks"] == 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# 追溯闭环（2026-08-29）：漏报率 + 人工注记 + agent_go: 排除收紧
+# ═══════════════════════════════════════════════════════════════
+
+def _write_attrib(td: Path, data: dict) -> None:
+    (td / "blind_spot_attribution.json").write_text(_json.dumps(data), encoding="utf-8")
+
+
+def test_blind_spot_miss_rate_unannotated_rework(tmp_path):
+    """返工任务交付时无盲区标注 → 漏报（警报该响没响，recall 维度）。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge agent work", date_ts=anchor + _DAY)
+    (repo / "a.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "human fix", date_ts=anchor + 2 * _DAY)
+    r = compute_post_delivery_rework([td], now=anchor + 20 * _DAY)
+    assert r["reworked_tasks"] == 1
+    assert r["reworked_without_annotation"] == 1
+    assert r["blind_spot_miss_rate"] == 1.0
+    assert r["reworked"][0]["annotated"] is False
+
+
+def test_blind_spot_miss_rate_annotated_rework(tmp_path):
+    """返工任务有盲区标注 → 非漏报（miss_rate=0）。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={"weakly_anchored_subtasks": ["s1"]},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge agent work", date_ts=anchor + _DAY)
+    (repo / "a.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "human fix", date_ts=anchor + 2 * _DAY)
+    r = compute_post_delivery_rework([td], now=anchor + 20 * _DAY)
+    assert r["reworked_tasks"] == 1
+    assert r["reworked_without_annotation"] == 0
+    assert r["blind_spot_miss_rate"] == 0.0
+
+
+def test_agent_go_marker_commit_excluded(tmp_path):
+    """subject 含 agent_go: 固定标记的 commit（其他任务的交付 merge）不算人工返工。"""
+    from agent_go.metrics import compute_post_delivery_rework
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge agent work", date_ts=anchor + _DAY)
+    (repo / "a.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "agent_go: local delivery of task-zzz",
+         date_ts=anchor + 2 * _DAY)
+    r = compute_post_delivery_rework([td], now=anchor + 20 * _DAY)
+    assert r["reworked_tasks"] == 0
+
+
+def test_attribution_confirmed_instant_hit(tmp_path):
+    """pending 项 + confirmed 注记 → 即时命中（人工结论不等观察期）。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={"weakly_anchored_subtasks": ["s1"]},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    _write_attrib(td, {"items": {
+        "weakly_anchored_subtasks:s1": {"attribution": "confirmed"}},
+        "task_level": None})
+    r = compute_blind_spot_hit_rate([td], now=anchor + 5 * _DAY)
+    assert r["blind_spot_items"] == 1
+    assert r["blind_spot_hits"] == 1
+    assert r["blind_spot_pending"] == 0
+    assert r["attributed_items"] == 1
+    assert r["blind_spot_hit_rate"] == 1.0
+
+
+def test_attribution_false_hit_overrides_immediate(tmp_path):
+    """即时终局命中 + false-hit 注记 → 改判未命中（纠假阳性，进分母不计命中）。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    td = _mk_task(tmp_path, "task-1", {
+        "status": "VERIFICATION_FAILED",
+        "results": [{"subtask_id": "s1", "status": "failed"}],
+        "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
+    })
+    _write_attrib(td, {"items": {
+        "weakly_anchored_subtasks:s1": {"attribution": "false-hit"}},
+        "task_level": None})
+    r = compute_blind_spot_hit_rate([td])
+    assert r["blind_spot_items"] == 1
+    assert r["blind_spot_hits"] == 0
+    assert r["blind_spot_judged"] == 1
+    assert r["blind_spot_hit_rate"] == 0.0
+
+
+def test_attribution_false_clear_overrides_pending(tmp_path):
+    """pending 项 + false-clear 注记 → 改判命中（纠假阴性）。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={"inconclusive_evaluations": ["s1"]},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    _write_attrib(td, {"items": {
+        "inconclusive_evaluations:s1": {"attribution": "false-clear"}},
+        "task_level": None})
+    r = compute_blind_spot_hit_rate([td], now=anchor + 5 * _DAY)
+    assert r["blind_spot_hits"] == 1
+    assert r["blind_spot_pending"] == 0
+    assert r["attributed_items"] == 1
+
+
+def test_task_level_missed_attributed(tmp_path):
+    """无盲区标注任务 + 任务级 missed 注记 → 漏报人工证据计数。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    td = _mk_task(tmp_path, "task-1", {
+        "status": "completed",
+        "results": [{"subtask_id": "s1", "status": "completed"}],
+    })
+    _write_attrib(td, {"items": {},
+                       "task_level": {"attribution": "missed", "note": "交付后人工修复但当时无标注"}})
+    r = compute_blind_spot_hit_rate([td])
+    assert r["task_miss_attributed"] == 1
+    assert r["blind_spot_items"] == 0
+
+
+def test_attribution_corrupt_file_tolerated(tmp_path):
+    """注记文件损坏 → 容错为空，自动判定不受影响。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={"weakly_anchored_subtasks": ["s1"]},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    (td / "blind_spot_attribution.json").write_text("{not json", encoding="utf-8")
+    r = compute_blind_spot_hit_rate([td], now=anchor + 5 * _DAY)
+    assert r["blind_spot_pending"] == 1
+    assert r["attributed_items"] == 0
+
+
+def test_cli_annotate_writes_attribution(tmp_path, monkeypatch):
+    """trust --annotate 项级注记：写 blind_spot_attribution.json。"""
+    from types import SimpleNamespace
+    import agent_go.cli as cli
+    monkeypatch.setattr(cli, "AGENT_GO_DIR", tmp_path)
+    td = tmp_path / "task-x"
+    td.mkdir()
+    (td / "meta.json").write_text("{}", encoding="utf-8")
+    cli._annotate_blind_spot(SimpleNamespace(
+        annotate="task-x", item="weakly_anchored_subtasks:s1",
+        attribution="confirmed", note="复核确认"))
+    data = _json.loads((td / "blind_spot_attribution.json").read_text(encoding="utf-8"))
+    assert data["items"]["weakly_anchored_subtasks:s1"]["attribution"] == "confirmed"
+    assert data["items"]["weakly_anchored_subtasks:s1"]["note"] == "复核确认"
+
+
+def test_cli_annotate_task_level_missed(tmp_path, monkeypatch):
+    """trust --annotate 任务级 missed：漏报注记落 task_level。"""
+    from types import SimpleNamespace
+    import agent_go.cli as cli
+    monkeypatch.setattr(cli, "AGENT_GO_DIR", tmp_path)
+    td = tmp_path / "task-x"
+    td.mkdir()
+    (td / "meta.json").write_text("{}", encoding="utf-8")
+    cli._annotate_blind_spot(SimpleNamespace(
+        annotate="task-x", item="", attribution="missed", note=""))
+    data = _json.loads((td / "blind_spot_attribution.json").read_text(encoding="utf-8"))
+    assert data["task_level"]["attribution"] == "missed"

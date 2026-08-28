@@ -431,6 +431,13 @@ def _build_parser():
                               help="包含 bench/fixture 任务（默认只统计真实任务）")
     trust_parser.add_argument("--window", type=int, default=30, dest="recent_window",
                               help="观察窗口：最近 N 个任务（D-0 口径，默认 30；0=不限）")
+    trust_parser.add_argument("--annotate", metavar="TASK_ID", default="",
+                              help="人工盲区归因注记模式：写注记后退出（不展示指标）")
+    trust_parser.add_argument("--item", default="",
+                              help="注记目标项（格式 sig:key，如 weakly_anchored_subtasks:sub-1；省略则任务级）")
+    trust_parser.add_argument("--attribution", default="", choices=["", "confirmed", "false-hit", "false-clear", "missed"],
+                              help="归因结论：confirmed=确认命中 / false-hit=假阳性改判未命中 / false-clear=假阴性改判命中 / missed=任务级漏报（仅无 --item 时）")
+    trust_parser.add_argument("--note", default="", help="归因备注（追溯依据，≤200 字）")
 
     # kanban 子命令（看板任务编排）
     kanban_parser = subparsers.add_parser("kanban", help="看板任务编排（卡片管理/Spec 导入）")
@@ -3959,6 +3966,62 @@ def cmd_problems(args=None) -> None:
                    f"{'  💡' + p.resolution_summary[:40] if p.resolution_summary else ''}")
 
 
+def _annotate_blind_spot(args) -> None:
+    """人工盲区归因注记（trust --annotate，文件协议 blind_spot_attribution.json）。
+
+    项级（--item sig:key）：confirmed/false-hit/false-clear 覆盖自动判定——
+    人工结论即时判定，不等观察期；任务级（无 --item）：missed 漏报注记
+    （该任务交付后出问题但当时无盲区标注，进 miss 维度展示）。
+    """
+    import time as _time
+    from .console import _LazyConsole
+    from .metrics import _ATTRIB_SIGS
+
+    con = _LazyConsole()
+    task_id = str(getattr(args, "annotate", "")).strip()
+    attribution = str(getattr(args, "attribution", "")).strip()
+    item = str(getattr(args, "item", "")).strip()
+    note = str(getattr(args, "note", "")).strip()[:200]
+    if not attribution:
+        con.force("❌ --attribution 必填（confirmed/false-hit/false-clear/missed）")
+        return
+    td = AGENT_GO_DIR / task_id
+    if not (td / "meta.json").exists():
+        con.force(f"❌ 任务不存在: {task_id}")
+        return
+    entry = {"attribution": attribution, "note": note, "ts": _time.time()}
+    path = td / "blind_spot_attribution.json"
+    data: dict = {"items": {}, "task_level": None}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = {
+                    "items": loaded.get("items") if isinstance(loaded.get("items"), dict) else {},
+                    "task_level": loaded.get("task_level") if isinstance(loaded.get("task_level"), dict) else None,
+                }
+        except (OSError, json.JSONDecodeError):
+            pass
+    if item:
+        if attribution == "missed":
+            con.force("❌ missed 仅用于任务级注记（省略 --item）")
+            return
+        sig = item.partition(":")[0]
+        if sig not in _ATTRIB_SIGS:
+            con.force(f"❌ item 信号名非法: {sig}（合法: {'/'.join(_ATTRIB_SIGS)}）")
+            return
+        data["items"][item] = entry
+    else:
+        if attribution != "missed":
+            con.force("❌ 任务级注记仅支持 missed（漏报）")
+            return
+        data["task_level"] = entry
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    scope = item or "任务级"
+    con.force(f"✅ 已注记 {task_id} [{scope}] → {attribution}"
+              + (f"（{note}）" if note else ""))
+
+
 def cmd_trust(args=None) -> None:
     """#49 信任指标（阶段 D 自治决策放行门）查看入口。
 
@@ -3973,6 +4036,9 @@ def cmd_trust(args=None) -> None:
     from .metrics import compute_post_delivery_rework, compute_trust_metrics
 
     _con = _LazyConsole()
+    if getattr(args, "annotate", ""):
+        _annotate_blind_spot(args)
+        return
     window = int(getattr(args, "recent_window", 30) or 0)
     task_dirs = sorted(d for d in AGENT_GO_DIR.glob("task-*") if (d / "meta.json").exists())
     include_bench = bool(getattr(args, "include_bench", False))
@@ -4010,6 +4076,9 @@ def cmd_trust(args=None) -> None:
     _con.print(f"  交付后返工率: {_pct(rework['post_delivery_rework_rate'])}"
                f"  （自动信号，{rework['reworked_tasks']}/{rework['rework_eligible_tasks']} 个交付任务 "
                f"{rework['window_days']}d 内被返工；放行方向：下降，提案 ≤20%→10%）")
+    _con.print(f"  盲区漏报率:   {_pct(rework.get('blind_spot_miss_rate'))}"
+               f"  （自动信号，{rework.get('reworked_without_annotation', 0)}/{rework.get('reworked_tasks', 0)} "
+               f"个返工任务交付时无盲区标注——警报该响没响；放行方向：下降）")
     _con.print(f"  复发可见率:   {_pct(r['recurrence_visibility_rate'])}"
                f"  （{r['failed_subtasks']} 个失败子任务；放行方向：上升，提案 ≥80%）")
     _con.print(f"  盲区命中率:   {_pct(r['blind_spot_hit_rate'])}"
@@ -4023,6 +4092,11 @@ def cmd_trust(args=None) -> None:
             _pend = f"，{v['pending']} 挂起" if v.get("pending") else ""
             _na = f"，{v['na']} 不可观察" if v.get("na") else ""
             _con.print(f"    - {sig}: {v['hits']}/{v['items'] - v.get('pending', 0)} 命中{_pend}{_na}")
+    _attr = int(r.get("blind_spot_attributed_items", 0) or 0)
+    _miss_att = int(r.get("task_miss_attributed", 0) or 0)
+    if _attr or _miss_att:
+        _con.print(f"  人工注记:     {_attr} 项（{r.get('blind_spot_attributed_hits', 0)} 计命中），"
+                   f"{_miss_att} 任务级漏报（trust --annotate 维护）")
     if rework["rework_eligible_tasks"] < 10 or r.get("blind_spot_judged", 0) < 20:
         _con.print("  ⚠️ 样本不足（放行评估需 ≥10 个有效交付任务 / ≥20 条已判定盲区标注），"
                    "指标仅供参考——见 docs/design/trust-metrics-baseline-2026-08-21.md")

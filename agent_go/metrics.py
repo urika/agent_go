@@ -499,7 +499,10 @@ def _post_delivery_touches(repo_str: str, target: str, task_id: str,
                            files: list[str]) -> Optional[list[str]]:
     """锚点后 target 分支上触碰 files 的后续 commit 列表（newest → oldest）。
 
-    排除锚点自身、排除消息含 task_id 的 agent 自身 commit；近似锚点（无
+    排除锚点自身、排除 agent 自身 commit（双信号：消息含 task_id，或消息含
+    ``agent_go:`` 固定标记——delivery 聚合 merge「agent_go: merge subtask …」/
+    本地交付 merge「agent_go: local delivery of …」均带此前缀，收紧前
+    其他 agent_go 任务的交付 merge 会误计人工返工）；近似锚点（无
     explicit merge commit）时丢弃最旧一个触碰 commit（视为交付 merge 本身，
     可能高估防护）。git 命令失败返回 None（fail-open，由调用方决定剔除或挂起）。
     """
@@ -517,7 +520,7 @@ def _post_delivery_touches(repo_str: str, target: str, task_id: str,
         if not line.strip():
             continue
         sha, _, subject = line.partition("\x00")
-        if sha == anchor_commit or task_id in subject:
+        if sha == anchor_commit or task_id in subject or "agent_go:" in subject:
             continue
         commits.append(sha)
     if not anchor_commit and commits:
@@ -546,14 +549,19 @@ def compute_post_delivery_rework(task_dirs: list[Path],
       迁移会刷新 mtime）。显式锚点时锚点 commit 之后的任何触碰 commit 都计返工；
       近似锚点时丢弃最旧一个触碰 commit（视为交付 merge 本身，可能高估防护）。
     - 分子：分母任务中，交付文件在 (锚点, 锚点+window] 内被 target/base 分支上的
-      后续 commit（排除锚点自身、排除消息含 task_id 的 agent 自身 commit）修改。
+      后续 commit（排除锚点自身、排除 agent 自身 commit）修改。
+
+    盲区漏报率（recall 维度，2026-08-29）：返工任务中「交付时三类预测性盲区
+    标注（wa/inc/uac）全空」的比例——警报该响没响。注意口径：分母是返工任务
+    （已知出问题）而非全部任务，测的是「返工时盲区系统是否给出过预警」。
 
     fail-open：git 命令失败/仓库已删的任务不进分母。
 
     Returns:
         {"post_delivery_rework_rate": float|None, "rework_eligible_tasks": int,
          "reworked_tasks": int, "window_days": int,
-         "reworked": [{"task_id", "commits"}]}
+         "blind_spot_miss_rate": float|None, "reworked_without_annotation": int,
+         "reworked": [{"task_id", "commits", "annotated"}]}
     """
     import time as _time
 
@@ -561,6 +569,7 @@ def compute_post_delivery_rework(task_dirs: list[Path],
     task_dirs = select_recent_task_dirs(task_dirs, recent_window)
     eligible = 0
     reworked = 0
+    reworked_unannotated = 0
     reworked_list: list[dict] = []
     for td in task_dirs:
         meta_path = td / "meta.json"
@@ -593,20 +602,59 @@ def compute_post_delivery_rework(task_dirs: list[Path],
 
         target = str(meta.get("target_branch") or meta.get("base_branch") or "HEAD")
         task_id = str(meta.get("task_id") or td.name)
+        blind = meta.get("blind_spots") or {}
+        annotated = isinstance(blind, dict) and any(
+            blind.get(k) for k in
+            ("weakly_anchored_subtasks", "inconclusive_evaluations",
+             "uncovered_acceptance_ids"))
         commits = _post_delivery_touches(
             repo_str, target, task_id, anchor_commit, anchor_ts, files)
         if commits is None:
             continue
         if commits:
             reworked += 1
-            reworked_list.append({"task_id": task_id, "commits": len(commits)})
+            if not annotated:
+                reworked_unannotated += 1
+            reworked_list.append({"task_id": task_id, "commits": len(commits),
+                                  "annotated": annotated})
 
     return {
         "post_delivery_rework_rate": round(reworked / eligible, 4) if eligible else None,
         "rework_eligible_tasks": eligible,
         "reworked_tasks": reworked,
         "window_days": window_days,
+        "blind_spot_miss_rate": round(reworked_unannotated / reworked, 4) if reworked else None,
+        "reworked_without_annotation": reworked_unannotated,
         "reworked": reworked_list[:20],
+    }
+
+
+_ATTRIBUTION_FILE = "blind_spot_attribution.json"
+_ATTRIB_SIGS = ("weakly_anchored_subtasks", "inconclusive_evaluations",
+                "uncovered_acceptance_ids")
+
+
+def _load_attributions(td: Path) -> dict:
+    """加载人工盲区归因注记（trust --annotate 写入，文件协议）。
+
+    结构：{"items": {"<sig>:<key>": {"attribution": ..., "note": ..., "ts": ...}},
+           "task_level": {"attribution": "missed", ...} | None}
+    attribution ∈ confirmed（确认命中）/ false-hit（假阳性改判未命中）/
+    false-clear（假阴性改判命中）/ missed（任务级漏报，仅 task_level）。
+    容错：文件不存在/损坏 → 空 dict（注记是增强，不是依赖）。
+    """
+    p = td / _ATTRIBUTION_FILE
+    if not p.exists():
+        return {"items": {}, "task_level": None}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"items": {}, "task_level": None}
+    if not isinstance(data, dict):
+        return {"items": {}, "task_level": None}
+    return {
+        "items": data.get("items") if isinstance(data.get("items"), dict) else {},
+        "task_level": data.get("task_level") if isinstance(data.get("task_level"), dict) else None,
     }
 
 
@@ -640,6 +688,10 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
       这类项时间无法给出答案，永久挂起只会稀释观察——如实排除并单独计数。
     命中率 = hits / (items - pending)，分母为「已具备判定条件」的标注项。
 
+    人工注记优先（2026-08-29，追溯闭环）：项级注记（confirmed/false-hit/
+    false-clear）覆盖自动判定——人工结论即时判定，不等观察期；任务级 missed
+    注记单独计数（漏报人工证据，进 miss 维度展示）。
+
     分母排除两类：unattributed_failures（本身已是失败，是「问题」而非「预测」）、
     baseline_dirty（环境标志位，非可命中的标注项）。
 
@@ -647,6 +699,8 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
         {"blind_spot_hit_rate": float|None, "blind_spot_items": int,
          "blind_spot_hits": int, "blind_spot_judged": int,
          "blind_spot_pending": int, "blind_spot_na": int, "window_days": int,
+         "attributed_items": int, "attributed_hits": int,
+         "task_miss_attributed": int,
          "by_signal": {signal: {"items": n, "hits": m, "pending": p, "na": q}}}
     """
     import time as _time
@@ -657,6 +711,9 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
         "inconclusive_evaluations": {"items": 0, "hits": 0, "pending": 0, "na": 0},
         "uncovered_acceptance_ids": {"items": 0, "hits": 0, "pending": 0, "na": 0},
     }
+    attributed_items = 0
+    attributed_hits = 0
+    task_miss_attributed = 0
     for td in task_dirs:
         meta_path = td / "meta.json"
         if not meta_path.exists():
@@ -666,6 +723,11 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
         except (OSError, json.JSONDecodeError):
             continue
         blind = meta.get("blind_spots") or {}
+        attrib = _load_attributions(td)
+        item_attribs = attrib.get("items") or {}
+        if isinstance(attrib.get("task_level"), dict) and \
+                attrib["task_level"].get("attribution") == "missed":
+            task_miss_attributed += 1
         if not isinstance(blind, dict) or not any(
                 blind.get(k) for k in by_signal):
             continue
@@ -725,7 +787,16 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
             return bool(commits)
 
         def _judge(signal: str, item_key: str, immediate: bool) -> None:
+            nonlocal attributed_items, attributed_hits
             st = by_signal[signal]
+            att = (item_attribs.get(f"{signal}:{item_key}") or {}).get("attribution")
+            if att in ("confirmed", "false-hit", "false-clear"):
+                attributed_items += 1
+                st["items"] += 1
+                if att in ("confirmed", "false-clear"):
+                    st["hits"] += 1
+                    attributed_hits += 1
+                return
             if immediate:
                 st["items"] += 1
                 st["hits"] += 1
@@ -763,6 +834,9 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
         "blind_spot_judged": judged,
         "blind_spot_pending": pending,
         "blind_spot_na": na,
+        "attributed_items": attributed_items,
+        "attributed_hits": attributed_hits,
+        "task_miss_attributed": task_miss_attributed,
         "window_days": window_days,
         "by_signal": by_signal,
     }
@@ -833,5 +907,8 @@ def compute_trust_metrics(task_dirs: list[Path],
         "blind_spot_judged": blind["blind_spot_judged"],
         "blind_spot_pending": blind["blind_spot_pending"],
         "blind_spot_na": blind["blind_spot_na"],
+        "blind_spot_attributed_items": blind["attributed_items"],
+        "blind_spot_attributed_hits": blind["attributed_hits"],
+        "task_miss_attributed": blind["task_miss_attributed"],
         "blind_spot_by_signal": blind["by_signal"],
     }
