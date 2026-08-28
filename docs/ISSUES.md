@@ -816,3 +816,13 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 **问题**：双重失灵。①匹配层：`_tokenize_words` 中文 bigram 硬切产生「当用/中的/为」碎片词；df=1 的「专属词」实为同形异义巧合（cmd_list 函数「签名」 vs 通讯录个人「签名」、「错误」处理 vs「错误量」、main「调用」 vs API「调用」），旧门槛 score≥1.0 下单个巧合词即破门；`_skip` 停用词表全英文对中文零防护。②回填层：任务级匹配的 default_skills 不加子任务级复检，全量回填进每个无 skill 的子任务——任务级相关 ≠ 子任务相关。
 
 **修复**：①skills.py——`_skip` 补中文碎片/泛词（当用/户提/时的/中的/一个/当前/用户/以及/如果），overlap 排除单字符碎片，门槛 score≥2.0（≈两个独立专属词证据）；②ui.py——default_skills 回填前用子任务文本（title+description+agent_prompt）复检，只保留子任务级也命中的，复检异常不回填（宁缺毋滥）。tests/test_discover_skills.py +4 用例、tests/test_plan_to_subtasks.py +3 用例，真实案例（38 skill 池 + 原任务文本）验证零误配。
+
+### ISSUE-54 盲区命中率口径失灵：0/37 全不命中，指标无判别力（阶段 D 放行门 A1 阻塞项）
+
+- **位置**：`metrics.py compute_trust_metrics` 盲区命中规则（同任务终局关联）
+- **状态**：🔲 已登记未修复（2026-08-28，阶段 D 放行评估 D-1 的 A1 阻塞项）
+- **严重度**：P1（指标 0% 低于 50% 放行下限——不是质量好，是「验收 ID 未覆盖 ≠ 出问题」规则过宽导致标注全是虚警；该指标目前等于没有盲区警报器，阶段 D 放行评估被它卡住）
+
+**问题**：37 条盲区标注（weakly_anchored 6 / inconclusive_eval 16 / uncovered_ac 15）在任务终局无一命中问题。D-0 报告（trust-metrics-baseline §3）已预警 uncovered_acceptance_ids 命中规则过宽，全量数据证实。
+
+**修复方向**：命中规则收紧（如仅当任务交付后 14d 内相关文件被人工修改/返工才计命中，复用 post_delivery_rework 信号），或重定义「命中」为跨任务复发关联；修完用历史 37 条重算验证读数落入 50%~90% 判别区间。

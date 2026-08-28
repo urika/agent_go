@@ -36,6 +36,7 @@
 | [design/production-model-config.md](design/production-model-config.md) | 生产模型配置指南（方案 B：planner=K3 + evaluator=GLM 混合，6/6 hard 100%） |
 | [design/llama-defender-context-engineering-design.md](design/llama-defender-context-engineering-design.md) | llama-defender 上下文工程改造设计：append-only + epoch 压缩 + 动作台账（缓存击穿修复 + 元认知证据保留） |
 | [design/diag-dataplane-consumer-requirements-20260819.md](design/diag-dataplane-consumer-requirements-20260819.md) | R13-R16 诊断数据面 agent_go 消费侧需求与实施记录（C1-C7：会话头/metering 采集/eval 聚合/看门狗/manifest 口径/复盘/健康检查） |
+| [design/trust-metrics-eval-d1-2026-08-28.md](design/trust-metrics-eval-d1-2026-08-28.md) | 阶段 D 放行评估 D-1（2026-08-28）：不放行——返工率 3.8% 达标，盲区命中率 0/37 口径失灵（A1 阻塞项），review/失败样本不足 |
 | [design/sandbox-greywall.md](design/sandbox-greywall.md) | Greywall 沙箱集成与运维参考：安装（brew 信任坑）/ 集成现状（仅交互式路径）/ 网络与 MCP 放行 playbook |
 | [archive/reference/bench-analysis-2026-08-01.md](archive/reference/bench-analysis-2026-08-01.md) | 历史 Bench 分析：仅作 exploratory 数据，不作为当前 KPI 基线 |
 | [archive/design/bench-convergence-plan.md](archive/design/bench-convergence-plan.md) | 已归档：Bench 收敛阶段计划和正式 baseline 门禁 |

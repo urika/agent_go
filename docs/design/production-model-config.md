@@ -2,6 +2,7 @@
 
 > 状态：生产配置（当前生效，`~/.agent_go/config.json`）
 > 日期：2026-08-15
+> 本地后端：**Ornith-1.5-35B-A3B-oQ4e-mtp**（profile `ornith-oq4e`，2026-08-28 自 Qwen3.6-35B 转正——bench 第四臂 decision 58/58 满分、速度四臂最快 269s/run、交付$ $0.0210；registry `local-mlx-ornith`，TCO $0.0005/次同口径；路由名不变，代理 4000 后端热切换）
 > 实验依据：[m4-mixB-hard 基线](../../eval_suite/baselines/m4-mixB-hard/summary.json)（6/6 hard 任务 100% 通过）
 > 关联：[model-entity-config-design.md](model-entity-config-design.md)、[config-schema.md](config-schema.md)
 

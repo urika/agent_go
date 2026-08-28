@@ -464,6 +464,68 @@ def select_recent_task_dirs(task_dirs: list[Path], window: Optional[int] = 30) -
     return ordered[-window:]
 
 
+def _delivery_anchor(meta: dict, td: Path, meta_path: Path) -> tuple[str, Optional[float]]:
+    """交付锚点：(anchor_commit, anchor_ts)。
+
+    锚点优先级：meta.explicit_merge_commit（显式交付 merge，精确）> 任务目录名
+    时间戳（task-YYYYMMDD-HHMMSS，任务创建时刻；agent 工作在 agent_go/* 分支不进
+    target 分支 log，故创建时刻起算安全）> meta.json mtime（兜底，注意元数据
+    迁移会刷新 mtime）。anchor_ts 无法确定时返回 (anchor_commit, None)。
+    """
+    anchor_commit = str(meta.get("explicit_merge_commit") or "")
+    anchor_ts: Optional[float] = None
+    if anchor_commit:
+        repo_str = str(meta.get("repo", "") or meta.get("repo_path", ""))
+        try:
+            ct = subprocess.run(
+                ["git", "show", "-s", "--format=%ct", anchor_commit],
+                cwd=repo_str, capture_output=True, text=True, timeout=10)
+            if ct.returncode == 0 and ct.stdout.strip().isdigit():
+                anchor_ts = float(ct.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if anchor_ts is None:
+        anchor_ts = _task_dir_ts(td.name)
+    if anchor_ts is None:
+        try:
+            anchor_ts = meta_path.stat().st_mtime
+        except OSError:
+            anchor_ts = None
+    return anchor_commit, anchor_ts
+
+
+def _post_delivery_touches(repo_str: str, target: str, task_id: str,
+                           anchor_commit: str, anchor_ts: float,
+                           files: list[str]) -> Optional[list[str]]:
+    """锚点后 target 分支上触碰 files 的后续 commit 列表（newest → oldest）。
+
+    排除锚点自身、排除消息含 task_id 的 agent 自身 commit；近似锚点（无
+    explicit merge commit）时丢弃最旧一个触碰 commit（视为交付 merge 本身，
+    可能高估防护）。git 命令失败返回 None（fail-open，由调用方决定剔除或挂起）。
+    """
+    try:
+        log = subprocess.run(
+            ["git", "log", target, f"--since={int(anchor_ts)}",
+             "--format=%H%x00%s", "--"] + files,
+            cwd=repo_str, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if log.returncode != 0:
+        return None
+    commits = []
+    for line in log.stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        sha, _, subject = line.partition("\x00")
+        if sha == anchor_commit or task_id in subject:
+            continue
+        commits.append(sha)
+    if not anchor_commit and commits:
+        # 近似锚点：最旧一个触碰 commit 视为交付 merge 本身
+        commits = commits[:-1]
+    return commits
+
+
 def compute_post_delivery_rework(task_dirs: list[Path],
                                  window_days: int = 14,
                                  now: Optional[float] = None,
@@ -522,61 +584,19 @@ def compute_post_delivery_rework(task_dirs: list[Path],
         if not files:
             continue
 
-        anchor_commit = str(meta.get("explicit_merge_commit") or "")
-        anchor_ts: Optional[float] = None
-        if anchor_commit:
-            try:
-                ct = subprocess.run(
-                    ["git", "show", "-s", "--format=%ct", anchor_commit],
-                    cwd=repo_str, capture_output=True, text=True, timeout=10)
-                if ct.returncode == 0 and ct.stdout.strip().isdigit():
-                    anchor_ts = float(ct.stdout.strip())
-            except (OSError, subprocess.SubprocessError):
-                pass
+        anchor_commit, anchor_ts = _delivery_anchor(meta, td, meta_path)
         if anchor_ts is None:
-            # 任务目录名时间戳（task-YYYYMMDD-HHMMSS-...）优先于 mtime
-            # （元数据迁移会刷新 mtime，不可信）
-            import re as _re2
-            from datetime import datetime as _dt
-            _m = _re2.match(r"task-(\d{8})-(\d{6})", td.name)
-            if _m:
-                try:
-                    anchor_ts = _dt.strptime(
-                        _m.group(1) + _m.group(2), "%Y%m%d%H%M%S").timestamp()
-                except ValueError:
-                    anchor_ts = None
-        if anchor_ts is None:
-            try:
-                anchor_ts = meta_path.stat().st_mtime
-            except OSError:
-                continue
+            continue
         if now - anchor_ts < window_days * 86400:
             continue  # 观察期不足
         eligible += 1
 
         target = str(meta.get("target_branch") or meta.get("base_branch") or "HEAD")
         task_id = str(meta.get("task_id") or td.name)
-        try:
-            log = subprocess.run(
-                ["git", "log", target, f"--since={int(anchor_ts)}",
-                 "--format=%H%x00%s", "--"] + files,
-                cwd=repo_str, capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
+        commits = _post_delivery_touches(
+            repo_str, target, task_id, anchor_commit, anchor_ts, files)
+        if commits is None:
             continue
-        if log.returncode != 0:
-            continue
-        # newest → oldest；排除锚点自身与 agent 自身（消息含 task_id）commit
-        commits = []
-        for line in log.stdout.strip().split("\n"):
-            if not line.strip():
-                continue
-            sha, _, subject = line.partition("\x00")
-            if sha == anchor_commit or task_id in subject:
-                continue
-            commits.append(sha)
-        if not anchor_commit and commits:
-            # 近似锚点：最旧一个触碰 commit 视为交付 merge 本身
-            commits = commits[:-1]
         if commits:
             reworked += 1
             reworked_list.append({"task_id": task_id, "commits": len(commits)})
