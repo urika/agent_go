@@ -81,6 +81,8 @@ Plan 生成专用 API 配置。非空时**完全覆盖** `plan_api`（Planner �
 | `show_agent_prompt` | bool | `true` | 显示 agent prompt 详情 |
 | `show_resource_map` | bool | `true` | 显示项目资源映射 |
 | `max_plan_iterations` | int | `5` | Plan 生成最大重试次数 |
+| `plan_preflight_repair_enabled` | bool | `true` | Plan 门禁不通过时启用预修复（LLM 定向修复 plan 缺陷后重提门禁） |
+| `max_plan_repairs` | int | `1` | 预修复最大次数（防循环） |
 | `notify_on_complete` | bool | `true` | 任务完成时发送通知 |
 | `notify_command` | str | `""` | 自定义通知命令（覆盖内置通知通道） |
 
@@ -97,7 +99,9 @@ Plan 生成专用 API 配置。非空时**完全覆盖** `plan_api`（Planner �
 | `run_timeout` | int | `1800` | Claude 执行超时（秒） |
 | `block_on_failure` | bool | `true` | 验证失败时阻止下游子任务 |
 | `diverge_similarity_threshold` | float | `0.3` | 打地鼠检测：连续两次语义评估缺陷指纹相似度低于此值 → 提前终止重试 |
+| `revert_threshold` | int | `2` | 连续 revert 次数达到该值终止重试（检测「改了又改回」空转） |
 | `readonly_review` | object | `{enabled:false}` | 独立只读审查 subagent（两阶段审查，见下） |
+| `architecture_review` | object | `{enabled:false}` | 架构合规独立审查（见下） |
 
 ### `verification.readonly_review`（独立只读审查 subagent）
 
@@ -114,6 +118,19 @@ Plan 生成专用 API 配置。非空时**完全覆盖** `plan_api`（Planner �
 | `max_tokens` | int | `2048` | 审查响应最大 token |
 | `timeout_ms` | int | `90000` | 审查 API 调用超时（毫秒） |
 
+### `verification.architecture_review`（架构合规独立审查）
+
+对带 Architecture 约束的任务，用独立模型审查实现 diff 是否偏离架构决策（M1.4 架构合规的可选 LLM 复核层）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 是否启用架构审查（默认关） |
+| `model` | str | `""` | 审查模型（空 = 复用 evaluator.model） |
+| `provider` | str | `""` | 审查 API 提供商（空 = 复用 evaluator.provider） |
+| `base_url` | str | `""` | 审查 API 端点（空 = 复用 evaluator.base_url） |
+| `max_tokens` | int | `2048` | 审查响应最大 token |
+| `timeout_ms` | int | `90000` | 审查 API 调用超时（毫秒） |
+
 ---
 
 ## 5. `goal`
@@ -126,6 +143,7 @@ Claude Code `/goal` Stop Hook 机制。启用后在 worktree 中注入 `.claude/
 | `max_turns` | int | `20` | Goal 验收最大轮次 |
 | `timeout_seconds` | int | `600` | Goal 验收超时（秒） |
 | `enable_goal_hook` | bool | `false` | 是否注入 Stop Hook（需要 worktree 写入权限） |
+| `policy` | str | `"off"` | 最终执行策略（`off`/`verify`/`enforce`，goal-mechanism-design §3.3；B3 拍板默认 off，policy resolver 见 `goal_policy.py`） |
 
 ---
 
@@ -318,6 +336,14 @@ Agent 类型默认配置。
 
 当 `/status` 探测失败时的 fallback。
 
+## 17b. `local_model_cost`
+
+本地模型 TCO 显式归算（可选）。键为本地后端真实模型名，值为每次调用摊销成本（美元）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| (model name) | float | — | 如 `{"mlx-community/Qwen3.6-27B-4bit": 0.0007}`；命中的本地调用按此计费并计入 $/pass 与 gate |
+
 ---
 
 ## 18. `cache`
@@ -366,6 +392,8 @@ Plan 缓存。
 | `enabled` | bool | 否 | 是否启用（默认 `true`） |
 | `tool_filter` | list | 否 | 允许调用的工具白名单 |
 | `scope` | str | 否 | 作用域（`subtask` / `task`） |
+
+内置示例：DEFAULT_CONFIG 自带 `playwright` 条目（`npx @playwright/mcp@latest`，`enabled:false`，`scope:worker`），供浏览器自动化任务启用。
 
 ---
 

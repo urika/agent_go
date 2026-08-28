@@ -2,21 +2,22 @@
   "_comment": "agent_go 配置示例。将本文件复制为 ~/.agent_go/config.json 后编辑。",
   "_presets": "底部提供三套 router + worker_models 预设（国际/国内/混合），按需选用。",
   "_schema_ref": "完整字段说明见 docs/design/config-schema.md",
-
   "plan_api": {
     "provider": "anthropic",
     "base_url": "https://api.anthropic.com/v1/messages",
     "api_key": "",
     "model": "claude-sonnet-5",
-    "_note":  "Sonnet 5 intro 价 $2/$10 至 Aug 31 2026，之后 $3/$15。也可选 claude-sonnet-4-6 ($3/$15) 或 gpt-4.1 ($2/$8)",
+    "_note": "Sonnet 5 intro 价 $2/$10 至 Aug 31 2026，之后 $3/$15。也可选 claude-sonnet-4-6 ($3/$15) 或 gpt-4.1 ($2/$8)",
     "max_tokens": 4096,
-    "temperature": 0.2
+    "temperature": 0.2,
+    "timeout_ms": 180000,
+    "worker_base_url": "",
+    "worker_max_tokens": 0,
+    "local_models": []
   },
-
   "planner_api": {
     "_comment": "Plan 生成专用 API。非空时完全覆盖 plan_api（Planner 与 Worker 使用不同 provider）。留空 = 使用 plan_api"
   },
-
   "behavior": {
     "auto_confirm_plan": false,
     "auto_confirm_subtasks": false,
@@ -25,9 +26,10 @@
     "show_resource_map": true,
     "max_plan_iterations": 5,
     "notify_on_complete": true,
-    "notify_command": ""
+    "notify_command": "",
+    "max_plan_repairs": 1,
+    "plan_preflight_repair_enabled": true
   },
-
   "verification": {
     "max_retries": 3,
     "retry_timeout": 300,
@@ -39,16 +41,35 @@
       "auto_apply": false,
       "max_children": 4,
       "repeat_similarity_threshold": 0.7
+    },
+    "diverge_similarity_threshold": 0.3,
+    "revert_threshold": 2,
+    "readonly_review": {
+      "enabled": false,
+      "threshold": 2,
+      "model": "",
+      "provider": "",
+      "base_url": "",
+      "skill": "",
+      "max_tokens": 2048,
+      "timeout_ms": 90000
+    },
+    "architecture_review": {
+      "enabled": false,
+      "model": "",
+      "provider": "",
+      "base_url": "",
+      "max_tokens": 2048,
+      "timeout_ms": 90000
     }
   },
-
   "goal": {
     "enabled": false,
     "max_turns": 20,
     "timeout_seconds": 600,
-    "enable_goal_hook": false
+    "enable_goal_hook": false,
+    "policy": "off"
   },
-
   "agent_loop": {
     "_comment": "自主 agent 循环模式（--agent-loop），不经过 Claude Code CLI",
     "enabled": false,
@@ -56,7 +77,6 @@
     "max_duration": 600,
     "api_timeout": 120
   },
-
   "knowledge": {
     "_comment": "C4 KnowledgeStore A/B 实验臂：修复重试时注入跨任务历史经验；默认关闭=对照臂",
     "enabled": false,
@@ -64,7 +84,6 @@
     "suppressed_ids": [],
     "resolution_llm": true
   },
-
   "evaluator": {
     "_comment": "LLM 语义评估器。验证命令通过后对 Claude 输出做语义判断",
     "enabled": false,
@@ -75,13 +94,11 @@
     "api_key": "",
     "prompt_template": "default"
   },
-
   "fallback": {
     "local_model_url": "http://localhost:8000/v1/chat/completions",
     "local_model_name": "qwen",
     "enable_rules": true
   },
-
   "notify": {
     "_comment": "多通道事件通知。channels 支持 desktop / webhook / command 类型",
     "enabled": true,
@@ -90,86 +107,81 @@
     "channels": [
       {
         "type": "desktop",
-        "events": ["on_complete", "on_failed", "on_blocked"]
+        "events": [
+          "on_complete",
+          "on_failed",
+          "on_blocked"
+        ]
       },
       {
         "type": "webhook",
         "name": "team-dingtalk",
         "url": "${AGENT_GO_WEBHOOK_URL}",
         "format": "dingtalk",
-        "events": ["on_failed", "on_blocked"]
+        "events": [
+          "on_failed",
+          "on_blocked"
+        ]
       }
     ]
   },
-
   "cost_control": {
     "_comment": "三层成本控制。enabled 默认关闭——基线不可信时误杀率高，须 eval cost-baseline 校准后才开。详见 docs/design/adr/ADR-005",
     "enabled": false,
     "l1_enabled": false,
-    "max_budget_usd": 0.50,
+    "max_budget_usd": 0.5,
     "per_subtask_budget_usd": {
-      "easy": 0.20,
-      "medium": 0.40,
-      "hard": 1.00
+      "easy": 0.2,
+      "medium": 0.4,
+      "hard": 1.0
     },
     "subtask_multiplier": 2.5,
     "on_exceed": "stop",
     "budget_mode": "strict"
   },
-
   "skills": {
     "auto_discover": false,
     "max_auto_skills": 3
   },
-
   "agents": {
     "default": "developer"
   },
-
   "artifact_dir": null,
   "_artifact_note": "S9-B 产物导出目录（如 \"/Users/me/reports\"）。子任务写入 worktree/__artifacts__/ 的文件在任务完成后导出到该目录；null = 不导出（向后兼容）",
-
   "worker_models": {
-    "easy":   "",
+    "easy": "",
     "medium": "",
-    "hard":   "claude-opus-4-8"
+    "hard": "claude-opus-4-8"
   },
-
   "worker_models_fallback": {
     "_comment": "主模型不可用时的降级备选。结构同 worker_models",
-    "easy":   "",
+    "easy": "",
     "medium": "",
-    "hard":   ""
+    "hard": ""
   },
-
   "worker_models_fallback_chain": {
     "_comment": "P0：验证/超时失败后按顺序升级模型；空数组=不启用。",
-    "easy":   [],
+    "easy": [],
     "medium": [],
-    "hard":   []
+    "hard": []
   },
-
   "worker_models_degrades": {
     "_comment": "预算降级（degrade 模式）时的难度下移映射",
-    "easy":   "",
+    "easy": "",
     "medium": "easy",
-    "hard":   "medium"
+    "hard": "medium"
   },
-
   "worker_models_by_type": {
     "_comment": "按 agent_type 指定模型，覆盖难度路由。如 {\"reviewer\": \"gemini-3.1-pro\"}"
   },
-
   "local_model_names": {
     "_comment": "路由名→本地真实模型名映射。如 {\"claude-haiku-4-5\": \"Qwen3.6-27B-4bit\"}。/status 探测失败时 fallback"
   },
-
   "cache": {
     "enabled": true,
     "plan_ttl": 86400,
     "max_entries": 100
   },
-
   "router": {
     "enabled": false,
     "roles": {},
@@ -185,21 +197,30 @@
       "half_open_requests": 2
     }
   },
-
   "mcp_servers": {
     "_comment": "外部 MCP server 配置。子任务调用外部 MCP 工具，命名空间 mcp__{server}__{tool}。每个 server: command/args/env/enabled/tool_filter/scope",
     "_example": {
       "filesystem": {
         "command": "npx",
-        "args": ["-y", "@anthropic-ai/mcp-filesystem"],
+        "args": [
+          "-y",
+          "@anthropic-ai/mcp-filesystem"
+        ],
         "env": {},
         "enabled": true,
         "tool_filter": [],
         "scope": "subtask"
       }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ],
+      "enabled": false,
+      "scope": "worker"
     }
   },
-
   "_preset_international": "以下为国际场景预设（Claude 生态，2026-07 最新模型）。Sonnet 5 为规划默认，Haiku 4.5 执行，Opus 4.8 复杂任务。$/pass 估算约 $0.06（Sonnet 5 intro 价）。worker_models 必须与 router 平级（根级），不要嵌进 router 对象内。",
   "_international_router": {
     "router": {
@@ -208,7 +229,7 @@
         "planner": {
           "provider": "anthropic",
           "model": "claude-sonnet-5",
-          "_note":  "Sonnet 5 intro $2/$10 至 Aug 2026。Planner 不降级（铁律）"
+          "_note": "Sonnet 5 intro $2/$10 至 Aug 2026。Planner 不降级（铁律）"
         },
         "worker": {
           "provider": "anthropic",
@@ -221,17 +242,16 @@
         "reviewer": {
           "provider": "google",
           "model": "gemini-3.1-pro",
-          "_note":  "与 Worker(anthropic) 不同源（铁律）"
+          "_note": "与 Worker(anthropic) 不同源（铁律）"
         }
       }
     },
     "worker_models": {
-      "easy":   "claude-haiku-4-5",
+      "easy": "claude-haiku-4-5",
       "medium": "claude-sonnet-5",
-      "hard":   "claude-opus-4-8"
+      "hard": "claude-opus-4-8"
     }
   },
-
   "_preset_domestic": "以下为国内场景预设（2026-07 最新）。DeepSeek V3.2 主力，GLM-5 轻量，Qwen3-Max 复杂。$/pass 估算约 $0.005。worker_models 必须与 router 平级（根级）。",
   "_domestic_router": {
     "router": {
@@ -240,7 +260,7 @@
         "planner": {
           "provider": "deepseek",
           "model": "deepseek-chat",
-          "_note":  "DeepSeek V3.2，成本仅 Claude 的 1/20。Planner 不降级。"
+          "_note": "DeepSeek V3.2，成本仅 Claude 的 1/20。Planner 不降级。"
         },
         "worker": {
           "provider": "deepseek",
@@ -253,17 +273,16 @@
         "reviewer": {
           "provider": "moonshot",
           "model": "kimi-k2.5",
-          "_note":  "与 Worker(deepseek) 不同源。K2.5 前端专精 + 256K ctx"
+          "_note": "与 Worker(deepseek) 不同源。K2.5 前端专精 + 256K ctx"
         }
       }
     },
     "worker_models": {
-      "easy":   "glm-4.7-air",
+      "easy": "glm-4.7-air",
       "medium": "deepseek-chat",
-      "hard":   "qwen3-max"
+      "hard": "qwen3-max"
     }
   },
-
   "_preset_hybrid": "以下为混合场景预设（Sonnet 5 规划保质量 + DeepSeek 执行省成本）。$/pass 估算约 $0.025（Sonnet 5 intro 价），最接近 PRD Q3 目标。worker_models 必须与 router 平级（根级）。",
   "_hybrid_router": {
     "router": {
@@ -272,7 +291,7 @@
         "planner": {
           "provider": "anthropic",
           "model": "claude-sonnet-5",
-          "_note":  "规划质量是总成本前置变量（铁律）。Sonnet 5 intro $2/$10"
+          "_note": "规划质量是总成本前置变量（铁律）。Sonnet 5 intro $2/$10"
         },
         "worker": {
           "provider": "deepseek",
@@ -285,14 +304,16 @@
         "reviewer": {
           "provider": "google",
           "model": "gemini-2.5-pro",
-          "_note":  "与 Worker(deepseek) 不同源"
+          "_note": "与 Worker(deepseek) 不同源"
         }
       }
     },
     "worker_models": {
-      "easy":   "glm-4.7-air",
+      "easy": "glm-4.7-air",
       "medium": "deepseek-chat",
-      "hard":   "claude-opus-4-8"
+      "hard": "claude-opus-4-8"
     }
-  }
+  },
+  "local_model_cost": {},
+  "worker_models_by_cognitive": {}
 }

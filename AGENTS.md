@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (57 modules, ~30,000 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (64 modules, ~38,500 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
 Runtime has no external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`, `http.server`). Dev/test deps (pytest, pytest-mock, ruff, mypy, pyyaml) are external.
 
@@ -196,7 +196,7 @@ delivery.py         → task-level delivery contract (M1.2); `merge` command is 
 
 If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuilds `meta.json` from worktree state: commit+verify-pass → completed, commit+verify-fail → failed, no commit+orphan changes → reset (resume reruns it), no commit+no changes → no_changes. It never commits orphan changes itself — commit stays the sole completion boundary for resume correctness.
 
-## Key Modules (57 modules, ~30,000 lines)
+## Key Modules (64 modules, ~38,500 lines)
 
 | Module | Purpose |
 |--------|---------|
@@ -259,6 +259,11 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `task_runner.py` | Web 子进程任务运行器（Thin shell 同哲学）：spawn agent_go --yes --json，meta.json 唯一事实源，SIGINT cancel |
 | `web_confirm.py` | R5b Web 计划确认协议：pending/decision 文件协议 + 阻塞轮询，30min 超时自动取消 |
 | `lint.py` | AST-based static checks: suspicious for-loop body truncation |
+| `decision_log.py` | M6.2 决策记录：模型推荐/配置修改/profile 切换/交付决策追加 `~/.agent_go/decision_log.jsonl`（evidence_refs 绑定依据，actual 复跑后回填），可审计可复盘 |
+| `evidence.py` | M6.1 证据物化层：immutable bench 批次聚合为 LLM 可推理的结构化证据包（evidence_hash 校验 manifest），eval insight 只能基于真实数据推理 |
+| `task_lock.py` | M5.2 任务级互斥锁：is_task_locked 前置探测（web 409 检查）+ TaskLock 上下文管理器，merge 与 run/resume 并发改 worktree 互斥 |
+| `knowledge_ab.py` | C4 KnowledgeStore A/B 判定分析器：两臂 pass_rate/ADR/$/AD 汇总 + 三门槛判定（ADR↑ + 成本不劣化 + 错误知识可淘汰）→ PRODUCTIZE/ROLLBACK |
+| `task_report.py` | 任务统计报表生成器：generate_task_report 只读聚合任务 JSONL（total/completed/uncompleted/tags_distribution，多形态兼容 + 标签归一 + 解码失败跳过） |
 
 ## Key Design Decisions
 
@@ -291,7 +296,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 
 ```bash
 pip3 install pytest pytest-mock
-pytest tests/                       # 2448 tests (93 files); --tb=short via pyproject addopts
+pytest tests/                       # 2787 tests (111 files); --tb=short via pyproject addopts
 pytest tests/ -q
 pytest tests/ -k "not integration"  # Unit tests only (skips test_integration.py, test_agent_loop_integration.py)
 pytest tests/ -k "TestFormatCommit" -v
@@ -351,8 +356,8 @@ for fut in as_completed(futures):
 ## File Organization
 
 ```
-agent_go/           # 57 Python modules (~30,000 lines)
-tests/              # 93 test files, 2448 tests
+agent_go/           # 64 Python modules (~38,500 lines)
+tests/              # 111 test files, 2787 tests
 eval_suite/         # eval bench suite: tasks/ (35 task YAMLs), fixtures/ (5 fixture repos), results_*.jsonl
 docs/design/        # Design docs: config-schema.md, module-catalog.md, architecture, ADRs
 docs/archive/       # Historical code review records

@@ -1,7 +1,7 @@
 # agent_go 模块职责目录
 
 > 状态：As-Built 模块映射
-> 更新日期：2026-08-11
+> 更新日期：2026-08-24（对齐 64 模块；补 M5/M6/C4/看板 18 个模块）
 
 | 模块 | 主要职责 | 关键输出 |
 |---|---|---|
@@ -48,9 +48,27 @@
 | `console.py` | 统一输出抽象层：quiet / verbose 模式，延迟默认绑定，表格渲染 | console output |
 | `tui.py` | Curses 状态仪表盘：实时显示并发子任务进度 | TUI display |
 | `workflow_gen.py` | GitHub Actions workflow 自动生成（`ci` 命令） | workflow YAML |
-| `web_server.py` | 只读 Web 观察平台：tasks / cost / models / config / timeline | HTTP JSON/HTML |
+| `web_server.py` | Web 操作台：只读观测（17 GET API）+ 写处置（run/resume/cancel/review/merge/pr）+ 配置中心 + 🗂 看板视图 + SSE | HTTP JSON/HTML/SSE |
 | `lint.py` | AST 静态检查：可疑 Python 代码模式（如循环体截断） | lint warnings |
 | `mcp_http.py` | MCP Server HTTP/SSE transport：POST /mcp + GET /mcp (SSE) + /health | HTTP response |
+| `kanban.py` | 看板数据层：~/.agent_go/kanban.jsonl 单文件存储（mtime 缓存+原子写+锁），5 阶段列 × 3 类卡片，阶段流转 + reconcile_cards 惰性状态回流 | kanban board state |
+| `profiles.py` | Profile 管理：local⇄cloud 一键切换（config local/cloud/status）、健康检查、本地 profile 模板生成 | active profile |
+| `task_runner.py` | Web 子进程任务运行器：spawn agent_go --yes --json，meta.json 唯一事实源，SIGINT cancel | subprocess task run |
+| `web_confirm.py` | Web 计划确认协议：pending/decision 文件协议 + 阻塞轮询，30min 超时自动取消 | confirm decision |
+| `knowledge.py` | C4 KnowledgeStore 注入臂：从 Problem/deviation/verify_state 提取历史经验注入 repair prompt（可开关/suppressed_ids+dormant 可淘汰/knowledge_injected 埋点） | knowledge context |
+| `knowledge_ab.py` | C4 A/B 判定分析器：两臂 pass_rate/ADR/$/AD 汇总 + 三门槛判定（ADR↑/成本不劣化/可淘汰）→ PRODUCTIZE/ROLLBACK | A/B verdict report |
+| `problems.py` | 跨任务 Problem 实体（B4/H3）：三态+复发重开、半衰期 dormant、葬礼 resolution_summary、LLM 根因级 summarize_resolution、全局 problems.jsonl upsert | Problem records |
+| `replan.py` | C3 局部重规划（F-VERIFY-6）：无进展触发一次 Plan 拆分建议（LLM+启发式兜底），最多一次/继承父预算 | replan suggestion |
+| `deviation.py` | Spec/Architecture/acceptance 偏差记录：模型、持久化、聚合（M2.5） | deviation records |
+| `models_registry.py` | 模型池 Model Registry：models.json 加载（mtime 缓存）+ ModelEntity + key_ref 解析（env/secret 不存明文） | model entities |
+| `review_agent.py` | 只读独立审查 subagent：两阶段 review | review analysis |
+| `diag.py` | llama-defender 诊断数据面客户端（R13-R16 消费侧）：session key/fail-open fetch/ledger/metrics/archive 封装 | diag payloads |
+| `exit_codes.py` | 语义化进程退出码（CLI 工具可脚本化判断） | exit code |
+| `evidence.py` | M6.1 证据物化层：immutable bench 批次聚合为 LLM 可推理证据包（evidence_hash 校验） | evidence package |
+| `decision_log.py` | M6.2 决策记录：关键决策追加 decision_log.jsonl（evidence_refs 绑定 + actual 回填） | decision entries |
+| `task_lock.py` | M5.2 任务级互斥锁：is_task_locked 前置探测 + TaskLock 上下文（merge 与 run/resume 互斥） | task lock |
+| `task_report.py` | 任务统计报表生成器：只读聚合任务 JSONL（total/completed/tags_distribution，多形态+归一+容错） | stats report |
+| `goal_policy.py` | Goal Loop 最终执行策略 resolver（goal-mechanism-design §3.3/§4） | goal policy |
 
 ## 模块变更规则
 
