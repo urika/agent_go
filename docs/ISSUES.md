@@ -826,3 +826,13 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 **问题**：37 条盲区标注（weakly_anchored 6 / inconclusive_eval 16 / uncovered_ac 15）在任务终局无一命中问题。D-0 报告（trust-metrics-baseline §3）已预警 uncovered_acceptance_ids 命中规则过宽，全量数据证实。
 
 **修复方向**：命中规则收紧（如仅当任务交付后 14d 内相关文件被人工修改/返工才计命中，复用 post_delivery_rework 信号），或重定义「命中」为跨任务复发关联；修完用历史 37 条重算验证读数落入 50%~90% 判别区间。
+
+### ISSUE-55 巨型模块接近可维护性边界：web_server.py 4838 行 / executor.py 3103 行（2026-08-29 系统 Review 遗留）
+
+- **位置**：`agent_go/web_server.py`（4838 行）、`agent_go/executor.py`（3103 行）
+- **状态**：🔲 已登记未修复（2026-08-29，系统 Review 遗留风险，供决策拆分时机）
+- **严重度**：P2（非功能缺陷，纯可维护性——两者均为改动最频繁的核心模块，持续膨胀将放大 review/合并冲突/回归半径）
+
+**问题**：全仓 64 模块 ~38.5K 行中这两个文件合计 ~7.9K 行（~21%）。web_server.py 混合了 HTTP 传输层、鉴权、17+ GET 观测 API、写处置端点、kanban 视图、SSE、配置中心多个关注点；executor.py 混合了 worktree 生命周期、skill 装载、claude spawn、验证循环、metering、葬礼回写等多个关注点。当前测试基线健康（2741 passed），尚无质量信号恶化，但按当前增速（每批次 +50~200 行）将很快超过单文件可高效导航的阈值。
+
+**修复方向**：不急拆（无质量信号恶化，拆分本身有回归风险），但设触发线：任一文件超 5500 行或单次 review diff 超 400 行即启动拆分。候选切面——web_server 按「传输/鉴权」「观测 GET」「写处置 ops」「kanban」「SSE/配置中心」分 4~5 个文件（handler mixin 或 route 模块）；executor 按「worktree 生命周期」「spawn+验证循环」「metering/回写」分 3 个文件。拆分保持公共 API 不变（executor.run_subtask 签名不动），先搬纯函数再做行为等价验证。
