@@ -431,8 +431,9 @@ def _build_parser():
                               help="包含 bench/fixture 任务（默认只统计真实任务）")
     trust_parser.add_argument("--window", type=int, default=30, dest="recent_window",
                               help="观察窗口：最近 N 个任务（D-0 口径，默认 30；0=不限）")
-    trust_parser.add_argument("--annotate", metavar="TASK_ID", default="",
-                              help="人工盲区归因注记模式：写注记后退出（不展示指标）")
+    trust_parser.add_argument("--annotate", nargs="?", const="__wizard__", default="",
+                              metavar="TASK_ID",
+                              help="人工盲区归因注记：裸 --annotate 进交互向导；--annotate TASK_ID 为单发模式（写后退出）")
     trust_parser.add_argument("--item", default="",
                               help="注记目标项（格式 sig:key，如 weakly_anchored_subtasks:sub-1；省略则任务级）")
     trust_parser.add_argument("--attribution", default="", choices=["", "confirmed", "false-hit", "false-clear", "missed"],
@@ -3967,21 +3968,15 @@ def cmd_problems(args=None) -> None:
 
 
 def _annotate_blind_spot(args) -> None:
-    """人工盲区归因注记（trust --annotate，文件协议 blind_spot_attribution.json）。
-
-    项级（--item sig:key）：confirmed/false-hit/false-clear 覆盖自动判定——
-    人工结论即时判定，不等观察期；任务级（无 --item）：missed 漏报注记
-    （该任务交付后出问题但当时无盲区标注，进 miss 维度展示）。
-    """
-    import time as _time
+    """人工盲区归因注记——单发模式（trust --annotate TASK_ID ...）。"""
     from .console import _LazyConsole
-    from .metrics import _ATTRIB_SIGS
+    from .metrics import write_attribution
 
     con = _LazyConsole()
     task_id = str(getattr(args, "annotate", "")).strip()
     attribution = str(getattr(args, "attribution", "")).strip()
     item = str(getattr(args, "item", "")).strip()
-    note = str(getattr(args, "note", "")).strip()[:200]
+    note = str(getattr(args, "note", "")).strip()
     if not attribution:
         con.force("❌ --attribution 必填（confirmed/false-hit/false-clear/missed）")
         return
@@ -3989,37 +3984,116 @@ def _annotate_blind_spot(args) -> None:
     if not (td / "meta.json").exists():
         con.force(f"❌ 任务不存在: {task_id}")
         return
-    entry = {"attribution": attribution, "note": note, "ts": _time.time()}
-    path = td / "blind_spot_attribution.json"
-    data: dict = {"items": {}, "task_level": None}
-    if path.exists():
+    ok, msg = write_attribution(td, item, attribution, note)
+    con.force(("✅ " if ok else "❌ ") + msg)
+
+
+_WIZARD_SIG_LABELS = (
+    ("weakly_anchored_subtasks", "弱锚定"),
+    ("inconclusive_evaluations", "评估不定"),
+    ("uncovered_acceptance_ids", "漏验收"),
+)
+
+
+def _wizard_candidates(limit_tasks: int = 15) -> list[tuple[str, list[tuple[str, str]]]]:
+    """向导候选：近期有可归因盲区标注的任务 → [(task_id, [(item_key, label)])]。"""
+    cands: list[tuple[str, list[tuple[str, str]]]] = []
+    for td in sorted(AGENT_GO_DIR.glob("task-*"), reverse=True):
+        mp = td / "meta.json"
+        if not mp.exists():
+            continue
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = {
-                    "items": loaded.get("items") if isinstance(loaded.get("items"), dict) else {},
-                    "task_level": loaded.get("task_level") if isinstance(loaded.get("task_level"), dict) else None,
-                }
+            meta = json.loads(mp.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            pass
-    if item:
-        if attribution == "missed":
-            con.force("❌ missed 仅用于任务级注记（省略 --item）")
-            return
-        sig = item.partition(":")[0]
-        if sig not in _ATTRIB_SIGS:
-            con.force(f"❌ item 信号名非法: {sig}（合法: {'/'.join(_ATTRIB_SIGS)}）")
-            return
-        data["items"][item] = entry
+            continue
+        b = meta.get("blind_spots") or {}
+        if not isinstance(b, dict):
+            continue
+        items = [(f"{sig}:{k}", label)
+                 for sig, label in _WIZARD_SIG_LABELS
+                 for k in (b.get(sig) or [])]
+        if items:
+            cands.append((td.name, items))
+        if len(cands) >= limit_tasks:
+            break
+    return cands
+
+
+def _annotate_wizard() -> None:
+    """人工盲区归因向导（trust --annotate 裸调用）：列任务 → 选项 → 四选一 → note。
+
+    非 TTY / EOF 环境优雅退出（headless 安全）。
+    """
+    from .console import _LazyConsole
+    from .metrics import write_attribution
+
+    con = _LazyConsole()
+    con.title("🧭 盲区归因向导（人工结论优先于自动判定，重算即时生效）")
+    cands = _wizard_candidates()
+    if not cands:
+        con.force("近期任务无可归因的盲区标注（wa/inc/uac 三类信号）。")
+        return
+    for i, (tid, items) in enumerate(cands, 1):
+        con.print(f"  [{i}] {tid}  （{len(items)} 项）")
+        for key, label in items[:3]:
+            con.print(f"        {label} {key}")
+        if len(items) > 3:
+            con.print(f"        … 共 {len(items)} 项")
+    con.print("  [m<N>] 任务级漏报复注（N=任务号，如 m1）")
+    try:
+        sel = input("选择任务编号（q 退出）: ").strip()
+    except EOFError:
+        con.force("（非交互环境，向导退出——用单发模式 trust --annotate TASK_ID …）")
+        return
+    if not sel or sel.lower() == "q":
+        return
+    task_idx = None
+    task_level = False
+    if sel.lower().startswith("m") and sel[1:].isdigit():
+        task_idx, task_level = int(sel[1:]), True
+    elif sel.isdigit():
+        task_idx = int(sel)
     else:
-        if attribution != "missed":
-            con.force("❌ 任务级注记仅支持 missed（漏报）")
+        con.force(f"❌ 无法识别: {sel}")
+        return
+    if not (1 <= task_idx <= len(cands)):
+        con.force(f"❌ 编号越界: {sel}")
+        return
+    tid, items = cands[task_idx - 1]
+    item, attribution = "", "missed"
+    if not task_level:
+        con.print(f"\n  {tid} 可归因项：")
+        for j, (key, label) in enumerate(items, 1):
+            con.print(f"  [{j}] {label} {key}")
+        con.print("  [0] 任务级漏报（missed）")
+        try:
+            jsel = input("选择项编号: ").strip()
+        except EOFError:
             return
-        data["task_level"] = entry
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    scope = item or "任务级"
-    con.force(f"✅ 已注记 {task_id} [{scope}] → {attribution}"
-              + (f"（{note}）" if note else ""))
+        if not jsel.isdigit() or not (0 <= int(jsel) <= len(items)):
+            con.force(f"❌ 编号非法: {jsel}")
+            return
+        j = int(jsel)
+        if j == 0:
+            attribution = "missed"
+        else:
+            item = items[j - 1][0]
+            con.print("\n  归因：[1] confirmed 确认命中  [2] false-hit 假阳性  [3] false-clear 假阴性")
+            try:
+                asel = input("选择归因: ").strip()
+            except EOFError:
+                return
+            attribution = {"1": "confirmed", "2": "false-hit", "3": "false-clear"}.get(asel, "")
+            if not attribution:
+                con.force(f"❌ 归因编号非法: {asel}")
+                return
+    try:
+        note = input("备注（可空，≤200 字）: ").strip() or ""
+    except EOFError:
+        note = ""
+    td = AGENT_GO_DIR / tid
+    ok, msg = write_attribution(td, item, attribution, note)
+    con.force(("✅ " if ok else "❌ ") + f"{tid} {msg}")
 
 
 def cmd_trust(args=None) -> None:
@@ -4037,7 +4111,10 @@ def cmd_trust(args=None) -> None:
 
     _con = _LazyConsole()
     if getattr(args, "annotate", ""):
-        _annotate_blind_spot(args)
+        if args.annotate == "__wizard__":
+            _annotate_wizard()
+        else:
+            _annotate_blind_spot(args)
         return
     window = int(getattr(args, "recent_window", 30) or 0)
     task_dirs = sorted(d for d in AGENT_GO_DIR.glob("task-*") if (d / "meta.json").exists())
@@ -4100,6 +4177,32 @@ def cmd_trust(args=None) -> None:
     if rework["rework_eligible_tasks"] < 10 or r.get("blind_spot_judged", 0) < 20:
         _con.print("  ⚠️ 样本不足（放行评估需 ≥10 个有效交付任务 / ≥20 条已判定盲区标注），"
                    "指标仅供参考——见 docs/design/trust-metrics-baseline-2026-08-21.md")
+    _unatt = [x for x in (rework.get("reworked") or []) if not x.get("annotated")]
+    if _unatt:
+        _con.sep("─", 62)
+        _con.title("📮 返工未归因（修复现场顺手标注，读数即纠偏；复制执行）")
+        for x in _unatt[:5]:
+            tid = x.get("task_id", "")
+            items: list[str] = []
+            try:
+                meta_u = json.loads((AGENT_GO_DIR / tid / "meta.json").read_text(encoding="utf-8"))
+                b = meta_u.get("blind_spots") or {}
+                items = [f"{sig}:{k}" for sig, _ in
+                         (("weakly_anchored_subtasks", ""), ("inconclusive_evaluations", ""),
+                          ("uncovered_acceptance_ids", ""))
+                         for k in (b.get(sig) or [])]
+            except (OSError, json.JSONDecodeError):
+                pass
+            if items:
+                _con.print(f"  {tid}（{x.get('commits', 0)} 次触碰）——该项是否真出问题？")
+                _con.print(f"    agent_go trust --annotate {tid} --item {items[0]} "
+                           f"--attribution <confirmed|false-hit|false-clear> --note '…'")
+                _con.print(f"    （其余可归因项: {', '.join(items[1:4]) or '无'}）")
+            else:
+                _con.print(f"  {tid}（{x.get('commits', 0)} 次触碰，交付时无任何盲区标注）→ 漏报：")
+                _con.print(f"    agent_go trust --annotate {tid} --attribution missed --note '…'")
+        if len(_unatt) > 5:
+            _con.print(f"  … 共 {len(_unatt)} 个返工未归因任务（--json 查看 reworked 全量）")
 
 
 def cmd_router(args=None) -> None:

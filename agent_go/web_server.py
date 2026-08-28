@@ -43,6 +43,7 @@ from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
 from .config import AGENT_GO_DIR, CONFIG_PATH, load_config
+from .metrics import _load_attributions
 from .console import _LazyConsole
 from .profiles import (
     ProfileError,
@@ -212,7 +213,8 @@ def api_task(task_id: str) -> Optional[dict]:
         "blind_spots": meta.get("blind_spots") or {},
         "uncovered_perspectives": meta.get("uncovered_perspectives") or [],
         "layer_attribution": meta.get("layer_attribution") or {},
-        # M4 goal 回溯：合规度正交维度（纯透传，与 status 正交）
+        # 盲区人工归因注记（P1.5 四按钮状态回显）
+        "blind_spot_attributions": _load_attributions(td),        # M4 goal 回溯：合规度正交维度（纯透传，与 status 正交）
         "goal_adherence": meta.get("goal_adherence") or {},
     }
 
@@ -1874,6 +1876,11 @@ class WebHandler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "notes":
                 self._op_add_note(parts[2], body, token)
                 return
+            # POST /api/tasks/<id>/blind-spot-attribution {item, attribution, note}
+            # （P1.5 盲区归因四按钮写端点）
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "blind-spot-attribution":
+                self._op_blind_spot_attrib(parts[2], body, token)
+                return
             # POST /api/insight/generate {batch, goal?, plan?}（M6.3 生成洞察报告）
             if len(parts) == 3 and parts[1] == "insight" and parts[2] == "generate":
                 self._op_insight_generate(body, token)
@@ -1925,6 +1932,29 @@ class WebHandler(BaseHTTPRequestHandler):
         else:
             _audit("insight.generate", {"batch": batch}, result["stderr"][-300:], False, token)
             self._reply_json(422, result)
+
+    def _op_blind_spot_attrib(self, task_id: str, body: dict, token: str) -> None:
+        """P1.5 盲区归因注记写端点（Web 四按钮）。
+
+        body: {item: "sig:key" | "", attribution: confirmed/false-hit/false-clear/missed,
+               note?: str}——项级注记覆盖自动判定，任务级 missed 记漏报。
+        """
+        from .metrics import write_attribution
+        td = _task_dir(task_id)
+        if td is None:
+            self._reply_json(404, {"error": "task not found"})
+            return
+        item = str(body.get("item") or "").strip()
+        attribution = str(body.get("attribution") or "").strip()
+        note = str(body.get("note") or "").strip()
+        ok, msg = write_attribution(td, item, attribution, note)
+        _audit("tasks.blind_spot_attribution",
+               {"task_id": task_id, "item": item, "attribution": attribution},
+               msg, ok, token)
+        if not ok:
+            self._reply_json(422, {"error": msg})
+            return
+        self._reply_json(200, {"ok": True, "message": msg})
 
     def _op_add_note(self, task_id: str, body: dict, token: str) -> None:
         if _task_dir(task_id) is None:
@@ -2945,6 +2975,13 @@ _SPA_HTML = """<!DOCTYPE html>
   .humility-card { background:rgba(210,153,34,0.06); border:1px solid var(--yellow); border-radius:8px;
                    padding:10px 14px; margin-top:12px; margin-bottom:12px; }
   .humility-card .h-title { font-weight:600; color:var(--yellow); margin-bottom:6px; }
+  .humility-card .h-line .abtns { margin-left:8px; white-space:nowrap; }
+  .humility-card .abtn { font-size:11px; padding:1px 6px; margin-right:3px; border:1px solid var(--border);
+    border-radius:4px; background:transparent; color:var(--fg-dim); cursor:pointer; }
+  .humility-card .abtn:hover { border-color:var(--blue); color:var(--blue); }
+  .humility-card .abtn.ok:hover { border-color:#3fb950; color:#3fb950; }
+  .humility-card .abtn.miss { float:right; }
+  .att-done { color:var(--green); font-size:11px; }
   .humility-card .h-line { color:var(--dim); font-size:13px; line-height:1.6; }
   .kanban-toolbar { display:flex; gap:12px; align-items:center; margin-bottom:12px; }
   .kanban-toolbar input { background:var(--panel); border:1px solid var(--border);
@@ -3578,21 +3615,33 @@ function renderTaskDetail(d) {
         '<div class="loading">点击子任务查看明细</div>'+
       '</div></div>';
   }).join('');
-  // 谦逊层盲区卡片（#51：交底报告进操作台）
+  // 谦逊层盲区卡片（#51：交底报告进操作台 + P1.5 归因四按钮）
   const bs = d.blind_spots || {};
+  const att = ((d.blind_spot_attributions || {}).items) || {};
+  const attState = (k) => att[k] ? ' <span class="att-done">[已注:' + att[k].attribution + ']</span>' : '';
+  const abtns = (sig, key) =>
+    ' <span class="abtns">' +
+    '<button class="abtn ok" data-item="' + sig + ':' + key + '" data-att="confirmed" title="确认命中：交付后人工修复验证了该盲区">✓</button>' +
+    '<button class="abtn" data-item="' + sig + ':' + key + '" data-att="false-hit" title="假阳性：自动计命中但实为巧合触碰">假阳</button>' +
+    '<button class="abtn" data-item="' + sig + ':' + key + '" data-att="false-clear" title="假阴性：盲区真出了问题（提前判定命中）">假阴</button></span>';
+  const sigLines = (label, sig) => ((bs[sig] && bs[sig].length)
+    ? bs[sig].map(k => '<div class="h-line">' + label + ': ' + esc(String(k)) + attState(sig + ':' + k) + abtns(sig, k) + '</div>').join('')
+    : '');
   const persp = d.uncovered_perspectives || [];
   const layer = d.layer_attribution || {};
   const blindLines = [];
-  if (bs.uncovered_acceptance_ids && bs.uncovered_acceptance_ids.length) blindLines.push('未覆盖验收 ID: ' + bs.uncovered_acceptance_ids.join(', '));
-  if (bs.weakly_anchored_subtasks && bs.weakly_anchored_subtasks.length) blindLines.push('弱锚定验证子任务: ' + bs.weakly_anchored_subtasks.join(', '));
-  if (bs.unattributed_failures && bs.unattributed_failures.length) blindLines.push('无根因失败: ' + bs.unattributed_failures.join(', '));
-  if (bs.baseline_dirty) blindLines.push('任务启动时工作区有未提交改动');
-  if (bs.inconclusive_evaluations && bs.inconclusive_evaluations.length) blindLines.push('语义评估不确定: ' + bs.inconclusive_evaluations.join(', '));
-  persp.forEach(p => blindLines.push('未覆盖视角 [' + esc(p.perspective||'') + ']: ' + esc(p.reason||'')));
-  if (layer.primary) blindLines.push('层间归因: ' + esc(layer.primary));
-  const humilityHtml = blindLines.length
-    ? '<div class="humility-card"><div class="h-title">⚠️ 已知盲区（系统主动交底）</div>' +
-      blindLines.map(l => '<div class="h-line">' + l + '</div>').join('') + '</div>'
+  blindLines.push(sigLines('未覆盖验收 ID', 'uncovered_acceptance_ids'));
+  blindLines.push(sigLines('弱锚定验证子任务', 'weakly_anchored_subtasks'));
+  if (bs.unattributed_failures && bs.unattributed_failures.length) blindLines.push('<div class="h-line">无根因失败: ' + bs.unattributed_failures.map(esc).join(', ') + '</div>');
+  if (bs.baseline_dirty) blindLines.push('<div class="h-line">任务启动时工作区有未提交改动</div>');
+  blindLines.push(sigLines('语义评估不确定', 'inconclusive_evaluations'));
+  persp.forEach(p => blindLines.push('<div class="h-line">未覆盖视角 [' + esc(p.perspective||'') + ']: ' + esc(p.reason||'') + '</div>'));
+  if (layer.primary) blindLines.push('<div class="h-line">层间归因: ' + esc(layer.primary) + '</div>');
+  const missDone = (d.blind_spot_attributions || {}).task_level ? ' <span class="att-done">[已注:missed]</span>' : '';
+  const humilityHtml = blindLines.filter(Boolean).length
+    ? '<div class="humility-card"><div class="h-title">⚠️ 已知盲区（系统主动交底）' + missDone +
+      '<button class="abtn miss" data-item="" data-att="missed" title="漏报：交付后出问题但当时无任何盲区标注">漏报复注</button></div>' +
+      blindLines.filter(Boolean).join('') + '</div>'
     : '';
   return '<div class="kv">'+
     '<dt>任务</dt><dd>'+esc(d.task)+'</dd>'+
@@ -3603,6 +3652,22 @@ function renderTaskDetail(d) {
 }
 
 function bindDetailEvents(taskId, tr) {
+  tr.querySelectorAll('.abtn').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const item = btn.dataset.item, a = btn.dataset.att;
+      const note = (a === 'missed') ? (prompt('漏报复注：简述交付后出了什么问题（可空）') || '') : (prompt('归因备注（可空，≤200 字）') || '');
+      try {
+        await postJSON('/api/tasks/' + encodeURIComponent(taskId) + '/blind-spot-attribution',
+          {item: item, attribution: a, note: note});
+        const span = document.createElement('span');
+        span.className = 'att-done';
+        span.textContent = ' [已注:' + a + ']';
+        if (item) { const grp = btn.closest('.abtns'); if (grp) { grp.before(span); grp.remove(); } }
+        else { btn.replaceWith(span); }
+      } catch (e) { alert('标注失败: ' + e.message); }
+    });
+  });
   tr.querySelectorAll('.sub-head').forEach(head => {
     head.addEventListener('click', async () => {
       const subId = head.dataset.sub;

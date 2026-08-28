@@ -1114,3 +1114,66 @@ class TestInsightDecisionApi:
         code, d = _post(f"{ops_server}/api/insight/generate", {"batch": "m4-mixB-hard", "goal": "测试"})
         assert code == 200
         assert any(a["op"] == "insight.generate" for a in _audit_lines(ops_env))
+
+
+# ═══════════════════════════════════════════════════════════════
+# P1.5 盲区归因四按钮写端点（POST /api/tasks/<id>/blind-spot-attribution）
+# ═══════════════════════════════════════════════════════════════
+
+class TestBlindSpotAttribEndpoint:
+    def _mk_blind_task(self, adir: Path, task_id: str) -> Path:
+        td = _mk_task(adir, task_id, status="DELIVERY_READY")
+        meta = json.loads((td / "meta.json").read_text(encoding="utf-8"))
+        meta["blind_spots"] = {"weakly_anchored_subtasks": ["sub-1"]}
+        (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        return td
+
+    def test_item_attribution_ok(self, ops_server, ops_env):
+        tid = "task-20260819-235959-101-a111"
+        self._mk_blind_task(ops_env, tid)
+        code, data = _post(f"{ops_server}/api/tasks/{tid}/blind-spot-attribution",
+                          {"item": "weakly_anchored_subtasks:sub-1",
+                           "attribution": "confirmed", "note": "复核确认"})
+        assert code == 200
+        assert data["ok"] is True
+        att = json.loads((ops_env / tid / "blind_spot_attribution.json").read_text())
+        assert att["items"]["weakly_anchored_subtasks:sub-1"]["attribution"] == "confirmed"
+
+    def test_detail_echoes_attributions(self, ops_server, ops_env):
+        tid = "task-20260819-235959-102-b222"
+        self._mk_blind_task(ops_env, tid)
+        _post(f"{ops_server}/api/tasks/{tid}/blind-spot-attribution",
+              {"item": "weakly_anchored_subtasks:sub-1",
+               "attribution": "false-hit", "note": ""})
+        d = _get(f"{ops_server}/api/tasks/{tid}")
+        att = d.get("blind_spot_attributions", {}).get("items", {})
+        assert att["weakly_anchored_subtasks:sub-1"]["attribution"] == "false-hit"
+
+    def test_task_level_missed(self, ops_server, ops_env):
+        tid = "task-20260819-235959-103-c333"
+        self._mk_blind_task(ops_env, tid)
+        code, data = _post(f"{ops_server}/api/tasks/{tid}/blind-spot-attribution",
+                          {"attribution": "missed", "note": "交付后人工修复"})
+        assert code == 200
+        att = json.loads((ops_env / tid / "blind_spot_attribution.json").read_text())
+        assert att["task_level"]["attribution"] == "missed"
+
+    def test_invalid_sig_422(self, ops_server, ops_env):
+        tid = "task-20260819-235959-104-d444"
+        self._mk_blind_task(ops_env, tid)
+        code, data = _post(f"{ops_server}/api/tasks/{tid}/blind-spot-attribution",
+                          {"item": "bogus:sub-1", "attribution": "confirmed"})
+        assert code == 422
+        assert "信号名非法" in data["error"]
+
+    def test_missing_attribution_422(self, ops_server, ops_env):
+        tid = "task-20260819-235959-105-e555"
+        self._mk_blind_task(ops_env, tid)
+        code, _ = _post(f"{ops_server}/api/tasks/{tid}/blind-spot-attribution",
+                        {"item": "", "attribution": ""})
+        assert code == 422
+
+    def test_task_not_found_404(self, ops_server):
+        code, _ = _post(f"{ops_server}/api/tasks/task-20260819-235959-106-f666/blind-spot-attribution",
+                        {"attribution": "missed"})
+        assert code == 404

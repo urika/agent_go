@@ -658,6 +658,47 @@ def _load_attributions(td: Path) -> dict:
     }
 
 
+def write_attribution(td: Path, item: str, attribution: str,
+                      note: str = "") -> tuple[bool, str]:
+    """写入一条人工盲区归因注记（CLI 向导 / 单发 / Web 端点共用）。
+
+    item 非空 → 项级（sig:key，attribution ∈ confirmed/false-hit/false-clear）；
+    item 空 → 任务级（attribution 必须 missed）。同目标重复写入覆盖。
+    Returns: (ok, message)。
+    """
+    if item:
+        if attribution == "missed":
+            return False, "missed 仅用于任务级注记（item 留空）"
+        sig = item.partition(":")[0]
+        if sig not in _ATTRIB_SIGS:
+            return False, f"item 信号名非法: {sig}（合法: {'/'.join(_ATTRIB_SIGS)}）"
+    elif attribution != "missed":
+        return False, "任务级注记仅支持 missed（漏报）"
+    import time as _time
+    entry = {"attribution": attribution, "note": note[:200], "ts": _time.time()}
+    path = td / _ATTRIBUTION_FILE
+    data: dict = {"items": {}, "task_level": None}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = {
+                    "items": loaded.get("items") if isinstance(loaded.get("items"), dict) else {},
+                    "task_level": loaded.get("task_level") if isinstance(loaded.get("task_level"), dict) else None,
+                }
+        except (OSError, json.JSONDecodeError):
+            pass
+    if item:
+        data["items"][item] = entry
+    else:
+        data["task_level"] = entry
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        return False, f"写入失败: {e}"
+    return True, f"已注记 [{item or '任务级'}] → {attribution}" + (f"（{note[:60]}）" if note else "")
+
+
 def compute_blind_spot_hit_rate(task_dirs: list[Path],
                                 window_days: int = 14,
                                 now: Optional[float] = None) -> dict[str, Any]:
