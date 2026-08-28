@@ -820,7 +820,7 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 ### ISSUE-54 盲区命中率口径失灵：0/37 全不命中，指标无判别力（阶段 D 放行门 A1 阻塞项）
 
 - **位置**：`metrics.py compute_blind_spot_hit_rate`（原同任务终局关联口径）
-- **状态**：✅ 已修复（2026-08-29）
+- **状态**：✅ 已修复（2026-08-29 两步：① 两级命中证据（即时终局 + 交付后 14d 返工），judged/pending 分列，37 条如实报「无数据」而非恒 0；② 死挂起终态化（ad892a3）——清点发现 37 条挂起中 35 条为 repo 已删/无关联文件的死挂起，N/A 终态排除出 items，真实数据验证 37 → 2 挂起 + 35 N/A）
 - **严重度**：P1（指标 0% 低于 50% 放行下限——不是质量好，是「验收 ID 未覆盖 ≠ 出问题」规则过宽导致标注全是虚警；该指标当时等于没有盲区警报器，阶段 D 放行评估被它卡住）
 
 **问题**：37 条盲区标注（weakly_anchored 6 / inconclusive_eval 16 / uncovered_ac 15）在任务终局无一命中问题。D-0 报告（trust-metrics-baseline §3）已预警 uncovered_acceptance_ids 命中规则过宽，全量数据证实。
