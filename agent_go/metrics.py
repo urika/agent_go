@@ -630,11 +630,15 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
       wa/inc 项关联文件 = 被标注子任务的 diff 文件（解析不出时回退任务级全集）；
       uac 项关联文件 = 任务级交付文件全集。
 
-    判定口径：无即时证据且观察期未满 / repo 或 git 不可用 / 无可解析交付文件
-    的标注项计 pending（挂起，不进命中率分母）——「尚未出问题」≠「不出问题」。
+    判定口径（ISSUE-54 口径改造 + 死挂起终态化，2026-08-29）：
+    - 命中：即时终局证据，或交付后 14d 窗口内关联文件被人工 commit 再改。
+    - 未命中：窗口已满且无返工证据。
+    - pending（挂起，不进分母）：repo 可达、有关联文件、无即时证据但观察期
+      未满——「尚未出问题」≠「不出问题」。
+    - N/A（不可观察，整项排除出 items）：repo 不可达（目标仓库已删，bench/
+      smoke 临时目录的常见终局）或关联文件全集为空（no_changes/空 diffstat）。
+      这类项时间无法给出答案，永久挂起只会稀释观察——如实排除并单独计数。
     命中率 = hits / (items - pending)，分母为「已具备判定条件」的标注项。
-    D-1 复盘：历史 37 条标注全部为「交付顺利、观察期未满」，旧口径把它们
-    直接计 0 命中导致读数恒 0%、指标无判别力；新口径如实报告 pending。
 
     分母排除两类：unattributed_failures（本身已是失败，是「问题」而非「预测」）、
     baseline_dirty（环境标志位，非可命中的标注项）。
@@ -642,16 +646,16 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
     Returns:
         {"blind_spot_hit_rate": float|None, "blind_spot_items": int,
          "blind_spot_hits": int, "blind_spot_judged": int,
-         "blind_spot_pending": int, "window_days": int,
-         "by_signal": {signal: {"items": n, "hits": m, "pending": p}}}
+         "blind_spot_pending": int, "blind_spot_na": int, "window_days": int,
+         "by_signal": {signal: {"items": n, "hits": m, "pending": p, "na": q}}}
     """
     import time as _time
 
     now = now if now is not None else _time.time()
     by_signal: dict[str, dict[str, int]] = {
-        "weakly_anchored_subtasks": {"items": 0, "hits": 0, "pending": 0},
-        "inconclusive_evaluations": {"items": 0, "hits": 0, "pending": 0},
-        "uncovered_acceptance_ids": {"items": 0, "hits": 0, "pending": 0},
+        "weakly_anchored_subtasks": {"items": 0, "hits": 0, "pending": 0, "na": 0},
+        "inconclusive_evaluations": {"items": 0, "hits": 0, "pending": 0, "na": 0},
+        "uncovered_acceptance_ids": {"items": 0, "hits": 0, "pending": 0, "na": 0},
     }
     for td in task_dirs:
         meta_path = td / "meta.json"
@@ -700,6 +704,7 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
         anchor_ts: Optional[float] = None
         window_open: Optional[bool] = None  # None=未计算
         repo_str = str(meta.get("repo", "") or meta.get("repo_path", ""))
+        repo_ok = bool(repo_str and (Path(repo_str) / ".git").exists())
         target = str(meta.get("target_branch") or meta.get("base_branch") or "HEAD")
         task_id = str(meta.get("task_id") or td.name)
 
@@ -707,16 +712,11 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
             """交付后观察证据：True=返工命中 / False=观察期满无返工 / None=挂起。"""
             nonlocal anchor_commit, anchor_ts, window_open
             if window_open is None:
-                if repo_str and (Path(repo_str) / ".git").exists():
-                    anchor_commit, anchor_ts = _delivery_anchor(meta, td, meta_path)
-                    window_open = bool(
-                        anchor_ts is not None
-                        and now - anchor_ts >= window_days * 86400)
-                else:
-                    window_open = False
-            if not window_open:
-                return None
-            if not item_files:
+                anchor_commit, anchor_ts = _delivery_anchor(meta, td, meta_path)
+                window_open = bool(
+                    anchor_ts is not None
+                    and now - anchor_ts >= window_days * 86400)
+            if not window_open or anchor_ts is None:
                 return None
             commits = _post_delivery_touches(
                 repo_str, target, task_id, anchor_commit, anchor_ts, item_files)
@@ -726,11 +726,15 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
 
         def _judge(signal: str, item_key: str, immediate: bool) -> None:
             st = by_signal[signal]
-            st["items"] += 1
             if immediate:
+                st["items"] += 1
                 st["hits"] += 1
                 return
             files = files_by_subtask.get(item_key) or task_files
+            if not repo_ok or not files:
+                st["na"] += 1
+                return
+            st["items"] += 1
             obs = _observe_hit(files)
             if obs is None:
                 st["pending"] += 1
@@ -750,6 +754,7 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
     items = sum(v["items"] for v in by_signal.values())
     hits = sum(v["hits"] for v in by_signal.values())
     pending = sum(v["pending"] for v in by_signal.values())
+    na = sum(v["na"] for v in by_signal.values())
     judged = items - pending
     return {
         "blind_spot_hit_rate": round(hits / judged, 4) if judged else None,
@@ -757,6 +762,7 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
         "blind_spot_hits": hits,
         "blind_spot_judged": judged,
         "blind_spot_pending": pending,
+        "blind_spot_na": na,
         "window_days": window_days,
         "by_signal": by_signal,
     }
@@ -784,7 +790,8 @@ def compute_trust_metrics(task_dirs: list[Path],
          "recurrence_visibility_rate": float|None, "failed_subtasks": int,
          "blind_spot_hit_rate": float|None, "blind_spot_items": int,
          "blind_spot_hits": int, "blind_spot_judged": int,
-         "blind_spot_pending": int, "blind_spot_by_signal": dict}
+         "blind_spot_pending": int, "blind_spot_na": int,
+         "blind_spot_by_signal": dict}
     """
     reviewed = 0
     modified = 0
@@ -825,5 +832,6 @@ def compute_trust_metrics(task_dirs: list[Path],
         "blind_spot_hits": blind["blind_spot_hits"],
         "blind_spot_judged": blind["blind_spot_judged"],
         "blind_spot_pending": blind["blind_spot_pending"],
+        "blind_spot_na": blind["blind_spot_na"],
         "blind_spot_by_signal": blind["by_signal"],
     }

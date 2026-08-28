@@ -337,22 +337,29 @@ def test_blind_spot_hit_weak_anchor_failed(tmp_path):
     assert r["blind_spot_items"] == 1
     assert r["blind_spot_hits"] == 1
     assert r["blind_spot_hit_rate"] == 1.0
-    assert r["by_signal"]["weakly_anchored_subtasks"] == {"items": 1, "hits": 1, "pending": 0}
+    assert r["by_signal"]["weakly_anchored_subtasks"] == {"items": 1, "hits": 1, "pending": 0, "na": 0}
 
 
 def test_blind_spot_no_hit_when_completed(tmp_path):
-    """弱锚定标注但子任务 completed、任务交付且观察期未满 → 挂起（pending），
-    不计命中也不进分母（ISSUE-54：「尚未出问题」≠「不出问题」）。"""
+    """弱锚定标注但子任务 completed、任务交付、repo 可达有文件、观察期未满
+    → 挂起（pending），不计命中也不进分母（ISSUE-54：「尚未出问题」≠「不出问题」）。"""
+    import subprocess
     from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     t = _mk_task(tmp_path, "task-1", {
         "status": "ACCEPTED_DELIVERY",
-        "results": [{"subtask_id": "s1", "status": "completed"}],
+        "repo": str(repo),
+        "results": [{"subtask_id": "s1", "status": "completed",
+                     "summary": "a.py | 2 ++"}],
         "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
     }, review={"decision": "approved"})
     r = compute_blind_spot_hit_rate([t])
     assert r["blind_spot_items"] == 1
     assert r["blind_spot_hits"] == 0
     assert r["blind_spot_pending"] == 1
+    assert r["blind_spot_na"] == 0
     assert r["blind_spot_hit_rate"] is None
 
 
@@ -365,7 +372,7 @@ def test_blind_spot_hit_inconclusive_review_rejected(tmp_path):
         "blind_spots": {"inconclusive_evaluations": ["s1"]},
     }, review={"decision": "changes_requested"})
     r = compute_blind_spot_hit_rate([t])
-    assert r["by_signal"]["inconclusive_evaluations"] == {"items": 1, "hits": 1, "pending": 0}
+    assert r["by_signal"]["inconclusive_evaluations"] == {"items": 1, "hits": 1, "pending": 0, "na": 0}
 
 
 def test_blind_spot_hit_uncovered_acceptance_goal_low(tmp_path):
@@ -378,7 +385,7 @@ def test_blind_spot_hit_uncovered_acceptance_goal_low(tmp_path):
         "blind_spots": {"uncovered_acceptance_ids": ["AC-1", "AC-2"]},
     })
     r = compute_blind_spot_hit_rate([t])
-    assert r["by_signal"]["uncovered_acceptance_ids"] == {"items": 2, "hits": 2, "pending": 0}
+    assert r["by_signal"]["uncovered_acceptance_ids"] == {"items": 2, "hits": 2, "pending": 0, "na": 0}
 
 
 def test_blind_spot_uncovered_acceptance_no_hit_when_delivered(tmp_path):
@@ -529,16 +536,39 @@ def test_blind_spot_rework_item_level_file_isolation(tmp_path):
     assert r["blind_spot_judged"] == 1
 
 
-def test_blind_spot_repo_gone_after_window_pending(tmp_path):
-    """观察期满但 repo 已删 → fail-open 挂起（无法确认「无返工」）。"""
+def test_blind_spot_repo_gone_after_window_na(tmp_path):
+    """repo 已删（bench/smoke 临时目录常见终局）→ N/A 终态排除（死挂起终态化，
+    2026-08-29）：不可观察 ≠ 挂起，永久挂起只会稀释观察、误导排查。"""
     from agent_go.metrics import compute_blind_spot_hit_rate
     td = _mk_blind_task(tmp_path, "task-a", tmp_path / "no-such-repo",
                         _BASE, blind={"inconclusive_evaluations": ["s1"]},
                         results=[{"subtask_id": "s1", "status": "completed",
                                   "summary": "a.py | 2 ++"}])
     r = compute_blind_spot_hit_rate([td], now=_BASE + 30 * _DAY)
-    assert r["blind_spot_pending"] == 1
+    assert r["blind_spot_na"] == 1
+    assert r["blind_spot_pending"] == 0
+    assert r["blind_spot_items"] == 0
     assert r["blind_spot_hit_rate"] is None
+
+
+def test_blind_spot_na_no_associated_files(tmp_path):
+    """repo 可达但关联文件全集为空（no_changes/空 diffstat）→ N/A 终态排除。"""
+    import subprocess
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    t = _mk_task(tmp_path, "task-1", {
+        "status": "completed",
+        "repo": str(repo),
+        "results": [{"subtask_id": "s1", "status": "completed", "summary": ""}],
+        "goal_adherence": {"level": "full"},
+        "blind_spots": {"uncovered_acceptance_ids": ["AC-1"]},
+    })
+    r = compute_blind_spot_hit_rate([t])
+    assert r["blind_spot_na"] == 1
+    assert r["blind_spot_items"] == 0
+    assert r["blind_spot_pending"] == 0
 
 
 # ═══════════════════════════════════════════════════════════════
