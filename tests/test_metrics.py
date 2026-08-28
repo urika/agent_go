@@ -337,11 +337,12 @@ def test_blind_spot_hit_weak_anchor_failed(tmp_path):
     assert r["blind_spot_items"] == 1
     assert r["blind_spot_hits"] == 1
     assert r["blind_spot_hit_rate"] == 1.0
-    assert r["by_signal"]["weakly_anchored_subtasks"] == {"items": 1, "hits": 1}
+    assert r["by_signal"]["weakly_anchored_subtasks"] == {"items": 1, "hits": 1, "pending": 0}
 
 
 def test_blind_spot_no_hit_when_completed(tmp_path):
-    """弱锚定标注但子任务 completed、任务交付 → 未命中。"""
+    """弱锚定标注但子任务 completed、任务交付且观察期未满 → 挂起（pending），
+    不计命中也不进分母（ISSUE-54：「尚未出问题」≠「不出问题」）。"""
     from agent_go.metrics import compute_blind_spot_hit_rate
     t = _mk_task(tmp_path, "task-1", {
         "status": "ACCEPTED_DELIVERY",
@@ -351,7 +352,8 @@ def test_blind_spot_no_hit_when_completed(tmp_path):
     r = compute_blind_spot_hit_rate([t])
     assert r["blind_spot_items"] == 1
     assert r["blind_spot_hits"] == 0
-    assert r["blind_spot_hit_rate"] == 0.0
+    assert r["blind_spot_pending"] == 1
+    assert r["blind_spot_hit_rate"] is None
 
 
 def test_blind_spot_hit_inconclusive_review_rejected(tmp_path):
@@ -363,7 +365,7 @@ def test_blind_spot_hit_inconclusive_review_rejected(tmp_path):
         "blind_spots": {"inconclusive_evaluations": ["s1"]},
     }, review={"decision": "changes_requested"})
     r = compute_blind_spot_hit_rate([t])
-    assert r["by_signal"]["inconclusive_evaluations"] == {"items": 1, "hits": 1}
+    assert r["by_signal"]["inconclusive_evaluations"] == {"items": 1, "hits": 1, "pending": 0}
 
 
 def test_blind_spot_hit_uncovered_acceptance_goal_low(tmp_path):
@@ -376,7 +378,7 @@ def test_blind_spot_hit_uncovered_acceptance_goal_low(tmp_path):
         "blind_spots": {"uncovered_acceptance_ids": ["AC-1", "AC-2"]},
     })
     r = compute_blind_spot_hit_rate([t])
-    assert r["by_signal"]["uncovered_acceptance_ids"] == {"items": 2, "hits": 2}
+    assert r["by_signal"]["uncovered_acceptance_ids"] == {"items": 2, "hits": 2, "pending": 0}
 
 
 def test_blind_spot_uncovered_acceptance_no_hit_when_delivered(tmp_path):
@@ -429,6 +431,114 @@ def test_trust_metrics_blind_spot_none_without_annotations(tmp_path):
     r = compute_trust_metrics([t])
     assert r["blind_spot_hit_rate"] is None
     assert r["blind_spot_items"] == 0
+
+
+# ISSUE-54：交付后观察证据（返工命中 / pending 挂起）
+# 复用下文返工率测试的 _git / _mk_repo_with_file 助手（模块级，调用时解析）。
+
+def _mk_blind_task(base: Path, name: str, repo: Path, mtime_ts: int,
+                   blind: dict, results: list) -> Path:
+    import os
+    td = base / name
+    td.mkdir()
+    meta = {
+        "task_id": name, "status": "ACCEPTED_DELIVERY", "repo": str(repo),
+        "results": results, "blind_spots": blind,
+    }
+    mp = td / "meta.json"
+    mp.write_text(_json.dumps(meta), encoding="utf-8")
+    os.utime(mp, (mtime_ts, mtime_ts))
+    return td
+
+
+def test_blind_spot_hit_post_delivery_rework(tmp_path):
+    """弱锚定子任务交付后 14d 内其文件被人工 commit 修改 → 命中（ISSUE-54）。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={"weakly_anchored_subtasks": ["s1"]},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++\n 1 file changed, 2 insertions(+)"}])
+    # 交付 merge（近似锚点丢弃最旧）+ 人工返工
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge agent work", date_ts=anchor + _DAY)
+    (repo / "a.py").write_text("x = 3\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "human fix", date_ts=anchor + 2 * _DAY)
+    r = compute_blind_spot_hit_rate([td], now=anchor + 20 * _DAY)
+    assert r["blind_spot_hits"] == 1
+    assert r["blind_spot_judged"] == 1
+    assert r["blind_spot_pending"] == 0
+    assert r["blind_spot_hit_rate"] == 1.0
+
+
+def test_blind_spot_no_rework_after_window_judged_non_hit(tmp_path):
+    """观察期满且无返工 → 判定为非命中（进分母，rate=0.0）。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={"weakly_anchored_subtasks": ["s1"]},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "merge agent work", date_ts=anchor + _DAY)
+    r = compute_blind_spot_hit_rate([td], now=anchor + 20 * _DAY)
+    assert r["blind_spot_hits"] == 0
+    assert r["blind_spot_judged"] == 1
+    assert r["blind_spot_hit_rate"] == 0.0
+
+
+def test_blind_spot_window_not_elapsed_pending(tmp_path):
+    """观察期未满 → pending（不进分母，rate=None）。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = _mk_repo_with_file(tmp_path, _BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={"weakly_anchored_subtasks": ["s1"]},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    r = compute_blind_spot_hit_rate([td], now=anchor + 5 * _DAY)
+    assert r["blind_spot_pending"] == 1
+    assert r["blind_spot_judged"] == 0
+    assert r["blind_spot_hit_rate"] is None
+
+
+def test_blind_spot_rework_item_level_file_isolation(tmp_path):
+    """返工命中按标注项关联文件判定：别人子任务的文件被返工不算本项命中。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    repo = _mk_repo_with_file(tmp_path, _BASE)  # a.py 已在 base commit
+    (repo / "b.py").write_text("y = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "add b", date_ts=_BASE)
+    anchor = _BASE + _DAY
+    td = _mk_blind_task(tmp_path, "task-a", repo, anchor,
+                        blind={"weakly_anchored_subtasks": ["s1"]},
+                        results=[
+                            {"subtask_id": "s1", "status": "completed",
+                             "summary": "b.py | 2 ++"},
+                            {"subtask_id": "s2", "status": "completed",
+                             "summary": "a.py | 2 ++"},
+                        ])
+    (repo / "a.py").write_text("x = 9\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "human fix a only", date_ts=anchor + 2 * _DAY)
+    r = compute_blind_spot_hit_rate([td], now=anchor + 20 * _DAY)
+    # s1 的交付文件是 b.py，未被返工 → 非命中（近似锚点丢弃最旧=该 commit 恰为
+    # 唯一触碰 commit 时按交付 merge 处理，两种解释下均不命中 s1）
+    assert r["blind_spot_hits"] == 0
+    assert r["blind_spot_judged"] == 1
+
+
+def test_blind_spot_repo_gone_after_window_pending(tmp_path):
+    """观察期满但 repo 已删 → fail-open 挂起（无法确认「无返工」）。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    td = _mk_blind_task(tmp_path, "task-a", tmp_path / "no-such-repo",
+                        _BASE, blind={"inconclusive_evaluations": ["s1"]},
+                        results=[{"subtask_id": "s1", "status": "completed",
+                                  "summary": "a.py | 2 ++"}])
+    r = compute_blind_spot_hit_rate([td], now=_BASE + 30 * _DAY)
+    assert r["blind_spot_pending"] == 1
+    assert r["blind_spot_hit_rate"] is None
 
 
 # ═══════════════════════════════════════════════════════════════

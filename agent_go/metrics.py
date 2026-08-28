@@ -610,29 +610,48 @@ def compute_post_delivery_rework(task_dirs: list[Path],
     }
 
 
-def compute_blind_spot_hit_rate(task_dirs: list[Path]) -> dict[str, Any]:
+def compute_blind_spot_hit_rate(task_dirs: list[Path],
+                                window_days: int = 14,
+                                now: Optional[float] = None) -> dict[str, Any]:
     """盲区命中率：盲区标注项最终真出问题的比例（#49 放行门第三指标）。
 
-    逐信号命中规则（同任务终局判定——标注产生在 pipeline 收尾，「出问题」
-    取该任务的终局证据：子任务 failed / review 被拒 / 任务未完成 / goal 低合规）：
+    两级命中证据（ISSUE-54 口径改造，2026-08-29）：
 
-    - weakly_anchored_subtasks 项：该子任务最终 failed，或任务 review 被
-      rejected / changes_requested。
-    - inconclusive_evaluations 项：同上（评估不确定 → 后来真失败/被拒）。
-    - uncovered_acceptance_ids 项：任务未 completed，或 goal_adherence.level == "low"
-      （M4 回溯判定「执行全过但漏验收」），或 review 被拒。
+    ① 即时终局证据（标注产生在 pipeline 收尾，当场可判）：
+      - weakly_anchored_subtasks 项：该子任务最终 failed，或任务 review 被
+        rejected / changes_requested。
+      - inconclusive_evaluations 项：同上（评估不确定 → 后来真失败/被拒）。
+      - uncovered_acceptance_ids 项：任务未 completed，或 goal_adherence.level == "low"
+        （M4 回溯判定「执行全过但漏验收」），或 review 被拒。
+
+    ② 交付后观察证据（复用 compute_post_delivery_rework 信号通道）：交付锚点后
+      window_days 内，该标注项关联的交付文件被 target 分支上的人工 commit
+      （排除 agent 自身）再次修改 → 盲区真兑现为返工，计命中。
+      wa/inc 项关联文件 = 被标注子任务的 diff 文件（解析不出时回退任务级全集）；
+      uac 项关联文件 = 任务级交付文件全集。
+
+    判定口径：无即时证据且观察期未满 / repo 或 git 不可用 / 无可解析交付文件
+    的标注项计 pending（挂起，不进命中率分母）——「尚未出问题」≠「不出问题」。
+    命中率 = hits / (items - pending)，分母为「已具备判定条件」的标注项。
+    D-1 复盘：历史 37 条标注全部为「交付顺利、观察期未满」，旧口径把它们
+    直接计 0 命中导致读数恒 0%、指标无判别力；新口径如实报告 pending。
 
     分母排除两类：unattributed_failures（本身已是失败，是「问题」而非「预测」）、
     baseline_dirty（环境标志位，非可命中的标注项）。
 
     Returns:
         {"blind_spot_hit_rate": float|None, "blind_spot_items": int,
-         "blind_spot_hits": int, "by_signal": {signal: {"items": n, "hits": m}}}
+         "blind_spot_hits": int, "blind_spot_judged": int,
+         "blind_spot_pending": int, "window_days": int,
+         "by_signal": {signal: {"items": n, "hits": m, "pending": p}}}
     """
+    import time as _time
+
+    now = now if now is not None else _time.time()
     by_signal: dict[str, dict[str, int]] = {
-        "weakly_anchored_subtasks": {"items": 0, "hits": 0},
-        "inconclusive_evaluations": {"items": 0, "hits": 0},
-        "uncovered_acceptance_ids": {"items": 0, "hits": 0},
+        "weakly_anchored_subtasks": {"items": 0, "hits": 0, "pending": 0},
+        "inconclusive_evaluations": {"items": 0, "hits": 0, "pending": 0},
+        "uncovered_acceptance_ids": {"items": 0, "hits": 0, "pending": 0},
     }
     for td in task_dirs:
         meta_path = td / "meta.json"
@@ -646,8 +665,9 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path]) -> dict[str, Any]:
         if not isinstance(blind, dict) or not any(
                 blind.get(k) for k in by_signal):
             continue
+        results = meta.get("results") or []
         failed_ids = {
-            str(r.get("subtask_id")) for r in (meta.get("results") or [])
+            str(r.get("subtask_id")) for r in results
             if isinstance(r, dict) and r.get("status") == "failed" and r.get("subtask_id")
         }
         review_bad = False
@@ -663,25 +683,81 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path]) -> dict[str, Any]:
         task_not_completed = bool(meta.get("status")) and meta.get("status") not in _ok_states
         goal_low = (meta.get("goal_adherence") or {}).get("level") == "low"
 
+        # 交付后观察证据的惰性准备：只有存在「无即时证据」的标注项时才解析
+        # 文件集/锚点/git（git log 有成本，且大多数任务的标注会挂起到观察期满）
+        files_by_subtask: dict[str, list[str]] = {}
+        task_files: list[str] = []
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            r_files = _files_from_diff_stat(str(r.get("summary", "")))
+            if r.get("subtask_id"):
+                files_by_subtask[str(r["subtask_id"])] = r_files
+            task_files.extend(r_files)
+        task_files = sorted({f for f in task_files if f and not f.startswith("/")})[:50]
+
+        anchor_commit: str = ""
+        anchor_ts: Optional[float] = None
+        window_open: Optional[bool] = None  # None=未计算
+        repo_str = str(meta.get("repo", "") or meta.get("repo_path", ""))
+        target = str(meta.get("target_branch") or meta.get("base_branch") or "HEAD")
+        task_id = str(meta.get("task_id") or td.name)
+
+        def _observe_hit(item_files: list[str]) -> Optional[bool]:
+            """交付后观察证据：True=返工命中 / False=观察期满无返工 / None=挂起。"""
+            nonlocal anchor_commit, anchor_ts, window_open
+            if window_open is None:
+                if repo_str and (Path(repo_str) / ".git").exists():
+                    anchor_commit, anchor_ts = _delivery_anchor(meta, td, meta_path)
+                    window_open = bool(
+                        anchor_ts is not None
+                        and now - anchor_ts >= window_days * 86400)
+                else:
+                    window_open = False
+            if not window_open:
+                return None
+            if not item_files:
+                return None
+            commits = _post_delivery_touches(
+                repo_str, target, task_id, anchor_commit, anchor_ts, item_files)
+            if commits is None:
+                return None
+            return bool(commits)
+
+        def _judge(signal: str, item_key: str, immediate: bool) -> None:
+            st = by_signal[signal]
+            st["items"] += 1
+            if immediate:
+                st["hits"] += 1
+                return
+            files = files_by_subtask.get(item_key) or task_files
+            obs = _observe_hit(files)
+            if obs is None:
+                st["pending"] += 1
+            elif obs:
+                st["hits"] += 1
+
         for sid in (blind.get("weakly_anchored_subtasks") or []):
-            by_signal["weakly_anchored_subtasks"]["items"] += 1
-            if str(sid) in failed_ids or review_bad:
-                by_signal["weakly_anchored_subtasks"]["hits"] += 1
+            _judge("weakly_anchored_subtasks", str(sid),
+                   str(sid) in failed_ids or review_bad)
         for sid in (blind.get("inconclusive_evaluations") or []):
-            by_signal["inconclusive_evaluations"]["items"] += 1
-            if str(sid) in failed_ids or review_bad:
-                by_signal["inconclusive_evaluations"]["hits"] += 1
+            _judge("inconclusive_evaluations", str(sid),
+                   str(sid) in failed_ids or review_bad)
         for ac_id in (blind.get("uncovered_acceptance_ids") or []):
-            by_signal["uncovered_acceptance_ids"]["items"] += 1
-            if task_not_completed or goal_low or review_bad:
-                by_signal["uncovered_acceptance_ids"]["hits"] += 1
+            _judge("uncovered_acceptance_ids", str(ac_id),
+                   task_not_completed or goal_low or review_bad)
 
     items = sum(v["items"] for v in by_signal.values())
     hits = sum(v["hits"] for v in by_signal.values())
+    pending = sum(v["pending"] for v in by_signal.values())
+    judged = items - pending
     return {
-        "blind_spot_hit_rate": round(hits / items, 4) if items else None,
+        "blind_spot_hit_rate": round(hits / judged, 4) if judged else None,
         "blind_spot_items": items,
         "blind_spot_hits": hits,
+        "blind_spot_judged": judged,
+        "blind_spot_pending": pending,
+        "window_days": window_days,
         "by_signal": by_signal,
     }
 
@@ -699,14 +775,16 @@ def compute_trust_metrics(task_dirs: list[Path],
       —— 交付的「初始可信度」：用户审查后动手改的比例越低越可信。
     复发可见率   = 失败子任务中带 problem_id 的比例
       —— 学习闭环覆盖率：失败能否关联到历史 Problem（#50 接线后才有数据）。
-    盲区命中率   = 盲区标注项最终真出问题的比例
-      —— 需跨任务历史关联（task X 的盲区 → task Y 的失败），暂返回 None 待数据积累。
+    盲区命中率   = 已判定盲区标注项中最终真出问题的比例
+      —— 即时终局证据 + 交付后 14d 返工证据（compute_blind_spot_hit_rate，
+      ISSUE-54 口径）；观察期未满的标注项计 pending 不进分母。
 
     Returns:
         {"review_modification_rate": float|None, "reviewed_tasks": int,
          "recurrence_visibility_rate": float|None, "failed_subtasks": int,
          "blind_spot_hit_rate": float|None, "blind_spot_items": int,
-         "blind_spot_hits": int, "blind_spot_by_signal": dict}
+         "blind_spot_hits": int, "blind_spot_judged": int,
+         "blind_spot_pending": int, "blind_spot_by_signal": dict}
     """
     reviewed = 0
     modified = 0
@@ -745,5 +823,7 @@ def compute_trust_metrics(task_dirs: list[Path],
         "blind_spot_hit_rate": blind["blind_spot_hit_rate"],
         "blind_spot_items": blind["blind_spot_items"],
         "blind_spot_hits": blind["blind_spot_hits"],
+        "blind_spot_judged": blind["blind_spot_judged"],
+        "blind_spot_pending": blind["blind_spot_pending"],
         "blind_spot_by_signal": blind["by_signal"],
     }

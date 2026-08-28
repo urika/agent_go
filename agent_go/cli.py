@@ -4013,13 +4013,16 @@ def cmd_trust(args=None) -> None:
     _con.print(f"  复发可见率:   {_pct(r['recurrence_visibility_rate'])}"
                f"  （{r['failed_subtasks']} 个失败子任务；放行方向：上升，提案 ≥80%）")
     _con.print(f"  盲区命中率:   {_pct(r['blind_spot_hit_rate'])}"
-               f"  （{r['blind_spot_hits']}/{r['blind_spot_items']} 标注项命中；目标区间 50%~90%）")
+               f"  （{r['blind_spot_hits']}/{r.get('blind_spot_judged', 0)} 已判定标注项命中"
+               f"{('，' + str(r['blind_spot_pending']) + ' 条挂起（观察期未满/不可判定）') if r.get('blind_spot_pending') else ''}"
+               f"；目标区间 50%~90%）")
     by_signal = r.get("blind_spot_by_signal") or {}
     for sig, v in by_signal.items():
         if v.get("items"):
-            _con.print(f"    - {sig}: {v['hits']}/{v['items']} 命中")
-    if rework["rework_eligible_tasks"] < 10 or r["blind_spot_items"] < 20:
-        _con.print("  ⚠️ 样本不足（放行评估需 ≥10 个有效交付任务 / ≥20 条盲区标注），"
+            _pend = f"，{v['pending']} 挂起" if v.get("pending") else ""
+            _con.print(f"    - {sig}: {v['hits']}/{v['items'] - v.get('pending', 0)} 命中{_pend}")
+    if rework["rework_eligible_tasks"] < 10 or r.get("blind_spot_judged", 0) < 20:
+        _con.print("  ⚠️ 样本不足（放行评估需 ≥10 个有效交付任务 / ≥20 条已判定盲区标注），"
                    "指标仅供参考——见 docs/design/trust-metrics-baseline-2026-08-21.md")
 
 
