@@ -439,6 +439,16 @@ def _build_parser():
     trust_parser.add_argument("--attribution", default="", choices=["", "confirmed", "false-hit", "false-clear", "missed"],
                               help="归因结论：confirmed=确认命中 / false-hit=假阳性改判未命中 / false-clear=假阴性改判命中 / missed=任务级漏报（仅无 --item 时）")
     trust_parser.add_argument("--note", default="", help="归因备注（追溯依据，≤200 字）")
+    trust_parser.add_argument("--watch-repo", metavar="REPO", default="",
+                              help="P2 opt-in：开启该 repo 的盲区归因监视（Stop Hook 会话聚合提醒）")
+    trust_parser.add_argument("--watch-off", metavar="REPO", default="",
+                              help="关闭监视并移除注入的 Stop Hook（其余配置保留）")
+
+    # attribution 子命令（P2：hook 脚本入口，用户一般不直接调用）
+    attribution_parser = subparsers.add_parser("attribution", help="盲区归因监视（hook 入口）")
+    attribution_sub = attribution_parser.add_subparsers(dest="attribution_subcommand")
+    attribution_stop = attribution_sub.add_parser("stop-hook", help="Stop Hook 会话聚合提醒")
+    attribution_stop.add_argument("--repo", required=True, help="监视的 repo 绝对路径")
 
     # kanban 子命令（看板任务编排）
     kanban_parser = subparsers.add_parser("kanban", help="看板任务编排（卡片管理/Spec 导入）")
@@ -4096,6 +4106,17 @@ def _annotate_wizard() -> None:
     con.force(("✅ " if ok else "❌ ") + f"{tid} {msg}")
 
 
+def cmd_attribution(args=None) -> None:
+    """P2 盲区归因监视 hook 入口（stop-hook：会话改动 ∩ 监视交付集 → 提醒）。"""
+    from .attribution_watch import stop_hook_report
+    from pathlib import Path as _P
+
+    if str(getattr(args, "attribution_subcommand", "") or "") == "stop-hook":
+        report = stop_hook_report(_P(str(getattr(args, "repo", "") or "")).expanduser())
+        if report:
+            print(report)
+
+
 def cmd_trust(args=None) -> None:
     """#49 信任指标（阶段 D 自治决策放行门）查看入口。
 
@@ -4110,6 +4131,17 @@ def cmd_trust(args=None) -> None:
     from .metrics import compute_post_delivery_rework, compute_trust_metrics
 
     _con = _LazyConsole()
+    watch_repo = str(getattr(args, "watch_repo", "") or "").strip()
+    watch_off = str(getattr(args, "watch_off", "") or "").strip()
+    if watch_repo or watch_off:
+        from .attribution_watch import install_hook, uninstall_hook
+        from pathlib import Path as _P
+        if watch_repo:
+            ok, msg = install_hook(_P(watch_repo).expanduser())
+        else:
+            ok, msg = uninstall_hook(_P(watch_off).expanduser())
+        _con.force(("✅ " if ok else "❌ ") + msg)
+        return
     if getattr(args, "annotate", ""):
         if args.annotate == "__wizard__":
             _annotate_wizard()
@@ -4621,6 +4653,8 @@ def main() -> None:
             cmd_problems(args)
         elif args.command == "trust":
             cmd_trust(args)
+        elif args.command == "attribution":
+            cmd_attribution(args)
         elif args.command == "mcp":
             cmd_mcp(args)
         elif args.command == "web":

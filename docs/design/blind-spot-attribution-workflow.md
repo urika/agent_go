@@ -63,7 +63,18 @@
 - `tests/test_web_ops.py::TestBlindSpotAttribEndpoint`（6 用例：项级/回显/任务级/非法信号 422/缺归因 422/404）
 - `tests/test_metrics.py` 注记五路径 + 漏报两态（c4ec257 已含 10 用例）
 
-## 5. 待讨论：P2 — 工作流自动触发（时机绑定）
+## 5. P2 — 工作流自动触发（时机绑定）：**已实施 opt-in MVP（2026-08-29 拍板 ①）**
+
+### 5.0 已交付（opt-in + Stop Hook 会话聚合）
+
+- **开启/关闭**：`agent_go trust --watch-repo <repo>`（opt-in，观察信任后可转自动）/ `--watch-off <repo>`（卸载，其余配置保留）
+- **watch index**：`~/.agent_go/attribution_watch.json`——开启时扫描该 repo 交付任务（交付三态 + 文件集非空 + 有三类盲区标注）登记 `{files, blind_items}`
+- **Stop Hook**：会话结束聚合「未提交改动 ∩ 监视交付文件集」输出一条提醒（含预填 annotate 命令）；无命中静默 exit 0（每会话最多一次，零噪声）
+- **注入安全**：合并式（保留用户已有 hooks/其他键）、幂等（HOOK_MARK 检测）、可卸载（精确移除本工具 entry）、首次注入备份 `settings.json.agent_go_bak`；hook 脚本放 `~/.agent_go/hooks/`（repo 内零新增文件）
+- **实现**：`agent_go/attribution_watch.py`（install/uninstall/scan_repo_tasks/stop_hook_report）+ cli `attribution stop-hook` 子命令 + trust `--watch-repo/--watch-off`
+- **测试**：`tests/test_attribution_watch.py` 10 用例（合并保留/幂等/只移除自己的/命中提醒/未命中静默/未监视静默/hook 脚本真实执行）
+
+### 5.1 机制调研结论（历史存档）
 
 ### 5.1 机制调研结论
 
@@ -80,11 +91,12 @@
 
 goal_injector 在**隔离 worktree** 覆盖式写 settings.json 是安全的；P2 在**用户主 repo**，必须：① 合并式注入（保留用户已有 hooks）+ 幂等；② 可卸载（`attribution unwatch`）；③ 性能（每次 Edit 跑脚本，需毫秒级路径匹配，不跑 git）。
 
-### 5.3 待决问题（讨论后再实施）
+### 5.3 后续决策（MVP2 范围）
 
-1. 注入生命周期：交付时自动注入 vs 用户显式 opt-in（`trust --watch-repo <repo>`）？
-2. agent 代办标注的确认边界：Claude 直接写注记 vs 输出建议等人确认？
-3. MVP1 范围：仅 stdout 提醒（人手动跑）还是含 Stop hook 会话总结？
+1. ~~注入生命周期~~ → **已拍板 opt-in 起步**（观察信任后转自动）
+2. agent 代办标注的确认边界：Claude 直接写注记 vs 输出建议等人确认？（MVP2，倾向折中：confirmed/false-hit 需确认、missed 直接写）
+3. PostToolUse 即时提醒（带去重限流）是否追加？（MVP2，Stop 聚合已覆盖主要场景）
+4. 方案 A git post-commit 兜底（vim/IDE 场景）与方案 D skill 指引何时补？（待 Stop Hook 实际使用数据）
 
 ## 6. 待讨论：P3 — 制度化（DoD 扩展）
 

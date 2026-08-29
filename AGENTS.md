@@ -263,6 +263,7 @@ If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuild
 | `evidence.py` | M6.1 证据物化层：immutable bench 批次聚合为 LLM 可推理的结构化证据包（evidence_hash 校验 manifest），eval insight 只能基于真实数据推理 |
 | `task_lock.py` | M5.2 任务级互斥锁：is_task_locked 前置探测（web 409 检查）+ TaskLock 上下文管理器，merge 与 run/resume 并发改 worktree 互斥 |
 | `knowledge_ab.py` | C4 KnowledgeStore A/B 判定分析器：两臂 pass_rate/ADR/$/AD 汇总 + 三门槛判定（ADR↑ + 成本不劣化 + 错误知识可淘汰）→ PRODUCTIZE/ROLLBACK |
+| `attribution_watch.py` | P2 盲区归因监视（opt-in）：trust --watch-repo 开启；watch index（repo→交付任务文件集/盲区项）+ Stop Hook 合并式注入（幂等/可卸载）+ 会话改动交集聚合提醒（无命中静默） |
 | `task_report.py` | 任务统计报表生成器：generate_task_report 只读聚合任务 JSONL（total/completed/uncompleted/tags_distribution，多形态兼容 + 标签归一 + 解码失败跳过） |
 
 ## Key Design Decisions
