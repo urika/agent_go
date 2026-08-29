@@ -980,3 +980,43 @@ def test_cli_annotate_task_level_missed(tmp_path, monkeypatch):
         annotate="task-x", item="", attribution="missed", note=""))
     data = _json.loads((td / "blind_spot_attribution.json").read_text(encoding="utf-8"))
     assert data["task_level"]["attribution"] == "missed"
+
+
+def test_blind_spot_by_evidence_breakdown(tmp_path):
+    """命中按证据来源分列：即时确认 / 观察兑现 / 人工注记。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    td_hit = _mk_task(tmp_path, "task-1", {
+        "status": "VERIFICATION_FAILED",
+        "results": [{"subtask_id": "s1", "status": "failed"}],
+        "blind_spots": {"inconclusive_evaluations": ["s1"]},
+    })
+    r = compute_blind_spot_hit_rate([td_hit])
+    assert r["by_evidence"] == {"immediate": 1, "observed": 0, "attributed": 0}
+    _write_attrib(td_hit, {"items": {
+        "inconclusive_evaluations:s1": {"attribution": "confirmed"}},
+        "task_level": None})
+    r2 = compute_blind_spot_hit_rate([td_hit])
+    assert r2["by_evidence"] == {"immediate": 0, "observed": 0, "attributed": 1}
+
+
+def test_blind_spot_judgment_window_filters_old(tmp_path):
+    """判定时间窗：创建超窗的老任务被筛除（目录名时间戳），解析失败保留。"""
+    from agent_go.metrics import compute_blind_spot_hit_rate
+    td_old = _mk_task(tmp_path, "task-20260701-000000-001-old1", {
+        "status": "VERIFICATION_FAILED",
+        "results": [{"subtask_id": "s1", "status": "failed"}],
+        "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
+    })
+    td_recent = _mk_task(tmp_path, "task-20260829-000000-002-new2", {
+        "status": "VERIFICATION_FAILED",
+        "results": [{"subtask_id": "s1", "status": "failed"}],
+        "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
+    })
+    td_unparsed = _mk_task(tmp_path, "task-x", {
+        "status": "VERIFICATION_FAILED",
+        "results": [{"subtask_id": "s1", "status": "failed"}],
+        "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
+    })
+    r = compute_blind_spot_hit_rate(
+        [td_old, td_recent, td_unparsed], judgment_window_days=35)
+    assert r["blind_spot_items"] == 2

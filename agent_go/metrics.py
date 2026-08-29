@@ -532,7 +532,8 @@ def _post_delivery_touches(repo_str: str, target: str, task_id: str,
 def compute_post_delivery_rework(task_dirs: list[Path],
                                  window_days: int = 14,
                                  now: Optional[float] = None,
-                                 recent_window: Optional[int] = 30) -> dict[str, Any]:
+                                 recent_window: Optional[int] = 30,
+                                 judgment_window_days: Optional[int] = None) -> dict[str, Any]:
     """交付后返工率（#49 审查后修改率的自动信号，「审查行为入流」口径改造）。
 
     动机：显式 review 决策（review.json）长期无数据——人工审查实际发生在
@@ -555,6 +556,11 @@ def compute_post_delivery_rework(task_dirs: list[Path],
     标注（wa/inc/uac）全空」的比例——警报该响没响。注意口径：分母是返工任务
     （已知出问题）而非全部任务，测的是「返工时盲区系统是否给出过预警」。
 
+    判定时间窗（judgment_window_days，2026-08-29 口径修正）：同
+    compute_blind_spot_hit_rate——按任务目录名时间戳筛「创建 ≥ now -
+    judgment_window_days」（建议 2×window_days+7），解析失败保留（fail-open）；
+    None = 不限。个数窗 recent_window 之上的叠加筛选。
+
     fail-open：git 命令失败/仓库已删的任务不进分母。
 
     Returns:
@@ -572,6 +578,10 @@ def compute_post_delivery_rework(task_dirs: list[Path],
     reworked_unannotated = 0
     reworked_list: list[dict] = []
     for td in task_dirs:
+        if judgment_window_days:
+            _ts = _task_dir_ts(td.name)
+            if _ts is not None and now - _ts > judgment_window_days * 86400:
+                continue
         meta_path = td / "meta.json"
         if not meta_path.exists():
             continue
@@ -701,7 +711,8 @@ def write_attribution(td: Path, item: str, attribution: str,
 
 def compute_blind_spot_hit_rate(task_dirs: list[Path],
                                 window_days: int = 14,
-                                now: Optional[float] = None) -> dict[str, Any]:
+                                now: Optional[float] = None,
+                                judgment_window_days: Optional[int] = None) -> dict[str, Any]:
     """盲区命中率：盲区标注项最终真出问题的比例（#49 放行门第三指标）。
 
     两级命中证据（ISSUE-54 口径改造，2026-08-29）：
@@ -729,6 +740,13 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
       这类项时间无法给出答案，永久挂起只会稀释观察——如实排除并单独计数。
     命中率 = hits / (items - pending)，分母为「已具备判定条件」的标注项。
 
+    判定时间窗（judgment_window_days，2026-08-29 口径修正）：判定类指标
+    需要任务走完 window_days 观察期，「最近 N 个任务」滚动窗会把观察期内
+    任务滚出视野（judged 样本永远出不来）。启用时按任务目录名时间戳筛
+    「创建 ≥ now - judgment_window_days」，建议 2×window_days+7（覆盖完整
+    判定周期 + 近期信号）；目录名解析失败的任务保留（fail-open）。
+    None = 不限（兼容旧口径）。
+
     人工注记优先（2026-08-29，追溯闭环）：项级注记（confirmed/false-hit/
     false-clear）覆盖自动判定——人工结论即时判定，不等观察期；任务级 missed
     注记单独计数（漏报人工证据，进 miss 维度展示）。
@@ -753,9 +771,14 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
         "uncovered_acceptance_ids": {"items": 0, "hits": 0, "pending": 0, "na": 0},
     }
     attributed_items = 0
+    by_evidence: dict[str, int] = {"immediate": 0, "observed": 0, "attributed": 0}
     attributed_hits = 0
     task_miss_attributed = 0
     for td in task_dirs:
+        if judgment_window_days:
+            _ts = _task_dir_ts(td.name)
+            if _ts is not None and now - _ts > judgment_window_days * 86400:
+                continue
         meta_path = td / "meta.json"
         if not meta_path.exists():
             continue
@@ -837,10 +860,12 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
                 if att in ("confirmed", "false-clear"):
                     st["hits"] += 1
                     attributed_hits += 1
+                    by_evidence["attributed"] += 1
                 return
             if immediate:
                 st["items"] += 1
                 st["hits"] += 1
+                by_evidence["immediate"] += 1
                 return
             files = files_by_subtask.get(item_key) or task_files
             if not repo_ok or not files:
@@ -852,6 +877,7 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
                 st["pending"] += 1
             elif obs:
                 st["hits"] += 1
+                by_evidence["observed"] += 1
 
         for sid in (blind.get("weakly_anchored_subtasks") or []):
             _judge("weakly_anchored_subtasks", str(sid),
@@ -877,6 +903,7 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
         "blind_spot_na": na,
         "attributed_items": attributed_items,
         "attributed_hits": attributed_hits,
+        "by_evidence": by_evidence,
         "task_miss_attributed": task_miss_attributed,
         "window_days": window_days,
         "by_signal": by_signal,
@@ -884,7 +911,8 @@ def compute_blind_spot_hit_rate(task_dirs: list[Path],
 
 
 def compute_trust_metrics(task_dirs: list[Path],
-                          recent_window: Optional[int] = 30) -> dict[str, Any]:
+                          recent_window: Optional[int] = 30,
+                          judgment_window_days: Optional[int] = None) -> dict[str, Any]:
     """#49 信任指标（渐进自治放行门）：审查后修改率 / 复发可见率 / 盲区命中率。
 
     recent_window：D-0 提案「最近 N 个真实任务」观察窗口口径，默认 30
@@ -936,7 +964,7 @@ def compute_trust_metrics(task_dirs: list[Path],
                 reviewed += 1
                 if decision in ("rejected", "changes_requested"):
                     modified += 1
-    blind = compute_blind_spot_hit_rate(task_dirs)
+    blind = compute_blind_spot_hit_rate(task_dirs, judgment_window_days=judgment_window_days)
     return {
         "review_modification_rate": round(modified / reviewed, 4) if reviewed else None,
         "reviewed_tasks": reviewed,
@@ -952,4 +980,5 @@ def compute_trust_metrics(task_dirs: list[Path],
         "blind_spot_attributed_hits": blind["attributed_hits"],
         "task_miss_attributed": blind["task_miss_attributed"],
         "blind_spot_by_signal": blind["by_signal"],
+        "blind_spot_by_evidence": blind["by_evidence"],
     }

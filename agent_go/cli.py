@@ -4163,8 +4163,11 @@ def cmd_trust(args=None) -> None:
                 real_dirs.append(d)
         task_dirs = real_dirs
 
-    r = compute_trust_metrics(task_dirs, recent_window=window)
-    rework = compute_post_delivery_rework(task_dirs, recent_window=window)
+    _judgment_window = 14 * 2 + 7
+    r = compute_trust_metrics(task_dirs, recent_window=window,
+                              judgment_window_days=_judgment_window)
+    rework = compute_post_delivery_rework(task_dirs, recent_window=window,
+                                          judgment_window_days=_judgment_window)
     if bool(getattr(args, "json_mode", False)):
         _con.force(json.dumps({"scope": "all" if include_bench else "real",
                                "task_count": len(task_dirs),
@@ -4190,8 +4193,12 @@ def cmd_trust(args=None) -> None:
                f"个返工任务交付时无盲区标注——警报该响没响；放行方向：下降）")
     _con.print(f"  复发可见率:   {_pct(r['recurrence_visibility_rate'])}"
                f"  （{r['failed_subtasks']} 个失败子任务；放行方向：上升，提案 ≥80%）")
+    _ev = r.get("blind_spot_by_evidence") or {}
     _con.print(f"  盲区命中率:   {_pct(r['blind_spot_hit_rate'])}"
                f"  （{r['blind_spot_hits']}/{r.get('blind_spot_judged', 0)} 已判定标注项命中"
+               f"［即时确认 {_ev.get('immediate', 0)}"
+               f" / 观察兑现 {_ev.get('observed', 0)}"
+               f" / 人工注记 {_ev.get('attributed', 0)}］"
                f"{('，' + str(r['blind_spot_pending']) + ' 条挂起（观察期未满）') if r.get('blind_spot_pending') else ''}"
                f"{('，' + str(r['blind_spot_na']) + ' 条不可观察（repo 已删/无关联文件，已排除）') if r.get('blind_spot_na') else ''}"
                f"；目标区间 50%~90%）")
