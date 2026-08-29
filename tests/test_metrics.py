@@ -284,13 +284,13 @@ def test_compute_trust_metrics_review_and_recurrence(tmp_path):
     t1 = tmp_path / "task-1"
     t1.mkdir()
     (t1 / "meta.json").write_text(_json.dumps({
-        "results": [{"subtask_id": "s1", "status": "failed", "problem_id": "p-1"}]}), encoding="utf-8")
+        "results": [{"subtask_id": "s1", "status": "failed", "verify_ok": False, "problem_id": "p-1"}]}), encoding="utf-8")
     (t1 / "review.json").write_text(_json.dumps({"decision": "changes_requested"}), encoding="utf-8")
     # task-2: 1 失败无 problem_id + review=approved
     t2 = tmp_path / "task-2"
     t2.mkdir()
     (t2 / "meta.json").write_text(_json.dumps({
-        "results": [{"subtask_id": "s1", "status": "failed"}]}), encoding="utf-8")
+        "results": [{"subtask_id": "s1", "status": "failed", "verify_ok": False}]}), encoding="utf-8")
     (t2 / "review.json").write_text(_json.dumps({"decision": "approved"}), encoding="utf-8")
     # task-3: 无 meta（跳过）
     t3 = tmp_path / "task-3"
@@ -419,7 +419,7 @@ def test_trust_metrics_blind_spot_wired(tmp_path):
     from agent_go.metrics import compute_trust_metrics
     t = _mk_task(tmp_path, "task-1", {
         "status": "VERIFICATION_FAILED",
-        "results": [{"subtask_id": "s1", "status": "failed", "problem_id": "p-1"}],
+        "results": [{"subtask_id": "s1", "status": "failed", "verify_ok": False, "problem_id": "p-1"}],
         "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
     })
     r = compute_trust_metrics([t])
@@ -778,9 +778,9 @@ def test_trust_metrics_recent_window_filters_old(tmp_path):
     """recent_window 只统计最近 N 个任务（旧任务不稀释新信号）。"""
     from agent_go.metrics import compute_trust_metrics
     td_old = _mk_task(tmp_path, "task-20250101-000000-000-aaaa", {
-        "results": [{"subtask_id": "s1", "status": "failed", "problem_id": "p-1"}]})
+        "results": [{"subtask_id": "s1", "status": "failed", "verify_ok": False, "problem_id": "p-1"}]})
     td_new = _mk_task(tmp_path, "task-20251201-000000-000-cccc", {
-        "results": [{"subtask_id": "s1", "status": "failed"}]})
+        "results": [{"subtask_id": "s1", "status": "failed", "verify_ok": False}]})
     r = compute_trust_metrics([td_old, td_new], recent_window=1)
     assert r["failed_subtasks"] == 1
     assert r["recurrence_visibility_rate"] == 0.0  # 只有新任务（无 problem_id）
@@ -1020,3 +1020,18 @@ def test_blind_spot_judgment_window_filters_old(tmp_path):
     r = compute_blind_spot_hit_rate(
         [td_old, td_recent, td_unparsed], judgment_window_days=35)
     assert r["blind_spot_items"] == 2
+
+
+def test_recurrence_visibility_denominator_verify_only(tmp_path):
+    """口径收紧：非验证失败（verify_ok 非 False）不进复发可见率分母。"""
+    from agent_go.metrics import compute_trust_metrics
+    t = _mk_task(tmp_path, "task-1", {
+        "results": [
+            {"subtask_id": "s1", "status": "failed", "verify_ok": False, "problem_id": "p-1"},
+            {"subtask_id": "s2", "status": "failed", "verify_ok": False},
+            {"subtask_id": "s3", "status": "failed", "verify_ok": True},
+            {"subtask_id": "s4", "status": "failed"},
+        ]})
+    r = compute_trust_metrics([t])
+    assert r["failed_subtasks"] == 2
+    assert r["recurrence_visibility_rate"] == 0.5

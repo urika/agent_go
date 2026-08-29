@@ -922,7 +922,10 @@ def compute_trust_metrics(task_dirs: list[Path],
 
     审查后修改率 = (rejected + changes_requested) / 有 review 决策的任务数
       —— 交付的「初始可信度」：用户审查后动手改的比例越低越可信。
-    复发可见率   = 失败子任务中带 problem_id 的比例
+    复发可见率   = 验证失败子任务中带 problem_id 的比例（分母口径 2026-08-29
+                   收紧：仅 verify_ok is False——Problem 实体不覆盖非验证失败；
+                   #50 接线（2026-08-15）前的历史失败天然无 pid，全量口径读数
+                   含历史稀释，默认最近窗口为主口径）
       —— 学习闭环覆盖率：失败能否关联到历史 Problem（#50 接线后才有数据）。
     盲区命中率   = 已判定盲区标注项中最终真出问题的比例
       —— 即时终局证据 + 交付后 14d 返工证据（compute_blind_spot_hit_rate，
@@ -951,6 +954,11 @@ def compute_trust_metrics(task_dirs: list[Path],
             continue
         for r in meta.get("results") or []:
             if isinstance(r, dict) and r.get("status") == "failed":
+                # 口径收紧（2026-08-29 拆解修正）：Problem 实体只覆盖验证失败
+                # （executor: status==failed and verify_ok is False 才录制），
+                # 非验证失败（merge/commit 类，verify_ok 非 False）不进分母。
+                if r.get("verify_ok") is not False:
+                    continue
                 failed_total += 1
                 if r.get("problem_id"):
                     failed_with_problem += 1

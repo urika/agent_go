@@ -4192,7 +4192,8 @@ def cmd_trust(args=None) -> None:
                f"  （自动信号，{rework.get('reworked_without_annotation', 0)}/{rework.get('reworked_tasks', 0)} "
                f"个返工任务交付时无盲区标注——警报该响没响；放行方向：下降）")
     _con.print(f"  复发可见率:   {_pct(r['recurrence_visibility_rate'])}"
-               f"  （{r['failed_subtasks']} 个失败子任务；放行方向：上升，提案 ≥80%）")
+               f"  （{r['failed_subtasks']} 个验证失败子任务（仅 verify 失败口径）；放行方向：上升，提案 ≥80%"
+               f"{'；⚠️ 全量口径含 #50 接线(08-15)前历史，读数天然偏低' if not window else ''}）")
     _ev = r.get("blind_spot_by_evidence") or {}
     _con.print(f"  盲区命中率:   {_pct(r['blind_spot_hit_rate'])}"
                f"  （{r['blind_spot_hits']}/{r.get('blind_spot_judged', 0)} 已判定标注项命中"
