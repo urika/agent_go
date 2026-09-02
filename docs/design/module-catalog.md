@@ -76,3 +76,77 @@
 - 公共接口变更必须同步 `docs/spec.md`。
 - 状态、数据契约或边界变更必须新增/更新 ADR。
 - 实现状态必须区分 `implemented`、`tested`、`dogfooded`、`accepted`。
+
+---
+
+## 附录：模块详细职责（原 AGENTS.md Key Modules 表，2026-09-02 迁入）
+
+| Module | Purpose |
+|--------|---------|
+| `cli.py` | CLI commands: run, resume, recover, list, show, status, pr, merge, config, clean, inspect, review, router, cache, eval, ci, skills, agents, spec, governance, deviation, problems, migrate, plan-history, plan-diff, replay, checkpoint, mcp, web |
+| `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
+| `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
+| `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify loop |
+| `pipeline.py` | Wave scheduler, concurrency, worktree preservation/cleanup, remote push, SIGINT |
+| `subtask.py` | claude -p headless runner, git merge upstream, worker metering, difficulty env；goal watchdog（goal turn=验证循环轮数：Bash 命中 AGENT_GO_VERIFY_HINT token 交集≥2 才计数，hint 空回退全工具计数；GOAL_TIMEOUT 按难度缩放 ×1/1.5/2.5） |
+| `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
+| `goal_injector.py` | /goal Stop Hook injection: .claude/settings.json + verify-goal.sh |
+| `goal_policy.py` | Goal Loop final execution policy resolver (goal-mechanism-design §3.3/§4) |
+| `git_utils.py` | Project analysis, worktree create/remove/prune, gc.auto control |
+| `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown), symlink resolution |
+| `agents.py` | Agent type system: developer/architect/reviewer/tester; claude/greywall command |
+| `role_skill_map.py` | Config-driven rule matching: keywords, file patterns, agent type |
+| `router.py` | Role-aware model routing: planner/worker/reviewer, fallback + circuit breaker |
+| `models_registry.py` | 模型池（① Model Registry）：models.json 加载（mtime 缓存）+ ModelEntity（endpoint/thinking/JSON 遵从/TCO/quality_tags）+ key_ref 解析（env/secret，不存明文） |
+| `evaluator.py` | LLM semantic evaluation + failure summary for verification loop；策略注册表（`EvalStrategy`：default/visual/chain），config `evaluator.strategy` 路由 |
+| `verify_chain.py` | AG-2 验证机械前置层（吸收 llama-defender verification_chain L1）：MechanicalGate 空/畸形 diff 零成本短路 + ChainEvalStrategy（机械闸→委托 default LLM 评估），opt-in `evaluator.strategy="chain"` |
+| `llama_contracts.py` | AG-1 llama-defender 共享契约包（叶子模块）：SignalSnapshot + EscalationDecision（任务级语义），CONTRACT_VERSION=1 对齐；漂移检测 `tools/check_llama_contracts.py` |
+| `metrics.py` | Data collection: timing/change stats, estimate_cost, aggregate_metering, trust metrics (#49 放行门：review/交付后返工率/复发可见率/盲区命中率) |
+| `config.py` | Config loading, logging, API key resolution, meter_event |
+| `utils.py` | Commit formatting, slugify, shell safety, version detection, tool version probing |
+| `spec.py` | Task Spec parsing + L1 admission review (S11-P0) |
+| `delivery.py` | Task-level delivery contract (M1.2) |
+| `governance.py` | SDD traceability matrix + architecture compliance (M1.4) |
+| `deviation.py` | Spec/Architecture/acceptance deviation records: model, persistence, aggregation (M2.5) |
+| `problems.py` | Cross-task Problem entity (B4/H3): 三态+复发重开, 半衰期(stale_after_days→dormant), 葬礼(resolution_summary), 全局 ~/.agent_go/problems.jsonl upsert；「越用越聪明」数据层；C4 葬礼回写（record_resolution：重试后成功回写「模式+解法」；summarize_resolution LLM 根因级总结，knowledge.resolution_llm 开关，fail-open 降级 diffstat 级） |
+| `replan.py` | C3 局部重规划（F-VERIFY-6）：无进展触发一次 Plan 拆分建议（LLM+启发式兜底），最多一次/继承父预算/默认人工确认/不扩大任务图；AG-3 确定性决策层（`decide_escalation` 决策表 + `TaskCircuitBreaker` 熔断 + 幂等闸，agent 侧自有失败信号口径，输出 EscalationDecision 契约，reload 动作待 AG-4/5） |
+| `knowledge.py` | C4 KnowledgeStore A/B 注入臂：从 Problem/deviation/verify_state 提取历史经验注入 repair prompt（可开关/可淘汰/knowledge_injected 埋点） |
+| `status.py` | Canonical task state machine (M0-2, 8 states) |
+| `exit_codes.py` | Semantic process exit codes for CLI tools |
+| `failure.py` | Stable failure classes and policy (M0-3) |
+| `eval.py` | Quality/perf/cost (per-role)/reliability/UX analysis + eval gate ($/pass baseline + regression) |
+| `planning.py` | Planning helpers: estimate_task_duration |
+| `pricing.py` | Model price table (52 models), MODEL_TIER, provider defaults |
+| `replay.py` | Execution replay timeline: load meta/metering/results, ASCII/JSON visualization |
+| `checkpoint.py` | Worktree file snapshot manager: take/restore/delete |
+| `recover.py` | Rebuild meta.json from worktree state after SIGKILL/abnormal interruption |
+| `metadata_migration.py` | Auditable failure-metadata migration for historical task dirs (`migrate failure-metadata`) |
+| `mcp_server.py` | MCP server over stdio: 7 tools (run_task/resume_task/inspect_task/review_task/governance_task/list_tasks/cancel_task) + resources + prompts |
+| `mcp_http.py` | MCP server HTTP/SSE transport: POST /mcp + GET /mcp (SSE) + GET /health, Bearer auth |
+| `mcp_client.py` | MCP consumption layer: subtasks call external MCP tools, namespaced `mcp__{server}__{tool}` |
+| `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks；子进程强制 --no-goal（对照实验不引入 goal 变量，防 watchdog 误杀口径噪声）；语义判定取末次有效 verdict（verification_results 跨重试累积）；`plan_quality_blocked` 单列 kill_reason=plan_gate_blocked（不计能力失败） |
+| `bench_schema.py` | Versioned Bench record schema + JSONL validator (M0-4) |
+| `batch_governance.py` | Result batch governance + immutable baseline manifests (M0-10) |
+| `metric_report.py` | Reproducible Metric Freeze report generation (M0-9) |
+| `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
+| `assessment.py` | False-positive evaluation data layer: AssessmentEvent model, persistence, aggregation |
+| `artifacts.py` | Artifact export (S9-B): collect worktree/__artifacts__/ into --artifact-dir before cleanup |
+| `diag.py` | llama-defender 诊断数据面客户端（R13-R16 消费侧 C1-C7）：session key 构造/截断口径、fail-open fetch、ledger/metrics/archive/ctx_config/props 封装 |
+| `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
+| `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |
+| `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
+| `tui.py` | Curses status dashboard |
+| `review_agent.py` | Read-only independent review subagent, two-phase review |
+| `workflow_gen.py` | GitHub Actions workflow generation (ci command) |
+| `web_server.py` | Web 操作台：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ 🗂 看板视图（kanban 6 写端点，SSE 联动）+ SSE，stdlib http.server + SPA |
+| `kanban.py` | 看板数据层：~/.agent_go/kanban.json 单文件存储（mtime 缓存 + 原子写 + 锁），5 阶段列（brainstorm→operations）× 3 类卡片（discussion/implementation/periodic），阶段流转 + history，task_ids 软链接执行任务（与 status.py 执行态正交，不动 meta.json） |
+| `profiles.py` | Profile 管理：local⇄cloud 一键切换（config local/cloud/status）、.current_profile、健康检查（mismatch 检测）、本地 profile 模板生成 |
+| `task_runner.py` | Web 子进程任务运行器（Thin shell 同哲学）：spawn agent_go --yes --json，meta.json 唯一事实源，SIGINT cancel |
+| `web_confirm.py` | R5b Web 计划确认协议：pending/decision 文件协议 + 阻塞轮询，30min 超时自动取消 |
+| `lint.py` | AST-based static checks: suspicious for-loop body truncation |
+| `decision_log.py` | M6.2 决策记录：模型推荐/配置修改/profile 切换/交付决策追加 `~/.agent_go/decision_log.jsonl`（evidence_refs 绑定依据，actual 复跑后回填），可审计可复盘 |
+| `evidence.py` | M6.1 证据物化层：immutable bench 批次聚合为 LLM 可推理的结构化证据包（evidence_hash 校验 manifest），eval insight 只能基于真实数据推理 |
+| `task_lock.py` | M5.2 任务级互斥锁：is_task_locked 前置探测（web 409 检查）+ TaskLock 上下文管理器，merge 与 run/resume 并发改 worktree 互斥 |
+| `knowledge_ab.py` | C4 KnowledgeStore A/B 判定分析器：两臂 pass_rate/ADR/$/AD 汇总 + 三门槛判定（ADR↑ + 成本不劣化 + 错误知识可淘汰）→ PRODUCTIZE/ROLLBACK |
+| `attribution_watch.py` | P2 盲区归因监视（opt-in）：trust --watch-repo 开启；watch index（repo→交付任务文件集/盲区项）+ Stop Hook 合并式注入（幂等/可卸载）+ 会话改动交集聚合提醒（无命中静默） |
+| `task_report.py` | 任务统计报表生成器：generate_task_report 只读聚合任务 JSONL（total/completed/uncompleted/tags_distribution，多形态兼容 + 标签归一 + 解码失败跳过） |

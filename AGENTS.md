@@ -1,366 +1,145 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents when working with code in this repository.
+Guidance for AI coding agents working in this repository. This file keeps only conceptual content and pointers; detailed references live in `docs/design/`:
+
+| Reference doc | Content |
+|---|---|
+| `docs/design/cli-commands.md` | Full CLI command reference (all subcommands + flags) |
+| `docs/design/module-catalog.md` | Module catalog (brief) + appendix: detailed per-module purposes |
+| `docs/design/runtime-design-decisions.md` | Key design decisions, full text (worktree/routing/cost/sandbox/humility layer) |
+| `docs/design/code-review-checklist.md` | Code review checklist with examples (loop truncation etc.) |
+| `docs/design/config-schema.md` | Config field reference (`~/.agent_go/config.json`) |
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (64 modules, ~38,500 lines) that wraps Claude Code with a structured Plan -> Decompose -> Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (69 modules, ~39,800 lines) that wraps Claude Code with a structured Plan → Decompose → Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
-Runtime has no external Python dependencies — uses only stdlib (`urllib`, `subprocess`, `json`, `logging`, `pathlib`, `http.server`). Dev/test deps (pytest, pytest-mock, ruff, mypy, pyyaml) are external.
+## Tech Stack & Build
 
-## Commands
+- **Python ≥ 3.9**, setuptools build backend (`pyproject.toml`), console entry point `agent_go = agent_go.cli:main`. Alternative entries: `python3 -m agent_go`, `python3 agent_go.py`.
+- **Runtime has zero external dependencies** — stdlib only (`urllib`, `subprocess`, `json`, `logging`, `pathlib`, `http.server`). Do not add runtime deps without explicit discussion.
+- Dev/test deps (external): `pytest`, `pytest-mock`, `ruff`, `mypy`, `pyyaml`.
 
 ```bash
-# Install
-pip install -e .
-
-export AGENT_GO_API_KEY="sk-ant-..."
-
-# Run a task (also: python3 -m agent_go run, python3 agent_go.py run)
-agent_go run <repo-path> '<task>'
-
-# Headless with concurrency and remote push
-agent_go run <repo-path> '<task>' --yes --parallel 3 --remote origin
-
-# With explicit skills and agent type
-agent_go run <repo-path> '<task>' --skill security-review --agent-type reviewer
-
-# With verification loop and worktree preservation
-agent_go run <repo-path> '<task>' --max-retries 5 --preserve-worktrees
-
-# With structured Task Spec (SDD input contract) — recommended for non-trivial tasks
-agent_go spec template <repo-path> --output docs/tasks/task-xxx.md   # generate spec template
-agent_go spec validate docs/tasks/task-xxx.md <repo-path>            # L1 admission gate
-agent_go run <repo-path> --spec docs/tasks/task-xxx.md --yes         # run with spec
-agent_go run <repo-path> --spec docs/tasks/task-xxx.md --force       # skip admission gate
-
-# Auto git init for non-git target dir (local-only, no remote)
-agent_go run <repo-path> '<task>' --auto-init
-
-# Dirty working tree at run start: headless/--yes ABORTS (fail-safe) unless you pass one of:
-#   --baseline    commit uncommitted changes as the baseline first (subtasks see correct HEAD)
-#   --allow-dirty explicitly accept the risk (subtasks build from HEAD, won't see dirty changes)
-agent_go run <repo-path> '<task>' --yes --baseline
-
-# Export subtask artifacts (worktree/__artifacts__/) to a directory before cleanup
-agent_go run <repo-path> '<task>' --artifact-dir ~/Desktop/reports
-
-# With custom config file
-agent_go --config /path/to/config.json run <repo-path> '<task>'
-
-# Resume an interrupted task
-agent_go resume <task-id>
-
-# Rebuild meta.json after a SIGKILL / abnormal interruption
-agent_go recover <task-id>
-agent_go recover <task-id> --dry-run    # scan only, don't update meta.json
-
-# Inspect preserved worktrees after failed task
-agent_go inspect <task-id>
-agent_go inspect <task-id> --all    # show all subtasks
-agent_go inspect <task-id> --json   # machine-readable
-
-# Aggregate result review (M7): per-file diff summary + approve/reject
-agent_go review --task <task-id>
-agent_go review --task <task-id> --deep          # independent-model per-subtask analysis
-agent_go review --task <task-id> --approve       # or --reject / --changes-requested
-
-# Plan version history
-agent_go plan-history <task-id>
-agent_go plan-diff <task-id> --v1 1 --v2 2
-
-# Execution replay (timeline visualization)
-agent_go replay <task-id>
-agent_go replay <task-id> --json
-
-# Checkpoint management (worktree file snapshots)
-agent_go checkpoint list <task-id>
-agent_go checkpoint restore <task-id> --name <sub-id> [--target <dir>]
-agent_go checkpoint delete <task-id> --name <sub-id>
-
-# SDD governance / delivery (M1.2/M2.5): traceability matrix, deviations, manual merge
-agent_go governance [--json]                      # spec/architecture compliance traceability
-agent_go deviation [task-id] [--json]             # spec/architecture/acceptance deviation records
-agent_go merge <task-id> [--push] [--remote origin]   # merge delivery branch into target
-agent_go migrate failure-metadata [--apply]       # migrate historical task metadata
-
-# Global Problem records (M5/B4+H3): cross-task failure memory — 「越用越聪明」查询入口
-agent_go problems                               # 列出全部 Problem（按出现次数降序，含休眠/解法摘要）
-agent_go problems --aggregate                   # 聚合分析（状态分布/复发数/top 失败模式）
-agent_go problems --only <problem-id>           # 单个详情（生命周期/根因/历史解法/复发重开）
-agent_go problems --json                        # 机器可读
-agent_go trust                                  # #49 信任指标（阶段 D 放行门）：审查后修改率/交付后返工率/复发可见率/盲区命中率
-agent_go trust --json                           # 机器可读；--all 含 bench 任务（默认真实任务口径）
-agent_go trust --window N                       # 观察窗口：最近 N 个任务（D-0 口径，默认 30；0=不限）
-
-# MCP server (JSON-RPC 2.0 over stdio, or HTTP/SSE)
-agent_go mcp
-agent_go mcp --http --host 127.0.0.1 --port 8090   # HTTP transport: POST /mcp + GET /mcp (SSE) + GET /health
-AGENT_GO_MCP_HTTP_TOKEN=xxx agent_go mcp --http   # 启用 Bearer token 鉴权
-
-# Monitor running tasks
-agent_go status --watch
-
-# Model benchmark / cross-judgment / evaluation / gate
-agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3   # 启动前探测实际后端+校验定价（S12）
-agent_go eval bench --suite golden                 # 预设套件: smoke/core/decision/stress/golden/phaseD
-agent_go eval bench --with-delivery                # 本地交付 merge 闭合 accepted_delivery 判定（不推进 target 引用）
-agent_go eval bench --source-batch results_v2      # 批次标识（跨批次追溯）
-agent_go eval baseline --candidate-models M1,M2    # 对照基线：claude -p 裸跑（不走 harness）
-agent_go eval models --results eval_suite/results.jsonl
-agent_go eval cost-baseline --results eval_suite/results_v3.jsonl,eval_suite/results_v4_calib.jsonl
-agent_go eval judge --results eval_suite/results.jsonl --judge-models M1,M2
-agent_go eval judge --judge-subcommand calibrate --llm-scores ... --human-scores ...
-agent_go eval calibrate-difficulty --results eval_suite/results.jsonl            # dry-run
-agent_go eval calibrate-difficulty --results eval_suite/results.jsonl --apply     # 写回任务 YAML difficulty
-agent_go eval metric-freeze --results eval_suite/results.jsonl                   # 可复现 Metric Freeze 报告
-agent_go eval batch-manifest                                                    # 批次基线 manifest（M0-10）
-agent_go eval validate-schema --results eval_suite/results.jsonl                # Bench schema 校验
-agent_go eval gate --baseline 0.05
-agent_go eval gate --check-regression --update-baseline
-
-# PR / CI workflow generation / cache / router / skills / agents / config
-agent_go pr <task-id> --push
-agent_go ci --dry-run
-agent_go cache stats
-agent_go router show
-agent_go router set-role <role> --provider <p> --model <m> --base-url <url>
-agent_go router recommend [--results FILE] [--apply] [--force]   # 基于 bench 结果推荐 router.roles + worker_models
-agent_go models list                          # 列出模型池（models.json registry）
-agent_go models add <id> --provider <p> --base-url <url> [--thinking] [--json-loose] [--tco $] [--tags ...]  # 注册新模型（零代码接入）
-agent_go skills list
-agent_go skills show <name> [--json]
-agent_go skills resolve <name>                 # trace a Skill's symlink resolution chain
-agent_go agents
-agent_go config                          # 查看当前生效配置
-agent_go config local [--url ...]        # 一键生成并激活纯本地 profile（探测代理 + 备份）
-agent_go config cloud                    # 恢复云端配置（备份保留）
-agent_go config status                   # 当前模式 + plan/worker/evaluator/代理健康检查
-
-# List / show / clean
-agent_go list
-agent_go show <task-id>
-agent_go clean                        # 清理全部任务数据
-agent_go clean --older-than 7         # 只清理早于 7 天前的任务（保留期）
-agent_go clean --fixture-worktrees    # 只清理 eval_suite/fixtures/ 下失效 worktree 注册（ISSUE-38）
-
-# Web 操作台（观测 + 处置：任务启动/恢复/取消/清理/审批/合并/PR + 配置中心 local⇄cloud + 健康检查 + 🗂 看板任务管理）
-agent_go web --host 127.0.0.1 --port 8091   # 打开 http://127.0.0.1:8091
-agent_go web --token xxx                     # 可选 Bearer token 鉴权
+pip install -e .                 # editable install (build)
+pip3 install pytest pytest-mock  # test deps
 ```
 
-## Architecture
+## Commands (quick start)
+
+Full command reference: `docs/design/cli-commands.md`.
+
+```bash
+export AGENT_GO_API_KEY="sk-ant-..."
+
+agent_go run <repo-path> '<task>'                                     # run a task
+agent_go run <repo-path> '<task>' --yes --parallel 3 --remote origin  # headless + concurrency + push
+agent_go run <repo-path> --spec docs/tasks/task-xxx.md --yes          # run with Task Spec (L1 admission gate; --force skips)
+agent_go resume <task-id>                                             # resume interrupted task
+agent_go recover <task-id>                                            # rebuild meta.json after SIGKILL
+agent_go inspect <task-id>                                            # preserved worktrees of failed subtasks
+agent_go review --task <task-id>                                      # aggregate result review (approve/reject)
+agent_go eval bench --suite golden                                    # model benchmark
+agent_go web --port 8091                                              # Web 操作台
+```
+
+Other command groups: `list`/`show`/`status`/`report`, `pr`/`merge`, `config` (local/cloud/status profiles), `models` (model registry), `spec` (template/validate), `skills`/`agents`, `kanban`, `problems`/`trust`/`attribution` (humility layer), `replay`/`checkpoint`/`plan-history`/`plan-diff`, `governance`/`deviation`/`decision`, `cache`, `migrate`, `ci`, `mcp`, `clean`, `router`.
+
+Dirty working tree at run start: headless/`--yes` ABORTS (fail-safe) unless `--baseline` (commit dirty changes as baseline first) or `--allow-dirty` (subtasks build from HEAD, won't see dirty changes).
+
+## Runtime Architecture
 
 ```
 cmd_run()
-  ├── analyze_project()        → git ls-files or find
-  ├── get_git_info()           → remote, branch, commit
-  ├── get_resource_map()       → directories, config files
-  ├── spec.py                  → optional Task Spec admission gate (--spec / --force skips)
-  ├── generate_plan()          → calls LLM API, returns structured JSON
-  │     ├── injects skill inventory + role-skill rule summary into prompt
-  │     ├── call_api()         → unified Anthropic/OpenAI/DeepSeek/custom
-  │     ├── router.py          → optional role-aware routing (planner/worker/reviewer)
-  │     └── metering.jsonl     → per-call role/tokens/cost/latency (planner + worker)
-  ├── confirm_plan()           → Y/S/D/E/R/N interactive (--yes skips)
-  ├── plan_to_subtasks()       → injects agent_prompt + applies role-skill rules + difficulty
-  ├── confirm_subtasks()       → Y/N/E/A/D interactive
-  ├── estimate_task_duration() → M4 time estimate (historical median × topo waves)
+  ├── analyze_project() / get_git_info() / get_resource_map()
+  ├── spec.py                  → optional Task Spec admission gate
+  ├── generate_plan()          → LLM API; injects skill inventory + role-skill rules;
+  │                              router.py role-aware routing; metering.jsonl per call
+  ├── confirm_plan() / plan_to_subtasks() / confirm_subtasks()  (--yes skips)
   └── _run_pipeline()
-        ├── disable gc.auto    → concurrency safety
-        ├── topological waves  → ThreadPoolExecutor with --parallel N
-        │   └── upstream failed/blocked → downstream marked blocked & skipped
+        ├── disable gc.auto (concurrency safety)
+        ├── topological waves → ThreadPoolExecutor (--parallel N)
+        │   └── upstream failed/blocked → downstream blocked & skipped
         ├── run_subtask()
         │     ├── git worktree add -b agent_go/{task_id}/{sub_id}
         │     ├── git merge upstream tag → artifact passing
-        │     ├── writes TASK.md (path-rewritten; optional /goal via --goal)
-        │     ├── optional Stop Hook injection (--goal-hook)
-        │     ├── difficulty → worker_models → claude --model
-        │     ├── checkpoint snapshot taken for rollback (checkpoint.py)
-        │     ├── spawns claude -p (or greywall wrapper)
-        │     ├── loads skills + agent type per subtask
+        │     ├── writes TASK.md; difficulty → worker_models → claude --model
+        │     ├── spawns claude -p (interactive path may wrap greywall)
         │     ├── git commit + tag ({task_id}/{sub_id} namespaced)
-        │     └── verification + auto-retry loop (configurable max_retries)
-        ├── push branches to remote (if --remote)
-        ├── remove worktrees + delete tags + restore gc.auto
-        │   └── preserves failed/blocked worktrees for human review
-        ├── final report
-        │   └── lists preserved worktree paths + failure reasons
-        └── inspect command → list preserved worktrees, paths, git branches
+        │     └── verification + auto-retry loop (--max-retries)
+        ├── push branches (if --remote)
+        └── cleanup worktrees/tags; failed/blocked worktrees preserved for review
 
-recover <task-id>   → rebuild meta.json from worktree state after SIGKILL
-resume <task-id>    → reruns uncompleted subtasks from meta.json state
-status.py           → canonical 8-state task state machine (M0-2)
-delivery.py         → task-level delivery contract (M1.2); `merge` command is the explicit hand-off
+recover → rebuild meta.json from worktree state after SIGKILL
+resume  → rerun uncompleted subtasks from meta.json
 ```
 
-If the process is killed (SIGKILL) mid-run, `agent_go recover <task-id>` rebuilds `meta.json` from worktree state: commit+verify-pass → completed, commit+verify-fail → failed, no commit+orphan changes → reset (resume reruns it), no commit+no changes → no_changes. It never commits orphan changes itself — commit stays the sole completion boundary for resume correctness.
+**Completion boundary**: commit is the sole completion boundary. `recover` only classifies worktree state (commit+verify-pass → completed; commit+verify-fail → failed; no commit+orphan changes → reset; no commit+no changes → no_changes) — it never commits orphan changes itself.
 
-## Key Modules (64 modules, ~38,500 lines)
+Module layout (full catalog with per-module responsibilities: `docs/design/module-catalog.md`): `cli.py` (entry/dispatch), `api.py` (LLM plan), `pipeline.py` (DAG waves/concurrency), `executor.py` + `subtask.py` (per-subtask worktree/claude/verify), `router.py`/`models_registry.py`/`pricing.py` (model routing & cost), `evaluator.py`/`verify_chain.py` (verification), `eval.py`/`bench.py`/`metrics.py` (measurement), `mcp_server.py`/`mcp_http.py`/`mcp_client.py` (MCP dual role), `web_server.py`/`task_runner.py`/`tui.py` (UIs), `problems.py`/`knowledge.py`/`deviation.py` (cross-task memory), `config.py`/`console.py`/`utils.py` (shared infra).
 
-| Module | Purpose |
-|--------|---------|
-| `cli.py` | CLI commands: run, resume, recover, list, show, status, pr, merge, config, clean, inspect, review, router, cache, eval, ci, skills, agents, spec, governance, deviation, problems, migrate, plan-history, plan-diff, replay, checkpoint, mcp, web |
-| `api.py` | LLM API: generate_plan, call_api, decompose_fallback, plan cache |
-| `ui.py` | Interactive prompts: confirm_plan, confirm_subtasks, plan_to_subtasks |
-| `executor.py` | Core subtask runner: worktree create, skill load, claude spawn, verify loop |
-| `pipeline.py` | Wave scheduler, concurrency, worktree preservation/cleanup, remote push, SIGINT |
-| `subtask.py` | claude -p headless runner, git merge upstream, worker metering, difficulty env；goal watchdog（goal turn=验证循环轮数：Bash 命中 AGENT_GO_VERIFY_HINT token 交集≥2 才计数，hint 空回退全工具计数；GOAL_TIMEOUT 按难度缩放 ×1/1.5/2.5） |
-| `notify.py` | Multi-channel event notification: desktop/webhook/command, IM adapters |
-| `goal_injector.py` | /goal Stop Hook injection: .claude/settings.json + verify-goal.sh |
-| `goal_policy.py` | Goal Loop final execution policy resolver (goal-mechanism-design §3.3/§4) |
-| `git_utils.py` | Project analysis, worktree create/remove/prune, gc.auto control |
-| `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown), symlink resolution |
-| `agents.py` | Agent type system: developer/architect/reviewer/tester; claude/greywall command |
-| `role_skill_map.py` | Config-driven rule matching: keywords, file patterns, agent type |
-| `router.py` | Role-aware model routing: planner/worker/reviewer, fallback + circuit breaker |
-| `models_registry.py` | 模型池（① Model Registry）：models.json 加载（mtime 缓存）+ ModelEntity（endpoint/thinking/JSON 遵从/TCO/quality_tags）+ key_ref 解析（env/secret，不存明文） |
-| `evaluator.py` | LLM semantic evaluation + failure summary for verification loop |
-| `metrics.py` | Data collection: timing/change stats, estimate_cost, aggregate_metering, trust metrics (#49 放行门：review/交付后返工率/复发可见率/盲区命中率) |
-| `config.py` | Config loading, logging, API key resolution, meter_event |
-| `utils.py` | Commit formatting, slugify, shell safety, version detection, tool version probing |
-| `spec.py` | Task Spec parsing + L1 admission review (S11-P0) |
-| `delivery.py` | Task-level delivery contract (M1.2) |
-| `governance.py` | SDD traceability matrix + architecture compliance (M1.4) |
-| `deviation.py` | Spec/Architecture/acceptance deviation records: model, persistence, aggregation (M2.5) |
-| `problems.py` | Cross-task Problem entity (B4/H3): 三态+复发重开, 半衰期(stale_after_days→dormant), 葬礼(resolution_summary), 全局 ~/.agent_go/problems.jsonl upsert；「越用越聪明」数据层；C4 葬礼回写（record_resolution：重试后成功回写「模式+解法」；summarize_resolution LLM 根因级总结，knowledge.resolution_llm 开关，fail-open 降级 diffstat 级） |
-| `replan.py` | C3 局部重规划（F-VERIFY-6）：无进展触发一次 Plan 拆分建议（LLM+启发式兜底），最多一次/继承父预算/默认人工确认/不扩大任务图 |
-| `knowledge.py` | C4 KnowledgeStore A/B 注入臂：从 Problem/deviation/verify_state 提取历史经验注入 repair prompt（可开关/可淘汰/knowledge_injected 埋点） |
-| `status.py` | Canonical task state machine (M0-2, 8 states) |
-| `exit_codes.py` | Semantic process exit codes for CLI tools |
-| `failure.py` | Stable failure classes and policy (M0-3) |
-| `eval.py` | Quality/perf/cost (per-role)/reliability/UX analysis + eval gate ($/pass baseline + regression) |
-| `planning.py` | Planning helpers: estimate_task_duration |
-| `pricing.py` | Model price table (52 models), MODEL_TIER, provider defaults |
-| `replay.py` | Execution replay timeline: load meta/metering/results, ASCII/JSON visualization |
-| `checkpoint.py` | Worktree file snapshot manager: take/restore/delete |
-| `recover.py` | Rebuild meta.json from worktree state after SIGKILL/abnormal interruption |
-| `metadata_migration.py` | Auditable failure-metadata migration for historical task dirs (`migrate failure-metadata`) |
-| `mcp_server.py` | MCP server over stdio: 7 tools (run_task/resume_task/inspect_task/review_task/governance_task/list_tasks/cancel_task) + resources + prompts |
-| `mcp_http.py` | MCP server HTTP/SSE transport: POST /mcp + GET /mcp (SSE) + GET /health, Bearer auth |
-| `mcp_client.py` | MCP consumption layer: subtasks call external MCP tools, namespaced `mcp__{server}__{tool}` |
-| `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks；子进程强制 --no-goal（对照实验不引入 goal 变量，防 watchdog 误杀口径噪声）；语义判定取末次有效 verdict（verification_results 跨重试累积）；`plan_quality_blocked` 单列 kill_reason=plan_gate_blocked（不计能力失败） |
-| `bench_schema.py` | Versioned Bench record schema + JSONL validator (M0-4) |
-| `batch_governance.py` | Result batch governance + immutable baseline manifests (M0-10) |
-| `metric_report.py` | Reproducible Metric Freeze report generation (M0-9) |
-| `cross_judge.py` | Cross-model judgment matrix (self-bias prevention) + human calibration |
-| `assessment.py` | False-positive evaluation data layer: AssessmentEvent model, persistence, aggregation |
-| `artifacts.py` | Artifact export (S9-B): collect worktree/__artifacts__/ into --artifact-dir before cleanup |
-| `diag.py` | llama-defender 诊断数据面客户端（R13-R16 消费侧 C1-C7）：session key 构造/截断口径、fail-open fetch、ledger/metrics/archive/ctx_config/props 封装 |
-| `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
-| `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |
-| `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
-| `tui.py` | Curses status dashboard |
-| `review_agent.py` | Read-only independent review subagent, two-phase review |
-| `workflow_gen.py` | GitHub Actions workflow generation (ci command) |
-| `web_server.py` | Web 操作台：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ 🗂 看板视图（kanban 6 写端点，SSE 联动）+ SSE，stdlib http.server + SPA |
-| `kanban.py` | 看板数据层：~/.agent_go/kanban.json 单文件存储（mtime 缓存 + 原子写 + 锁），5 阶段列（brainstorm→operations）× 3 类卡片（discussion/implementation/periodic），阶段流转 + history，task_ids 软链接执行任务（与 status.py 执行态正交，不动 meta.json） |
-| `profiles.py` | Profile 管理：local⇄cloud 一键切换（config local/cloud/status）、.current_profile、健康检查（mismatch 检测）、本地 profile 模板生成 |
-| `task_runner.py` | Web 子进程任务运行器（Thin shell 同哲学）：spawn agent_go --yes --json，meta.json 唯一事实源，SIGINT cancel |
-| `web_confirm.py` | R5b Web 计划确认协议：pending/decision 文件协议 + 阻塞轮询，30min 超时自动取消 |
-| `lint.py` | AST-based static checks: suspicious for-loop body truncation |
-| `decision_log.py` | M6.2 决策记录：模型推荐/配置修改/profile 切换/交付决策追加 `~/.agent_go/decision_log.jsonl`（evidence_refs 绑定依据，actual 复跑后回填），可审计可复盘 |
-| `evidence.py` | M6.1 证据物化层：immutable bench 批次聚合为 LLM 可推理的结构化证据包（evidence_hash 校验 manifest），eval insight 只能基于真实数据推理 |
-| `task_lock.py` | M5.2 任务级互斥锁：is_task_locked 前置探测（web 409 检查）+ TaskLock 上下文管理器，merge 与 run/resume 并发改 worktree 互斥 |
-| `knowledge_ab.py` | C4 KnowledgeStore A/B 判定分析器：两臂 pass_rate/ADR/$/AD 汇总 + 三门槛判定（ADR↑ + 成本不劣化 + 错误知识可淘汰）→ PRODUCTIZE/ROLLBACK |
-| `attribution_watch.py` | P2 盲区归因监视（opt-in）：trust --watch-repo 开启；watch index（repo→交付任务文件集/盲区项）+ Stop Hook 合并式注入（幂等/可卸载）+ 会话改动交集聚合提醒（无命中静默） |
-| `task_report.py` | 任务统计报表生成器：generate_task_report 只读聚合任务 JSONL（total/completed/uncompleted/tags_distribution，多形态兼容 + 标签归一 + 解码失败跳过） |
+## Key Design Decisions (速览)
 
-## Key Design Decisions
+Full text: `docs/design/runtime-design-decisions.md`.
 
-- **Worktree isolation**: `git worktree add -b agent_go/{task_id}/{sub_id}` creates branch-specific worktrees sharing the repo's object database. Tags are namespaced as `{task_id}/{sub_id}` to avoid cross-task collisions.
-- **Artifact passing**: Upstream subtask tags are directly `git merge`d into downstream worktrees — no temp remotes needed since all worktrees share the same object db.
-- **Concurrency safety**: `git gc.auto` is disabled before concurrent execution and restored after pipeline completion.
-- **Config-driven role routing**: `~/.agent_go/role_skill_map.json` maps keyword/file-pattern/agent-type conditions to required and recommended skills. Rules are injected into the Plan prompt and applied as post-LLM fallback.
-- **Plan prompt**: Injects installed Skill inventory table + role-skill rule summary so LLM knows available Skills before generating steps. `agent_type` and `skills` fields required in output.
-- **Three-tier fallback**: External API -> local model (localhost:8000) -> rule-based decomposition.
-- **Verification loop**: Failed subtasks auto-retry with full failure context (stdout/stderr/git diff) injected into fix prompt. Configurable max retries (`--max-retries`). Worktree preserved for manual inspection on final failure. Semantic-eval diff base is the subtask's pre-work HEAD (after upstream merge, ISSUE-51) — upstream subtask changes never pollute the current subtask's judgment diff.
-- **Worktree preservation**: Failed/blocked subtask worktrees are preserved after pipeline completion. `agent_go inspect <task-id>` lists paths and branch names for manual review.
-- **Result review (M7)**: `agent_go review --task <task-id>` aggregates per-file diff summaries across subtasks with approve/reject/changes-requested decisions; `--deep` runs independent-model per-subtask analysis.
-- **Difficulty routing**: Planner tags subtasks with `difficulty`; `worker_models` config maps difficulty to a model name passed via `claude --model`; `worker_base_url` is the single worker entry point (per-subtask `ANTHROPIC_BASE_URL` injection — model→backend fine-grained routing lives proxy-side); `worker_backends` is DEPRECATED (deployment topology belonged to the proxy; kept as compat read with a migration warning, no longer generated by `config local`). Difficulty and actual model recorded in metering. `local_model_names` (optional) maps a routed name to its real local backend name (e.g. `claude-haiku-4-5` → `Qwen3.6-27B-4bit`) as a fallback when proxy probing fails. `worker_models_fallback` / `worker_models_by_type` / `worker_models_degrades` provide degrade paths.
-- **Planner API isolation**: `planner_api` config block overrides `plan_api` for plan generation only — supports independent model/provider for planning vs execution.
-- **Crash recovery**: commit is the sole completion boundary. `agent_go recover` never commits orphan changes on your behalf — it only classifies worktree state so `resume` knows what to rerun.
-- **MCP dual role**: agent_go is both an MCP server (`mcp_server.py` / `mcp_http.py`) and an MCP consumer (`mcp_client.py`, letting subtasks call tools from external MCP servers, namespaced `mcp__{server}__{tool}`). Consumer failures are isolated per-server and degrade to a warning rather than blocking the pipeline.
-- **Config**: `~/.agent_go/config.json` (auto-created). Shallow-merged with `DEFAULT_CONFIG`. Field reference: `docs/design/config-schema.md`.
-- **API key**: `AGENT_GO_API_KEY` env var > `config.json` `api_key`. Template vars (`${VAR_NAME}`) resolved from environment.
-- **Local model cost tracking**: `local_models` list marks model names routed to local backends — metering cost is zeroed for matched models. Local backend is auto-detected when `worker_base_url` (or deprecated `worker_backends`) points to `127.0.0.1`/`localhost` (injects `AGENT_GO_IS_LOCAL`); the real backend model name is probed from the proxy's `/api/status` JSON (`backend.model_name`, supports hot model switching via SIGHUP; legacy proxies fall back to `/status` HTML parsing) or falls back to `local_model_names` config, then `routed_model`. `local_model_cost` (optional) imputes explicit TCO per local call (e.g. `"mlx-community/Qwen3.6-27B-4bit": 0.0007`), included in $/pass/gate.
-- **Cost recomputation (actual model pricing)**: claude CLI's `total_cost_usd` is billed at Anthropic prices, but `claude-*` route names may resolve to cheaper backends (e.g. `claude-haiku-4-5`/`claude-sonnet-4-6` → `deepseek-v4-flash`, `claude-opus-4-7` → `deepseek-v4-pro`). Worker metering recomputes `cost_usd` from the **actual model** (parsed from claude's `assistant.message.model`) using `MODEL_PRICES`, preventing 10-16x cost inflation; unknown models fall back to claude's reported cost. Local models stay zero-cost (unless `local_model_cost` configured).
-- **Cost control (3-layer, all default OFF)**: L1 single-call hard cap via `claude --max-budget-usd` (per difficulty from `cost_control.per_subtask_budget_usd`, unknown difficulty falls back to medium); L2 subtask cumulative cap across retries (`per_subtask_budget_usd × subtask_multiplier`, read from metering.jsonl); L3 task-level circuit break (`--max-cost`/`--budget` sets `cost_control.max_budget_usd`, pipeline checks cumulative metering before each wave). **L2/L3 gated by `cost_control.enabled` (default False — "判死"机制，基线不可信时误杀率高，须 `eval cost-baseline` 校准后才开); L1 gated by `cost_control.l1_enabled` (default False — Claude CLI ≥2.1.224 `--max-budget-usd` semantics are "refuse when near cap", which blocked tasks at $0.13 vs $0.20 budget; enable only after baseline calibration)**. `--budget-mode` selects `strict`(block)/`degrade`(switch cheaper model, `degraded=True`, max_retries→1)/`ignore`(L1/L2 only); dynamic default budget = Σ per_subtask_budget × multiplier × subtask count. `on_exceed` is a legacy no-op key (budget_mode is the real switch).
-- **Measurement/control decoupling**: baseline uses only natural-cost records (timed_out=True excluded — right-censored); circuit-break writes `cost_censored` events to metering.jsonl and keeps accumulating (cost control doesn't stop measurement). `eval cost-baseline` computes P90×tolerance budgets by difficulty×model.
-- **Logging**: Dual-format — INFO human-readable + DEBUG JSON events.
-- **Output abstraction**: `Console` class (quiet/verbose modes) is injected at CLI entry and shared via module-level default. All user-facing output goes through it — no bare `print()` calls.
-- **Sandbox**: Prefers `greywall`, falls back to native `claude` (`get_claude_command` in `agents.py`, double-wrap guarded in `executor.py`). Wrapping applies only to the interactive path — headless (`claude -p`, bench/`--yes`) always runs native（设计意图：零交互静默执行，2026-08-25 拍板维持）。观察期策略（同日拍板）：交互式路径当前包装为 `greywall --watch --`（全放行全记录，`sandbox_type=greywatch`），收紧时去掉两处 `--watch`。Install/ops/MCP network playbook: `docs/design/sandbox-greywall.md`.
-- **CI**: `.github/workflows/test.yml` runs pytest + `agent_go eval gate --baseline 0.05` + ruff (E,F,W) + mypy on push/PR to main. Config in `pyproject.toml`.
-- **谦逊层（Humility Layer, H1-H4）**: 正交观测层，专门记录「系统不知道自己不知道」的部分。H1/H4 交付盲区清单——`meta.json` 存 `blind_spots`（未覆盖文件/未运行命令/未验证场景）+ `uncovered_perspectives`（未覆盖视角），经交底报告（#48）、Web 任务详情盲区卡片（#51）、`inspect` 失败历史（#52）对外呈现；H2 层间归因——`layer_attribution` 字段把失败定位到「层」（修 spec / 修 plan / 调预算 / 换模型），失败可复盘（#47）；H3 Problem 实体——全局 `~/.agent_go/problems.jsonl`（三态+复发重开/半衰期/葬礼，即 M5 数据层）。信任指标（#49：审查后修改率↓/盲区命中率高/复发可见率↑）是阶段 D 自治决策的放行门；知识召回（#50）先「给人看」验证解法质量，B5=c 才做确定性注入。
+- **Worktree isolation + artifact passing**: namespaced branches/tags `{task_id}/{sub_id}` share the repo object db; upstream tags are `git merge`d directly into downstream worktrees.
+- **Three-tier plan fallback**: external API → local model (localhost:8000) → rule-based decomposition.
+- **Verification loop**: failed subtasks auto-retry with full failure context; semantic-eval diff base is the subtask's pre-work HEAD after upstream merge (ISSUE-51).
+- **Difficulty routing**: planner-tagged `difficulty` → `worker_models` → `claude --model`; `worker_base_url` is the single worker entry point (fine-grained routing lives proxy-side); `worker_backends` DEPRECATED.
+- **MCP dual role**: agent_go is both MCP server and consumer (`mcp__{server}__{tool}` namespaced); consumer failures degrade to warnings.
+- **Cost**: metering recomputes `cost_usd` from the actual model (claude route names may resolve to cheaper backends); 3-layer cost control all default OFF (enable only after `eval cost-baseline` calibration).
+- **Output abstraction**: all user-facing output via `Console` class — no bare `print()`.
+- **Sandbox**: interactive path prefers `greywall --watch --` (观察期全放行全记录); headless always runs native `claude -p`.
+- **谦逊层 (H1-H4)**: orthogonal observation of blind spots (`meta.json blind_spots`), layer attribution, cross-task Problem memory (`~/.agent_go/problems.jsonl`); trust metrics (#49) gate phase-D autonomy.
+
+## Code Style
+
+- Ruff: `target-version = "py39"`, `line-length = 120`, lint rules `E,F,W` with `E501` ignored (formatter manages length). CI runs `ruff check agent_go/ --select=E,F,W --ignore=E501`.
+- MyPy: `python_version = 3.9`, `ignore_missing_imports = true`, `warn_return_any = false` (JSON/config merging inherently returns `Any`).
+- All user-facing output goes through the injected `Console` class (`console.py`) — never bare `print()`.
+- Commit messages are formatted by `utils._format_commit` (prefix/scope detection); don't hand-roll commit messages in new code.
+- Match the surrounding file's conventions; module header comments and docstrings are largely Chinese — follow the file you're editing.
+- Module changes have doc-sync rules (`docs/design/module-catalog.md` §模块变更规则): new core module → update the catalog; public interface change → sync `docs/spec.md`; state/data-contract/boundary change → add/update an ADR (`docs/design/adr/`).
 
 ## Testing
 
 ```bash
-pip3 install pytest pytest-mock
-pytest tests/                       # 2787 tests (111 files); --tb=short via pyproject addopts
-pytest tests/ -q
-pytest tests/ -k "not integration"  # Unit tests only (skips test_integration.py, test_agent_loop_integration.py)
-pytest tests/ -k "TestFormatCommit" -v
+pytest tests/                       # 2863 tests (115 files); --tb=short via pyproject addopts
+pytest tests/ -k "not integration"  # unit tests only
 pytest tests/test_format_commit.py::TestFormatCommitChinese::test_feat_add
 ```
 
-Integration tests mock all external deps (generate_plan, run_subtask, `_run_headless`, subprocess.run) — no real LLM/Claude/Git needed. Shared fixtures (logger, temp_dir, sample_plan, minimal_plan) live in `tests/conftest.py`. A `flaky` marker is registered for annotation only (no rerun plugin).
+- Integration tests mock all external deps (`generate_plan`, `run_subtask`, `_run_headless`, `subprocess.run`) — no real LLM/Claude/Git needed.
+- Shared fixtures (`logger`, `temp_dir`, `sample_plan`, `minimal_plan`) live in `tests/conftest.py`.
+- Custom marker `@pytest.mark.flaky` is registered (annotation only, no rerun mechanism).
+- CI (`.github/workflows/test.yml`, push/PR to main): `pytest tests/ -q` → `agent_go eval gate --baseline 0.05` ($/pass release gate; passes automatically with no data) → ruff → mypy, on Python 3.9.
 
-## Code Review Checklist
+## Security Considerations
 
-When reviewing Python code, check for these high-risk patterns:
+- **API keys**: `AGENT_GO_API_KEY` env var takes precedence over `config.json` `api_key`; `${VAR_NAME}` template vars resolve from the environment. The model registry (`models_registry.py`) stores only `key_ref` (env var name or secret-file reference) — never plaintext keys.
+- **Verification command filter**: planner-generated verification commands pass `_is_safe_verification_command` (`utils.py`) — safe-prefix allowlist plus rejection logging; don't bypass it when adding execution paths.
+- **Web console**: `agent_go web` binds `127.0.0.1` by default; use `--admin-token`/`--viewer-token` for multi-role access (admin full / viewer read-only). MCP HTTP transport uses Bearer token auth.
+- **Secrets on disk**: task data, metering, and configs live under `~/.agent_go/` — treat as user-private; never commit contents into this repo.
 
-### Loop body truncation (critical)
+## Code Review Checklist (速览)
 
-**Anti-pattern**: After a `for x in collection:` loop, code references `x` (the loop variable) to do state mutations — this means the mutations are outside the loop, acting only on the last element.
+Full checklist with examples: `docs/design/code-review-checklist.md`.
 
-```python
-# ❌ BUG: mutations after the loop — only processes last item
-for st in wave:
-    fut = executor.submit(run_subtask, ...)
-    futures[fut] = st
-for fut in as_completed(futures):    # ← same level as for st above
-    st = futures[fut]
-    try:
-        result = fut.result()
-    except Exception:
-        ...
-with meta_lock:                      # ← OUTSIDE the as_completed loop!
-    results_map[st["id"]] = result   # ← only saves last st
-completed_ids.add(st["id"])          # ← only adds last st
-
-# ✅ CORRECT: all per-item processing inside the loop
-for st in wave:
-    fut = executor.submit(run_subtask, ...)
-    futures[fut] = st
-for fut in as_completed(futures):
-    st = futures[fut]
-    try:
-        result = fut.result()
-    except Exception:
-        ...
-    with meta_lock:                  # ← INSIDE the loop
-        results_map[st["id"]] = result
-    completed_ids.add(st["id"])
-```
-
-**Detection rule**: When a `for` loop processes a collection and the lines immediately after the loop reference the loop variable (`st`, `item`, `fut`, etc.), verify the indentation: these should likely be inside the loop.
-
-### Other review patterns
-
-- **Thread safety**: Shared mutable state (`results_map`, `completed_ids`, counters) modified across threads must be protected by a lock.
-- **Mock side_effect exhaustion**: When mocking a function with `side_effect=[...]`, ensure the number of expected calls doesn't exceed the list length — otherwise `StopIteration` crashes the test.
-- **Subprocess pipe deadlock**: Always use `capture_output=True` or `stdin=PIPE` with `communicate()`, never `wait()` on a pipe that fills the buffer.
-- **Temp directory leak**: Tests that create directories/files should use `tmp_path` fixture (auto-cleanup) or clean up in a `finally` block.
-- **Codegen/config drift**: `config.example.json` must stay in sync with `DEFAULT_CONFIG` in `config.py`; pricing table additions must update `pricing.py`. `spec validate` gates non-trivial tasks — `--force` bypasses it and should not be the default path.
+- **Loop body truncation (critical)**: after a `for x in ...:` loop, lines referencing the loop variable at the outer level only process the last item — per-item processing belongs inside the loop. (`lint.py` has an AST check for this pattern.)
+- **Thread safety**: shared mutable state across threads (pipeline uses `ThreadPoolExecutor`) must be lock-protected.
+- **Mock `side_effect` exhaustion**: expected calls must not exceed the list length (`StopIteration`).
+- **Subprocess pipe deadlock**: use `capture_output=True` or `communicate()`, never `wait()` on a filling pipe.
+- **Codegen/config drift**: `config.example.json` must stay in sync with `DEFAULT_CONFIG` (`config.py`); pricing additions update `pricing.py`; llama-defender contract changes are drift-checked by `tools/check_llama_contracts.py`.
 
 ## File Organization
 
 ```
-agent_go/           # 64 Python modules (~38,500 lines)
-tests/              # 111 test files, 2787 tests
-eval_suite/         # eval bench suite: tasks/ (35 task YAMLs), fixtures/ (5 fixture repos), results_*.jsonl
-docs/design/        # Design docs: config-schema.md, module-catalog.md, architecture, ADRs
+agent_go/           # 69 Python modules (~39,800 lines); catalog: docs/design/module-catalog.md
+tests/              # 115 test files, 2863 tests; fixtures in conftest.py
+eval_suite/         # eval bench suite: golden_tasks/ m3_tasks/ phaseD_tasks/ fixtures/ baselines/, results_*.jsonl
+docs/design/        # Design docs + reference docs split out of AGENTS.md (see top table); adr/ for ADRs
 docs/archive/       # Historical code review records
-tools/              # Dev scripts: bench_split_design.py, check_llama_defender_contract.py, check_markdown_links.py, recompute_bench_results.py（按当前 _collect_result 口径重算/合并历史 bench JSONL）
+tools/              # Dev scripts (bench split/recompute, contract drift checks, markdown link check, spec smoke)
+agent_go.py         # Root-level convenience entry (python3 agent_go.py run ...)
+config.example.json # Example config — keep in sync with DEFAULT_CONFIG
 ```
