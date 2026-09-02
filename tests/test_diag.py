@@ -134,6 +134,24 @@ class TestEndpointHelpers:
     def test_get_session_metrics_empty_key(self):
         assert diag.get_session_metrics(self.BASE, "") is None
 
+    def test_get_session_hbe_ok(self):
+        payload = {"session_key": "abcd1234", "count": 2,
+                   "records": [{"turn": 4, "h_mean_bits": 0.71, "result": "ok"},
+                               {"turn": 8, "h_mean_bits": 0.93, "result": "ok"}]}
+        with patch("urllib.request.urlopen", return_value=_FakeResp(payload)):
+            h = diag.get_session_hbe(self.BASE, "abcd1234")
+        assert h["count"] == 2
+        assert h["records"][0]["h_mean_bits"] == 0.71
+
+    def test_get_session_hbe_404_returns_none(self):
+        err = urllib.error.HTTPError(
+            self.BASE, 404, "nf", {}, io.BytesIO(json.dumps({"error": {"type": "session_not_found"}}).encode()))
+        with patch("urllib.request.urlopen", side_effect=err):
+            assert diag.get_session_hbe(self.BASE, "abcd1234") is None
+
+    def test_get_session_hbe_empty_key(self):
+        assert diag.get_session_hbe(self.BASE, "") is None
+
     def test_get_ctx_config(self):
         payload = {"state": "healthy",
                    "ctx_config": {"diag_enabled": True, "compression_mode": "semantic"},
