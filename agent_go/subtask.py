@@ -358,6 +358,10 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                     cmd.extend(["--mcp-config", mcp_config_path])
             except Exception as _mcp_err:
                 logger.debug(f"[{sub_id}] MCP config 透传失败（已跳过）: {_mcp_err}")
+        # C1 ISSUE-56 方案 A：零成本判别——ANTHROPIC_CUSTOM_HEADERS 是否真的进入子进程 env
+        _custom_headers_env_set = bool(env.get("ANTHROPIC_CUSTOM_HEADERS"))
+        logger.info(f"[{sub_id}] ISSUE-56 custom_headers_env={_custom_headers_env_set} "
+                    f"session_key={env.get('AGENT_GO_SESSION_KEY', '')[:8]}")
         proc = subprocess.Popen(cmd, env=env, cwd=str(worktree), stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
 
@@ -772,6 +776,8 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         # C1 会话 key 落 metering（executor 注入 env）：与代理台账/档案的 join 键
         if env.get("AGENT_GO_SESSION_KEY"):
             _metering_rec["session_key"] = env["AGENT_GO_SESSION_KEY"]
+        # ISSUE-56 方案 A：把 custom_headers env 是否 set 写进 metering，使断链可观测
+        _metering_rec["headers_env_set"] = bool(env.get("ANTHROPIC_CUSTOM_HEADERS"))
         meter_event(metering_path, _metering_rec)
         # C2 worker 侧诊断采集：claude 是黑盒子进程拿不到响应头，改为子任务结束后
         # 按会话 key 查代理 session metrics 聚合（R16），独立 worker_diag 事件，

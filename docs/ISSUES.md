@@ -846,19 +846,26 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 ### ISSUE-56 worker 会话无法 join 到 llama-defender 数据面（join 键断链）
 
 - **位置**：`agent_go/executor.py:2736-2745`（C1 注入）→ `agent_go/subtask.py:361`（Popen）→ claude CLI → 代理
-- **状态**：🔲 已登记未修复（判别方案已备，见 `docs/design/session-join-broken-chain-handoff.md` §9）
+- **状态**：🟡 已实施方案 A 判别（2026-09-03），待观察数据确认
 - **严重度**：P1（agent_go 任务的真实成败标签链路断；swe-eval/planner 通道不受影响）
 
 **问题**：4254 个 (task,sub) 组合 × 台账/档案/sessions.jsonl 全历史 = 0 命中；同时段数据面出现 CLI 自发 UUID 形态的一次性 8-hex 会话键（F8）。外部会话（llama-defender 侧）已完成三组判别实验与三项静态考古（handoff 文档 §9 附录）：CLI 在干净环境忠实透传注入头（恰一次、值为注入值）；无注入变量时 CLI 自发 UUID 头——与 F8 形态完全匹配；代理取头单分支无旁路；注入代码 08-19 已提交且 else 分支完备。**修正后头号假设：worker 最终 Popen env 中 `ANTHROPIC_CUSTOM_HEADERS` 实际缺失或未生效**（F1 证明的是分支执行与 AGENT_GO_SESSION_KEY 透传，不证明头变量送达子进程）。
 
-**修复方向**（定案后执行，顺序勿颠倒）：①subtask Popen 前一行日志打印 `custom_headers_env=bool`（方案 A，零成本判别）；②若 env=False → 修 env 构造链丢失点（无需改头名/无需动代理）；若 env=True 仍断 → 完整旗标组合 × 本地 echo（方案 B）→ 确认后按 §6 私有头 `X-Agent-Go-Session-Id` 两侧修复（代理侧 raw_sid 三级读取：私有头 → X-Claude-Code-Session-Id → fallback）；③metering 增 `headers_env_set: bool` 字段使断链可观测。验证：任一 subtask 的 key 出现在台账/档案/`/api/session/<key>/hbe`。
+**修复方向**：
+1. ✅ 方案 A（2026-09-03）：`subtask.py` Popen 前打印 `custom_headers_env=bool` 并写入 metering `headers_env_set` 字段，零成本判别。
+2. 若 env=False → 修 env 构造链丢失点（无需改头名/无需动代理）。
+3. 若 env=True 仍断 → 完整旗标组合 × 本地 echo（方案 B）→ 确认后按 §6 私有头 `X-Agent-Go-Session-Id` 两侧修复（代理侧 raw_sid 三级读取：私有头 → X-Claude-Code-Session-Id → fallback）。
+
+**验证**：任一 subtask 的 key 出现在台账/档案/`/api/session/<key>/hbe`。
 
 ### ISSUE-57 `~/.claude/settings.json` env 钉死劫持一切真实 HOME 的 claude 调用
 
 - **位置**：`~/.claude/settings.json` env 块（mtime 2026-08-29 09:27；`ANTHROPIC_BASE_URL=https://open.bigmodel.cn/...` + AUTH_TOKEN + glm 全家模型映射）
-- **状态**：🔲 已登记未处置（**决策项**——钉死可能正在服务用户的 bigmodel 会话，拆除/按需切换由用户决定）
+- **状态**：✅ 已处置（2026-09-03 方案 A：拆除 env 块）
 - **严重度**：P0（影响面大于 ISSUE-56：实测 settings env 压过进程 env 且 `--settings {}` 不能旁路）
 
-**问题**：2026-08-30 两次实测（含 `--settings` 空 JSON 旁路尝试）均静默绕过本地 ：4000 直打 bigmodel 真实 API。后果：①agent_go worker 今日起全部静默走云端（ISSUE-56 的判别与验证被它阻断）；②一切手工 claude 复现的 BASE_URL 不可信；③成本与数据面静默外泄风险。注意它可能是用户当前 bigmodel 工作流的有意配置——处置前必须确认。
+**问题**：2026-08-30 两次实测（含 `--settings` 空 JSON 旁路尝试）均静默绕过本地 `:4000` 直打 bigmodel 真实 API。后果：①agent_go worker 全部静默走云端（ISSUE-56 的判别与验证被它阻断）；②一切手工 claude 复现的 BASE_URL 不可信；③成本与数据面静默外泄风险。
 
-**修复方向**：用户决策三选一——拆除（恢复 env 覆盖语义）/改为按需 profile 切换/保留但在 agent_go subtask env 中显式带 `CLAUDE_CODE_...` 级覆盖（若 CLI 支持）。处置后 ISSUE-56 的判别（方案 A）即可执行。
+**修复方向**：按方案 A 拆除 `~/.claude/settings.json` 的 `env` 块。备份：`~/.claude/settings.json.20260903-061711.bak`（含 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、glm 模型映射等）。其余非 env 配置（model、worktree、tui、theme、max_tokens 等）保留。
+
+**后续如需恢复 bigmodel**：从备份恢复 env 块，或改用按需 env profile / wrapper 脚本，避免常驻 env 块劫持 agent_go worker。
