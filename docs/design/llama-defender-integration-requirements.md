@@ -30,6 +30,9 @@
 | **P1 R11** | `/api/status` 增 `route_config`（cloud_model/route_enabled/cloud_key_set） | ③ 探测依据统一 | 健康检查探测依据不一致（G4） |
 | **P2 R12** | `POST /admin/reload`（HTTP 热重载） | ③ 运维 | 远程/容器场景 reload（等效 manage.sh reload） |
 | **P1 R13-R16** | 上下文工程诊断数据面：响应头扩展（Prompt-Processed-N / Epoch-Count / Feedback-Injected）+ 会话台账端点 + L4 档案查询 + /metrics 会话维度；另需透传 llama-server 原生 `timings` / `/props` / `/slots` | **④ 观测归因** | 缓存命中率 / 延迟分档 / 会话观测 / 压缩后行为复盘无数据源——详见 [llama-defender-context-engineering-design.md §10](llama-defender-context-engineering-design.md) |
+| **P1 R17** | `GET /api/session/<key>/signals` | **⑤ 升级决策** | AG-3 升级决策可选输入（IFC 信号）；缺失不影响当前 retry/split/human 子集 |
+| **P1 R18** | `POST /api/task-context` | **⑤ 升级决策** | AG-4 reload 动作获取上下文证据包；fail-open 降级 |
+| **P1 R19** | `X-Proxy-Pin-Context` 请求头 | **⑤ 升级决策** | AG-5 reload 重试时保护关键上下文锚点；fail-open 降级 |
 
 **四层闭环支撑**：① registry ← R10；③ 部署拓扑 ← R9/R11/R12；④ 观测归因 ← **R8（最关键，决定 bench 成本/归因可信度）**；② 角色绑定无代理依赖。
 
@@ -235,8 +238,96 @@ manage.sh 是**服务启停的主路径**，尤其在 HTTP API 生效前或代�
 
 **需求（可选）**：`POST /admin/reload` 等效 SIGHUP 热重载（读 active.conf 应用变更），返回 `{reloaded: true, active_profile: "..."}`。幂等。
 
+## 3.2 上下文工程诊断面与会话契约（R13-R19，2026-09-03 增补）
+
+R13-R16 定义 llama-defender 侧上下文工程的可观测数据面，详见 [llama-defender-context-engineering-design.md](llama-defender-context-engineering-design.md)。本节新增 R17-R19，作为 **agent_go ↔ llama-defender 升级决策与会话保持** 的集成契约；按双端 contract-first 约定，R18/R19 需先在本文档草案化、经 agent_go 评审冻结后再实施。
+
+### R17（P1）：`GET /api/session/<key>/signals` —— 信号快照
+
+**现状缺口**：agent_go 的升级决策（AG-3）当前只使用自有失败信号（verify verdict / 无进展 / 尝试次数），无法消费 llama-defender 侧 IFC 指标（reread_pressure、hit_ratio、epoch 触发等）。
+
+**需求**：按 `llama_contracts.SignalSnapshot`（CONTRACT_VERSION=1）返回某会话的完整信号快照，供升级决策表可选输入。
+
+**降级**：端点不存在时 AG-3 维持当前自有信号口径，不阻塞任务。
+
+### R18（P1）：`POST /api/task-context` —— 任务上下文证据包
+
+**端点定位**：供 agent_go 在 `reload` 升级动作前，基于任务描述获取代理侧推荐的上下文证据包（manifest / lookup / orig 组合），使重试能带上“最有价值的压缩后上下文”。
+
+**请求体**：
+
+```json
+{
+  "task_descriptor": "修复 agent_go/subtask.py 中 ISSUE-56 的 header 注入...",
+  "session_key": "039d208c-ag-task-20260903-063517-618-a177-sub-1",
+  "turn_budget": 10
+}
+```
+
+字段说明：
+- `task_descriptor`（string，必填）：任务标题/描述，代理据此做语义检索与预算裁剪。
+- `session_key`（string，必填）：当前会话 key，代理在该会话的 canonical history 范围内生成证据包。
+- `turn_budget`（int，可选）：期望返回的“等效轮数”预算，代理据此裁剪 bundle 规模；缺失时由代理按默认策略。
+
+**响应体**：
+
+```json
+{
+  "context_bundle": {
+    "manifest": [{"id": "m1", "summary": "...", "turn_range": [1, 3]}],
+    "lookup": [{"id": "l1", "query": "...", "result": "..."}],
+    "orig": [{"id": "o1", "sha256": "...", "anchor": "orig:abc123"}]
+  },
+  "budget_used": 4,
+  "budget_total": 10,
+  "sem_card": null,
+  "pin_anchors": ["orig:abc123"]
+}
+```
+
+字段说明：
+- `context_bundle`：证据包内容；`manifest`/`lookup`/`orig` 语义同 llama-defender 内部 context_engine 输出。
+- `budget_used` / `budget_total`：本次消耗的等效轮数 / 可用预算。
+- `sem_card`（可选）：SEM 语义卡扩展点；未实现时返回 `null`。
+- `pin_anchors`（string[]）：建议 pinning 的 anchor 列表，agent_go 在 reload 请求时通过 R19 头携带。
+
+**降级语义**：
+- 代理不可达、返回 404/501、JSON 异常或 `context_bundle=null` → agent_go fail-open，视为空 bundle。
+- 空 bundle 时 `reload` 动作降级为普通重试（retry）或局部重规划（split），不阻断任务。
+
+**幂等**：同 `(task_descriptor, session_key)` 可安全重复调用；代理侧可缓存。
+
+### R19（P1）：`X-Proxy-Pin-Context` 请求头 —— 上下文锚点保护
+
+**端点定位**：reload 重试请求携带 pinning anchor，要求代理在压缩/截断/context_engine 处理时跳过指定锚点。
+
+**头格式**：
+
+```http
+X-Proxy-Pin-Context: orig:abc123
+X-Proxy-Pin-Context: manifest:m1
+```
+
+- 单个请求可携带多个头（多 anchor）或一个头用逗号分隔（待冻结时确定）。
+- anchor 前缀：`orig:<sha256>`、`manifest:<id>`、`lookup:<id>`，由 R18 `pin_anchors` 给出。
+
+**语义约束**：
+1. **跳过压缩/截断**：代理在 context_engine 的任意阶段不得压缩、摘要或丢弃 pinned 锚点对应的内容。
+2. **预算记账**：代理侧维护 pin 预算；当 pin 内容导致上下文接近 OOM 时，代理可按 `oom_danger` 档降级（优先保最近 N 个 pin，其余降级为普通压缩），并通过响应头 `X-Proxy-Pin-Degraded: true` 告知 agent_go。
+3. **禁用区**：禁止将 pin 注入 L3 压缩区内部或原生流（L2）内部；pin 只能保护“已有原始内容”或“manifest 摘要块”不被进一步压缩，不能作为新内容插入历史。
+
+**降级**：代理不支持该头时直接忽略，agent_go 侧通过 worker_diag 记录 `pin_header_ignored=true`。
+
+### 契约版本化
+
+- R17-R19 纳入 llama-defender 集成契约；agent_go 侧 `llama_contracts.CONTRACT_VERSION` 在 R18/R19 字段冻结并从草案转为正式后递增到 `2`。
+- 字段变更仅允许“新增可选字段”；删/改字段需 `CONTRACT_VERSION` 递增 + 双端漂移检测同步。
+
 ### 边界（不需代理提供，agent_go 侧职责）
 
+- `reload` 决策时机与触发信号：agent_go `replan.py` 决策表。
+- task-context 证据包如何注入修复 prompt：agent_go `executor.py`。
+- pin 头如何附加到 Claude CLI 请求：agent_go `subtask.py` 通过 `ANTHROPIC_CUSTOM_HEADERS` 透传。
 - ① 逻辑模型 registry：`quality_tags`、pricing 表、角色绑定（router.roles）——agent_go `models.json`/pricing.py
 - ② 角色场景参数：temperature/max_tokens/thinking 开关/goal/min_difficulty——agent_go config
 - Plan 生成/拆解/e2e 判定——agent_go 核心流程
@@ -270,6 +361,9 @@ manage.sh 是**服务启停的主路径**，尤其在 HTTP API 生效前或代�
 | R10 模型能力元数据 | P1 | ① registry 自动同步能力属性，免手工录入 |
 | R11 status 路由配置段 | P1 | 健康检查探测依据统一（cloud_model/key_set） |
 | R12 HTTP 热重载 | P2（可选） | 远程/容器场景可 reload |
+| R17 会话信号快照 | P1 | AG-3 决策表可消费 IFC 信号（可选增强） |
+| R18 任务上下文证据包 | P1 | AG-4 reload 动作获取 context bundle；缺失时 fail-open |
+| R19 Pin-Context 头 | P1 | AG-5 reload 请求携带 pinned anchor；不支持时忽略 |
 
 ## 6. 兼容策略
 

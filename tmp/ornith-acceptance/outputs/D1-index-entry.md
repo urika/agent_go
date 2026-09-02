@@ -1,0 +1,1 @@
+- [result.json Schema 参考文档](docs/design/result-schema.md) — 定义每个子任务结果文件 `result.json` 的完整字段，覆盖执行路径与 Synthetic 路径。

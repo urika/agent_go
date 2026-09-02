@@ -6,6 +6,7 @@ from agent_go.llama_contracts import CONTRACT_VERSION, EscalationDecision
 from agent_go.replan import (
     ESCALATION_ACTIONS,
     TaskCircuitBreaker,
+    build_reload_context,
     decide_escalation,
 )
 
@@ -101,5 +102,75 @@ class TestDecideEscalation:
         assert sig["max_retries"] == 3
 
     def test_action_vocabulary(self):
-        # agent 侧动作子集（reload 待 AG-4/5）
-        assert set(ESCALATION_ACTIONS) == {"retry", "split", "human"}
+        # AG-4/5 已启用 reload，动作子集扩展为 retry/reload/split/human
+        assert set(ESCALATION_ACTIONS) == {"retry", "reload", "split", "human"}
+
+    def test_task_context_enabled_gives_reload(self):
+        cfg = {"task_context": {"enabled": True}}
+        for reason in ("verify_revert", "verify_divergence", "failure_pattern_repeat"):
+            d = decide_escalation("s1", reason, attempt=0, max_retries=3, config=cfg)
+            assert d["action"] == "reload", f"{reason} 应触发 reload"
+            assert d["reason"] == reason
+
+    def test_task_context_disabled_falls_back_to_split(self):
+        # 默认未开启 task_context，无进展信号仍走 split
+        for reason in ("verify_revert", "verify_divergence", "failure_pattern_repeat"):
+            assert decide_escalation("s1", reason, 0, 3)["action"] == "split"
+
+    def test_reload_respects_circuit_breaker_and_max_retries(self):
+        cfg = {"task_context": {"enabled": True}}
+        # 熔断打开时 reload 仍被拦截为 human
+        b = TaskCircuitBreaker(threshold=1)
+        b.record_failure("verify_revert")
+        assert decide_escalation("s1", "verify_revert", 0, 3, breaker=b, config=cfg)["action"] == "human"
+        # 达到 max_retries 时 reload 被拦截为 human
+        assert decide_escalation("s1", "verify_revert", 3, 3, config=cfg)["action"] == "human"
+
+    def test_non_no_progress_reason_never_reload(self):
+        cfg = {"task_context": {"enabled": True}}
+        d = decide_escalation("s1", "some_other_failure", 0, 3, config=cfg)
+        assert d["action"] == "retry"
+
+
+class TestBuildReloadContext:
+    def test_missing_session_key(self):
+        r = build_reload_context({"title": "t"}, "", {})
+        assert r["context_bundle"] is None
+        assert r["task_context_error"] == "missing_session_key"
+
+    def test_missing_base_url(self):
+        r = build_reload_context({"title": "t"}, "sess-key", {})
+        assert r["context_bundle"] is None
+        assert r["task_context_error"] == "missing_base_url"
+
+    def test_empty_bundle_fail_open(self):
+        from unittest.mock import patch
+        with patch("agent_go.diag.get_task_context", return_value={"context_bundle": None}):
+            r = build_reload_context(
+                {"title": "t"}, "sess-key",
+                {"task_context": {"enabled": True, "base_url": "http://127.0.0.1:4000"}})
+        assert r["context_bundle"] is None
+        assert r["task_context_fetched"] is True
+        assert r["task_context_error"] == "empty_bundle"
+
+    def test_bundle_with_pin_anchors(self):
+        from unittest.mock import patch
+        resp = {
+            "context_bundle": {"manifest": [{"id": "m1"}]},
+            "pin_anchors": ["orig:abc", "manifest:m1"],
+        }
+        with patch("agent_go.diag.get_task_context", return_value=resp):
+            r = build_reload_context(
+                {"title": "t"}, "sess-key",
+                {"task_context": {"enabled": True, "base_url": "http://127.0.0.1:4000"}})
+        assert r["context_bundle"]["manifest"][0]["id"] == "m1"
+        assert r["pin_anchors"] == ["orig:abc", "manifest:m1"]
+
+    def test_exception_fail_open(self):
+        from unittest.mock import patch
+        with patch("agent_go.diag.get_task_context", side_effect=RuntimeError("boom")):
+            r = build_reload_context(
+                {"title": "t"}, "sess-key",
+                {"task_context": {"enabled": True, "base_url": "http://127.0.0.1:4000"}})
+        assert r["context_bundle"] is None
+        assert "boom" in r["task_context_error"]

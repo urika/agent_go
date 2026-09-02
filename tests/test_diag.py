@@ -173,3 +173,51 @@ class TestEndpointHelpers:
         with patch("urllib.request.urlopen", side_effect=err):
             props = diag.get_backend_props(self.BASE)
         assert props == {"supported": False}
+
+
+class TestPostJson:
+    BASE = "http://127.0.0.1:4000"
+
+    def test_success(self):
+        with patch("urllib.request.urlopen", return_value=_FakeResp({"ok": True})):
+            assert diag.post_json(self.BASE, "/api/task-context", {"x": 1}) == {"ok": True}
+
+    def test_network_error_returns_none(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+            assert diag.post_json(self.BASE, "/api/task-context", {"x": 1}) is None
+
+    def test_empty_base_url(self):
+        assert diag.post_json("", "/api/task-context", {"x": 1}) is None
+
+
+class TestTaskContext:
+    BASE = "http://127.0.0.1:4000"
+
+    def test_ok_returns_bundle(self):
+        payload = {
+            "context_bundle": {"manifest": [{"id": "m1"}], "orig": []},
+            "budget_used": 3,
+            "budget_total": 10,
+            "pin_anchors": ["orig:abc123"],
+        }
+        with patch("urllib.request.urlopen", return_value=_FakeResp(payload)):
+            r = diag.get_task_context(self.BASE, "fix bug", "sess-key", turn_budget=5)
+        assert r["context_bundle"]["manifest"][0]["id"] == "m1"
+        assert r["pin_anchors"] == ["orig:abc123"]
+
+    def test_endpoint_missing_fail_open(self):
+        err = urllib.error.HTTPError(
+            self.BASE, 404, "nf", {}, io.BytesIO(json.dumps({"error": "not found"}).encode()))
+        with patch("urllib.request.urlopen", side_effect=err):
+            r = diag.get_task_context(self.BASE, "fix bug", "sess-key")
+        assert r == {"context_bundle": None}
+
+    def test_network_error_fail_open(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("down")):
+            r = diag.get_task_context(self.BASE, "fix bug", "sess-key")
+        assert r == {"context_bundle": None}
+
+    def test_missing_inputs_fail_open(self):
+        assert diag.get_task_context(self.BASE, "", "sess-key") == {"context_bundle": None}
+        assert diag.get_task_context(self.BASE, "fix", "") == {"context_bundle": None}
+        assert diag.get_task_context("", "fix", "sess-key") == {"context_bundle": None}

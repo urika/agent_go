@@ -211,6 +211,52 @@ class TestRunHeadless:
         assert result.returncode == 0
 
     @patch("subprocess.Popen")
+    def test_pin_context_appended_to_custom_headers(self, mock_popen, logger):
+        """R19：AGENT_GO_PIN_CONTEXT 应追加到 ANTHROPIC_CUSTOM_HEADERS"""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12346
+        mock_proc.poll.return_value = 0
+        mock_proc.stdout.readline.side_effect = ["", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        _run_headless(
+            "task content", Path("/tmp/work"),
+            {
+                "ANTHROPIC_CUSTOM_HEADERS": "X-Claude-Code-Session-Id: abcdef12",
+                "AGENT_GO_PIN_CONTEXT": "orig:abc123\nmanifest:m1",
+            },
+            logger, "sub-1"
+        )
+
+        _env = mock_popen.call_args.kwargs["env"]
+        _headers = _env["ANTHROPIC_CUSTOM_HEADERS"]
+        assert "X-Claude-Code-Session-Id: abcdef12" in _headers
+        assert "X-Proxy-Pin-Context: orig:abc123" in _headers
+        assert "X-Proxy-Pin-Context: manifest:m1" in _headers
+
+    @patch("subprocess.Popen")
+    def test_pin_context_creates_custom_headers(self, mock_popen, logger):
+        """R19：仅有 AGENT_GO_PIN_CONTEXT 时创建 ANTHROPIC_CUSTOM_HEADERS"""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12347
+        mock_proc.poll.return_value = 0
+        mock_proc.stdout.readline.side_effect = ["", ""]
+        mock_proc.stderr.readline.side_effect = ["", ""]
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        _run_headless(
+            "task content", Path("/tmp/work"),
+            {"AGENT_GO_PIN_CONTEXT": "orig:abc123"},
+            logger, "sub-1"
+        )
+
+        _env = mock_popen.call_args.kwargs["env"]
+        assert _env["ANTHROPIC_CUSTOM_HEADERS"] == "X-Proxy-Pin-Context: orig:abc123"
+
+    @patch("subprocess.Popen")
     def test_worker_metering_written(self, mock_popen, logger, tmp_path):
         """result 事件中的 usage/cost 被聚合并写入 metering.jsonl（worker 角色）"""
         metering = tmp_path / "metering.jsonl"

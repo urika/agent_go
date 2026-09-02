@@ -1561,20 +1561,70 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         _replan_state["reason"] = trigger_reason
         try:
             from .replan import (TaskCircuitBreaker, build_decomposition,
-                                 confirm_replan, decide_escalation,
-                                 render_replan_guidance)
+                                 build_reload_context, confirm_replan,
+                                 decide_escalation, render_replan_guidance)
             # AG-3：确定性决策层先行——熔断/幂等闸拦截时不进入拆分修复
             if _replan_breaker[0] is None:
                 _replan_breaker[0] = TaskCircuitBreaker()
             decision = decide_escalation(
                 subtask_id=sub_id, reason=trigger_reason,
                 attempt=retry_count, max_retries=max_retries,
-                breaker=_replan_breaker[0], failure_class=trigger_reason)
+                breaker=_replan_breaker[0], failure_class=trigger_reason,
+                config=_full_cfg)
             _replan_state["decision"] = dict(decision)
             log_event(logger, "escalation_decision", {
                 "sub_id": sub_id, "action": decision["action"],
                 "reason": decision["reason"], "attempt": retry_count,
             })
+
+            # AG-4/5：reload 动作——带恢复上下文重试
+            if decision["action"] == "reload":
+                _reload_ctx = build_reload_context(
+                    subtask, env.get("AGENT_GO_SESSION_KEY", ""), _full_cfg, logger)
+                _replan_state["reload_context"] = {
+                    "fetched": _reload_ctx.get("task_context_fetched"),
+                    "error": _reload_ctx.get("task_context_error", ""),
+                    "pin_anchors": _reload_ctx.get("pin_anchors", []),
+                }
+                if _reload_ctx.get("context_bundle"):
+                    _pin_anchors = _reload_ctx.get("pin_anchors") or []
+                    if _pin_anchors:
+                        env["AGENT_GO_PIN_CONTEXT"] = "\n".join(str(a) for a in _pin_anchors)
+                    _replan_state["executed"] = True
+                    _replan_state["status"] = "reload_executed"
+                    logger.info("[局部重规划] 执行 reload（带 task-context + pin）")
+                    log_event(logger, "replan_reload_executed", {
+                        "sub_id": sub_id, "reason": trigger_reason,
+                        "pin_anchors": len(_pin_anchors),
+                    })
+                    _difficulty_r = subtask.get("difficulty", "medium")
+                    _base_timeout_r = _cfg.get("verification", {}).get("retry_timeout", 300)
+                    _mult_r = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(_difficulty_r, 1.5)
+                    _cap_r = {"easy": 600, "medium": 900, "hard": 1500}.get(_difficulty_r, 900)
+                    _reload_timeout = min(int(_base_timeout_r * _mult_r), _cap_r)
+                    if env.get("AGENT_GO_IS_LOCAL", "") == "1":
+                        _reload_timeout = min(_reload_timeout * 2, 3000)
+                    _latest_kill_reason[0] = None
+                    _reload_prompt = task_md
+                    _reload_result = _run_headless(
+                        _reload_prompt, worktree, env, logger, sub_id,
+                        active_pids=active_pids, active_pids_lock=active_pids_lock,
+                        allowed_tools=allowed_tools, hard_timeout=_reload_timeout,
+                        config=_cfg)
+                    _reload_kr = getattr(_reload_result, "kill_reason", None)
+                    if isinstance(_reload_kr, str) and _reload_kr:
+                        _latest_kill_reason[0] = _reload_kr
+                    subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
+                    subprocess.run(
+                        ["git", "commit", "-m", f"replan({sub_id}): reload with task-context"],
+                        cwd=str(worktree), capture_output=True)
+                    return True
+                # task-context 拿不到 → 降级为 split
+                logger.info("[局部重规划] reload 无可用 context_bundle，降级为 split")
+                decision["action"] = "split"
+                decision["reason"] = f"{trigger_reason}_reload_fallback_to_split"
+                _replan_state["decision"] = dict(decision)
+
             if decision["action"] != "split":
                 _replan_state["status"] = f"skipped_{decision['action']}"
                 logger.info(f"[局部重规划] 决策层拦截（{decision['action']}: "

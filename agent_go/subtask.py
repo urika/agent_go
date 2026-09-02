@@ -360,6 +360,16 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                 logger.debug(f"[{sub_id}] MCP config 透传失败（已跳过）: {_mcp_err}")
         # C1 ISSUE-56 方案 A：零成本判别——ANTHROPIC_CUSTOM_HEADERS 是否真的进入子进程 env
         _custom_headers_env_set = bool(env.get("ANTHROPIC_CUSTOM_HEADERS"))
+        # R19 AG-5：pin 上下文头追加到 ANTHROPIC_CUSTOM_HEADERS（executor 在 reload 路径设置 env）
+        _pin_context = env.get("AGENT_GO_PIN_CONTEXT", "")
+        if _pin_context:
+            _pin_header = "X-Proxy-Pin-Context: " + _pin_context.replace("\n", "\nX-Proxy-Pin-Context: ")
+            if env.get("ANTHROPIC_CUSTOM_HEADERS"):
+                env["ANTHROPIC_CUSTOM_HEADERS"] = env["ANTHROPIC_CUSTOM_HEADERS"].rstrip("\n") + "\n" + _pin_header
+            else:
+                env["ANTHROPIC_CUSTOM_HEADERS"] = _pin_header
+            _custom_headers_env_set = True
+            logger.info(f"[{sub_id}] R19 pin_context appended; anchors={_pin_context.count(chr(10))+1}")
         logger.info(f"[{sub_id}] ISSUE-56 custom_headers_env={_custom_headers_env_set} "
                     f"session_key={env.get('AGENT_GO_SESSION_KEY', '')[:8]}")
         proc = subprocess.Popen(cmd, env=env, cwd=str(worktree), stdout=subprocess.PIPE,
@@ -787,6 +797,7 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
         if _sess_key and _proxy_url and diag.LOCAL_URL_RE.search(_proxy_url):
             _sm = diag.get_session_metrics(_proxy_url, diag.session_key8(_sess_key))
             if _sm:
+                _cmm = _sm.get("canonical_mismatch_count", 0) or 0
                 _diag_rec = {
                     "role": "worker_diag",
                     "session_key": _sess_key,
@@ -796,9 +807,15 @@ def _run_headless(task_md: str, worktree: Path, env: dict[str, str], logger: log
                     "hit_ratio_p50": _sm.get("hit_ratio_p50"),
                     "hit_ratio_p90": _sm.get("hit_ratio_p90"),
                     "injection_counts": _sm.get("injection_counts") or {},
-                    "canonical_mismatch_count": _sm.get("canonical_mismatch_count", 0),
+                    "canonical_mismatch_count": _cmm,
                     "result": "success" if final_rc == 0 else "failed",
                 }
+                if _cmm > 0:
+                    _diag_rec["canonical_mismatch_detected"] = True
+                    logger.warning(
+                        f"[{sub_id}] canonical_mismatch_count={_cmm}："
+                        f"Claude CLI 微压缩/裁剪导致代理 canonical 前缀失配，"
+                        f"缓存收益可能打折（属客户端行为，agent_go 仅监控）")
                 meter_event(metering_path, _diag_rec)
         logger.info(f"{PFX} Claude 执行计量: {claude_usage_total['prompt_tokens']}+{claude_usage_total['completion_tokens']} tokens, ${_cost:.4f}{' (本地模型, 成本 0)' if _is_local else ''}")
 

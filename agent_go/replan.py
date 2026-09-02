@@ -19,7 +19,7 @@ import json
 import re
 import time
 from collections import defaultdict
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from .llama_contracts import build_escalation
 
@@ -171,12 +171,12 @@ def confirm_replan(reason: str, steps: list[dict], input_fn=input) -> bool:
 #
 # 动作词汇沿用上游 escalate.py；agent 侧当前可用子集：
 # - retry：同层重试（默认）
+# - reload：带恢复上下文重试（AG-4/5：task-context + pin），需配置开启
 # - split：局部重规划（无进展信号 → 拆分引导修复，即本模块既有能力）
 # - human：终态（幂等闸 / 熔断），停止自动重试等待人工处置
-# reload（带恢复上下文重试）待 AG-4/AG-5 task-context + pin 落地后启用；
 # route_cloud 是代理层概念，agent_go 的模型降档走 router/degrade 既有通道，不在此表。
 
-ESCALATION_ACTIONS = ("retry", "split", "human")
+ESCALATION_ACTIONS = ("retry", "reload", "split", "human")
 
 
 class TaskCircuitBreaker:
@@ -227,17 +227,24 @@ class TaskCircuitBreaker:
         }
 
 
+def _task_context_enabled(config: Optional[dict]) -> bool:
+    """AG-4/5：reload 动作是否开启（默认关闭，显式开启才走 task-context + pin）。"""
+    cfg = config if isinstance(config, dict) else {}
+    return bool((cfg.get("task_context") or {}).get("enabled", False))
+
+
 def decide_escalation(subtask_id: str, reason: str, attempt: int,
                       max_retries: int,
                       breaker: Optional[TaskCircuitBreaker] = None,
-                      failure_class: str = ""):
+                      failure_class: str = "", config: Optional[dict] = None):
     """验证失败后的确定性升级决策（决策表 + 幂等闸 + 熔断检查）。
 
     决策优先级（高→低，与上游 escalate.py 同构）：
     1. 熔断器打开 → human（circuit_breaker_open，不再自动重试）
     2. 尝试次数 ≥ max_retries → human（max_retries_exceeded，幂等闸/终态）
-    3. 无进展信号（REPLAN_TRIGGERS）→ split（局部重规划）
-    4. 默认 → retry（同层重试）
+    3. 无进展信号 + task_context.enabled → reload（带恢复上下文重试，AG-4/5）
+    4. 无进展信号 → split（局部重规划）
+    5. 默认 → retry（同层重试）
 
     返回 EscalationDecision（llama_contracts，任务级语义契约）。
     """
@@ -262,11 +269,59 @@ def decide_escalation(subtask_id: str, reason: str, attempt: int,
         return build_escalation(subtask_id, "human", "max_retries_exceeded",
                                 attempt_count=attempt, signals=signals)
 
-    # 3. 无进展信号 → 局部重规划
+    # 3. 无进展信号 + task_context 开启 → reload（AG-4/5）
+    if should_trigger(reason) and _task_context_enabled(config):
+        return build_escalation(subtask_id, "reload", reason,
+                                attempt_count=attempt, signals=signals)
+
+    # 4. 无进展信号 → 局部重规划
     if should_trigger(reason):
         return build_escalation(subtask_id, "split", reason,
                                 attempt_count=attempt, signals=signals)
 
-    # 4. 默认：同层重试
+    # 5. 默认：同层重试
     return build_escalation(subtask_id, "retry", reason or "verification_failed",
                             attempt_count=attempt, signals=signals)
+
+
+def build_reload_context(subtask: dict, session_key: str, config: Optional[dict],
+                         logger=None) -> dict[str, Any]:
+    """AG-4：调用代理 task-context 端点，获取 reload 所需的上下文证据包与 pin anchors。
+
+    fail-open：代理不可达/端点缺失/返回异常 → 返回空 dict，调用方降级为 split/retry。
+    """
+    result: dict[str, Any] = {
+        "context_bundle": None,
+        "pin_anchors": [],
+        "task_context_fetched": False,
+        "task_context_error": "",
+    }
+    cfg = config if isinstance(config, dict) else {}
+    if not session_key:
+        result["task_context_error"] = "missing_session_key"
+        return result
+    base_url = (cfg.get("task_context") or {}).get("base_url", "")
+    if not base_url:
+        # 未显式配置 base_url 时，尝试从 plan_api.worker_base_url 取本地代理
+        from .diag import local_proxy_base_url
+        base_url = local_proxy_base_url(cfg)
+    if not base_url:
+        result["task_context_error"] = "missing_base_url"
+        return result
+    turn_budget = (cfg.get("task_context") or {}).get("turn_budget")
+    descriptor = subtask.get("title", "") or subtask.get("description", "") or subtask.get("id", "")
+    try:
+        from .diag import get_task_context
+        resp = get_task_context(base_url, descriptor, session_key, turn_budget=turn_budget)
+        result["task_context_fetched"] = True
+        bundle = resp.get("context_bundle") if isinstance(resp, dict) else None
+        if bundle:
+            result["context_bundle"] = bundle
+            result["pin_anchors"] = resp.get("pin_anchors") or []
+        else:
+            result["task_context_error"] = "empty_bundle"
+    except Exception as e:
+        result["task_context_error"] = str(e)
+        if logger is not None:
+            logger.warning(f"[replan] task-context 获取失败（将降级）: {e}")
+    return result

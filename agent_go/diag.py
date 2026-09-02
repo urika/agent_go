@@ -96,6 +96,39 @@ def fetch_json(base_url: str, path: str, timeout: float = 3.0) -> Any | None:
         return None
 
 
+def post_json(base_url: str, path: str, payload: dict[str, Any],
+              timeout: float = 3.0) -> Any | None:
+    """POST JSON，fail-open。
+
+    与 fetch_json 同等降级语义；非 2xx 但 body 合法 JSON 时仍返回 body，
+    便于调用方按 error/state 字段降级。
+    """
+    if not base_url:
+        return None
+    url = base_url.rstrip("/") + path
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "User-Agent": "agent_go-diag/1.0",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
 def get_sessions(base_url: str, timeout: float = 3.0) -> list[dict[str, Any]]:
     """GET /api/sessions → 会话列表（无则 []）。"""
     data = fetch_json(base_url, "/api/sessions", timeout)
@@ -157,3 +190,29 @@ def get_session_hbe(base_url: str, key8: str, timeout: float = 3.0) -> dict[str,
         return None
     data = fetch_json(base_url, f"/api/session/{key8}/hbe", timeout)
     return data if isinstance(data, dict) and "records" in data else None
+
+
+def get_task_context(base_url: str, task_descriptor: str, session_key: str,
+                     turn_budget: int | None = None,
+                     timeout: float = 3.0) -> dict[str, Any] | None:
+    """POST /api/task-context → 任务上下文证据包（R18，AG-4 reload 路径）。
+
+    请求体：{"task_descriptor": ..., "session_key": ..., "turn_budget": ...}
+    响应体：{"context_bundle": {...}, "budget_used": N, "budget_total": M,
+             "sem_card": ..., "pin_anchors": [...]}
+
+    fail-open：代理不可达/端点缺失/返回异常 → 返回 {"context_bundle": null}，
+    调用方（replan/executor）降级为普通重试或 split。
+    """
+    if not base_url or not task_descriptor or not session_key:
+        return {"context_bundle": None}
+    payload: dict[str, Any] = {
+        "task_descriptor": task_descriptor,
+        "session_key": session_key,
+    }
+    if turn_budget is not None and isinstance(turn_budget, int):
+        payload["turn_budget"] = turn_budget
+    data = post_json(base_url, "/api/task-context", payload, timeout)
+    if isinstance(data, dict) and "context_bundle" in data:
+        return data
+    return {"context_bundle": None}

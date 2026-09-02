@@ -1,0 +1,2 @@
+- [看板驱动的智能任务编排工作流（设计）](docs/design/kanban-board.md) — 按可自动化程度把任务分流到云端强模型（架构/hard）或本地后台队列（明确 spec 模块），走成本-能力最优路径。
+- [看板智能任务编排（设计）](docs/design/kanban-task-orchestration.md#31-看板卡片分类标记) — 看板卡片加 `automation` 字段（auto/manual/review），分类器在创建/移入 design 列时自动标记，用户可手动覆盖。
