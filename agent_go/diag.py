@@ -143,3 +143,17 @@ def get_backend_props(base_url: str, timeout: float = 3.0) -> dict[str, Any] | N
     """GET /api/backend/props；501 时返回 {"supported": false, ...}（结构化降级）。"""
     data = fetch_json(base_url, "/api/backend/props", timeout)
     return data if isinstance(data, dict) else None
+
+
+def get_session_hbe(base_url: str, key8: str, timeout: float = 3.0) -> dict[str, Any] | None:
+    """GET /api/session/<key8>/hbe → H_BE shadow 探针记录（双轴信念观测）。
+
+    返回 {"session_key", "count", "records": [...]}；未知 key/探针未启用 → None。
+    只读不算：H_BE/D_ledger 的计算永远在代理侧，本函数不做任何派生。
+    records 元素为 hbe schema v2 记录（h_mean_bits/h_max_token_idx/
+    completion_budget/answer_truncated 等）。
+    """
+    if not key8:
+        return None
+    data = fetch_json(base_url, f"/api/session/{key8}/hbe", timeout)
+    return data if isinstance(data, dict) and "records" in data else None

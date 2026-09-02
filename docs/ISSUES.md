@@ -840,3 +840,25 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 **问题**：全仓 64 模块 ~38.5K 行中这两个文件合计 ~7.9K 行（~21%）。web_server.py 混合了 HTTP 传输层、鉴权、17+ GET 观测 API、写处置端点、kanban 视图、SSE、配置中心多个关注点；executor.py 混合了 worktree 生命周期、skill 装载、claude spawn、验证循环、metering、葬礼回写等多个关注点。当前测试基线健康（2741 passed），尚无质量信号恶化，但按当前增速（每批次 +50~200 行）将很快超过单文件可高效导航的阈值。
 
 **修复方向**：不急拆（无质量信号恶化，拆分本身有回归风险），但设触发线：任一文件超 5500 行或单次 review diff 超 400 行即启动拆分。候选切面——web_server 按「传输/鉴权」「观测 GET」「写处置 ops」「kanban」「SSE/配置中心」分 4~5 个文件（handler mixin 或 route 模块）；executor 按「worktree 生命周期」「spawn+验证循环」「metering/回写」分 3 个文件。拆分保持公共 API 不变（executor.run_subtask 签名不动），先搬纯函数再做行为等价验证。
+
+## 2026-08-30 worker session join 断链 + settings 钉死（外部会话交叉验证移交）
+
+### ISSUE-56 worker 会话无法 join 到 llama-defender 数据面（join 键断链）
+
+- **位置**：`agent_go/executor.py:2736-2745`（C1 注入）→ `agent_go/subtask.py:361`（Popen）→ claude CLI → 代理
+- **状态**：🔲 已登记未修复（判别方案已备，见 `docs/design/session-join-broken-chain-handoff.md` §9）
+- **严重度**：P1（agent_go 任务的真实成败标签链路断；swe-eval/planner 通道不受影响）
+
+**问题**：4254 个 (task,sub) 组合 × 台账/档案/sessions.jsonl 全历史 = 0 命中；同时段数据面出现 CLI 自发 UUID 形态的一次性 8-hex 会话键（F8）。外部会话（llama-defender 侧）已完成三组判别实验与三项静态考古（handoff 文档 §9 附录）：CLI 在干净环境忠实透传注入头（恰一次、值为注入值）；无注入变量时 CLI 自发 UUID 头——与 F8 形态完全匹配；代理取头单分支无旁路；注入代码 08-19 已提交且 else 分支完备。**修正后头号假设：worker 最终 Popen env 中 `ANTHROPIC_CUSTOM_HEADERS` 实际缺失或未生效**（F1 证明的是分支执行与 AGENT_GO_SESSION_KEY 透传，不证明头变量送达子进程）。
+
+**修复方向**（定案后执行，顺序勿颠倒）：①subtask Popen 前一行日志打印 `custom_headers_env=bool`（方案 A，零成本判别）；②若 env=False → 修 env 构造链丢失点（无需改头名/无需动代理）；若 env=True 仍断 → 完整旗标组合 × 本地 echo（方案 B）→ 确认后按 §6 私有头 `X-Agent-Go-Session-Id` 两侧修复（代理侧 raw_sid 三级读取：私有头 → X-Claude-Code-Session-Id → fallback）；③metering 增 `headers_env_set: bool` 字段使断链可观测。验证：任一 subtask 的 key 出现在台账/档案/`/api/session/<key>/hbe`。
+
+### ISSUE-57 `~/.claude/settings.json` env 钉死劫持一切真实 HOME 的 claude 调用
+
+- **位置**：`~/.claude/settings.json` env 块（mtime 2026-08-29 09:27；`ANTHROPIC_BASE_URL=https://open.bigmodel.cn/...` + AUTH_TOKEN + glm 全家模型映射）
+- **状态**：🔲 已登记未处置（**决策项**——钉死可能正在服务用户的 bigmodel 会话，拆除/按需切换由用户决定）
+- **严重度**：P0（影响面大于 ISSUE-56：实测 settings env 压过进程 env 且 `--settings {}` 不能旁路）
+
+**问题**：2026-08-30 两次实测（含 `--settings` 空 JSON 旁路尝试）均静默绕过本地 ：4000 直打 bigmodel 真实 API。后果：①agent_go worker 今日起全部静默走云端（ISSUE-56 的判别与验证被它阻断）；②一切手工 claude 复现的 BASE_URL 不可信；③成本与数据面静默外泄风险。注意它可能是用户当前 bigmodel 工作流的有意配置——处置前必须确认。
+
+**修复方向**：用户决策三选一——拆除（恢复 env 覆盖语义）/改为按需 profile 切换/保留但在 agent_go subtask env 中显式带 `CLAUDE_CODE_...` 级覆盖（若 CLI 支持）。处置后 ISSUE-56 的判别（方案 A）即可执行。

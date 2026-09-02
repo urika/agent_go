@@ -1545,6 +1545,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         "triggered": False, "executed": False, "reason": "",
         "steps": [], "status": "",
     }
+    # AG-3：确定性决策层熔断器（重试循环级作用域，非 JSON 序列化状态）
+    _replan_breaker = [None]
 
     def _attempt_local_replan(trigger_reason: str, failed_cmds: list[str],
                               failed_outputs: list[str]) -> bool:
@@ -1558,8 +1560,26 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         _replan_state["triggered"] = True
         _replan_state["reason"] = trigger_reason
         try:
-            from .replan import (build_decomposition, confirm_replan,
+            from .replan import (TaskCircuitBreaker, build_decomposition,
+                                 confirm_replan, decide_escalation,
                                  render_replan_guidance)
+            # AG-3：确定性决策层先行——熔断/幂等闸拦截时不进入拆分修复
+            if _replan_breaker[0] is None:
+                _replan_breaker[0] = TaskCircuitBreaker()
+            decision = decide_escalation(
+                subtask_id=sub_id, reason=trigger_reason,
+                attempt=retry_count, max_retries=max_retries,
+                breaker=_replan_breaker[0], failure_class=trigger_reason)
+            _replan_state["decision"] = dict(decision)
+            log_event(logger, "escalation_decision", {
+                "sub_id": sub_id, "action": decision["action"],
+                "reason": decision["reason"], "attempt": retry_count,
+            })
+            if decision["action"] != "split":
+                _replan_state["status"] = f"skipped_{decision['action']}"
+                logger.info(f"[局部重规划] 决策层拦截（{decision['action']}: "
+                            f"{decision['reason']}），不执行拆分修复")
+                return False
             _max_children = int(_replan_cfg.get("max_children", 4) or 4)
             steps = build_decomposition(
                 subtask,
@@ -2287,6 +2307,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             "replan_succeeded": (bool(verify_ok) if _replan_state["executed"] else None),
             # 预算继承：复用父任务 sub_id 计量，未新增预算条目
             "replan_budget_inherited": True,
+            # AG-3：确定性决策层的 EscalationDecision（契约输出，可审计）
+            "escalation_decision": _replan_state.get("decision"),
         }
         log_event(logger, "replan_result", {
             "sub_id": sub_id, "reason": _replan_state["reason"],

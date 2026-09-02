@@ -17,7 +17,11 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Optional
+import time
+from collections import defaultdict
+from typing import Dict, Optional
+
+from .llama_contracts import build_escalation
 
 REPLAN_TRIGGERS = ("verify_revert", "verify_divergence", "failure_pattern_repeat")
 
@@ -155,3 +159,114 @@ def confirm_replan(reason: str, steps: list[dict], input_fn=input) -> bool:
         return input_fn("> ").strip().upper() in ("P", "REPLAN")
     except (EOFError, KeyboardInterrupt):
         return False
+
+
+# ═══════════════════════════════════════════════════════════════
+# AG-3 确定性决策层（吸收 llama-defender escalate.py：决策表 + 幂等闸 + 熔断器）
+# ═══════════════════════════════════════════════════════════════
+#
+# 触发信号口径（双端评审 §六 决策）：agent 侧自有失败信号——
+# verify verdict（失败原因 reason）/ 无进展（REPLAN_TRIGGERS）/ 尝试次数。
+# 不依赖代理侧 IFC 信号（reread_pressure 等，待 R17 signals 端点落地后再评估增补）。
+#
+# 动作词汇沿用上游 escalate.py；agent 侧当前可用子集：
+# - retry：同层重试（默认）
+# - split：局部重规划（无进展信号 → 拆分引导修复，即本模块既有能力）
+# - human：终态（幂等闸 / 熔断），停止自动重试等待人工处置
+# reload（带恢复上下文重试）待 AG-4/AG-5 task-context + pin 落地后启用；
+# route_cloud 是代理层概念，agent_go 的模型降档走 router/degrade 既有通道，不在此表。
+
+ESCALATION_ACTIONS = ("retry", "split", "human")
+
+
+class TaskCircuitBreaker:
+    """同类失败熔断——连续失败 N 次后打开，冷却期内直接判 human（吸收自上游，语义不变）。
+
+    解决的问题：同一失败模式反复出现时，避免无脑重试浪费资源。
+    """
+
+    def __init__(self, threshold: int = 3, cooldown_s: int = 300):
+        self.threshold = threshold
+        self.cooldown_s = cooldown_s
+        self._failure_counts: Dict[str, int] = defaultdict(int)
+        self._open_until: Dict[str, float] = {}
+
+    def can_execute(self, failure_class: str) -> bool:
+        """检查该失败类当前是否可继续自动修复（熔断器是否打开）。"""
+        until = self._open_until.get(failure_class)
+        if until is None:
+            return True
+        if time.time() >= until:
+            # 冷却已过，关闭熔断
+            del self._open_until[failure_class]
+            self._failure_counts[failure_class] = 0
+            return True
+        return False
+
+    def record_failure(self, failure_class: str) -> None:
+        """记录一次失败——达到阈值时打开熔断。"""
+        self._failure_counts[failure_class] += 1
+        if self._failure_counts[failure_class] >= self.threshold:
+            self._open_until[failure_class] = time.time() + self.cooldown_s
+            self._failure_counts[failure_class] = 0
+
+    def record_success(self, failure_class: str) -> None:
+        """记录一次成功——重置失败计数。"""
+        self._failure_counts[failure_class] = 0
+
+    def status(self, failure_class: str) -> dict:
+        """查询某失败类的熔断状态。"""
+        until = self._open_until.get(failure_class)
+        is_open = until is not None and time.time() < until
+        remaining = max(0, int(until - time.time())) if until is not None and is_open else 0
+        return {
+            "failure_class": failure_class,
+            "open": is_open,
+            "failure_count": self._failure_counts[failure_class],
+            "remaining_cooldown_s": remaining,
+        }
+
+
+def decide_escalation(subtask_id: str, reason: str, attempt: int,
+                      max_retries: int,
+                      breaker: Optional[TaskCircuitBreaker] = None,
+                      failure_class: str = ""):
+    """验证失败后的确定性升级决策（决策表 + 幂等闸 + 熔断检查）。
+
+    决策优先级（高→低，与上游 escalate.py 同构）：
+    1. 熔断器打开 → human（circuit_breaker_open，不再自动重试）
+    2. 尝试次数 ≥ max_retries → human（max_retries_exceeded，幂等闸/终态）
+    3. 无进展信号（REPLAN_TRIGGERS）→ split（局部重规划）
+    4. 默认 → retry（同层重试）
+
+    返回 EscalationDecision（llama_contracts，任务级语义契约）。
+    """
+    fc = failure_class or reason or "unknown"
+    signals = {
+        "reason": reason,
+        "failure_class": fc,
+        "attempt": attempt,
+        "max_retries": max_retries,
+    }
+
+    # 1. 熔断检查（最高优先级）
+    if breaker is not None and not breaker.can_execute(fc):
+        breaker.record_failure(fc)  # 保持打开
+        return build_escalation(subtask_id, "human", "circuit_breaker_open",
+                                attempt_count=attempt, signals=signals)
+
+    # 2. 幂等闸（终态）
+    if attempt >= max_retries:
+        if breaker is not None:
+            breaker.record_failure(fc)
+        return build_escalation(subtask_id, "human", "max_retries_exceeded",
+                                attempt_count=attempt, signals=signals)
+
+    # 3. 无进展信号 → 局部重规划
+    if should_trigger(reason):
+        return build_escalation(subtask_id, "split", reason,
+                                attempt_count=attempt, signals=signals)
+
+    # 4. 默认：同层重试
+    return build_escalation(subtask_id, "retry", reason or "verification_failed",
+                            attempt_count=attempt, signals=signals)

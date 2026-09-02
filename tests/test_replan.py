@@ -314,3 +314,61 @@ class TestReplanTrigger:
 
         assert result["verify_ok"] is False
         assert result["replan"] is None
+
+
+class TestReplanDecisionLayer:
+    """AG-3 executor 接线：EscalationDecision 记录与决策层拦截。"""
+
+    def _run_verify(self, temp_repo, task_dir, logger, config):
+        from agent_go.executor import _verify_changes
+        return _verify_changes(
+            "task-1", "sub-1", dict(_SUBTASK_TPL), temp_repo, headless=True,
+            task_md="# Task", env={}, tag_name="task-1/sub-1",
+            active_pids=set(), active_pids_lock=Lock(), logger=logger,
+            task_dir=task_dir, config=config)
+
+    def test_decision_recorded_in_replan_record(self, temp_repo, task_dir, logger):
+        """触发 replan 时，EscalationDecision 随 replan 记录落审计面。"""
+        with patch("subprocess.run", side_effect=_git_with_base()), \
+             patch("agent_go.executor._run_headless") as mock_fix:
+            mock_fix.return_value = MagicMock(returncode=0)
+            result = self._run_verify(
+                temp_repo, task_dir, logger,
+                {"verification": {"max_retries": 5}, "_base_commit": "abc123"})
+
+        replan = result["replan"]
+        assert replan is not None
+        decision = replan["escalation_decision"]
+        assert decision is not None, "决策层输出应随 replan 记录持久化"
+        assert decision["action"] == "split"  # verify_revert → split
+        assert decision["reason"] == "verify_revert"
+        assert decision["contract_version"] == 1
+        assert decision["task_id"] == "sub-1"
+        assert decision["signals_at_decision"]["failure_class"] == "verify_revert"
+
+    def test_non_split_decision_intercepts(self, temp_repo, task_dir, logger):
+        """决策层返回非 split（如 human）→ 不生成拆分建议、不执行拆分修复。"""
+        from agent_go.llama_contracts import build_escalation
+        human_decision = build_escalation(
+            "sub-1", "human", "max_retries_exceeded",
+            attempt_count=5, signals={"failure_class": "verify_revert"})
+
+        with patch("subprocess.run", side_effect=_git_with_base()), \
+             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.replan.decide_escalation",
+                   return_value=human_decision) as mock_decide:
+            mock_fix.return_value = MagicMock(returncode=0)
+            result = self._run_verify(
+                temp_repo, task_dir, logger,
+                {"verification": {"max_retries": 5,
+                                  "replan": {"enabled": True, "auto_apply": True}},
+                 "_base_commit": "abc123"})
+
+        replan = result["replan"]
+        assert replan is not None
+        assert replan["replan_status"] == "skipped_human"
+        assert replan["replan_executed"] is False
+        assert replan["replan_steps"] == []  # 未生成拆分建议
+        assert replan["escalation_decision"]["action"] == "human"
+        assert mock_decide.called
+        assert not any("-replan" in str(c) for c in mock_fix.call_args_list)

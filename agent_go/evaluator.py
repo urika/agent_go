@@ -417,6 +417,10 @@ def _visual_eval(subtask, worktree, verification, previous_attempts, config, log
 # 注册视觉策略
 register(_VisualEvalStrategy())
 
+# AG-2：注册链式策略（机械前置层 + LLM 语义评估，config: evaluator.strategy="chain"）
+from .verify_chain import ChainEvalStrategy  # noqa: E402
+register(ChainEvalStrategy())
+
 
 def _default_semantic_eval(subtask, worktree, verification, previous_attempts, config, logger):
     """内置评估逻辑：调用 LLM → 解析响应 → 写 metering → 返回。"""
