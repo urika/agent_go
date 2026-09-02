@@ -846,17 +846,19 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 ### ISSUE-56 worker 会话无法 join 到 llama-defender 数据面（join 键断链）
 
 - **位置**：`agent_go/executor.py:2736-2745`（C1 注入）→ `agent_go/subtask.py:361`（Popen）→ claude CLI → 代理
-- **状态**：🟡 已实施方案 A 判别（2026-09-03），待观察数据确认
-- **严重度**：P1（agent_go 任务的真实成败标签链路断；swe-eval/planner 通道不受影响）
+- **状态**：✅ 已闭环（2026-09-03）。根因是 ISSUE-57，非 agent_go 注入代码缺陷。
+- **严重度**：P1（已修复）
 
 **问题**：4254 个 (task,sub) 组合 × 台账/档案/sessions.jsonl 全历史 = 0 命中；同时段数据面出现 CLI 自发 UUID 形态的一次性 8-hex 会话键（F8）。外部会话（llama-defender 侧）已完成三组判别实验与三项静态考古（handoff 文档 §9 附录）：CLI 在干净环境忠实透传注入头（恰一次、值为注入值）；无注入变量时 CLI 自发 UUID 头——与 F8 形态完全匹配；代理取头单分支无旁路；注入代码 08-19 已提交且 else 分支完备。**修正后头号假设：worker 最终 Popen env 中 `ANTHROPIC_CUSTOM_HEADERS` 实际缺失或未生效**（F1 证明的是分支执行与 AGENT_GO_SESSION_KEY 透传，不证明头变量送达子进程）。
 
-**修复方向**：
-1. ✅ 方案 A（2026-09-03）：`subtask.py` Popen 前打印 `custom_headers_env=bool` 并写入 metering `headers_env_set` 字段，零成本判别。
-2. 若 env=False → 修 env 构造链丢失点（无需改头名/无需动代理）。
-3. 若 env=True 仍断 → 完整旗标组合 × 本地 echo（方案 B）→ 确认后按 §6 私有头 `X-Agent-Go-Session-Id` 两侧修复（代理侧 raw_sid 三级读取：私有头 → X-Claude-Code-Session-Id → fallback）。
+**实际根因**：ISSUE-57 的 `~/.claude/settings.json` env 块钉死了 `ANTHROPIC_BASE_URL=https://open.bigmodel.cn/...`，导致 agent_go worker 全部直连 bigmodel 云端，本地代理 `:4000` 收不到流量，`ANTHROPIC_CUSTOM_HEADERS` 对云端无效，因此代理侧台账/档案 0 命中。
 
-**验证**：任一 subtask 的 key 出现在台账/档案/`/api/session/<key>/hbe`。
+**修复与验证**（2026-09-03）：
+1. ✅ 方案 A 诊断：`subtask.py` Popen 前打印 `custom_headers_env=True`，metering 写入 `"headers_env_set": true`。实测 `task-20260903-063517-618-a177/sub-1` 中 `custom_headers_env=True`，证明头变量送达子进程。
+2. ✅ 处置 ISSUE-57 后复跑：worker 回到本地代理 `:4000`（`actual_model=pyros-vault/Ornith-1.5-35B-A3B-oQ4e-fixed-mtp`，`is_local=true`，成本 $0）。
+3. ✅ `worker_diag` 事件成功查到代理侧 session metrics：`proxy_turns=5`，`result=success`，确认 session key `039d208c-...` 已被代理识别。
+
+**残留观察**：`worker_diag.canonical_mismatch_count=4` / `hit_ratio_p50/p90=null`。若后续持续出现，再评估是否按 §6 私有头 `X-Agent-Go-Session-Id` 增强；当前判定为已恢复。
 
 ### ISSUE-57 `~/.claude/settings.json` env 钉死劫持一切真实 HOME 的 claude 调用
 
@@ -869,3 +871,5 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 **修复方向**：按方案 A 拆除 `~/.claude/settings.json` 的 `env` 块。备份：`~/.claude/settings.json.20260903-061711.bak`（含 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、glm 模型映射等）。其余非 env 配置（model、worktree、tui、theme、max_tokens 等）保留。
 
 **后续如需恢复 bigmodel**：从备份恢复 env 块，或改用按需 env profile / wrapper 脚本，避免常驻 env 块劫持 agent_go worker。
+
+**影响**：本次处置同时闭环了 ISSUE-56（worker session join 断链）。根因是 settings env 钉死导致 worker 直连云端，本地代理收不到会话 key；拆除后 session key 立即在代理侧可见。
