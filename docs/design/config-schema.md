@@ -30,6 +30,7 @@ API key 解析优先级：环境变量 `AGENT_GO_API_KEY` > `config.json` `plan_
 | 14 | `worker_models_fallback` | — | 难度→模型降级备选 |
 | 15 | `worker_models_degrades` | — | 预算降级时难度下移映射 |
 | 16 | `worker_models_by_type` | — | Agent type→模型映射 |
+| 16a | `worker_backend` / `worker_backend_by_difficulty` / `worker_backend_by_type` | `""` | B3/B4 worker backend 显式选择与声明式路由（见 13–16 末节） |
 | 17 | `local_model_names` | — | 路由名→本地真实模型名映射 |
 | 18 | `cache` | `enabled: true` | Plan 缓存 |
 | 19 | `router` | `enabled: false` | 角色（planner/worker/reviewer）→ provider/model 路由 |
@@ -251,6 +252,21 @@ Agent 类型默认配置。
 | `hard` | str | `""` | hard 难度子任务使用的模型名 |
 
 空字符串 = 使用 claude CLI 默认模型。
+
+### `worker_backend` 系列（B3/B4：worker backend 选择与路由）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `worker_backend` | str | `""` | B3 全局显式 backend（如 `"pi"`，需本机已装对应 CLI） |
+| `worker_backend_by_difficulty` | dict | `{easy/medium/hard: ""}` | B4 按难度路由 backend（空 = 不覆盖） |
+| `worker_backend_by_type` | dict | `{}` | B4 按 agent_type 路由 backend（如 `{"explore": "pi"}`） |
+
+解析优先级（高→低）：`subtask.backend` > `worker_backend` > `worker_backend_by_type` >
+`worker_backend_by_difficulty` > agent_loop 自动规则 > claude 兜底。
+解析出非 claude 时仅 headless 生效，交互模式回退 claude（pi/opencode 均为非交互 CLI）。
+修复路径（fix/replan/reload）走同一解析（`backends/dispatch.run_repair`）。
+**命名警示**：勿用 deprecated 的 `worker_backends`（模型名→`ANTHROPIC_BASE_URL` 映射，见
+`plan_api.worker_base_url` 条目），与 B4 路由键语义完全不同。
 
 ### `worker_models_fallback`（难度→降级备选模型）
 

@@ -1,7 +1,7 @@
 # agent_go 模块职责目录
 
 > 状态：As-Built 模块映射
-> 更新日期：2026-09-04（补 B3 pi_backend + B2 AgentLoop 加固 + AG-4/5 reload 口径）
+> 更新日期：2026-09-04（补 B4 声明式 backend 路由 + B3 pi_backend + B2 AgentLoop 加固）
 
 | 模块 | 主要职责 | 关键输出 |
 |---|---|---|
@@ -135,7 +135,7 @@
 | `diag.py` | llama-defender 诊断数据面客户端（R13-R16 消费侧 C1-C7）：session key 构造/截断口径、fail-open fetch、ledger/metrics/archive/ctx_config/props 封装 |
 | `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop；B2 hardening: stuck 检测（连续重复调用先提醒后终止）/ no-progress 信号 / explore 只读模式 / scope advisory（files_hint 越界写入提示） |
 | `tool_executor.py` | Tool registry for agent loop: Read/Write/Edit/Bash/Grep/Glob/View + bash safety rules + readonly mode |
-| `backends/` | 阶段十三 worker backend 抽象包（B1/B2/B3）：base（BaseBackend/BackendContext/SubtaskResult）、registry（BackendRegistry/resolve_backend_name，含 subtask.backend/config.worker_backend 显式声明）、claude_backend（claude -p/greywall，progress 开关）、agent_loop_backend（直接 API 路径）、pi_backend（B3 PoC：pi -p --mode json NDJSON 事件流解析 + 聚合计量，仅 headless）、dispatch（修复路径 fix/replan/reload 统一分发 + repair_timeout 消重） |
+| `backends/` | 阶段十三 worker backend 抽象包（B1/B2/B3/B4）：base（BaseBackend/BackendContext/SubtaskResult）、registry（BackendRegistry/resolve_backend_name，显式声明 + B4 by_type/by_difficulty 声明式路由）、claude_backend（claude -p/greywall，progress 开关）、agent_loop_backend（直接 API 路径）、pi_backend（B3 PoC：pi -p --mode json NDJSON 事件流解析 + 聚合计量 + 零产出错误映射，仅 headless）、dispatch（修复路径 fix/replan/reload 统一分发 + repair_timeout 消重） |
 | `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
 | `tui.py` | Curses status dashboard |
 | `review_agent.py` | Read-only independent review subagent, two-phase review |
