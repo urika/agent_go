@@ -11,6 +11,7 @@ from .dispatch import repair_timeout, run_repair
 # 导入具体实现以完成注册表登记（无副作用，仅类定义加载）。
 from .claude_backend import ClaudeBackend
 from .agent_loop_backend import AgentLoopBackend
+from .pi_backend import PiBackend
 
 __all__ = [
     "BackendContext",
@@ -22,4 +23,5 @@ __all__ = [
     "run_repair",
     "ClaudeBackend",
     "AgentLoopBackend",
+    "PiBackend",
 ]

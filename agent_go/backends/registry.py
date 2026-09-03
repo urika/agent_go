@@ -54,7 +54,10 @@ def resolve_backend_name(
 
     B1 约束：默认路径与 AgentLoop 混合策略路径行为完全保持。
     - AgentLoop 仅在配置启用、headless 模式、且子任务被判定为简单时启用。
-    - agent_backend 字段已预留，供后续阶段按 Agent 类型指定 backend（B1 不启用）。
+    - B3：显式声明优先——subtask.backend 或 config.worker_backend 可指定
+      backend（如 pi）；非 claude 的显式 backend 仅 headless 模式生效，
+      交互模式回退 claude（pi/opencode 均为非交互 CLI）。
+    - agent_backend 字段已预留，供后续阶段按 Agent 类型指定 backend（B4 启用）。
 
     Args:
         config: 运行时生效配置（已合并 CLI 覆盖）。
@@ -64,8 +67,14 @@ def resolve_backend_name(
         agent_backend: Agent 类型声明的 backend（默认 claude）。
 
     Returns:
-        backend 名称，当前仅 "claude" 或 "agent_loop"。
+        backend 名称，当前为 "claude" / "agent_loop" / 显式声明的名称（如 "pi"）。
     """
+    # B3：显式声明优先（默认空，不改变既有行为）。
+    explicit = (subtask or {}).get("backend") or (config or {}).get("worker_backend", "")
+    if explicit:
+        if explicit != "claude" and not headless:
+            return "claude"
+        return explicit
     # B1：保持原有 agent_loop 触发条件，不受 agent_backend 影响。
     _agent_loop_enabled = (config or {}).get("agent_loop", {}).get("enabled", False)
     if _agent_loop_enabled and headless and is_simple:

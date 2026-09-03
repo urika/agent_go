@@ -312,3 +312,202 @@ class TestClaudeBackendProgress:
             mock_h.return_value = CompletedProcess([], 0, stdout="", stderr="")
             ClaudeBackend().run(self._ctx(tmp_path, null_logger, progress=True))
         mock_thread.assert_called_once()
+
+
+class TestResolveBackendNameExplicit:
+    """B3：显式声明（subtask.backend / config.worker_backend）优先于自动策略。"""
+
+    def test_subtask_backend_pi_headless(self):
+        assert resolve_backend_name({}, {"backend": "pi"}, True, False) == "pi"
+
+    def test_config_worker_backend_pi(self):
+        cfg = {"worker_backend": "pi"}
+        assert resolve_backend_name(cfg, {}, True, False) == "pi"
+
+    def test_subtask_beats_config(self):
+        cfg = {"worker_backend": "pi"}
+        assert resolve_backend_name(cfg, {"backend": "agent_loop"}, True, True) == "agent_loop"
+
+    def test_explicit_non_claude_interactive_falls_back(self):
+        # pi/opencode 均为非交互 CLI，交互模式强制回退 claude
+        assert resolve_backend_name({}, {"backend": "pi"}, False, False) == "claude"
+        cfg = {"worker_backend": "pi"}
+        assert resolve_backend_name(cfg, {}, False, True) == "claude"
+
+    def test_explicit_claude_passes_through(self):
+        assert resolve_backend_name({}, {"backend": "claude"}, False, True) == "claude"
+
+    def test_no_explicit_keeps_b1_behavior(self):
+        cfg = {"agent_loop": {"enabled": True}, "worker_backend": ""}
+        assert resolve_backend_name(cfg, {}, True, True) == "agent_loop"
+        assert resolve_backend_name(cfg, {}, True, False) == "claude"
+
+
+def _pi_ndjson(*events):
+    import json as _json
+    return "\n".join(_json.dumps(e) for e in events) + "\n"
+
+
+def _pi_success_stream(final_text="DONE"):
+    """构造一次成功的 pi NDJSON 事件流（工具调用 1 次 + 最终回复）。"""
+    return _pi_ndjson(
+        {"type": "session", "version": 3, "id": "sess-1", "cwd": "/tmp/x"},
+        {"type": "agent_start"},
+        {"type": "message_end", "message": {
+            "role": "assistant", "content": [], "stopReason": "toolUse",
+            "provider": "deepseek", "model": "deepseek-v4-pro",
+            "usage": {"input": 100, "output": 50, "cacheRead": 10,
+                      "cost": {"total": 0.001}},
+        }},
+        {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "read", "args": {"path": "a.txt"}},
+        {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read", "result": {}, "isError": False},
+        {"type": "message_end", "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": final_text}],
+            "stopReason": "stop",
+            "provider": "deepseek", "model": "deepseek-v4-pro",
+            "usage": {"input": 200, "output": 20, "cacheRead": 0,
+                      "cost": {"total": 0.002}},
+        }},
+        {"type": "agent_end", "messages": []},
+        {"type": "agent_settled"},
+    )
+
+
+def _mock_popen(stdout="", stderr="", returncode=0):
+    proc = MagicMock()
+    proc.pid = 4321
+    proc.returncode = returncode
+    proc.communicate.return_value = (stdout, stderr)
+    return proc
+
+
+class TestPiBackend:
+    """B3：PiBackend 命令构造、NDJSON 解析、超时与容错。"""
+
+    def _ctx(self, tmp_path: Path, null_logger, **kw):
+        defaults = dict(
+            task_md="# 任务\n做点事", worktree=tmp_path, env={}, headless=True,
+            sub_id="sub-1", task_id="task-1", logger=null_logger, config={},
+        )
+        defaults.update(kw)
+        return BackendContext(**defaults)
+
+    def test_command_and_parse_success(self, tmp_path, null_logger):
+        from agent_go.backends.pi_backend import PiBackend
+        proc = _mock_popen(stdout=_pi_success_stream("全部完成"))
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/usr/local/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            res = PiBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        cmd = mock_popen.call_args.args[0]
+        assert cmd[:4] == ["/usr/local/bin/pi", "-p", "--mode", "json"]
+        assert "--no-session" in cmd
+        assert cmd[-1].startswith("# 任务")
+        assert res.returncode == 0
+        assert res.sandbox_type == "pi"
+        assert res.stdout == "全部完成"
+        # 两轮 assistant usage 聚合：input 100+200, cacheRead 10, output 50+20
+        assert res.kill_reason is None
+        # pid 生命周期：结束后从 active_pids 移除
+        assert 4321 not in self._ctx(tmp_path, null_logger).active_pids
+
+    def test_readonly_restricts_tools(self, tmp_path, null_logger):
+        from agent_go.backends.pi_backend import PI_READONLY_TOOLS, PiBackend
+        proc = _mock_popen(stdout=_pi_success_stream())
+        ctx = self._ctx(tmp_path, null_logger, progress=False, extra={"readonly": True})
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            PiBackend().run(ctx)
+        cmd = mock_popen.call_args.args[0]
+        i = cmd.index("--tools")
+        assert cmd[i + 1] == PI_READONLY_TOOLS
+        assert "bash" not in cmd[i + 1]
+
+    def test_routed_model_passed_through(self, tmp_path, null_logger):
+        from agent_go.backends.pi_backend import PiBackend
+        proc = _mock_popen(stdout=_pi_success_stream())
+        ctx = self._ctx(tmp_path, null_logger, progress=False, routed_model="deepseek/deepseek-v4-pro")
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            PiBackend().run(ctx)
+        cmd = mock_popen.call_args.args[0]
+        i = cmd.index("--model")
+        assert cmd[i + 1] == "deepseek/deepseek-v4-pro"
+
+    def test_no_model_flag_when_unrouted(self, tmp_path, null_logger):
+        from agent_go.backends.pi_backend import PiBackend
+        proc = _mock_popen(stdout=_pi_success_stream())
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            PiBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert "--model" not in mock_popen.call_args.args[0]
+
+    def test_timeout_kills_and_reports(self, tmp_path, null_logger):
+        import subprocess as _sp
+        from agent_go.backends.pi_backend import PiBackend
+        proc = _mock_popen(returncode=-9)
+        proc.communicate.side_effect = [
+            _sp.TimeoutExpired(cmd="pi", timeout=5),
+            ("", "killed"),
+        ]
+        ctx = self._ctx(tmp_path, null_logger, progress=False, hard_timeout=5)
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc):
+            res = PiBackend().run(ctx)
+        proc.kill.assert_called_once()
+        assert res.kill_reason == "hard_timeout"
+        assert res.returncode == -9
+
+    def test_pi_not_installed(self, tmp_path, null_logger):
+        from agent_go.backends.pi_backend import PiBackend
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value=None):
+            res = PiBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 127
+        assert "pi" in res.stderr
+
+    def test_malformed_lines_tolerated(self, tmp_path, null_logger):
+        from agent_go.backends.pi_backend import PiBackend
+        stream = "garbage line\n{broken json\n" + _pi_success_stream("OK")
+        proc = _mock_popen(stdout=stream)
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc):
+            res = PiBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 0
+        assert res.stdout == "OK"
+
+    def test_meter_event_written(self, tmp_path, null_logger):
+        import json as _json
+        from agent_go.backends.pi_backend import PiBackend
+        metering = tmp_path / "metering.jsonl"
+        ctx = self._ctx(tmp_path, null_logger, progress=False,
+                        config={"_metering_path": str(metering)})
+        proc = _mock_popen(stdout=_pi_success_stream())
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc):
+            PiBackend().run(ctx)
+        events = [_json.loads(l) for l in metering.read_text().splitlines() if l.strip()]
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["virtual_model"] == "agentgo-worker-pi"
+        assert ev["actual_model"] == "deepseek-v4-pro"
+        assert ev["prompt_tokens"] == 310      # 100+10 + 200
+        assert ev["completion_tokens"] == 70   # 50 + 20
+        assert ev["cost_usd"] == pytest.approx(0.003)
+        assert ev["result"] == "success"
+
+    def test_tool_error_stop_logged_but_result_returned(self, tmp_path, null_logger):
+        from agent_go.backends.pi_backend import PiBackend
+        stream = _pi_ndjson(
+            {"type": "message_end", "message": {
+                "role": "assistant", "content": [{"type": "text", "text": ""}],
+                "stopReason": "error",
+                "usage": {"input": 1, "output": 1, "cost": {"total": 0.0}},
+            }},
+        )
+        proc = _mock_popen(stdout=stream, returncode=1, stderr="provider boom")
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc):
+            res = PiBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        # 非零退出码是正常结果（验证失败走 retry），不在这里触发回退
+        assert res.returncode == 1
+        assert res.stderr == "provider boom"

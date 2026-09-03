@@ -150,6 +150,8 @@
   },
   "artifact_dir": null,
   "_artifact_note": "S9-B 产物导出目录（如 \"/Users/me/reports\"）。子任务写入 worktree/__artifacts__/ 的文件在任务完成后导出到该目录；null = 不导出（向后兼容）",
+  "worker_backend": "",
+  "_worker_backend_note": "B3 显式 worker backend（如 \"pi\"，需本机已安装对应 CLI）。空 = 按既有策略解析（claude/agent_loop）。非 claude 的显式 backend 仅 headless 生效，交互模式回退 claude。",
   "worker_models": {
     "easy": "",
     "medium": "",

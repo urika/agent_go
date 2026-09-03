@@ -2828,6 +2828,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             except Exception as _reset_err:
                 logger.warning(f"AgentLoop fallback: worktree reset 失败 ({_reset_err})，继续 fallback（claude -p 可能在脏状态上运行）")
             result = _run_with_backend("claude")
+    elif _backend_name != "claude":
+        # B3：显式声明的第三方 backend（如 pi）。加载/执行抛异常时回退 claude；
+        # 注意 backend 返回非零退出码是正常结果（验证失败走 retry），不触发回退。
+        try:
+            result = _run_with_backend(_backend_name)
+        except Exception as _be_err:
+            logger.warning(f"Backend {_backend_name} 加载/执行失败，回退到 claude -p（不中断任务）: {_be_err}")
+            result = _run_with_backend("claude")
     else:
         result = _run_with_backend("claude")
     sandbox_type = result.sandbox_type
