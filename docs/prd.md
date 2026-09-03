@@ -1,9 +1,9 @@
 # agent_go 产品需求文档
 
-> 版本：v4.1
-> 更新日期：2026-08-20
+> 版本：v4.3
+> 更新日期：2026-09-03
 > 配套路线图：[roadmap.md](roadmap.md)
-> 当前阶段：M0-M4、M4.5 已 `accepted`；谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1 已交付；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立
+> 当前阶段：M0-M4、M4.5 已 `accepted`；谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1 已交付；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立；阶段十三「多 Backend 架构」已提出（proposed）
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
 > 当前执行清单：[m0-task-list.md](m0-task-list.md)
@@ -12,7 +12,7 @@
 
 ### 1.1 产品定位
 
-agent_go 是一个面向高频使用 Claude Code 的工程师的异步开发任务编排器。
+agent_go 是一个面向高频使用 Claude Code 及类似 Coding Agent 的工程师的异步开发任务编排器。当前以 Claude Code 为默认 worker backend，但架构上支持可插拔的多种 Agent Runtime。
 
 它将一次开发任务组织为：
 
@@ -105,6 +105,7 @@ Accepted Delivery Rate 逼近 1  ∧  Human Intervention Minutes → 0  ∧  Cos
 - 子任务拆解和依赖调度。
 - worktree 隔离执行。
 - Claude Code headless/interactive 执行。
+- 可插拔 worker backend 接口（当前默认 Claude Code，支持 AgentLoop 直接 API 路径）。
 - 验证命令、失败修复和重试。
 - 上游 artifact 传递。
 - commit、delivery branch 和 PR 交付。
@@ -120,6 +121,7 @@ Accepted Delivery Rate 逼近 1  ∧  Human Intervention Minutes → 0  ∧  Cos
 - 自动保证复杂任务的最佳架构方案。
 - 通过单一 benchmark 排名保证生产质量。
 - 同时维护所有模型、Coding Runtime 和 Office 产品表面。
+- 为所有 backend 提供 100% 能力 parity；新 backend 按标准接口逐步评估和接入。
 - 在没有真实场景和指标证据时扩展新集成。
 
 ## 4. 功能需求
@@ -421,7 +423,60 @@ llama-defender R13-R16 诊断数据面的消费侧落地（C1-C7，需求文档�
 - **worker 升级链**：`worker_models_fallback_chain` 支持验证失败按 retry 顺序自动升级模型，兼容旧单值 fallback。
 - 降级链三次 bench 样本归档验证（M5.1：兜底机制验证，非通过率手段）。
 
-### 4.6 CLI、JSON 和 MCP
+### 4.6 多 Backend 与 Agent Runtime
+
+> 目标：把 agent_go 从“Claude Code 包装器”演进为“可插拔多 Agent Runtime 编排器”，在保持默认路径稳定的前提下，逐步引入开源/定制化 backend。
+
+#### F-BACKEND-1 标准 Worker Backend 接口
+
+系统应定义统一的 worker backend 接口，使不同 Agent Runtime 以相同契约接入子任务执行流程：
+
+- 接收结构化任务描述（TASK.md / prompt）。
+- 在指定 git worktree 中执行。
+- 支持 headless / `--yes` 非交互模式。
+- 返回完成状态、变更证据、成本/用量数据。
+- 由 agent_go wrapper 统一完成 `git commit` / `git tag` / 验证循环（backend 可选择自己完成或交由 wrapper）。
+- 失败时提供可解析的失败原因，支持 fallback 到默认 backend。
+- MCP 工具注入对支持 MCP 的 backend 走同一注入层；不支持的 backend 显式降级（能力标签 `supports_mcp=false`），不得出现同一 MCP 配置在不同 backend 上静默行为不一致。
+
+默认实现保持现有 Claude Code 路径不变；新增 backend 必须通过标准接口接入，不得作为硬编码特例分支。
+
+#### F-BACKEND-2 AgentLoop 直接 API Backend
+
+AgentLoop 作为“简单任务”直接 API backend，应从实验性开关升级为符合标准接口的正式 backend：
+
+- 补齐 verification / scope / stuck 检测机制，与 Claude Code 路径的能力对齐。
+- 扩展 ACI 工具集：至少支持 `Read`、`Write`、`Edit`、`Bash`、`Grep`、`Glob`、`view` 长文件导航。
+- 引入 `explore` 只读模式，用于复杂子任务前的代码库扫描。
+- 保持失败 fallback 到 Claude Code 的能力，直到 AgentLoop 独立通过 bench 验收。
+- 仅在 bench 证明其 `Accepted Delivery Rate` 和 `Cost per AD` 不劣化于当前默认路径时，扩大默认启用范围。
+
+#### F-BACKEND-3 开源 Backend 接入（Pi / OpenCode）
+
+在标准 backend 接口稳定后，评估并接入满足以下最小契约的开源 Agent Runtime：
+
+- 支持 headless 执行和指定工作目录。
+- 能通过 CLI flag（如 `pi -p`、`--mode json/rpc`）或 SDK 接收任务描述。
+- 工具集覆盖文件读写、shell、代码库探索。
+- 能返回完成状态或结构化事件流。
+
+当前已评估候选：
+
+- **[Pi](https://github.com/earendil-works/pi)**：TypeScript/Bun 开源 agent harness，支持 `pi -p`、`--mode json`、`--mode rpc`、15+ providers、内置 `read/edit/write/bash/grep/find/ls`、无内置 MCP/权限系统。优先作为 Claude Code 的平替 backend 接入。
+- **OpenCode**：开源 coding agent CLI，支持子 agent 和权限模型，可作为 Pi 之后的第二候选。
+
+接入顺序：先 Pi（接口最完整），再 OpenCode；每项接入后必须经过 bench 对比，证明不劣化才扩大使用。
+
+#### F-BACKEND-4 定制化 Agent 生态
+
+通过标准 backend 接口和配置机制，支持用户/组织接入自定义 Agent Runtime：
+
+- 配置式 backend 注册：`config.json` 中声明 backend 名称、命令模板、默认模型、能力标签。
+- 按子任务特征路由 backend：简单任务 → AgentLoop；复杂任务 → Claude Code / Pi / 自定义 backend。
+- backend 能力标签：如 `supports_verification`、`supports_mcp`、`interactive_only`、`headless`。
+- 不强制要求所有 backend 支持 agent_go 全部功能；未支持的能力在路由时降级或 fallback。
+
+### 4.7 CLI、JSON 和 MCP
 
 系统应提供：
 
@@ -435,7 +490,7 @@ llama-defender R13-R16 诊断数据面的消费侧落地（C1-C7，需求文档�
 
 CLI、JSON 和 MCP 必须共享核心状态语义，不得出现同一任务在不同接口中显示不同结果。
 
-### 4.7 问题跟踪与决策辅助
+### 4.8 问题跟踪与决策辅助
 
 #### F-PROB-1 跨任务 Problem 实体（✅ 已实现，2026-08-16）
 
@@ -454,7 +509,7 @@ CLI、JSON 和 MCP 必须共享核心状态语义，不得出现同一任务在�
 - `insight --apply-suggestion N`：确认后自动应用（config 修改 + 备份 + 审计，可回滚）；无证据不入 --apply（强制校验）。
 - 全自动决策（M6.6）明确不做——目标由人定义是产品红线。
 
-### 4.8 谦逊层与信任体验（✅ 已实现，2026-08-16）
+### 4.9 谦逊层与信任体验（✅ 已实现，2026-08-16）
 
 产品叙事：卖的不是「自动化」，是「可信的自动化」——每次自动化升级以「先证明交底可信」为前提（设计：[humility-layer-design.md](design/humility-layer-design.md)）。
 
@@ -463,7 +518,7 @@ CLI、JSON 和 MCP 必须共享核心状态语义，不得出现同一任务在�
 - **信任指标（#49）与信任体验（#50-52）**：审查后修改率 / 盲区命中率 / 复发可见率（见 §6.9）；Web 任务详情盲区卡片 + `inspect` 失败历史可见。
 - 产品红线：信任指标是阶段 D（自治决策）的放行门，不达标不升级自动化。
 
-### 4.9 看板与 Web 协作（✅ 已实现，2026-08-13~19）
+### 4.10 看板与 Web 协作（✅ 已实现，2026-08-13~19）
 
 - **Web 操作台全功能（R1-R17）**：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ SSE。纯本地 Golden Path 端到端验收通过（[web-golden-path-acceptance-2026-08-13.md](archive/reference/web-golden-path-acceptance-2026-08-13.md)：10/10 步骤、$0.00、ACCEPTED_DELIVERY）。
 - **协作扩展**：任务报告导出（md/html）、多用户角色（admin/viewer 双 token 权限分离）、任务级互斥锁、任务备注、规模化保护（并发上限 + 磁盘告警）。
@@ -536,6 +591,15 @@ CLI、JSON 和 MCP 必须共享核心状态语义，不得出现同一任务在�
 - 进程树清理。
 - metering 不可用。
 - 并发预算竞态。
+
+### NFR-8 可维护性
+
+架构 review（2026-09-03）识别的结构性约束：
+
+- 单一模块行数应有上限意识：`executor.py`（~3.2K 行）、`web_server.py`（~4.7K 行）已超可维护阈值，新增功能优先落入既有拆分边界或新模块，不得继续向超大文件堆积。
+- 模块变更必须遵守 doc-sync 规则（`docs/design/module-catalog.md` §模块变更规则）：公共接口变更同步 `docs/spec.md`，状态/数据契约/边界变更新增 ADR——防止文档与代码漂移。
+- 并发执行共享同一 git 对象库，新增并发路径必须评估对象库写竞争（`gc.auto` 已禁用，pack 冲突仍是已知脆弱点）。
+- 新接入的 worker backend 不得成为 `executor.py` 中的硬编码特例分支，必须走标准接口（见 F-BACKEND-1）。
 
 ## 6. 产品指标
 
