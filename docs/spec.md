@@ -123,7 +123,9 @@ validate_plan_quality(subtasks, requirements, repo)       → 确定性预执行
 run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None) → 单子任务端到端
   ── _create_worktree() → _git_merge_upstream() → _build_task_md()
   ── checkpoint 快照（提交前，回滚用）
-  ── _run_claude() → _verify_changes() → commit + tag
+  ── BackendRegistry 分发（backends/: claude / agent_loop）→ _verify_changes() → commit + tag
+  ── 修复循环（fix/replan/reload）同样经 backends.dispatch.run_repair 分发，tag_name 强制留空，
+     commit 完成边界由 executor 独占
   ── metering_path → AGENT_GO_METERING_PATH env → worker 计量写入
   ── config → 运行时配置贯通（max_retries/goal/evaluator/worker_models）
   ── S4: difficulty → worker_models 映射 → AGENT_GO_CLAUDE_MODEL env

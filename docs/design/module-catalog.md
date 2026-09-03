@@ -1,7 +1,7 @@
 # agent_go 模块职责目录
 
 > 状态：As-Built 模块映射
-> 更新日期：2026-08-24（对齐 64 模块；补 M5/M6/C4/看板 18 个模块）
+> 更新日期：2026-09-03（补阶段十三 backends/ 包 + B2 AgentLoop 加固 + AG-4/5 reload 口径）
 
 | 模块 | 主要职责 | 关键输出 |
 |---|---|---|
@@ -43,8 +43,9 @@
 | `metadata_migration.py` | 历史任务元数据迁移工具（schema 升级/字段补齐） | migrated metadata |
 | `eval.py` | 评估分析：quality / perf / cost (per-role) / reliability / UX + eval gate | eval report |
 | `replay.py` | 执行回放时间线：从 meta/metering/results 重建可视化 | timeline (ASCII/JSON) |
-| `agent_loop.py` | 自主 agent 循环（`--agent-loop`）：tool-use ReAct 直接 API 调用 | loop result |
-| `tool_executor.py` | Agent loop 工具注册和执行（Read/Write/Edit/Bash + 安全规则） | tool results |
+| `agent_loop.py` | 自主 agent 循环（`--agent-loop`）：tool-use ReAct 直接 API 调用；B2 stuck 检测/no-progress 信号/explore 只读/scope advisory | loop result |
+| `tool_executor.py` | Agent loop 工具注册和执行（Read/Write/Edit/Bash/Grep/Glob/View + 安全规则 + 只读模式） | tool results |
+| `backends/` | 阶段十三 worker backend 抽象包：BaseBackend/BackendContext/SubtaskResult（base）、BackendRegistry/resolve_backend_name（registry）、ClaudeBackend（claude_backend）、AgentLoopBackend（agent_loop_backend）、修复路径分发 repair_timeout/run_repair（dispatch） | SubtaskResult |
 | `console.py` | 统一输出抽象层：quiet / verbose 模式，延迟默认绑定，表格渲染 | console output |
 | `tui.py` | Curses 状态仪表盘：实时显示并发子任务进度 | TUI display |
 | `workflow_gen.py` | GitHub Actions workflow 自动生成（`ci` 命令） | workflow YAML |
@@ -109,7 +110,7 @@
 | `governance.py` | SDD traceability matrix + architecture compliance (M1.4) |
 | `deviation.py` | Spec/Architecture/acceptance deviation records: model, persistence, aggregation (M2.5) |
 | `problems.py` | Cross-task Problem entity (B4/H3): 三态+复发重开, 半衰期(stale_after_days→dormant), 葬礼(resolution_summary), 全局 ~/.agent_go/problems.jsonl upsert；「越用越聪明」数据层；C4 葬礼回写（record_resolution：重试后成功回写「模式+解法」；summarize_resolution LLM 根因级总结，knowledge.resolution_llm 开关，fail-open 降级 diffstat 级） |
-| `replan.py` | C3 局部重规划（F-VERIFY-6）：无进展触发一次 Plan 拆分建议（LLM+启发式兜底），最多一次/继承父预算/默认人工确认/不扩大任务图；AG-3 确定性决策层（`decide_escalation` 决策表 + `TaskCircuitBreaker` 熔断 + 幂等闸，agent 侧自有失败信号口径，输出 EscalationDecision 契约，reload 动作待 AG-4/5） |
+| `replan.py` | C3 局部重规划（F-VERIFY-6）：无进展触发一次 Plan 拆分建议（LLM+启发式兜底），最多一次/继承父预算/默认人工确认/不扩大任务图；AG-3 确定性决策层（`decide_escalation` 决策表 + `TaskCircuitBreaker` 熔断 + 幂等闸，agent 侧自有失败信号口径，输出 EscalationDecision 契约）；AG-4/5 reload 动作（task-context 证据包 + pin 锚点，task_context.enabled 默认关，fail-open 降级 split/retry） |
 | `knowledge.py` | C4 KnowledgeStore A/B 注入臂：从 Problem/deviation/verify_state 提取历史经验注入 repair prompt（可开关/可淘汰/knowledge_injected 埋点） |
 | `status.py` | Canonical task state machine (M0-2, 8 states) |
 | `exit_codes.py` | Semantic process exit codes for CLI tools |
@@ -132,8 +133,9 @@
 | `assessment.py` | False-positive evaluation data layer: AssessmentEvent model, persistence, aggregation |
 | `artifacts.py` | Artifact export (S9-B): collect worktree/__artifacts__/ into --artifact-dir before cleanup |
 | `diag.py` | llama-defender 诊断数据面客户端（R13-R16 消费侧 C1-C7）：session key 构造/截断口径、fail-open fetch、ledger/metrics/archive/ctx_config/props 封装 |
-| `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop |
-| `tool_executor.py` | Tool registry for agent loop: bash safety rules, file ops |
+| `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop；B2 hardening: stuck 检测（连续重复调用先提醒后终止）/ no-progress 信号 / explore 只读模式 / scope advisory（files_hint 越界写入提示） |
+| `tool_executor.py` | Tool registry for agent loop: Read/Write/Edit/Bash/Grep/Glob/View + bash safety rules + readonly mode |
+| `backends/` | 阶段十三 worker backend 抽象包（B1/B2）：base（BaseBackend/BackendContext/SubtaskResult）、registry（BackendRegistry/resolve_backend_name）、claude_backend（claude -p/greywall，progress 开关）、agent_loop_backend（直接 API 路径）、dispatch（修复路径 fix/replan/reload 统一分发 + repair_timeout 消重） |
 | `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
 | `tui.py` | Curses status dashboard |
 | `review_agent.py` | Read-only independent review subagent, two-phase review |
