@@ -486,19 +486,21 @@ _METRICS_CHANGES = {
 class TestExecutorSemanticEval:
     """executor._verify_changes 的 Phase 3 语义评估集成（mock 隔离 git/subprocess）。"""
 
+    @patch("agent_go.executor._run_headless")
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.evaluator.evaluate_semantic")
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_shell_pass_semantic_fail_triggers_fix(
             self, mock_wt_create, mock_subprocess, mock_headless,
-            mock_metrics, mock_eval, mock_load_agent,
+            mock_metrics, mock_eval, mock_load_agent, mock_fix_headless,
             temp_repo, task_dir, logger, eval_subtask, eval_enabled_config):
         """shell 验证通过但语义评估不通过 → 转入修复流程，修复后复评通过。"""
         mock_wt_create.return_value = (True, "")
         mock_headless.return_value = make_subprocess_mock(returncode=0)
+        mock_fix_headless.return_value = make_subprocess_mock(returncode=0)
         mock_metrics.return_value = dict(_METRICS_CHANGES)
         mock_subprocess.side_effect = _git_and_pytest_pass
         # 第一次评估不通过 → 修复；第二次评估通过 → 收敛
@@ -509,9 +511,10 @@ class TestExecutorSemanticEval:
 
         # 语义评估执行了 2 次（初评 + 修复后复评）
         assert mock_eval.call_count == 2
-        # _run_headless 2 次：初始执行 + 1 次修复
-        assert mock_headless.call_count == 2
-        fix_prompt = mock_headless.call_args_list[1][0][0]
+        # _run_headless 共 2 次：初始执行（backend 路径）+ 1 次修复（executor 修复循环）
+        assert mock_headless.call_count == 1
+        assert mock_fix_headless.call_count == 1
+        fix_prompt = mock_fix_headless.call_args_list[0][0][0]
         assert "LLM 语义评估反馈" in fix_prompt
         assert "缺少文档更新" in fix_prompt
         assert "补充 README 说明" in fix_prompt
@@ -531,19 +534,21 @@ class TestExecutorSemanticEval:
         # 验证状态应持久化到 verify_state.json
         assert (task_dir / "sub-1" / "verify_state.json").exists()
 
+    @patch("agent_go.executor._run_headless")
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.evaluator.evaluate_semantic")
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_semantic_always_fails_exhausts_retries(
             self, mock_wt_create, mock_subprocess, mock_headless,
-            mock_metrics, mock_eval, mock_load_agent,
+            mock_metrics, mock_eval, mock_load_agent, mock_fix_headless,
             temp_repo, task_dir, logger, eval_subtask, eval_enabled_config):
         """语义评估持续不通过 → 耗尽重试次数后标记失败。"""
         mock_wt_create.return_value = (True, "")
         mock_headless.return_value = make_subprocess_mock(returncode=0)
+        mock_fix_headless.return_value = make_subprocess_mock(returncode=0)
         mock_metrics.return_value = dict(_METRICS_CHANGES)
         mock_subprocess.side_effect = _git_and_pytest_pass
         mock_eval.return_value = dict(_SEMANTIC_FAIL)
@@ -552,9 +557,10 @@ class TestExecutorSemanticEval:
         result = run_subtask("test-task", eval_subtask, temp_repo, task_dir,
                              logger, headless=True, config=eval_enabled_config)
 
-        # max_retries=1：初评 + 修复后复评共 2 次评估，1 次修复
+        # max_retries=1：初评 + 修复后复评共 2 次评估；1 次初始执行（backend）+ 1 次修复（executor）
         assert mock_eval.call_count == 2
-        assert mock_headless.call_count == 2
+        assert mock_headless.call_count == 1
+        assert mock_fix_headless.call_count == 1
         assert result["verify_ok"] is False
         assert result["status"] == "failed"
         assert result["retry_count"] == 1
@@ -566,7 +572,7 @@ class TestExecutorSemanticEval:
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.evaluator.evaluate_semantic")
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_evaluator_disabled_skips_semantic_eval(

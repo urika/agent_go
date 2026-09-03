@@ -501,7 +501,7 @@ class TestVerifySubtask:
 class TestSubtaskExecution:
     """测试 6: 子任务执行的隔离与产物传递"""
 
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     def test_worktree_creation(self, mock_subprocess, mock_headless,
                                temp_repo, task_dir, fast_logger):
@@ -524,7 +524,7 @@ class TestSubtaskExecution:
         assert "worktree" in result
         assert "summary" in result
 
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     def test_multiple_subtasks_isolation(self, mock_subprocess, mock_headless,
                                          temp_repo, task_dir, fast_logger):
@@ -719,7 +719,7 @@ class TestSkillInjection:
         )
         return skill_dir
 
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     def test_skill_injected_into_task_md(self, mock_subprocess, mock_headless,
                                          temp_repo, task_dir, fast_logger, tmp_path):
@@ -759,7 +759,7 @@ class TestSkillInjection:
             f"TASK.md 应包含 Skill 注入标记，实际内容前500字符:\n{content[:500]}"
         )
 
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     def test_no_skill_when_empty(self, mock_subprocess, mock_headless,
                                  temp_repo, task_dir, fast_logger):

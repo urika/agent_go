@@ -130,7 +130,7 @@ class TestAgentLoopBranchEnabled:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_simple_task_uses_agent_loop(
@@ -157,7 +157,7 @@ class TestAgentLoopBranchEnabled:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_complex_task_falls_back_to_headless(
@@ -179,7 +179,7 @@ class TestAgentLoopBranchEnabled:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_disabled_by_default(
@@ -199,7 +199,7 @@ class TestAgentLoopBranchEnabled:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_interactive_mode_skips_agent_loop(
@@ -226,7 +226,7 @@ class TestAgentLoopRoutingResolution:
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.router.resolve_provider")
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_uses_router_primary_when_route_resolved(
@@ -254,7 +254,7 @@ class TestAgentLoopRoutingResolution:
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.router.resolve_provider", return_value=None)
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_falls_back_to_plan_api_when_router_unavailable(
@@ -291,7 +291,7 @@ class TestAgentLoopResultPropagation:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_success_marks_agent_loop_sandbox(
@@ -320,7 +320,7 @@ class TestAgentLoopResultPropagation:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_loop_exit_nonzero_status_failed(
@@ -353,7 +353,7 @@ class TestAgentLoopMeteringPassthrough:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.agent_loop.AgentLoop")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_config_passed_to_loop_intact(

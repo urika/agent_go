@@ -23,6 +23,7 @@ from unittest.mock import patch, MagicMock, call
 
 import pytest
 
+from agent_go.backends import SubtaskResult
 from agent_go.executor import (
     run_subtask,
     _run_verification_cmd,
@@ -104,7 +105,7 @@ class TestRunSubtask:
     """run_subtask 核心逻辑测试"""
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_headless_mode(self, mock_wt_create, mock_subprocess, mock_headless,
@@ -124,7 +125,7 @@ class TestRunSubtask:
         assert "基础任务" in call_args[0][0], "TASK.md 应包含子任务标题"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_initial_hard_timeout_passed(self, mock_wt_create, mock_subprocess, mock_headless,
@@ -143,7 +144,7 @@ class TestRunSubtask:
         assert isinstance(ht, int) and ht > 0, "首跑硬超时应透传给 _run_headless"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_initial_hard_timeout_disabled_when_zero(self, mock_wt_create, mock_subprocess, mock_headless,
@@ -162,7 +163,7 @@ class TestRunSubtask:
         assert ht == 0
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_metering_path_propagated_to_env(self, mock_wt_create, mock_subprocess, mock_headless,
@@ -180,7 +181,7 @@ class TestRunSubtask:
         assert env["AGENT_GO_METERING_PATH"] == "/tmp/x/metering.jsonl"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_no_metering_path_no_env(self, mock_wt_create, mock_subprocess, mock_headless,
@@ -223,7 +224,7 @@ class TestRunSubtask:
         assert len(claude_calls) >= 1, "应有调用 claude 命令的 subprocess.run"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_no_changes_status(self, mock_wt_create, mock_subprocess,
@@ -255,7 +256,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_completed_status(self, mock_wt_create, mock_subprocess,
@@ -295,7 +296,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_crash_but_verified_flag(self, mock_wt_create, mock_subprocess,
@@ -334,7 +335,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_failed_status(self, mock_wt_create, mock_subprocess,
@@ -372,7 +373,7 @@ class TestRunSubtask:
         assert result["exit_code"] == 1
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_task_md_created(self, mock_wt_create, mock_subprocess,
@@ -395,7 +396,7 @@ class TestRunSubtask:
         assert "执行指令" in content, "TASK.md 应包含 Agent Prompt 部分"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_task_md_artifact_convention_injected_when_configured(
@@ -418,7 +419,7 @@ class TestRunSubtask:
         assert "__artifacts__/" in content, "TASK.md 应提及 __artifacts__/ 目录"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_task_md_no_artifact_convention_without_config(
@@ -440,7 +441,7 @@ class TestRunSubtask:
         assert "## 产物输出" not in content, "未配置时不应注入产物约定"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_context_file_created(self, mock_wt_create, mock_subprocess,
@@ -462,7 +463,7 @@ class TestRunSubtask:
         assert "基础任务" in content, "context.md 应包含子任务标题"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_env_variables_set(self, mock_wt_create, mock_subprocess,
@@ -489,7 +490,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor._git_merge_upstream")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_upstream_merge(self, mock_wt_create, mock_subprocess,
@@ -519,7 +520,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_verification_commands_executed(self, mock_wt_create, mock_subprocess,
@@ -576,7 +577,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_verification_failure_marks_failed(self, mock_wt_create, mock_subprocess,
@@ -631,7 +632,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_failure_writes_deviation_jsonl(self, mock_wt_create, mock_subprocess,
@@ -679,7 +680,7 @@ class TestRunSubtask:
         assert events["root_cause_category"] == "implementation_error"
 
     @patch("agent_go.executor.load_agent_type")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_skill_injection_into_task_md(self, mock_wt_create, mock_subprocess,
@@ -721,7 +722,7 @@ class TestRunSubtask:
         assert "security-review" in content, "TASK.md 应包含 Skill 名称"
 
     @patch("agent_go.executor.load_agent_type")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_skill_inject_mode_guide_for_claude(self, mock_wt_create, mock_subprocess,
@@ -753,7 +754,7 @@ class TestRunSubtask:
             f"claude worker 应使用 guide 注入，实际 {kwargs.get('mode')}"
 
     @patch("agent_go.executor.load_agent_type")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_skill_inject_mode_full_for_agent_loop(self, mock_wt_create, mock_subprocess,
@@ -785,7 +786,7 @@ class TestRunSubtask:
             f"agent_loop 应使用 full 注入，实际 {kwargs.get('mode')}"
 
     @patch("agent_go.executor.load_agent_type")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_agent_type_configured(self, mock_wt_create, mock_subprocess,
@@ -823,7 +824,7 @@ class TestRunSubtask:
             assert env["CLAUDE_PERMISSION_MODE"] == "bypassPermissions"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_upstream_context_injected_into_task_md(self, mock_wt_create,
@@ -866,7 +867,7 @@ class TestRunSubtask:
         assert "上游任务" in content, "TASK.md 应包含上游 context 内容"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_merge_conflict_injected_into_task_md(self, mock_wt_create,
@@ -906,7 +907,7 @@ class TestRunSubtask:
         assert "上游合并冲突" in content, "TASK.md 应包含冲突标记"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_context_file_with_risks(self, mock_wt_create, mock_subprocess,
@@ -940,7 +941,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_context_file_with_verification(self, mock_wt_create, mock_subprocess,
@@ -990,7 +991,7 @@ class TestRunSubtask:
         assert result["verify_ok"] is True, "验证应通过"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_worktree_clone_fallback(self, mock_wt_create, mock_subprocess,
@@ -1014,7 +1015,7 @@ class TestRunSubtask:
         assert len(clone_calls) >= 1, "worktree 失败后应回退到 git clone"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_existing_worktree_reused(self, mock_wt_create, mock_subprocess,
@@ -1039,7 +1040,7 @@ class TestRunSubtask:
         mock_wt_create.assert_not_called()
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_return_value_structure(self, mock_wt_create, mock_subprocess,
@@ -1065,7 +1066,7 @@ class TestRunSubtask:
         assert result["crash_but_verified"] is False, "正常完成时 crash_but_verified 应为 False"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_sandbox_type_headless(self, mock_wt_create, mock_subprocess,
@@ -1107,7 +1108,7 @@ class TestRunSubtask:
         assert result["sandbox_type"] == "native"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_no_git_repo_copies_directory(self, mock_wt_create, mock_subprocess,
@@ -1144,7 +1145,7 @@ class TestRunSubtask:
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor.collect_change_stats")
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_tag_namespaced_with_task_id(self, mock_wt_create, mock_subprocess,
@@ -1642,7 +1643,8 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=2)), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
             mock_fix.return_value = MagicMock(returncode=0)
 
             # 显式禁用语义评估：本测试只测 shell 验证循环，避免真实环境 evaluator
@@ -1693,7 +1695,8 @@ class TestVerificationLoopE2E:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=_run), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
             mock_fix.return_value = MagicMock(returncode=0)
             result = _verify_changes(
                 "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -1716,7 +1719,8 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
             mock_fix.return_value = MagicMock(returncode=0)
 
             result = _verify_changes(
@@ -1737,7 +1741,8 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
             mock_fix.return_value = MagicMock(returncode=0)
 
             result = _verify_changes(
@@ -1759,7 +1764,7 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
 
             result = _verify_changes(
@@ -1782,7 +1787,7 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             result = _verify_changes(
                 "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -1814,7 +1819,7 @@ class TestVerificationLoopE2E:
             "_metering_path": str(metering),
         }
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
              patch("agent_go.executor.write_censored_event"):
             mock_fix.return_value = MagicMock(returncode=0)
             result = _verify_changes(
@@ -1837,7 +1842,8 @@ class TestVerificationLoopE2E:
 
         def _run():
             with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-                 patch("agent_go.executor._run_headless") as mock_fix:
+                 patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+                 patch("agent_go.executor._run_headless", new=mock_fix):
                 mock_fix.return_value = MagicMock(returncode=0)
                 _verify_changes(
                     "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -1866,7 +1872,8 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             mock_fix.return_value = MagicMock(returncode=0)
             # 语义评估首次失败，二次通过
@@ -1980,7 +1987,7 @@ class TestVerificationLoopE2E:
         subtask["verification"] = "rm -rf /"  # 安全门禁必然拒绝的命令（不实际执行）
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
              patch("agent_go.executor._log_rejected_command"):
             mock_fix.return_value = MagicMock(returncode=0)
 
@@ -2046,7 +2053,8 @@ class TestRepairPromptContent:
             return MagicMock(returncode=0)
 
         with patch("subprocess.run", side_effect=self._always_fail_git_mock()), \
-             patch("agent_go.executor._run_headless", side_effect=capturing_fix):
+             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix) as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
 
             result = _verify_changes(
                 "task-1", "sub-1", self._make_subtask(), temp_repo, headless=True,
@@ -2084,7 +2092,8 @@ class TestRepairPromptContent:
             return MagicMock(returncode=0)
 
         with patch("subprocess.run", side_effect=self._always_fail_git_mock()), \
-             patch("agent_go.executor._run_headless", side_effect=capturing_fix):
+             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix) as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
 
             _verify_changes(
                 "task-1", "sub-1", self._make_subtask(), temp_repo, headless=True,
@@ -2116,7 +2125,8 @@ class TestRepairPromptContent:
         make_git = TestVerificationLoopE2E._git_mock
 
         with patch("subprocess.run", side_effect=make_git(verify_success_on_attempt=1)), \
-             patch("agent_go.executor._run_headless", side_effect=capturing_fix), \
+             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix) as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             # 首次语义评估失败，二次通过
             mock_eval.side_effect = [
@@ -2168,7 +2178,7 @@ class TestL1AutoTrigger:
             config.update(extra_config)
 
         with patch("subprocess.run", side_effect=self._git_mock_all_pass()), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             mock_fix.return_value = MagicMock(returncode=0)
             mock_eval.return_value = {"passed": True, "confidence": 0.9,
@@ -2419,7 +2429,7 @@ class TestTaskTypeRouting:
     未配 by_type / 无 task_type → 回退难度路由（默认行为不变）。"""
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_task_type_overrides_difficulty(self, mock_wt_create, mock_subprocess,
@@ -2442,7 +2452,7 @@ class TestTaskTypeRouting:
         assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-opus-4-8"  # task_type 胜出
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_task_type_falls_back_when_unconfigured(self, mock_wt_create, mock_subprocess,
@@ -2465,7 +2475,7 @@ class TestTaskTypeRouting:
         assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-sonnet-5"  # 回退 medium 难度
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_no_task_type_uses_difficulty(self, mock_wt_create, mock_subprocess,
@@ -2488,7 +2498,7 @@ class TestTaskTypeRouting:
         assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-opus-4-8"  # hard 难度模型
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_degrade_mode_downgrades_model(self, mock_wt_create, mock_subprocess,
@@ -2821,7 +2831,8 @@ class TestVerifyDivergence:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_always_pass()), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             mock_fix.return_value = MagicMock(returncode=0)
             # 连续两次语义评估失败，指出的缺陷不同（打地鼠）
@@ -2853,7 +2864,8 @@ class TestVerifyDivergence:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_always_pass()), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             mock_fix.return_value = MagicMock(returncode=0)
             # 两次都指出「None 保护缺失」→ 同一缺陷，应继续重试
@@ -2916,7 +2928,8 @@ class TestVerifyRevertDetection:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_with_base("abc123")), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
             mock_fix.return_value = MagicMock(returncode=0)
             result = _verify_changes(
                 "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -2939,7 +2952,8 @@ class TestVerifyRevertDetection:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_with_base("")), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
             mock_fix.return_value = MagicMock(returncode=0)
             result = _verify_changes(
                 "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -3008,7 +3022,11 @@ class TestCognitiveModelRouting:
             "plan_api": {},
             "agent_loop": {"enabled": False},
         }
-        with patch("agent_go.executor._run_claude") as mock_claude, \
+        mock_backend_cls = MagicMock()
+        mock_backend_inst = MagicMock()
+        mock_backend_inst.run.return_value = SubtaskResult(returncode=0, sandbox_type="headless", backend_time=1.0)
+        mock_backend_cls.return_value = mock_backend_inst
+        with patch("agent_go.executor.BackendRegistry.get", return_value=mock_backend_cls), \
              patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
              patch("agent_go.executor._verify_changes") as mock_verify:
             mock_verify.return_value = {
@@ -3017,13 +3035,13 @@ class TestCognitiveModelRouting:
                 "retry_count": 0, "verification_results": [], "commit_hash": "abc",
                 "change_stats": {}, "kill_reason": "none",
             }
-            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
             result = run_subtask(
                 "task-1", subtask, temp_repo, task_dir, logger, headless=True,
                 metering_path="", config=config,
             )
 
-        env = mock_claude.call_args[0][2]
+        ctx = mock_backend_inst.run.call_args[0][0]
+        env = ctx.env
         assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-opus-4-8", \
             f"认知模式路由应覆盖难度路由: {env.get('AGENT_GO_CLAUDE_MODEL')}"
         assert env["AGENT_GO_COGNITIVE_MODE"] == "review"
@@ -3046,7 +3064,11 @@ class TestCognitiveModelRouting:
             "plan_api": {},
             "agent_loop": {"enabled": False},
         }
-        with patch("agent_go.executor._run_claude") as mock_claude, \
+        mock_backend_cls = MagicMock()
+        mock_backend_inst = MagicMock()
+        mock_backend_inst.run.return_value = SubtaskResult(returncode=0, sandbox_type="headless", backend_time=1.0)
+        mock_backend_cls.return_value = mock_backend_inst
+        with patch("agent_go.executor.BackendRegistry.get", return_value=mock_backend_cls), \
              patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
              patch("agent_go.executor._verify_changes") as mock_verify:
             mock_verify.return_value = {
@@ -3055,13 +3077,13 @@ class TestCognitiveModelRouting:
                 "retry_count": 0, "verification_results": [], "commit_hash": "abc",
                 "change_stats": {}, "kill_reason": "none",
             }
-            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
             result = run_subtask(
                 "task-1", subtask, temp_repo, task_dir, logger, headless=True,
                 metering_path="", config=config,
             )
 
-        env = mock_claude.call_args[0][2]
+        ctx = mock_backend_inst.run.call_args[0][0]
+        env = ctx.env
         assert env["AGENT_GO_CLAUDE_MODEL"] == "claude-opus-4-8", \
             "未配置认知模式映射时回退难度路由"
 
@@ -3271,7 +3293,8 @@ class TestReadonlyReview:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=_git_fail), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.executor._run_verification_cmd") as mock_vcmd, \
              patch("agent_go.review_agent.run_readonly_review") as mock_review:
             mock_fix.return_value = MagicMock(returncode=0)
@@ -3315,7 +3338,8 @@ class TestReadonlyReview:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=_git_fail), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.executor._run_verification_cmd") as mock_vcmd, \
              patch("agent_go.review_agent.run_readonly_review") as mock_review:
             mock_fix.return_value = MagicMock(returncode=0)
@@ -3357,7 +3381,11 @@ class TestPermissionMinimization:
             "evaluator": {"enabled": False}, "plan_api": {},
             "agent_loop": {"enabled": False},
         }
-        with patch("agent_go.executor._run_claude") as mock_claude, \
+        mock_backend_cls = MagicMock()
+        mock_backend_inst = MagicMock()
+        mock_backend_inst.run.return_value = SubtaskResult(returncode=0, sandbox_type="headless", backend_time=1.0)
+        mock_backend_cls.return_value = mock_backend_inst
+        with patch("agent_go.executor.BackendRegistry.get", return_value=mock_backend_cls), \
              patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
              patch("agent_go.executor._verify_changes") as mock_verify:
             mock_verify.return_value = {
@@ -3366,14 +3394,12 @@ class TestPermissionMinimization:
                 "retry_count": 0, "verification_results": [], "commit_hash": "abc",
                 "change_stats": {}, "kill_reason": "none",
             }
-            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
             run_subtask(
                 "task-1", subtask, temp_repo, task_dir, logger, headless=True,
                 metering_path="", config=config,
             )
 
-        # agent 对象作为 _run_claude 的第 5 个位置参数传入
-        agent_arg = mock_claude.call_args[0][4]
+        agent_arg = mock_backend_inst.run.call_args[0][0].agent
         assert agent_arg.claude_config["allowed_tools"] == ["Read", "Grep", "Glob"], \
             f"subtask 级工具白名单应覆盖 agent 默认: {agent_arg.claude_config}"
 
@@ -3392,7 +3418,11 @@ class TestPermissionMinimization:
             "evaluator": {"enabled": False}, "plan_api": {},
             "agent_loop": {"enabled": False},
         }
-        with patch("agent_go.executor._run_claude") as mock_claude, \
+        mock_backend_cls = MagicMock()
+        mock_backend_inst = MagicMock()
+        mock_backend_inst.run.return_value = SubtaskResult(returncode=0, sandbox_type="headless", backend_time=1.0)
+        mock_backend_cls.return_value = mock_backend_inst
+        with patch("agent_go.executor.BackendRegistry.get", return_value=mock_backend_cls), \
              patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
              patch("agent_go.executor._verify_changes") as mock_verify:
             mock_verify.return_value = {
@@ -3401,13 +3431,12 @@ class TestPermissionMinimization:
                 "retry_count": 0, "verification_results": [], "commit_hash": "abc",
                 "change_stats": {}, "kill_reason": "none",
             }
-            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
             run_subtask(
                 "task-1", subtask, temp_repo, task_dir, logger, headless=True,
                 metering_path="", config=config,
             )
 
-        agent_arg = mock_claude.call_args[0][4]
+        agent_arg = mock_backend_inst.run.call_args[0][0].agent
         # developer 内置默认无 allowed_tools（完整权限），应保留
         assert "allowed_tools" not in (agent_arg.claude_config or {}), \
             f"未覆盖时应保留 agent 默认: {agent_arg.claude_config}"
@@ -3477,7 +3506,11 @@ class TestTaskBaseShared:
             "evaluator": {"enabled": False}, "plan_api": {},
             "agent_loop": {"enabled": False},
         }
-        with patch("agent_go.executor._run_claude") as mock_claude, \
+        mock_backend_cls = MagicMock()
+        mock_backend_inst = MagicMock()
+        mock_backend_inst.run.return_value = SubtaskResult(returncode=0, sandbox_type="headless", backend_time=1.0)
+        mock_backend_cls.return_value = mock_backend_inst
+        with patch("agent_go.executor.BackendRegistry.get", return_value=mock_backend_cls), \
              patch("agent_go.executor._create_worktree", return_value=(temp_repo, 1)), \
              patch("agent_go.executor._verify_changes") as mock_verify:
             mock_verify.return_value = {
@@ -3486,7 +3519,6 @@ class TestTaskBaseShared:
                 "retry_count": 0, "verification_results": [], "commit_hash": "abc",
                 "change_stats": {}, "kill_reason": "none",
             }
-            mock_claude.return_value = (MagicMock(returncode=0, stdout=""), "headless", 1.0)
             run_subtask(
                 "task-1", subtask, temp_repo, task_dir, logger, headless=True,
                 metering_path="", config=config,

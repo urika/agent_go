@@ -120,7 +120,7 @@ def _git_ok(args, **kwargs):
 
 class TestExecutorGoalIntegration:
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_goal_injected_when_enabled(
@@ -140,7 +140,7 @@ class TestExecutorGoalIntegration:
         assert "Goal Context" in task_md
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_goal_prefix_degrades_when_prompt_too_long(
@@ -168,7 +168,7 @@ class TestExecutorGoalIntegration:
         assert "详细说明" in task_md
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_goal_not_injected_by_default(
@@ -187,7 +187,7 @@ class TestExecutorGoalIntegration:
         assert "/goal" not in task_md
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_stop_hook_injected_when_enabled(
@@ -210,7 +210,7 @@ class TestExecutorGoalIntegration:
         assert not (worktree / GoalInjector.GOAL_HOOK_SCRIPT).exists()
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_stop_hook_not_injected_by_default(

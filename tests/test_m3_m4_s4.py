@@ -151,7 +151,7 @@ def _mock_cp(returncode=0, stdout="", stderr=""):
 
 class TestModelRouting:
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_hard_routes_to_configured_model(
@@ -178,7 +178,7 @@ class TestModelRouting:
         assert env["AGENT_GO_DIFFICULTY"] == "hard"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_no_config_no_model_env(

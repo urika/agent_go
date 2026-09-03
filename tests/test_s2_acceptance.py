@@ -78,17 +78,19 @@ def _git_side_effect(pytest_results):
 # ═══════════════════════════════════════════════════════════════
 
 class TestRepairPromptFeedback:
-    @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor._run_headless")
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_fix_prompt_contains_stdout_stderr_and_diffstat(
-        self, mock_wt, mock_subprocess, mock_headless, mock_agent,
+        self, mock_wt, mock_subprocess, mock_headless, mock_agent, mock_fix_headless,
         temp_repo, task_dir, logger,
     ):
         """验证失败 → 修复 prompt 必须含 exit code、stdout/stderr 尾部、diff --stat"""
         mock_wt.return_value = (True, "")
         mock_headless.return_value = _mock_cp(returncode=0)
+        mock_fix_headless.return_value = _mock_cp(returncode=0)
         # 第一次 pytest 失败（带输出），修复后第二次通过
         mock_subprocess.side_effect = _git_side_effect([
             (1, "FAILED tests/test_a.py::test_x", "AssertionError: expected 200 got 403"),
@@ -98,9 +100,10 @@ class TestRepairPromptFeedback:
         run_subtask("test-task", _subtask(), temp_repo, task_dir,
                     logger, headless=True, config={"goal": {"enabled": False}})
 
-        # 第 2 次 _run_headless 调用是修复 prompt
-        assert mock_headless.call_count == 2
-        fix_prompt = mock_headless.call_args_list[1][0][0]
+        # 初始执行走 backend 路径，第 2 次 _run_headless 调用（executor 修复循环）是修复 prompt
+        assert mock_headless.call_count == 1
+        assert mock_fix_headless.call_count == 1
+        fix_prompt = mock_fix_headless.call_args_list[0][0][0]
         assert "exit_code=1" in fix_prompt
         assert "FAILED tests/test_a.py::test_x" in fix_prompt       # stdout 尾部
         assert "AssertionError: expected 200 got 403" in fix_prompt  # stderr 尾部
@@ -112,17 +115,19 @@ class TestRepairPromptFeedback:
 # ═══════════════════════════════════════════════════════════════
 
 class TestRuntimeConfigPropagation:
-    @patch("agent_go.executor.load_agent_type", return_value=None)
     @patch("agent_go.executor._run_headless")
+    @patch("agent_go.executor.load_agent_type", return_value=None)
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_max_retries_from_config_param(
-        self, mock_wt, mock_subprocess, mock_headless, mock_agent,
+        self, mock_wt, mock_subprocess, mock_headless, mock_agent, mock_fix_headless,
         temp_repo, task_dir, logger,
     ):
         """config 参数中的 max_retries=2 生效：首次执行 + 2 次修复 = 3 次 _run_headless"""
         mock_wt.return_value = (True, "")
         mock_headless.return_value = _mock_cp(returncode=0)
+        mock_fix_headless.return_value = _mock_cp(returncode=0)
         # pytest 永远失败
         mock_subprocess.side_effect = _git_side_effect([(1, "", "boom")] * 10)
 
@@ -131,12 +136,14 @@ class TestRuntimeConfigPropagation:
                              config={"verification": {"max_retries": 2},
                                      "goal": {"enabled": False}})
 
-        assert mock_headless.call_count == 3  # 1 次执行 + 2 次修复
+        # 3 次 _run_headless：1 次执行（backend 路径）+ 2 次修复（executor 修复循环）
+        assert mock_headless.call_count == 1
+        assert mock_fix_headless.call_count == 2
         assert result["verify_ok"] is False
         assert result["retry_count"] == 2
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_max_retries_zero_disables_repair(
@@ -157,7 +164,7 @@ class TestRuntimeConfigPropagation:
         assert result["status"] == "failed"
 
     @patch("agent_go.executor.load_agent_type", return_value=None)
-    @patch("agent_go.executor._run_headless")
+    @patch("agent_go.backends.claude_backend._run_headless")
     @patch("subprocess.run")
     @patch("agent_go.executor._worktree_create")
     def test_goal_config_propagated_via_env(

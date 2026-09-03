@@ -234,7 +234,8 @@ class TestKnowledgeInjection:
                      resolution_summary="先 source venv 再跑 pytest"),
         ])
         with patch("subprocess.run", side_effect=_git_fail_then_pass()), \
-             patch("agent_go.executor._run_headless") as mock_fix, \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.config.AGENT_GO_DIR", problems_path):
             mock_fix.return_value = MagicMock(returncode=0)
             self._run_verify(
@@ -251,7 +252,8 @@ class TestKnowledgeInjection:
     def test_disabled_no_injection(self, temp_repo, task_dir, logger):
         """对照臂：默认关闭 → repair prompt 无历史经验。"""
         with patch("subprocess.run", side_effect=_git_fail_then_pass()), \
-             patch("agent_go.executor._run_headless") as mock_fix:
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.executor._run_headless", new=mock_fix):
             mock_fix.return_value = MagicMock(returncode=0)
             self._run_verify(
                 temp_repo, task_dir, logger,

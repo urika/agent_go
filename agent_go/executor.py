@@ -15,14 +15,14 @@ from .console import _LazyConsole
 from .config import log_event, safe_input, meter_event, write_censored_event
 from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call, classify_verification_scope
 from .subtask import _git_merge_upstream, _run_headless
-from .agents import load_agent_type, get_claude_command, get_agent_env
+from .agents import load_agent_type, get_agent_env
+from .backends import BackendContext, BackendRegistry, resolve_backend_name
 from .git_utils import _worktree_create, init_git_repo
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 from .artifacts import ARTIFACT_DIR_NAME
 from . import diag
 # 解耦原则：evaluator 是可选增强，不静态 import（避免核心模块强绑增强模块的传递依赖）。
 # 改为调用点（_verify_changes 内 evaluator_enabled 守卫后）动态 import。
-from .config import get_api_key
 
 console = _LazyConsole()
 # 中断状态由 pipeline 按 subtask 传入；不在模块级共享，避免并发任务互相影响。
@@ -810,88 +810,6 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     return task_md, verification, skill_names, unresolved_skills
 
 
-def _run_claude(task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger, config=None, hard_timeout=0):
-    """Run Claude in headless or interactive mode. Returns (result, sandbox_type, claude_time).
-
-    hard_timeout: 首跑硬超时（秒），0=不限制。仅 headless 模式生效，透传给 _run_headless。
-    """
-    claude_start = time.time()
-
-
-    if headless:
-        sandbox_type = "headless"
-        allowed_tools = agent.claude_config.get("allowed_tools", []) if agent else []
-        shared_activity = [None]
-        _progress_stop = threading.Event()
-        _last_activity_emit = [None]
-
-        def _tick():
-            start = time.time()
-            while not _progress_stop.is_set():
-                elapsed = int(time.time() - start)
-                act = shared_activity[0]
-                if act and act.get("target"):
-                    console.print(f"\r➜ {sub_id}: {act['tool']} {act['target']}  ({elapsed}s)", end="")
-                elif act:
-                    console.print(f"\r➜ {sub_id}: {act['tool']}  ({elapsed}s)", end="")
-                else:
-                    console.print(f"\r➜ {sub_id}: 运行中 ({elapsed}s)", end="")
-                # Bridge shared_activity to event stream (only on change)
-                if act != _last_activity_emit[0]:
-                    _last_activity_emit[0] = act
-                    if act and act.get("target"):
-                        console.emit("subtask_activity", {
-                            "sub_id": sub_id,
-                            "activity": f"{act['tool']} {act['target']}",
-                        })
-                    elif act:
-                        console.emit("subtask_activity", {
-                            "sub_id": sub_id,
-                            "activity": f"{act['tool']}",
-                        })
-                _progress_stop.wait(5)
-
-        t = threading.Thread(target=_tick, daemon=True)
-        t.start()
-
-        try:
-            result = _run_headless(task_md, worktree, env, logger, sub_id, active_pids=active_pids,
-                                   active_pids_lock=active_pids_lock, allowed_tools=allowed_tools,
-                                   shared_activity=shared_activity,
-                                   hard_timeout=hard_timeout,
-                                   config=_effective_config(config))
-            # S12-P0 G1：result 自带 kill_reason 属性（_run_headless 写入），
-            # 由 run_subtask 读取后传入 _verify_changes 归因。
-        finally:
-            _progress_stop.set()
-            t.join(timeout=2)
-
-        elapsed = int(time.time() - claude_start)
-        act = shared_activity[0]
-        _activity_note = f" → {act['tool']} {act['target']}" if act and act.get("target") else ""
-        console.print(f"\r➜ {sub_id}: ✓ {elapsed}s{_activity_note}" + " " * 20)
-    else:
-        # greywall 包装单点完成：agent 路径由 get_claude_command 内部处理，禁止重复包装
-        greywall_bin = shutil.which("greywall")
-        if agent:
-            claude_cmd = get_claude_command(agent, worktree, headless=False)
-        else:
-            # 观察期策略同 agents.py：--watch 全放行全记录
-            claude_cmd = (["greywall", "--watch", "--"] if greywall_bin else []) + ["claude", str(worktree)]
-
-        try:
-            result = subprocess.run(claude_cmd, env=env, cwd=str(worktree))
-            sandbox_type = "greywatch" if greywall_bin else "native"
-        except FileNotFoundError:
-            console.warning("Greywall 未安装，降级原生")
-            result = subprocess.run(["claude", str(worktree)], env=env, cwd=str(worktree))
-            sandbox_type = "native"
-
-    claude_time = time.time() - claude_start
-
-    return result, sandbox_type, claude_time
-
-
 def _build_repair_prompt(
     task_md: str,
     failed_cmds: list[str],
@@ -1362,7 +1280,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     pre_work_head: 上游 merge 完成后、claude 启动前的 HEAD（ISSUE-51），作为语义评估
     累积 diff 的 base——避免任务级 base_commit 把上游子任务的改动算进当前子任务。"""
     # S12-P0 G1：追踪本子任务最后一次 _run_headless 的 kill_reason（运行时 kill 分类）。
-    # initial_kill_reason 来自首次 _run_claude 的 result（_run_headless 在 subprocess 内运行）。
+    # initial_kill_reason 来自首次 backend 执行的 result（_run_headless 在 subprocess 内运行）。
     _latest_kill_reason = [initial_kill_reason]
 
     # Phase 1: 从运行时 config 读取 max_retries（默认 3，CLI --max-retries 可覆盖）
@@ -2853,48 +2771,41 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             _initial_timeout = min(_initial_timeout * 2, 14400)
             logger.info(f"[run_timeout] 本地模型检测，超时放宽 ×2 → {_initial_timeout}s")
         logger.info(f"[run_timeout] {sub_id} difficulty={difficulty} base={_run_base}s mult={_run_mult} → timeout={_initial_timeout}s")
-    _agent_loop_enabled = _effective_config(config).get("agent_loop", {}).get("enabled", False)
     _is_simple = _is_simple_task(subtask)
     # C4 轮级看门狗：claude 执行期间轮询代理台账检测重复轮（检测+上报，不杀进程）
     _wd_stop, _wd_state = _start_diag_watchdog(config, env, task_id, sub_id, logger)
-    if _agent_loop_enabled and _is_simple and headless:
-        # 解耦：动态 import + try/except——AgentLoop 是可选增强（方案 C 混合策略），
+
+    # B1：通过 BackendRegistry 分发到具体 Worker Backend。
+    _eff_cfg = _effective_config(config)
+    _backend_ctx = BackendContext(
+        task_md=task_md,
+        worktree=worktree,
+        env=env,
+        headless=headless,
+        agent=agent,
+        agent_type=subtask.get("agent_type", "developer"),
+        sub_id=sub_id,
+        task_id=task_id,
+        tag_name=f"{task_id}/{sub_id}",
+        difficulty=difficulty,
+        routed_model=routed_model,
+        active_pids=active_pids,
+        active_pids_lock=active_pids_lock,
+        logger=logger,
+        config=_eff_cfg,
+        hard_timeout=_initial_timeout,
+    )
+
+    def _run_with_backend(backend_name: str):
+        backend_cls = BackendRegistry.get(backend_name)
+        return backend_cls().run(_backend_ctx)
+
+    _backend_name = resolve_backend_name(_eff_cfg, subtask, headless, _is_simple)
+    if _backend_name == "agent_loop":
+        # 解耦：AgentLoop 是可选增强（方案 C 混合策略），
         # 模块加载或执行失败时回退到传统 claude -p 路径，不中断任务。
         try:
-            from .router import resolve_provider, ProviderConfig
-            from .agent_loop import AgentLoop
-            route = resolve_provider(subtask.get("agent_type", "developer"), config)
-            if route:
-                pc = route.primary
-                _route_info = f"{route.role}:{pc.provider}/{pc.model}"
-            else:
-                _plan_api = config.get("plan_api", {})
-                pc = ProviderConfig(
-                    provider=_plan_api.get("provider", "anthropic"),
-                    base_url=_plan_api.get("base_url", ""),
-                    model=_plan_api.get("model", ""),
-                )
-                _route_info = f"plan_api:{pc.provider}/{pc.model}"
-            # S4 复杂度双通道：按 difficulty 路由模型（非空时覆盖）
-            if routed_model:
-                pc.model = routed_model
-                _route_info += f" → {routed_model}"
-                logger.info(f"[S4] AgentLoop {sub_id} difficulty={difficulty} → model={routed_model}")
-            api_key = get_api_key(config)
-            loop = AgentLoop(logger=logger)
-            console.print(f"  🤖 直接 API 模式 ({_route_info})")
-            result = loop.run(
-                prompt=task_md,
-                worktree=worktree,
-                pc=pc,
-                api_key=api_key,
-                config=config,
-                tag_name=f"{task_id}/{sub_id}",
-                sub_id=sub_id,
-                task_id=task_id,
-            )
-            sandbox_type = "agent_loop"
-            claude_time = 0.0
+            result = _run_with_backend("agent_loop")
         except Exception as _loop_err:
             logger.warning(f"AgentLoop 加载/执行失败，回退到 claude -p（不中断任务）: {_loop_err}")
             # 关键修复（ISSUE #2）：AgentLoop 可能已部分修改 worktree（未 commit），
@@ -2906,15 +2817,11 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                 logger.info(f"AgentLoop fallback: 已清空 worktree 残留改动 ({worktree})")
             except Exception as _reset_err:
                 logger.warning(f"AgentLoop fallback: worktree reset 失败 ({_reset_err})，继续 fallback（claude -p 可能在脏状态上运行）")
-            result, sandbox_type, claude_time = _run_claude(
-                task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger,
-                config=config, hard_timeout=_initial_timeout,
-            )
+            result = _run_with_backend("claude")
     else:
-        result, sandbox_type, claude_time = _run_claude(
-            task_md, worktree, env, headless, agent, sub_id, active_pids, active_pids_lock, logger,
-            config=config, hard_timeout=_initial_timeout,
-        )
+        result = _run_with_backend("claude")
+    sandbox_type = result.sandbox_type
+    claude_time = result.backend_time
     _wd_stop()
     if _wd_state.get("loop_detected"):
         logger.warning(

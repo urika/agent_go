@@ -24,7 +24,9 @@ import agent_go
 from agent_go import cli as cli_mod
 from agent_go.agents import AgentType
 from agent_go.eval import analyze_cost, cmd_eval
-from agent_go.executor import _build_sandbox_env, _run_claude
+from agent_go.backends import BackendContext
+from agent_go.backends.claude_backend import ClaudeBackend
+from agent_go.executor import _build_sandbox_env
 from agent_go.subtask import _run_headless
 
 
@@ -175,21 +177,29 @@ class TestHeadlessAllowedTools:
         assert "--allowedTools" not in captured["cmd"]
 
     def test_run_claude_headless_passes_agent_tools(self, tmp_path, null_logger):
-        """_run_claude 应将 agent 的 allowed_tools 传给 _run_headless"""
+        """ClaudeBackend 应将 agent 的 allowed_tools 传给 _run_headless"""
         agent = AgentType(type_name="architect",
                           claude_config={"allowed_tools": ["Read", "Grep", "Glob"]})
-        with patch("agent_go.executor._run_headless") as mock_h:
+        ctx = BackendContext(
+            task_md="task", worktree=tmp_path, env={}, headless=True,
+            agent=agent, sub_id="sub-1", logger=null_logger,
+        )
+        with patch("agent_go.backends.claude_backend._run_headless") as mock_h:
             from subprocess import CompletedProcess
             mock_h.return_value = CompletedProcess([], 0, stdout="", stderr="")
-            _run_claude("task", tmp_path, {}, True, agent, "sub-1", set(), None, null_logger)
+            ClaudeBackend().run(ctx)
         assert mock_h.call_args.kwargs.get("allowed_tools") == ["Read", "Grep", "Glob"]
 
     def test_run_claude_headless_no_agent_unrestricted(self, tmp_path, null_logger):
         """无 agent 时 headless 不限制工具"""
-        with patch("agent_go.executor._run_headless") as mock_h:
+        ctx = BackendContext(
+            task_md="task", worktree=tmp_path, env={}, headless=True,
+            agent=None, sub_id="sub-1", logger=null_logger,
+        )
+        with patch("agent_go.backends.claude_backend._run_headless") as mock_h:
             from subprocess import CompletedProcess
             mock_h.return_value = CompletedProcess([], 0, stdout="", stderr="")
-            _run_claude("task", tmp_path, {}, True, None, "sub-1", set(), None, null_logger)
+            ClaudeBackend().run(ctx)
         assert mock_h.call_args.kwargs.get("allowed_tools") == []
 
 
@@ -398,7 +408,7 @@ class TestCmdCleanTags:
 
 class TestGreywallWrap:
     def test_no_double_wrap_with_agent(self, tmp_path, null_logger, monkeypatch):
-        """agent 路径：get_claude_command 已含 greywall 包装，_run_claude 不得再包"""
+        """agent 路径：get_claude_command 已含 greywall 包装，ClaudeBackend 不得再包"""
         agent = AgentType(type_name="developer", claude_config={})
         captured = {}
 
@@ -412,7 +422,11 @@ class TestGreywallWrap:
         monkeypatch.setattr("subprocess.run", fake_run)
         monkeypatch.setattr("shutil.which",
                             lambda name: "/usr/bin/greywall" if name == "greywall" else None)
-        _run_claude("task", tmp_path, {}, False, agent, "sub-1", set(), None, null_logger)
+        ctx = BackendContext(
+            task_md="task", worktree=tmp_path, env={}, headless=False,
+            agent=agent, sub_id="sub-1", logger=null_logger,
+        )
+        ClaudeBackend().run(ctx)
 
         cmd = captured["cmd"]
         assert sum(1 for tok in cmd if "greywall" in tok) == 1, f"双重包装: {cmd}"
@@ -432,7 +446,11 @@ class TestGreywallWrap:
         monkeypatch.setattr("subprocess.run", fake_run)
         monkeypatch.setattr("shutil.which",
                             lambda name: "/usr/bin/greywall" if name == "greywall" else None)
-        _run_claude("task", tmp_path, {}, False, None, "sub-1", set(), None, null_logger)
+        ctx = BackendContext(
+            task_md="task", worktree=tmp_path, env={}, headless=False,
+            agent=None, sub_id="sub-1", logger=null_logger,
+        )
+        ClaudeBackend().run(ctx)
 
         cmd = captured["cmd"]
         assert sum(1 for tok in cmd if "greywall" in tok) == 1
@@ -452,7 +470,10 @@ class TestGreywallWrap:
         monkeypatch.setattr("subprocess.run", fake_run)
         monkeypatch.setattr("shutil.which", lambda name: None)
         agent = AgentType(type_name="developer", claude_config={})
-        _, sandbox_type, _ = _run_claude("task", tmp_path, {}, False, agent,
-                                         "sub-1", set(), None, null_logger)
-        assert sandbox_type == "native"
+        ctx = BackendContext(
+            task_md="task", worktree=tmp_path, env={}, headless=False,
+            agent=agent, sub_id="sub-1", logger=null_logger,
+        )
+        res = ClaudeBackend().run(ctx)
+        assert res.sandbox_type == "native"
         assert captured["cmd"][0] == "claude"

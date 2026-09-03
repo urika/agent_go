@@ -73,6 +73,8 @@ class AgentType:
     description: str = ""
     claude_config: dict = field(default_factory=dict)
     preload_skills: list[str] = field(default_factory=list)
+    backend: str = "claude"
+    config: dict = field(default_factory=dict)
 
 
 def load_agent_type(name: str, project_root: Optional[Path] = None) -> Optional[AgentType]:
@@ -91,6 +93,8 @@ def load_agent_type(name: str, project_root: Optional[Path] = None) -> Optional[
                     description=data.get("description", ""),
                     claude_config=data.get("claude_config", {}),
                     preload_skills=data.get("preload_skills", []),
+                    backend=data.get("backend", "claude"),
+                    config=data.get("config", {}),
                 )
             except (json.JSONDecodeError, OSError, KeyError) as e:
                 logger.debug("Failed to load agent type from %s: %s", path, e)
@@ -103,6 +107,8 @@ def load_agent_type(name: str, project_root: Optional[Path] = None) -> Optional[
             description=builtin["description"],
             claude_config=builtin["claude_config"],
             preload_skills=builtin["preload_skills"],
+            backend=builtin.get("backend", "claude"),
+            config=builtin.get("config", {}),
         )
 
     return None
