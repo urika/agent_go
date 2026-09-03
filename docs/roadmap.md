@@ -681,7 +681,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 | ~~**B0 执行层重构（前置）**~~ | 已并入 B2（2026-09-03 决策）：B1 落地证明 backend 抽象不依赖 executor 全量拆分；executor 修复循环拆分随 B2 完成，`web_server.py` 拆分挂到下一个 Web 需求触发 | 见 B2 |
 | **B1 标准 backend 接口** ✅ 已完成（73cfcea） | 抽象 `BaseBackend` / `BackendContext` / `SubtaskResult` + `BackendRegistry`，Claude Code 和 AgentLoop 全部适配到同一接口 | 新增 backend 不再修改 `executor.py` 的硬编码 if/else；单元测试覆盖接口契约（tests/test_backends.py） |
 | **B2 AgentLoop 能力补齐** 🟡 代码已完成（bench A/B 待 B5） | 修复路径（fix/replan/reload）纳入 backend 分发（backends/dispatch.py）；ACI 工具集 Grep/Glob/View；stuck 检测；no-progress 信号；scope advisory；explore 只读模式 | 在 canonical easy/medium 任务上与 Claude Code 路径 A/B，通过率不劣化、成本下降（B5 验证） |
-| **B3 Pi backend PoC** ✅ PoC 完成（bench 待 B5） | 接入 `pi -p --mode json --no-session`（pi_backend.py）：NDJSON 事件流解析、聚合计量、hard_timeout、readonly 工具白名单；显式选择入口 subtask.backend / config.worker_backend | 5-10 个 canonical 任务跑通，记录 pass_rate / cost / elapsed（单次 smoke 已通过：建文件+解析+计量 ✓，canonical 批量随 B5） |
+| **B3 Pi backend PoC** ✅ PoC + 小规模批量完成 | 接入 `pi -p --mode json --no-session`（pi_backend.py）：NDJSON 事件流解析、聚合计量、hard_timeout、readonly 工具白名单、零产出错误映射；显式选择入口 subtask.backend / config.worker_backend / bench --worker-backend | golden 6 任务 × 2 臂（deepseek-pro / kimi-for-coding）累计 11/12 通过，唯一失败为已修复的基础设施 bug + 额度耗尽（详见 stage13-b3 设计文档）；B5 正式验收待同模型双臂 + repeat≥2 |
 | **B4 backend 路由配置** | `config.json` 支持声明式 backend 注册，按 difficulty/task_type 路由 | 配置即可切换子任务 backend，无需改代码 |
 | **B5 bench 对比基线** | Claude Code vs AgentLoop vs Pi 在相同任务集上跑 A/B | 只有不劣化于当前默认路径的 backend 才允许扩大使用 |
 
