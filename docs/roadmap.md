@@ -681,7 +681,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 | ~~**B0 执行层重构（前置）**~~ | 已并入 B2（2026-09-03 决策）：B1 落地证明 backend 抽象不依赖 executor 全量拆分；executor 修复循环拆分随 B2 完成，`web_server.py` 拆分挂到下一个 Web 需求触发 | 见 B2 |
 | **B1 标准 backend 接口** ✅ 已完成（73cfcea） | 抽象 `BaseBackend` / `BackendContext` / `SubtaskResult` + `BackendRegistry`，Claude Code 和 AgentLoop 全部适配到同一接口 | 新增 backend 不再修改 `executor.py` 的硬编码 if/else；单元测试覆盖接口契约（tests/test_backends.py） |
 | **B2 AgentLoop 能力补齐** 🟡 代码已完成（bench A/B 待 B5） | 修复路径（fix/replan/reload）纳入 backend 分发（backends/dispatch.py）；ACI 工具集 Grep/Glob/View；stuck 检测；no-progress 信号；scope advisory；explore 只读模式 | 在 canonical easy/medium 任务上与 Claude Code 路径 A/B，通过率不劣化、成本下降（B5 验证） |
-| **B3 Pi backend PoC** | 接入 `pi -p <prompt> --mode json --no-session --approve`，wrapper 负责 git commit/tag | 5-10 个 canonical 任务跑通，记录 pass_rate / cost / elapsed |
+| **B3 Pi backend PoC** ✅ PoC 完成（bench 待 B5） | 接入 `pi -p --mode json --no-session`（pi_backend.py）：NDJSON 事件流解析、聚合计量、hard_timeout、readonly 工具白名单；显式选择入口 subtask.backend / config.worker_backend | 5-10 个 canonical 任务跑通，记录 pass_rate / cost / elapsed（单次 smoke 已通过：建文件+解析+计量 ✓，canonical 批量随 B5） |
 | **B4 backend 路由配置** | `config.json` 支持声明式 backend 注册，按 difficulty/task_type 路由 | 配置即可切换子任务 backend，无需改代码 |
 | **B5 bench 对比基线** | Claude Code vs AgentLoop vs Pi 在相同任务集上跑 A/B | 只有不劣化于当前默认路径的 backend 才允许扩大使用 |
 
@@ -690,7 +690,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 ```text
 B1 标准 backend 接口 ✅（73cfcea）
   -> B2 AgentLoop 补齐 ✅ 代码完成（B0 修复循环拆分已并入；bench A/B 待 B5）
-  -> B3 Pi backend PoC（验证开源 backend 可接入）
+  -> B3 Pi backend PoC ✅（0ea5ce8 之后；smoke 通过，canonical 批量随 B5）
   -> B4 backend 路由配置
   -> B5 bench A/B（成本/通过率证据）
   -> accepted（可选地扩大默认启用范围）
@@ -838,7 +838,7 @@ M0 产品契约与指标冻结  ✅ accepted
   -> 阶段 C 智能闭环    C1/C2/C3 ✅ + C4 KnowledgeStore A/B smoke ✅（葬礼回写链路已闭环）
   -> 阶段 D 自治决策    → 信任指标放行门达标 + B1 决策后
   -> 阶段 E Spec-as-Source  仅试点
-  -> 阶段十三 多 Backend 架构  proposed（B1 标准接口 ✅ / B2 AgentLoop 补齐 ✅ 代码 / B3 Pi PoC）
+  -> 阶段十三 多 Backend 架构  proposed（B1 标准接口 ✅ / B2 AgentLoop 补齐 ✅ 代码 / B3 Pi PoC ✅）
 ```
 
 下一阶段三件事（按优先级）：
@@ -847,6 +847,6 @@ M0 产品契约与指标冻结  ✅ accepted
 2. **阶段 C 续项**：C3 局部重规划 ✅（2026-08-21，无进展触发一次拆分建议，默认人工确认，F-VERIFY-6 契约全守）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位，在 delivery-20260820 基线上做两臂对比）。
 3. **并行推进阶段 D 放行评估与阶段十三 多 Backend 架构**：
    - 阶段 D：信任指标（审查后修改率 / 盲区命中率 / 复发可见率）跨任务积累达标后，启动 Reviewer 灰度与 B1 自动 merge 决策。
-   - 阶段十三：B1 标准 backend 抽象与 B2 AgentLoop 能力补齐已落地（B0 修复循环拆分已并入 B2）；下一步跑 B3 Pi backend PoC 与 B5 bench A/B；只有 bench 证明不劣化于当前 Claude Code 默认路径，才允许扩大使用。
+   - 阶段十三：B1 标准 backend 抽象、B2 AgentLoop 能力补齐（B0 已并入）与 B3 Pi backend PoC 已落地（pi_backend.py + 显式选择入口 worker_backend，单次 smoke 通过）；下一步 B4 路由配置与 B5 bench A/B（canonical 批量对比）；只有 bench 证明不劣化于当前 Claude Code 默认路径，才允许扩大使用。
 
 在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。
