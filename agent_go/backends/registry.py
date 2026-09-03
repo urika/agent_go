@@ -57,26 +57,50 @@ def resolve_backend_name(
     - B3：显式声明优先——subtask.backend 或 config.worker_backend 可指定
       backend（如 pi）；非 claude 的显式 backend 仅 headless 模式生效，
       交互模式回退 claude（pi/opencode 均为非交互 CLI）。
-    - agent_backend 字段已预留，供后续阶段按 Agent 类型指定 backend（B4 启用）。
+    - B4：声明式路由——worker_backend_by_type（按 agent_type）与
+      worker_backend_by_difficulty（按 difficulty），全部默认空，不改变既有行为。
+    - agent_backend 字段已预留，供后续阶段按 Agent 类型指定 backend（B4 不启用）。
+
+    解析优先级（高→低）：
+      1. subtask.backend（单子任务显式）
+      2. config.worker_backend（全局显式）
+      3. config.worker_backend_by_type[agent_type]
+      4. config.worker_backend_by_difficulty[difficulty]
+      5. agent_loop 自动规则（B1 既有）
+      6. claude 兜底
+    以上 1-4 解析出非 claude 时均需 headless，否则回退 claude。
 
     Args:
         config: 运行时生效配置（已合并 CLI 覆盖）。
-        subtask: 子任务字典。
+        subtask: 子任务字典（读取 backend / agent_type / difficulty 字段）。
         headless: 是否为无头模式。
         is_simple: 子任务是否被 _is_simple_task 判定为简单。
         agent_backend: Agent 类型声明的 backend（默认 claude）。
 
     Returns:
-        backend 名称，当前为 "claude" / "agent_loop" / 显式声明的名称（如 "pi"）。
+        backend 名称："claude" / "agent_loop" / 显式或路由声明的名称（如 "pi"）。
     """
-    # B3：显式声明优先（默认空，不改变既有行为）。
-    explicit = (subtask or {}).get("backend") or (config or {}).get("worker_backend", "")
+    subtask = subtask or {}
+    config = config or {}
+
+    # 1-2：显式声明优先（默认空，不改变既有行为）
+    explicit = subtask.get("backend") or config.get("worker_backend", "")
+    # 3-4：B4 声明式路由（按 agent_type 优先于按 difficulty）
+    if not explicit:
+        _by_type = config.get("worker_backend_by_type", {}) or {}
+        explicit = _by_type.get(subtask.get("agent_type", "developer"), "")
+    if not explicit:
+        _by_diff = config.get("worker_backend_by_difficulty", {}) or {}
+        explicit = _by_diff.get(subtask.get("difficulty", "medium"), "")
+
     if explicit:
         if explicit != "claude" and not headless:
             return "claude"
         return explicit
-    # B1：保持原有 agent_loop 触发条件，不受 agent_backend 影响。
-    _agent_loop_enabled = (config or {}).get("agent_loop", {}).get("enabled", False)
+
+    # 5：B1 保持原有 agent_loop 触发条件，不受 agent_backend 影响
+    _agent_loop_enabled = config.get("agent_loop", {}).get("enabled", False)
     if _agent_loop_enabled and headless and is_simple:
         return "agent_loop"
+    # 6：兜底
     return "claude"

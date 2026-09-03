@@ -174,6 +174,14 @@ DEFAULT_CONFIG = {
     },
     "artifact_dir": None,           # S9-B 产物导出目录；null = 不导出（产物留在 worktree，向后兼容）
     "worker_backend": "",           # B3 显式 worker backend（"pi" 等）；空 = 按既有策略解析（claude/agent_loop）
+    # B4 声明式 backend 路由（空 = 不覆盖；非 claude 仅 headless 生效）。
+    # 注意命名避开 deprecated 的 worker_backends（模型名→ANTHROPIC_BASE_URL 映射）。
+    "worker_backend_by_difficulty": {
+        "easy": "",
+        "medium": "",
+        "hard": "",
+    },
+    "worker_backend_by_type": {},   # B4 按 agent_type 路由（如 {"explore": "pi"}；优先级高于 by_difficulty）
     "worker_models": {
         "easy": "",                 # S4 复杂度双通道：空 = claude CLI 默认模型
         "medium": "",

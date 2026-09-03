@@ -600,3 +600,74 @@ class TestPiBackend:
             res = PiBackend().run(self._ctx(tmp_path, null_logger, progress=False))
         assert res.returncode == 0
         assert res.stdout == "RECOVERED"
+
+
+class TestBackendRoutingB4:
+    """B4：声明式路由 worker_backend_by_difficulty（按难度）/ worker_backend_by_type（按 agent_type）。
+
+    优先级：subtask.backend > worker_backend > by_type > by_difficulty > agent_loop 自动 > claude。
+    """
+
+    def test_by_difficulty(self):
+        cfg = {"worker_backend_by_difficulty": {"easy": "", "medium": "", "hard": "pi"}}
+        assert resolve_backend_name(cfg, {"difficulty": "hard"}, True, False) == "pi"
+        assert resolve_backend_name(cfg, {"difficulty": "medium"}, True, False) == "claude"
+
+    def test_by_type(self):
+        cfg = {"worker_backend_by_type": {"explore": "pi"}}
+        assert resolve_backend_name(cfg, {"agent_type": "explore"}, True, False) == "pi"
+        assert resolve_backend_name(cfg, {"agent_type": "developer"}, True, False) == "claude"
+
+    def test_by_type_beats_by_difficulty(self):
+        cfg = {
+            "worker_backend_by_type": {"explore": "agent_loop"},
+            "worker_backend_by_difficulty": {"hard": "pi"},
+        }
+        sub = {"agent_type": "explore", "difficulty": "hard"}
+        assert resolve_backend_name(cfg, sub, True, False) == "agent_loop"
+
+    def test_global_explicit_beats_by_type(self):
+        cfg = {"worker_backend": "pi", "worker_backend_by_type": {"explore": "agent_loop"}}
+        assert resolve_backend_name(cfg, {"agent_type": "explore"}, True, False) == "pi"
+
+    def test_subtask_backend_beats_all(self):
+        cfg = {"worker_backend": "pi", "worker_backend_by_type": {"explore": "pi"}}
+        sub = {"backend": "claude", "agent_type": "explore"}
+        assert resolve_backend_name(cfg, sub, True, False) == "claude"
+
+    def test_routed_non_claude_requires_headless(self):
+        cfg = {"worker_backend_by_difficulty": {"hard": "pi"}}
+        assert resolve_backend_name(cfg, {"difficulty": "hard"}, False, False) == "claude"
+        cfg2 = {"worker_backend_by_type": {"explore": "pi"}}
+        assert resolve_backend_name(cfg2, {"agent_type": "explore"}, False, True) == "claude"
+
+    def test_empty_routing_keeps_b1_behavior(self):
+        cfg = {
+            "agent_loop": {"enabled": True},
+            "worker_backend_by_difficulty": {"easy": "", "medium": "", "hard": ""},
+            "worker_backend_by_type": {},
+        }
+        assert resolve_backend_name(cfg, {"difficulty": "easy"}, True, True) == "agent_loop"
+        assert resolve_backend_name(cfg, {"difficulty": "easy"}, True, False) == "claude"
+
+    def test_repair_path_uses_difficulty_routing(self, tmp_path, null_logger):
+        """run_repair 从 ctx 合成 subtask 视图，by_difficulty 对修复路径同样生效。"""
+        calls = []
+
+        class FakePi(BaseBackend):
+            name = "pi"
+
+            def run(self, ctx):
+                calls.append("pi")
+                return SubtaskResult(returncode=0, sandbox_type="pi")
+
+        cfg = {"worker_backend_by_difficulty": {"hard": "pi"}}
+        ctx = BackendContext(
+            task_md="fix", worktree=tmp_path, env={}, headless=True,
+            sub_id="sub-1-fix-1", logger=null_logger, config=cfg,
+            difficulty="hard", agent_type="developer",
+        )
+        with patch("agent_go.backends.dispatch.BackendRegistry.get", return_value=FakePi):
+            res = run_repair(ctx, is_simple=False)
+        assert res.sandbox_type == "pi"
+        assert calls == ["pi"]

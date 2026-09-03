@@ -32,8 +32,9 @@ def repair_timeout(cfg: dict, difficulty: str, env: dict) -> int:
 def run_repair(ctx: BackendContext, is_simple: bool) -> SubtaskResult:
     """修复类执行（fix/replan/reload）的 backend 分发。
 
-    与初始执行同一解析策略：resolve_backend_name(ctx.config, {}, ctx.headless, is_simple)；
-    非默认 backend（agent_loop / 显式声明的 pi 等）路径异常时回退 claude（log warning），
+    与初始执行同一解析策略：resolve_backend_name（B4 起含 by_type/by_difficulty 路由，
+    输入从 ctx 合成 subtask 视图）；
+    非默认 backend（agent_loop / 显式或路由声明的 pi 等）路径异常时回退 claude（log warning），
     与 executor 初始路径的容错一致
     （初始路径额外做的 worktree reset 是防 AgentLoop 半改状态污染首跑验证；
     修复路径随后必经 git add/commit，由 executor 的完成边界逻辑兜底，此处不重复 reset）。
@@ -42,7 +43,10 @@ def run_repair(ctx: BackendContext, is_simple: bool) -> SubtaskResult:
     # 非空时 AgentLoop 自行 git add/commit/tag。修复路径强制留空，
     # 让 executor 的修复后 commit/tag 逻辑继续独占完成边界。
     ctx.tag_name = ""
-    backend_name = resolve_backend_name(ctx.config, {}, ctx.headless, is_simple)
+    # B4：修复路径同样参与声明式路由（by_type/by_difficulty 需要 agent_type/difficulty，
+    # 从 ctx 合成 subtask 视图；显式 subtask.backend 在修复路径不存在，不影响）。
+    _sub_view = {"agent_type": ctx.agent_type, "difficulty": ctx.difficulty}
+    backend_name = resolve_backend_name(ctx.config, _sub_view, ctx.headless, is_simple)
     if backend_name != "claude":
         # 非默认 backend（agent_loop / 显式声明的 pi 等）：执行失败时回退 claude
         try:
