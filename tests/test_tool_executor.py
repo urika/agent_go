@@ -20,9 +20,9 @@ class TestToolDefinitions:
     """工具 schema 注册"""
 
     def test_four_tools_registered(self):
-        """注册 Read/Write/Edit/Bash 四个工具"""
+        """注册 Read/Write/Edit/Bash/Grep/Glob/View 七个工具（B2 补齐 ACI 导航工具）"""
         names = [t["name"] for t in TOOL_DEFINITIONS]
-        assert names == ["Read", "Write", "Edit", "Bash"]
+        assert names == ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "View"]
 
     def test_definitions_returned_by_registry(self):
         """ToolRegistry.definitions() 返回完整 schema 列表"""
@@ -41,6 +41,9 @@ class TestToolDefinitions:
         assert required["Write"] == ["file_path", "content"]
         assert required["Edit"] == ["file_path", "old_string", "new_string"]
         assert required["Bash"] == ["command"]
+        assert required["Grep"] == ["pattern"]
+        assert required["Glob"] == ["pattern"]
+        assert required["View"] == ["file_path"]
 
 
 class TestReadFile:
@@ -277,3 +280,131 @@ class TestToolRegistryDispatch:
         assert ToolRegistry.execute(
             "Bash", {"command": "cat a.txt"}, temp_dir
         )["output"] == "2"
+
+
+class TestGrepTool:
+    """Grep 工具（B2 新增）"""
+
+    def test_grep_finds_matches(self, temp_dir):
+        (temp_dir / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+        (temp_dir / "sub").mkdir()
+        (temp_dir / "sub" / "b.py").write_text("x = foo()\n", encoding="utf-8")
+        result = ToolRegistry.execute("Grep", {"pattern": "foo"}, temp_dir)
+        assert result["success"] is True
+        assert "a.py:1: def foo():" in result["output"]
+        assert "sub/b.py:1: x = foo()" in result["output"]
+
+    def test_grep_glob_filter(self, temp_dir):
+        (temp_dir / "a.py").write_text("foo\n", encoding="utf-8")
+        (temp_dir / "a.md").write_text("foo\n", encoding="utf-8")
+        result = ToolRegistry.execute("Grep", {"pattern": "foo", "glob": "*.py"}, temp_dir)
+        assert "a.py" in result["output"]
+        assert "a.md" not in result["output"]
+
+    def test_grep_invalid_regex(self, temp_dir):
+        result = ToolRegistry.execute("Grep", {"pattern": "([bad"}, temp_dir)
+        assert result["success"] is False
+        assert "无效正则" in result["error"]
+
+    def test_grep_skips_git_dir(self, temp_dir):
+        (temp_dir / ".git").mkdir()
+        (temp_dir / ".git" / "config").write_text("foo\n", encoding="utf-8")
+        result = ToolRegistry.execute("Grep", {"pattern": "foo"}, temp_dir)
+        assert result["output"] == "（无匹配）"
+
+    def test_grep_result_cap(self, temp_dir):
+        (temp_dir / "big.txt").write_text("foo\n" * 500, encoding="utf-8")
+        result = ToolRegistry.execute("Grep", {"pattern": "foo"}, temp_dir)
+        assert "结果截断" in result["output"]
+
+
+class TestGlobTool:
+    """Glob 工具（B2 新增）"""
+
+    def test_glob_lists_files(self, temp_dir):
+        (temp_dir / "x.py").write_text("", encoding="utf-8")
+        (temp_dir / "sub").mkdir()
+        (temp_dir / "sub" / "y.py").write_text("", encoding="utf-8")
+        (temp_dir / "z.md").write_text("", encoding="utf-8")
+        result = ToolRegistry.execute("Glob", {"pattern": "**/*.py"}, temp_dir)
+        assert result["success"] is True
+        assert "x.py" in result["output"]
+        assert "sub/y.py" in result["output"]
+        assert "z.md" not in result["output"]
+
+    def test_glob_no_match(self, temp_dir):
+        result = ToolRegistry.execute("Glob", {"pattern": "**/*.rs"}, temp_dir)
+        assert result["success"] is True
+        assert "无匹配" in result["output"]
+
+    def test_glob_skips_skip_dirs(self, temp_dir):
+        (temp_dir / "node_modules").mkdir()
+        (temp_dir / "node_modules" / "dep.js").write_text("", encoding="utf-8")
+        result = ToolRegistry.execute("Glob", {"pattern": "**/*.js"}, temp_dir)
+        assert "无匹配" in result["output"]
+
+
+class TestViewFile:
+    """View 长文件导航（B2 新增）"""
+
+    def test_view_full_file_with_line_numbers(self, temp_dir):
+        (temp_dir / "f.py").write_text("l1\nl2\nl3\n", encoding="utf-8")
+        result = ToolRegistry.execute("View", {"file_path": "f.py"}, temp_dir)
+        assert result["success"] is True
+        assert "共 3 行" in result["output"]
+        assert "2\tl2" in result["output"]
+
+    def test_view_range(self, temp_dir):
+        (temp_dir / "f.py").write_text("\n".join(f"l{i}" for i in range(1, 11)), encoding="utf-8")
+        result = ToolRegistry.execute("View", {"file_path": "f.py", "offset": 3, "limit": 2}, temp_dir)
+        assert "第 3-4 行" in result["output"]
+        assert "l3" in result["output"] and "l4" in result["output"]
+        assert "l5" not in result["output"]
+
+    def test_view_offset_beyond_eof(self, temp_dir):
+        (temp_dir / "f.py").write_text("l1\n", encoding="utf-8")
+        result = ToolRegistry.execute("View", {"file_path": "f.py", "offset": 99}, temp_dir)
+        assert result["success"] is False
+        assert "超出文件行数" in result["error"]
+
+    def test_view_missing_file(self, temp_dir):
+        result = ToolRegistry.execute("View", {"file_path": "nope.py"}, temp_dir)
+        assert result["success"] is False
+
+
+class TestReadonlyMode:
+    """explore 只读模式（B2 新增）"""
+
+    def test_definitions_filtered(self):
+        names = [t["name"] for t in ToolRegistry.definitions(readonly=True)]
+        assert names == ["Read", "Bash", "Grep", "Glob", "View"]
+        assert "Write" not in names and "Edit" not in names
+
+    def test_write_blocked(self, temp_dir):
+        result = ToolRegistry.execute(
+            "Write", {"file_path": "x.txt", "content": "y"}, temp_dir, readonly=True)
+        assert result["success"] is False
+        assert "只读模式" in result["error"]
+        assert not (temp_dir / "x.txt").exists()
+
+    def test_edit_blocked(self, temp_dir):
+        (temp_dir / "x.txt").write_text("a", encoding="utf-8")
+        result = ToolRegistry.execute(
+            "Edit", {"file_path": "x.txt", "old_string": "a", "new_string": "b"},
+            temp_dir, readonly=True)
+        assert result["success"] is False
+        assert "只读模式" in result["error"]
+
+    def test_read_tools_allowed(self, temp_dir):
+        (temp_dir / "x.txt").write_text("hello\n", encoding="utf-8")
+        for name, args in [("Read", {"file_path": "x.txt"}),
+                           ("Grep", {"pattern": "hello"}),
+                           ("Glob", {"pattern": "*.txt"}),
+                           ("View", {"file_path": "x.txt"})]:
+            result = ToolRegistry.execute(name, args, temp_dir, readonly=True)
+            assert result["success"] is True, f"{name} 应在只读模式可用"
+
+    def test_readonly_false_unchanged(self, temp_dir):
+        result = ToolRegistry.execute(
+            "Write", {"file_path": "x.txt", "content": "y"}, temp_dir, readonly=False)
+        assert result["success"] is True

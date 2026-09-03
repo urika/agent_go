@@ -12,6 +12,7 @@
 """
 
 import json
+import re
 import time
 import subprocess
 import logging
@@ -155,6 +156,8 @@ class AgentLoop:
         tag_name: str = "",
         sub_id: str = "",
         task_id: str = "",
+        readonly: bool = False,
+        scope_hint: str = "",
     ) -> subprocess.CompletedProcess:
         """执行多轮 Agent 对话。
 
@@ -167,6 +170,9 @@ class AgentLoop:
             tag_name: git tag 名称（由 executor 生成）
             sub_id: 子任务 ID
             task_id: 任务 ID
+            readonly: explore 只读模式（只暴露只读工具，屏蔽 Write/Edit）
+            scope_hint: 子任务声明的 files_hint（逗号/空白分隔），写工具越界时
+                在工具结果中追加 advisory 警告（不硬阻断）
 
         Returns:
             subprocess.CompletedProcess（兼容现有接口）
@@ -184,7 +190,7 @@ class AgentLoop:
         api_timeout = agent_loop_cfg.get("api_timeout", 120)     # 单次 API 调用超时（秒）
         metering_path = config.get("_metering_path", "")
 
-        tools = ToolRegistry.definitions()
+        tools = ToolRegistry.definitions(readonly=readonly)
         # S9-A: 合并外部 MCP 工具（如有连接池透传）
         _mcp_pool = config.get("_mcp_pool") if config else None
         if _mcp_pool is not None:
@@ -204,6 +210,17 @@ class AgentLoop:
         total_tool_calls = 0
         tool_stats: dict[str, int] = {}
         loop_start = time.time()
+
+        # B2 stuck/no-progress/scope 检测（均可经 agent_loop.* 配置调整）
+        _stuck_threshold = agent_loop_cfg.get("stuck_repeat_threshold", 3)
+        _no_progress_turns = agent_loop_cfg.get("no_progress_turns", 8)
+        _scope_hints = [t for t in re.split(r"[,\s]+", scope_hint or "") if t]
+        _last_sig = None
+        _repeat_count = 0
+        _stuck_nudged = False
+        stuck_detected = False
+        no_progress = False
+        _turns_since_write = 0
 
         for turn in range(max_turns):
             # 全局超时检查
@@ -238,15 +255,33 @@ class AgentLoop:
 
             messages.append(_assistant_message(tool_calls, content, provider))
 
+            _wrote_this_turn = False
             for tc in tool_calls:
                 self.logger.info(f"[AgentLoop] 执行 {tc['name']}(...)")
+                # stuck 检测：连续相同（工具+参数）签名计数
+                _sig = (tc["name"], json.dumps(tc["input"], ensure_ascii=False, sort_keys=True))
+                if _sig == _last_sig:
+                    _repeat_count += 1
+                else:
+                    _repeat_count = 1
+                    _last_sig = _sig
                 # S9-A: MCP 工具按 mcp__ 前缀路由到连接池，原生工具走 ToolRegistry
                 if tc["name"].startswith("mcp__"):
                     _mcp_pool = config.get("_mcp_pool") if config else None
                     result = _mcp_pool.dispatch(tc["name"], tc["input"]) if _mcp_pool is not None \
                         else {"success": False, "error": "MCP 池不可用"}
                 else:
-                    result = ToolRegistry.execute(tc["name"], tc["input"], worktree)
+                    result = ToolRegistry.execute(tc["name"], tc["input"], worktree, readonly=readonly)
+                # scope advisory：写工具落在 files_hint 声明范围外时追加提示（不阻断）
+                if _scope_hints and tc["name"] in ("Write", "Edit") and result.get("success"):
+                    _fp = str(tc["input"].get("file_path", ""))
+                    if _fp and not any(h in _fp for h in _scope_hints):
+                        result["output"] = (result.get("output", "")
+                                            + f"\n⚠️ scope 提示：{_fp} 不在本子任务声明的 files_hint"
+                                              f"（{scope_hint}）范围内，请确认是否越界。")
+                        self.logger.warning(f"[AgentLoop] scope 越界写入: {_fp}（files_hint={scope_hint}）")
+                if tc["name"] in ("Write", "Edit") and result.get("success"):
+                    _wrote_this_turn = True
                 result_str = result.get("output", "") or result.get("error", "")
                 self.logger.debug(f"[AgentLoop] {tc['name']} 结果: {result_str[:200]}")
                 messages.append({
@@ -254,6 +289,31 @@ class AgentLoop:
                     "tool_call_id": tc["id"],
                     "content": json.dumps(result, ensure_ascii=False)[:4000],
                 })
+
+            # stuck 处置：首次达阈值注入提醒；提醒后仍重复则判定卡死，终止循环
+            if _repeat_count > _stuck_threshold and _stuck_nudged:
+                self.logger.warning(
+                    f"[AgentLoop] stuck 检测：提醒后仍重复相同工具调用（{tc['name']}），强制结束"
+                )
+                stuck_detected = True
+                exit_code = 1
+                break
+            if _repeat_count >= _stuck_threshold and not _stuck_nudged:
+                _stuck_nudged = True
+                self.logger.warning(f"[AgentLoop] stuck 检测：连续 {_repeat_count} 次重复相同工具调用")
+                messages.append({
+                    "role": "user",
+                    "content": "系统提示：你已连续多次重复完全相同的工具调用且没有进展。"
+                               "请换一种方式：检查之前的工具结果、调整参数或改用其他工具。",
+                })
+
+            # no-progress 信号：连续多轮无成功写入（只记信号，不终止——终态判定归 wrapper 验证）
+            _turns_since_write = 0 if _wrote_this_turn else _turns_since_write + 1
+            if not no_progress and _turns_since_write >= _no_progress_turns:
+                no_progress = True
+                self.logger.warning(
+                    f"[AgentLoop] no-progress：连续 {_turns_since_write} 轮无成功 Write/Edit"
+                )
 
             # 窗口管理：超过 40 条消息时丢弃早期历史
             if len(messages) > 40:
@@ -268,6 +328,7 @@ class AgentLoop:
         self.logger.info(
             f"[AgentLoop] 汇总: {turn+1} 轮, {total_tool_calls} 工具调用, "
             f"${total_cost:.4f}, {total_duration}s"
+            f"{' [stuck]' if stuck_detected else ''}{' [no-progress]' if no_progress else ''}"
         )
 
         # 写入汇总计量事件
@@ -284,6 +345,8 @@ class AgentLoop:
             "total_tool_calls": total_tool_calls,
             "tool_stats": tool_stats,
             "duration_sec": total_duration,
+            "stuck_detected": stuck_detected,
+            "no_progress": no_progress,
             "task_id": task_id,
             "subtask_id": sub_id,
         })

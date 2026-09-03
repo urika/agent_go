@@ -40,6 +40,9 @@ class BackendContext:
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(__name__))
     config: dict = field(default_factory=dict)
     hard_timeout: int = 0
+    # 进度展示开关：False 时 ClaudeBackend headless 路径不起 ticker 线程、
+    # 不打印结束行（修复路径保持控制台安静的既有行为）。
+    progress: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
 
 

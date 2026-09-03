@@ -8,15 +8,16 @@ import shutil
 import logging
 import json
 import threading
+from dataclasses import replace as _ctx_replace
 from pathlib import Path
 from typing import Optional
 
 from .console import _LazyConsole
 from .config import log_event, safe_input, meter_event, write_censored_event
 from .utils import _format_commit, _is_safe_verification_command, _log_rejected_command, _safe_optional_call, classify_verification_scope
-from .subtask import _git_merge_upstream, _run_headless
+from .subtask import _git_merge_upstream
 from .agents import load_agent_type, get_agent_env
-from .backends import BackendContext, BackendRegistry, resolve_backend_name
+from .backends import BackendContext, BackendRegistry, resolve_backend_name, repair_timeout, run_repair
 from .git_utils import _worktree_create, init_git_repo
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 from .artifacts import ARTIFACT_DIR_NAME
@@ -1274,18 +1275,35 @@ def _diff_stat_hash(worktree: Path, base_ref: str = "HEAD") -> Optional[str]:
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
                     task_dir=None, config=None, interrupt_event=None, initial_kill_reason=None,
-                    pre_work_head=""):
+                    pre_work_head="", backend_ctx=None):
     """Verify changes, commit if needed, run verification commands. Returns verification dict.
 
     pre_work_head: 上游 merge 完成后、claude 启动前的 HEAD（ISSUE-51），作为语义评估
-    累积 diff 的 base——避免任务级 base_commit 把上游子任务的改动算进当前子任务。"""
-    # S12-P0 G1：追踪本子任务最后一次 _run_headless 的 kill_reason（运行时 kill 分类）。
-    # initial_kill_reason 来自首次 backend 执行的 result（_run_headless 在 subprocess 内运行）。
+    累积 diff 的 base——避免任务级 base_commit 把上游子任务的改动算进当前子任务。
+    backend_ctx: 初始执行的 BackendContext（run_subtask 传入），修复执行（fix/replan/
+    reload）以其为模板经 dataclasses.replace 派生；为 None 时按本函数参数重建等价上下文。"""
+    # S12-P0 G1：追踪本子任务最后一次执行的 kill_reason（运行时 kill 分类）。
+    # initial_kill_reason 来自首次 backend 执行的 result（claude 在 subprocess 内运行）。
     _latest_kill_reason = [initial_kill_reason]
 
     # Phase 1: 从运行时 config 读取 max_retries（默认 3，CLI --max-retries 可覆盖）
     _cfg = _effective_config(config)
     max_retries = _cfg.get("verification", {}).get("max_retries", 3)
+
+    # B2：修复类执行（fix/replan/reload）统一走 BackendRegistry 分发（backends.dispatch）。
+    # _is_simple 与初始执行同一判定函数；backend_ctx 缺省时按本函数参数重建
+    # （直接调用方/测试场景；agent 缺失时 allowed_tools 退化为不限制，与
+    # allowed_tools=None 的旧语义等价）。
+    _is_simple = _is_simple_task(subtask)
+    if backend_ctx is None:
+        backend_ctx = BackendContext(
+            task_md=task_md, worktree=worktree, env=env, headless=headless,
+            agent_type=subtask.get("agent_type", "developer"),
+            sub_id=sub_id, task_id=task_id, tag_name="",
+            difficulty=subtask.get("difficulty", "medium"),
+            active_pids=active_pids, active_pids_lock=active_pids_lock,
+            logger=logger, config=_cfg,
+        )
 
     # 中断事件由 pipeline 创建；直接调用时使用独立事件，绝不跨 subtask 共享。
     interrupt_event = interrupt_event or threading.Event()
@@ -1515,20 +1533,17 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         "sub_id": sub_id, "reason": trigger_reason,
                         "pin_anchors": len(_pin_anchors),
                     })
-                    _difficulty_r = subtask.get("difficulty", "medium")
-                    _base_timeout_r = _cfg.get("verification", {}).get("retry_timeout", 300)
-                    _mult_r = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(_difficulty_r, 1.5)
-                    _cap_r = {"easy": 600, "medium": 900, "hard": 1500}.get(_difficulty_r, 900)
-                    _reload_timeout = min(int(_base_timeout_r * _mult_r), _cap_r)
-                    if env.get("AGENT_GO_IS_LOCAL", "") == "1":
-                        _reload_timeout = min(_reload_timeout * 2, 3000)
+                    _reload_timeout = repair_timeout(_cfg, subtask.get("difficulty", "medium"), env)
                     _latest_kill_reason[0] = None
                     _reload_prompt = task_md
-                    _reload_result = _run_headless(
-                        _reload_prompt, worktree, env, logger, sub_id,
-                        active_pids=active_pids, active_pids_lock=active_pids_lock,
-                        allowed_tools=allowed_tools, hard_timeout=_reload_timeout,
-                        config=_cfg)
+                    # B2：修复执行走 BackendRegistry 分发（与初始执行同一解析策略）。
+                    # progress=False 保持控制台安静；tag_name="" 由 run_repair 强制，
+                    # commit 完成边界仍由下方 executor 逻辑独占。
+                    _reload_bctx = _ctx_replace(
+                        backend_ctx, task_md=_reload_prompt, sub_id=sub_id,
+                        headless=True, progress=False, tag_name="",
+                        hard_timeout=_reload_timeout)
+                    _reload_result = run_repair(_reload_bctx, _is_simple)
                     _reload_kr = getattr(_reload_result, "kill_reason", None)
                     if isinstance(_reload_kr, str) and _reload_kr:
                         _latest_kill_reason[0] = _reload_kr
@@ -1601,13 +1616,7 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 task_md, failed_cmds, failed_outputs,
                 summary, retry_count, max_retries, verification_history,
                 semantic_feedback=semantic_feedback) + "\n" + guidance
-            _difficulty_r = subtask.get("difficulty", "medium")
-            _base_timeout_r = _cfg.get("verification", {}).get("retry_timeout", 300)
-            _mult_r = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(_difficulty_r, 1.5)
-            _cap_r = {"easy": 600, "medium": 900, "hard": 1500}.get(_difficulty_r, 900)
-            _replan_timeout = min(int(_base_timeout_r * _mult_r), _cap_r)
-            if env.get("AGENT_GO_IS_LOCAL", "") == "1":
-                _replan_timeout = min(_replan_timeout * 2, 3000)
+            _replan_timeout = repair_timeout(_cfg, subtask.get("difficulty", "medium"), env)
             _replan_state["executed"] = True
             _replan_state["status"] = "executed"
             _latest_kill_reason[0] = None  # 不再终止，清除终止信号
@@ -1615,11 +1624,12 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             log_event(logger, "replan_executed", {
                 "sub_id": sub_id, "reason": trigger_reason, "steps": len(steps),
             })
-            _replan_result = _run_headless(
-                replan_prompt, worktree, env, logger, f"{subtask['id']}-replan",
-                active_pids=active_pids, active_pids_lock=active_pids_lock,
-                allowed_tools=allowed_tools, hard_timeout=_replan_timeout,
-                config=_cfg)
+            # B2：修复执行走 BackendRegistry 分发（同 reload 分支的 ctx 约定）。
+            _replan_bctx = _ctx_replace(
+                backend_ctx, task_md=replan_prompt, sub_id=f"{subtask['id']}-replan",
+                headless=True, progress=False, tag_name="",
+                hard_timeout=_replan_timeout)
+            _replan_result = run_repair(_replan_bctx, _is_simple)
             _replan_kr = getattr(_replan_result, "kill_reason", None)
             if isinstance(_replan_kr, str) and _replan_kr:
                 _latest_kill_reason[0] = _replan_kr
@@ -2162,23 +2172,20 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 readonly_review=readonly_review,
                 knowledge_context=knowledge_context)
 
-            # 修复执行带硬超时（verification.retry_timeout，按 difficulty 弹性缩放）
+            # 修复执行带硬超时（verification.retry_timeout，按 difficulty 弹性缩放）：
+            # 倍数/封顶/本地模型 ×2 规则统一收口在 backends.dispatch.repair_timeout。
             _difficulty = subtask.get("difficulty", "medium")
-            _base_timeout = _cfg.get("verification", {}).get("retry_timeout", 300)
-            _difficulty_mult = {"easy": 1, "medium": 1.5, "hard": 2.5}.get(_difficulty, 1.5)
-            # CR-建议#2：retry_timeout 封顶按难度缩放——hard 任务（db-*/可观测性）修复重试
-            # 900s 偏紧（撞墙钟→假 timeout）。easy/medium 保持，hard 放宽到 1500s。
-            _retry_caps = {"easy": 600, "medium": 900, "hard": 1500}
-            _cap = _retry_caps.get(_difficulty, 900)
-            retry_timeout = min(int(_base_timeout * _difficulty_mult), _cap)
-            # 本地模型修复重试超时放宽（2026-08-12 改进 2）：与首跑 hard_timeout 一致，×2。
-            if env.get("AGENT_GO_IS_LOCAL", "") == "1":
-                retry_timeout = min(retry_timeout * 2, 3000)
-            logger.info(f"[retry_timeout] difficulty={_difficulty} base={_base_timeout}s mult={_difficulty_mult} → timeout={retry_timeout}s")
-            _fix_result = _run_headless(fix_prompt, worktree, env, logger, f"{subtask['id']}-fix-{retry_count}",
-                                        active_pids=active_pids, active_pids_lock=active_pids_lock,
-                                        allowed_tools=allowed_tools, hard_timeout=retry_timeout,
-                                        config=_cfg)
+            retry_timeout = repair_timeout(_cfg, _difficulty, env)
+            logger.info(f"[retry_timeout] difficulty={_difficulty} → timeout={retry_timeout}s")
+            # B2：修复执行走 BackendRegistry 分发（与初始执行同一解析策略）。
+            # progress=False 保持控制台安静；tag_name="" 由 run_repair 强制——
+            # AgentLoop 拿到非空 tag_name 会自行 commit/tag，修复路径必须留空，
+            # 让下方 git add/commit/tag 逻辑继续独占完成边界。
+            _fix_bctx = _ctx_replace(
+                backend_ctx, task_md=fix_prompt, sub_id=f"{subtask['id']}-fix-{retry_count}",
+                headless=True, progress=False, tag_name="",
+                hard_timeout=retry_timeout)
+            _fix_result = run_repair(_fix_bctx, _is_simple)
             # S12-P0 G1：捕获 fix 重试的 kill_reason（修复超时等）
             # 仅接受真实字符串值（防御 MagicMock 等测试替身对象）
             _fix_kr = getattr(_fix_result, "kill_reason", None)
@@ -2553,7 +2560,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     env = os.environ.copy()
     loaded_skill_names = [sn for sn in skill_names if sn not in unresolved_skills]
     env.update({"AGENT_GO_TASK_ID": task_id, "AGENT_GO_SUBTASK_ID": sub_id, "AGENT_GO_WORKTREE": str(worktree), "AGENT_GO_SKILLS": ",".join(loaded_skill_names)})
-    # Phase 1 配套：把计量路径传给 _run_headless，让它记录 Claude 执行成本。
+    # Phase 1 配套：把计量路径经 env 传给 worker 执行（_run_headless），让它记录 Claude 执行成本。
     # 注意：_metering_path 是 cmd_run/cmd_resume 运行时注入 config 的，磁盘上的
     # config.json 没有此键，必须用参数传入，不能 load_config() 重读。
     if metering_path:
@@ -2794,6 +2801,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         logger=logger,
         config=_eff_cfg,
         hard_timeout=_initial_timeout,
+        # B2：AgentLoop 增强能力的透传通道（explore 只读模式 / scope advisory）。
+        extra={"files_hint": subtask.get("files_hint", ""),
+               "readonly": bool(subtask.get("readonly", False))},
     )
 
     def _run_with_backend(backend_name: str):
@@ -2846,7 +2856,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         allowed_tools=agent.claude_config.get("allowed_tools", []) if agent else None,
         task_dir=task_dir, config=config, interrupt_event=interrupt_event,
         initial_kill_reason=getattr(result, "kill_reason", None),
-        pre_work_head=pre_work_head,
+        pre_work_head=pre_work_head, backend_ctx=_backend_ctx,
     )
     summary = verify_results["summary"]
     metrics_changes = verify_results["metrics_changes"]

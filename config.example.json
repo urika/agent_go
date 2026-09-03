@@ -75,7 +75,9 @@
     "enabled": false,
     "max_turns": 20,
     "max_duration": 600,
-    "api_timeout": 120
+    "api_timeout": 120,
+    "stuck_repeat_threshold": 3,
+    "no_progress_turns": 8
   },
   "knowledge": {
     "_comment": "C4 KnowledgeStore A/B 实验臂：修复重试时注入跨任务历史经验；默认关闭=对照臂",

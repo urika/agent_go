@@ -58,6 +58,8 @@ class AgentLoopBackend(BaseBackend):
             tag_name=ctx.tag_name,
             sub_id=ctx.sub_id,
             task_id=ctx.task_id,
+            readonly=bool(ctx.extra.get("readonly", False)),
+            scope_hint=str(ctx.extra.get("files_hint", "") or ""),
         )
 
         return SubtaskResult(

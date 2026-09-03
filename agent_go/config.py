@@ -104,6 +104,8 @@ DEFAULT_CONFIG = {
         "max_turns": 20,                # 最大对话轮数
         "max_duration": 600,            # 全局超时（秒）
         "api_timeout": 120,             # 单次 API 调用超时（秒）
+        "stuck_repeat_threshold": 3,    # B2 stuck 检测：连续相同工具调用达阈值先提醒，再犯终止
+        "no_progress_turns": 8,         # B2 no-progress 信号：连续 N 轮无成功写入则记录（不终止）
     },
     # C4 KnowledgeStore（A/B 实验臂）：修复重试时注入跨任务历史经验
     # （Problem/deviation/verify_state）。默认关闭 = A/B 对照臂；

@@ -68,8 +68,11 @@ class ClaudeBackend(BaseBackend):
                         })
                 _progress_stop.wait(5)
 
-        t = threading.Thread(target=_tick, daemon=True)
-        t.start()
+        # progress=False（修复类执行）时保持控制台安静：不起 ticker 线程。
+        t = None
+        if ctx.progress:
+            t = threading.Thread(target=_tick, daemon=True)
+            t.start()
 
         try:
             result = _run_headless(
@@ -86,13 +89,15 @@ class ClaudeBackend(BaseBackend):
                 config=ctx.config,
             )
         finally:
-            _progress_stop.set()
-            t.join(timeout=2)
+            if t is not None:
+                _progress_stop.set()
+                t.join(timeout=2)
 
         elapsed = int(time.time() - start)
         act = shared_activity[0]
-        _activity_note = f" → {act['tool']} {act['target']}" if act and act.get("target") else ""
-        _console.print(f"\r➜ {sub_id}: ✓ {elapsed}s{_activity_note}" + " " * 20)
+        if ctx.progress:
+            _activity_note = f" → {act['tool']} {act['target']}" if act and act.get("target") else ""
+            _console.print(f"\r➜ {sub_id}: ✓ {elapsed}s{_activity_note}" + " " * 20)
 
         return SubtaskResult(
             returncode=result.returncode,

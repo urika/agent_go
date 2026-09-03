@@ -6,6 +6,7 @@
 
 from .base import BackendContext, BaseBackend, SubtaskResult
 from .registry import BackendRegistry, resolve_backend_name
+from .dispatch import repair_timeout, run_repair
 
 # 导入具体实现以完成注册表登记（无副作用，仅类定义加载）。
 from .claude_backend import ClaudeBackend
@@ -17,6 +18,8 @@ __all__ = [
     "SubtaskResult",
     "BackendRegistry",
     "resolve_backend_name",
+    "repair_timeout",
+    "run_repair",
     "ClaudeBackend",
     "AgentLoopBackend",
 ]

@@ -1643,8 +1643,7 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=2)), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
 
             # 显式禁用语义评估：本测试只测 shell 验证循环，避免真实环境 evaluator
@@ -1695,8 +1694,7 @@ class TestVerificationLoopE2E:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=_run), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             result = _verify_changes(
                 "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -1719,8 +1717,7 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
 
             result = _verify_changes(
@@ -1741,8 +1738,7 @@ class TestVerificationLoopE2E:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
 
             result = _verify_changes(
@@ -1842,8 +1838,7 @@ class TestVerificationLoopE2E:
 
         def _run():
             with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=999)), \
-                 patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-                 patch("agent_go.executor._run_headless", new=mock_fix):
+                 patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
                 mock_fix.return_value = MagicMock(returncode=0)
                 _verify_changes(
                     "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -1873,7 +1868,6 @@ class TestVerificationLoopE2E:
 
         with patch("subprocess.run", side_effect=self._git_mock(verify_success_on_attempt=1)), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             mock_fix.return_value = MagicMock(returncode=0)
             # 语义评估首次失败，二次通过
@@ -2053,8 +2047,7 @@ class TestRepairPromptContent:
             return MagicMock(returncode=0)
 
         with patch("subprocess.run", side_effect=self._always_fail_git_mock()), \
-             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix) as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix):
 
             result = _verify_changes(
                 "task-1", "sub-1", self._make_subtask(), temp_repo, headless=True,
@@ -2092,8 +2085,7 @@ class TestRepairPromptContent:
             return MagicMock(returncode=0)
 
         with patch("subprocess.run", side_effect=self._always_fail_git_mock()), \
-             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix) as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix):
 
             _verify_changes(
                 "task-1", "sub-1", self._make_subtask(), temp_repo, headless=True,
@@ -2125,8 +2117,7 @@ class TestRepairPromptContent:
         make_git = TestVerificationLoopE2E._git_mock
 
         with patch("subprocess.run", side_effect=make_git(verify_success_on_attempt=1)), \
-             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix) as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
+             patch("agent_go.backends.claude_backend._run_headless", side_effect=capturing_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             # 首次语义评估失败，二次通过
             mock_eval.side_effect = [
@@ -2832,7 +2823,6 @@ class TestVerifyDivergence:
 
         with patch("subprocess.run", side_effect=self._git_always_pass()), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             mock_fix.return_value = MagicMock(returncode=0)
             # 连续两次语义评估失败，指出的缺陷不同（打地鼠）
@@ -2865,7 +2855,6 @@ class TestVerifyDivergence:
 
         with patch("subprocess.run", side_effect=self._git_always_pass()), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             mock_fix.return_value = MagicMock(returncode=0)
             # 两次都指出「None 保护缺失」→ 同一缺陷，应继续重试
@@ -2928,8 +2917,7 @@ class TestVerifyRevertDetection:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_with_base("abc123")), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             result = _verify_changes(
                 "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -2952,8 +2940,7 @@ class TestVerifyRevertDetection:
         from agent_go.executor import _verify_changes
 
         with patch("subprocess.run", side_effect=self._git_with_base("")), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             result = _verify_changes(
                 "task-1", "sub-1", dict(self._SUBTASK_TPL), temp_repo, headless=True,
@@ -3294,7 +3281,6 @@ class TestReadonlyReview:
 
         with patch("subprocess.run", side_effect=_git_fail), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.executor._run_verification_cmd") as mock_vcmd, \
              patch("agent_go.review_agent.run_readonly_review") as mock_review:
             mock_fix.return_value = MagicMock(returncode=0)
@@ -3339,7 +3325,6 @@ class TestReadonlyReview:
 
         with patch("subprocess.run", side_effect=_git_fail), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.executor._run_verification_cmd") as mock_vcmd, \
              patch("agent_go.review_agent.run_readonly_review") as mock_review:
             mock_fix.return_value = MagicMock(returncode=0)

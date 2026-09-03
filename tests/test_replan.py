@@ -169,8 +169,7 @@ class TestReplanTrigger:
     def test_revert_trigger_suggested_only_by_default(self, temp_repo, task_dir, logger):
         """触发（verify_revert）+ auto_apply 默认 False → 只记录建议不执行。"""
         with patch("subprocess.run", side_effect=_git_with_base()), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             result = self._run_verify(
                 temp_repo, task_dir, logger,
@@ -191,8 +190,7 @@ class TestReplanTrigger:
     def test_replan_disabled_no_trigger(self, temp_repo, task_dir, logger):
         """replan.enabled=False → 不触发，行为与此前完全一致。"""
         with patch("subprocess.run", side_effect=_git_with_base()), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             result = self._run_verify(
                 temp_repo, task_dir, logger,
@@ -207,8 +205,7 @@ class TestReplanTrigger:
         """auto_apply=True → 执行一次拆分修复；验证仍失败 → replan_succeeded=False；
         再次触发不重复执行（最多一次）。"""
         with patch("subprocess.run", side_effect=_git_with_base()), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             result = self._run_verify(
                 temp_repo, task_dir, logger,
@@ -232,7 +229,6 @@ class TestReplanTrigger:
         """失败模式重复触发 + auto_apply → 拆分修复后验证通过 → replan_succeeded=True。"""
         with patch("subprocess.run", side_effect=_git_always_pass()), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.evaluator.evaluate_semantic") as mock_eval:
             mock_fix.return_value = MagicMock(returncode=0)
             # 两次同一缺陷（相同 reason → 相似度 1.0 ≥ 阈值 → failure_pattern_repeat），
@@ -263,7 +259,6 @@ class TestReplanTrigger:
         # replan 预算预检读到 1.0 ≥ 0.25 → budget_exhausted
         with patch("subprocess.run", side_effect=_git_with_base()), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.executor._metering_available", return_value=True), \
              patch("agent_go.executor._meter_cost_for_sub",
                    side_effect=[0.0, 0.0, 1.0]):
@@ -289,7 +284,6 @@ class TestReplanTrigger:
         """人工拒绝路径：交互模式确认选「不执行」→ 只记录建议。"""
         with patch("subprocess.run", side_effect=_git_with_base()), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.executor.sys.stdin") as mock_stdin, \
              patch("agent_go.executor.safe_input", return_value="R"), \
              patch("agent_go.replan.confirm_replan", return_value=False) as mock_confirm:
@@ -311,8 +305,7 @@ class TestReplanTrigger:
     def test_no_trigger_normal_failure(self, temp_repo, task_dir, logger):
         """普通失败（无无进展信号、跑满重试）→ 不触发 replan。"""
         with patch("subprocess.run", side_effect=_git_with_base()), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             # 无 _base_commit → revert 检测不启用；max_retries=1 跑满即终止
             result = self._run_verify(
@@ -337,8 +330,7 @@ class TestReplanDecisionLayer:
     def test_decision_recorded_in_replan_record(self, temp_repo, task_dir, logger):
         """触发 replan 时，EscalationDecision 随 replan 记录落审计面。"""
         with patch("subprocess.run", side_effect=_git_with_base()), \
-             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix):
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix:
             mock_fix.return_value = MagicMock(returncode=0)
             result = self._run_verify(
                 temp_repo, task_dir, logger,
@@ -363,7 +355,6 @@ class TestReplanDecisionLayer:
 
         with patch("subprocess.run", side_effect=_git_with_base()), \
              patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
-             patch("agent_go.executor._run_headless", new=mock_fix), \
              patch("agent_go.replan.decide_escalation",
                    return_value=human_decision) as mock_decide:
             mock_fix.return_value = MagicMock(returncode=0)
