@@ -33,7 +33,8 @@ def run_repair(ctx: BackendContext, is_simple: bool) -> SubtaskResult:
     """修复类执行（fix/replan/reload）的 backend 分发。
 
     与初始执行同一解析策略：resolve_backend_name(ctx.config, {}, ctx.headless, is_simple)；
-    agent_loop 路径异常时回退 claude（log warning），与 executor 初始路径的容错一致
+    非默认 backend（agent_loop / 显式声明的 pi 等）路径异常时回退 claude（log warning），
+    与 executor 初始路径的容错一致
     （初始路径额外做的 worktree reset 是防 AgentLoop 半改状态污染首跑验证；
     修复路径随后必经 git add/commit，由 executor 的完成边界逻辑兜底，此处不重复 reset）。
     """
@@ -42,9 +43,10 @@ def run_repair(ctx: BackendContext, is_simple: bool) -> SubtaskResult:
     # 让 executor 的修复后 commit/tag 逻辑继续独占完成边界。
     ctx.tag_name = ""
     backend_name = resolve_backend_name(ctx.config, {}, ctx.headless, is_simple)
-    if backend_name == "agent_loop":
+    if backend_name != "claude":
+        # 非默认 backend（agent_loop / 显式声明的 pi 等）：执行失败时回退 claude
         try:
-            return BackendRegistry.get("agent_loop")().run(ctx)
+            return BackendRegistry.get(backend_name)().run(ctx)
         except Exception as _loop_err:
-            ctx.logger.warning(f"AgentLoop 修复执行失败，回退到 claude -p（不中断任务）: {_loop_err}")
+            ctx.logger.warning(f"Backend {backend_name} 修复执行失败，回退到 claude -p（不中断任务）: {_loop_err}")
     return BackendRegistry.get("claude")().run(ctx)

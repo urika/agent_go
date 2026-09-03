@@ -62,6 +62,7 @@ def _parse_events(lines: list) -> dict:
     actual_model = ""
     actual_provider = ""
     saw_error_stop = False
+    error_message = ""
 
     for raw in lines:
         raw = raw.strip()
@@ -91,6 +92,8 @@ def _parse_events(lines: list) -> dict:
             stop = msg.get("stopReason", "")
             if stop == "error":
                 saw_error_stop = True
+                if msg.get("errorMessage"):
+                    error_message = msg["errorMessage"]
             # 最终回复：stopReason != toolUse 的 assistant 文本（后者只是工具调用轮）
             if stop != "toolUse":
                 text = _assistant_text(msg)
@@ -116,6 +119,7 @@ def _parse_events(lines: list) -> dict:
         "actual_model": actual_model,
         "actual_provider": actual_provider,
         "saw_error_stop": saw_error_stop,
+        "error_message": error_message,
     }
 
 
@@ -184,6 +188,18 @@ class PiBackend(BaseBackend):
         elapsed = time.time() - start
         parsed = _parse_events((stdout or "").splitlines())
 
+        # pi 对 API 级错误（402 余额不足等）也退出 0：零产出（无 tokens/工具调用/最终文本）
+        # 的 error stop 必须显式映射为失败，否则 executor 会把「什么都没做」当成功结果
+        # 进入验证循环，failure_class 被误记为 verification_failure。
+        zero_work_error = (
+            parsed["saw_error_stop"]
+            and parsed["prompt_tokens"] == 0
+            and parsed["tool_calls"] == 0
+            and not parsed["final_text"]
+        )
+        if zero_work_error:
+            stderr = (stderr or "") + f"\npi error: {parsed['error_message'] or 'stopReason=error'}"
+
         ctx.logger.info(
             f"[PiBackend] {ctx.sub_id} 结束: rc={proc.returncode}, "
             f"{parsed['tool_calls']} tool_calls ({parsed['tool_errors']} errors), "
@@ -199,6 +215,8 @@ class PiBackend(BaseBackend):
             _console.print(f"  ➜ {ctx.sub_id}: ✓ pi backend {elapsed:.0f}s")
 
         returncode = proc.returncode if proc.returncode is not None else 1
+        if zero_work_error and returncode == 0:
+            returncode = 1
         return SubtaskResult(
             returncode=returncode,
             stdout=parsed["final_text"] or (stdout or ""),

@@ -289,6 +289,59 @@ class TestRunRepair:
             res = run_repair(self._ctx(tmp_path, null_logger, config=cfg), is_simple=False)
         assert res.returncode == 0
 
+    def test_explicit_pi_dispatches_to_pi(self, tmp_path, null_logger):
+        """worker_backend=pi 时修复路径必须也走 pi（golden 批量曾因此 bug 回落 claude）。"""
+        calls = []
+
+        class FakePi(BaseBackend):
+            name = "pi"
+
+            def run(self, ctx):
+                calls.append("pi")
+                return SubtaskResult(returncode=0, sandbox_type="pi")
+
+        class FakeClaude(BaseBackend):
+            name = "claude"
+
+            def run(self, ctx):
+                calls.append("claude")
+                return SubtaskResult(returncode=0)
+
+        def _get(name):
+            return {"pi": FakePi, "claude": FakeClaude}[name]
+
+        cfg = {"worker_backend": "pi"}
+        with patch("agent_go.backends.dispatch.BackendRegistry.get", side_effect=_get):
+            res = run_repair(self._ctx(tmp_path, null_logger, config=cfg), is_simple=False)
+        assert res.sandbox_type == "pi"
+        assert calls == ["pi"]
+
+    def test_explicit_pi_failure_falls_back_to_claude(self, tmp_path, null_logger):
+        calls = []
+
+        class BrokenPi(BaseBackend):
+            name = "pi"
+
+            def run(self, ctx):
+                calls.append("pi")
+                raise RuntimeError("boom")
+
+        class FakeClaude(BaseBackend):
+            name = "claude"
+
+            def run(self, ctx):
+                calls.append("claude")
+                return SubtaskResult(returncode=0)
+
+        def _get(name):
+            return {"pi": BrokenPi, "claude": FakeClaude}[name]
+
+        cfg = {"worker_backend": "pi"}
+        with patch("agent_go.backends.dispatch.BackendRegistry.get", side_effect=_get):
+            res = run_repair(self._ctx(tmp_path, null_logger, config=cfg), is_simple=False)
+        assert res.returncode == 0
+        assert calls == ["pi", "claude"]
+
 
 class TestClaudeBackendProgress:
     """progress=False（修复路径）保持控制台安静：不起 ticker 线程。"""
@@ -511,3 +564,39 @@ class TestPiBackend:
         # 非零退出码是正常结果（验证失败走 retry），不在这里触发回退
         assert res.returncode == 1
         assert res.stderr == "provider boom"
+
+    def test_zero_work_error_maps_to_failure(self, tmp_path, null_logger):
+        """pi 对 API 级错误（402 余额不足）也退出 0：零产出 error 必须显式失败。"""
+        from agent_go.backends.pi_backend import PiBackend
+        stream = _pi_ndjson(
+            {"type": "session", "version": 3, "id": "s1", "cwd": "/tmp"},
+            {"type": "message_end", "message": {
+                "role": "assistant", "content": [], "stopReason": "error",
+                "errorMessage": "402: Insufficient Balance",
+                "usage": {"input": 0, "output": 0, "cost": {"total": 0.0}},
+            }},
+            {"type": "agent_end", "messages": []},
+        )
+        proc = _mock_popen(stdout=stream, returncode=0)
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc):
+            res = PiBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 1
+        assert "Insufficient Balance" in res.stderr
+
+    def test_midstream_error_with_real_work_stays_success(self, tmp_path, null_logger):
+        """事件流中间出现 error 但最终完成（有 tokens + 工具调用 + 最终文本）不误判。"""
+        from agent_go.backends.pi_backend import PiBackend
+        stream = _pi_ndjson(
+            {"type": "message_end", "message": {
+                "role": "assistant", "content": [], "stopReason": "error",
+                "errorMessage": "transient",
+                "usage": {"input": 0, "output": 0, "cost": {"total": 0.0}},
+            }},
+        ) + _pi_success_stream("RECOVERED")
+        proc = _mock_popen(stdout=stream, returncode=0)
+        with patch("agent_go.backends.pi_backend.shutil.which", return_value="/bin/pi"), \
+             patch("agent_go.backends.pi_backend.subprocess.Popen", return_value=proc):
+            res = PiBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 0
+        assert res.stdout == "RECOVERED"
