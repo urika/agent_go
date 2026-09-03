@@ -323,6 +323,8 @@ def _build_parser():
                              help="bench 子命令：任务成功后做本地交付 merge，闭合 accepted_delivery 判定（不推进 target 引用，保持 fixture repeat 可复现）")
     eval_parser.add_argument("--with-knowledge", dest="with_knowledge", action="store_true",
                              help="bench 子命令：C4 KnowledgeStore A/B 注入臂——修复重试时注入跨任务历史经验（对照臂不加此 flag）")
+    eval_parser.add_argument("--worker-backend", dest="worker_backend", default="",
+                             help="bench 子命令：B3/B5 显式 worker backend（如 pi），注入临时 config 的 worker_backend；留空 = 默认 claude/agent_loop 解析")
     eval_parser.add_argument("--yes", "-y", dest="yes", action="store_true",
                              help="跳过 bench 预检等交互确认（headless/后台运行；bench.py _preflight_model_pricing 读取）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
