@@ -394,6 +394,25 @@ class TestDecomposeFallback:
         assert result[0]["title"] == "A"
         mock_open.assert_called_once()
 
+    def test_local_model_files_hint_list_normalized(self, logger):
+        """本地模型把 files_hint 输出为 JSON 数组时归一化为逗号分隔字符串
+        （B6 批量 system_error 根因：'list' object has no attribute 'strip'）。"""
+        from unittest.mock import patch
+        from agent_go.api import decompose_fallback
+        config = {"fallback": {"local_model_url": "http://localhost:4000/v1/chat/completions",
+                               "local_model_name": "claude-sonnet-4-6",
+                               "enable_rules": True}}
+        fake_body = b'{"choices": [{"message": {"content": "[{\\"title\\": \\"A\\", \\"description\\": \\"d\\", \\"files_hint\\": [\\"src/utils.py\\", \\"src/storage.py\\"], \\"agent_prompt\\": \\"p\\"}]"}}]}'
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = fake_body
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_resp
+        with patch("urllib.request.urlopen", return_value=mock_ctx):
+            result = decompose_fallback("do complex task", Path("/tmp"), config, logger)
+        assert len(result) == 1
+        assert result[0]["files_hint"] == "src/utils.py, src/storage.py"
+        assert result[0]["files_hint"].strip()  # str 接口可用
+
     def test_subtask_id_format(self, logger):
         """子任务 ID 格式 sub-1, sub-2, ..."""
         from agent_go.api import decompose_fallback

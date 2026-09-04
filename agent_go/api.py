@@ -686,7 +686,16 @@ def decompose_fallback(task: str, repo: Path, config: dict[str, Any], logger: lo
             match = re.search(r'\[.*\]', content, re.DOTALL)
             if match:
                 parsed = json.loads(match.group())
-                return [{"id": f"sub-{i+1}", **st} for i, st in enumerate(parsed)]
+                out = []
+                for i, st in enumerate(parsed):
+                    st = dict(st)
+                    # 本地模型可能把 files_hint 输出为 JSON 数组；下游（executor/checkpoint）
+                    # 一律按逗号分隔字符串处理，此处归一化（B6 批量 3 例 system_error 根因）
+                    fh = st.get("files_hint")
+                    if isinstance(fh, list):
+                        st["files_hint"] = ", ".join(str(x) for x in fh)
+                    out.append({"id": f"sub-{i+1}", **st})
+                return out
     except Exception as e:
         logger.warning(f"本地模型失败: {e}")
 
