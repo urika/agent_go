@@ -1936,3 +1936,66 @@ def test_calibrate_difficulty_apply_updates_yaml(tmp_path):
     # easy-task / hard-task 未变
     assert _y.safe_load((tmp_path / "tasks" / "easy-task.yaml").read_text(encoding="utf-8"))["difficulty"] == "easy"
     assert _y.safe_load((tmp_path / "tasks" / "hard-task.yaml").read_text(encoding="utf-8"))["difficulty"] == "hard"
+
+
+class TestBenchEndpointB5:
+    """B5：--bench-endpoint/--bench-key-env 统一两臂规划/评估/worker 口径。"""
+
+    def _capture_config(self, tmp_path, monkeypatch, **kw):
+        """运行 _run_one_task（全 mock 子进程），返回写入的临时 config。"""
+        from agent_go import bench as _bench
+        from subprocess import CompletedProcess
+
+        captured = {}
+
+        def _fake_popen(cmd, **pkw):
+            i = cmd.index("--config")
+            captured["config"] = json.loads(Path(cmd[i + 1]).read_text())
+            proc = MagicMock()
+            proc.args = cmd
+            proc.returncode = 0
+            return proc
+
+        monkeypatch.setattr(_bench, "CONFIG_PATH", tmp_path / "no-user-config.json")
+        monkeypatch.setattr(_bench, "AGENT_GO_DIR", tmp_path / "agent_go_home")
+        monkeypatch.setattr(_bench.subprocess, "Popen", _fake_popen)
+        monkeypatch.setattr(_bench, "_run_with_grace",
+                            lambda proc, hard_timeout, grace_sec=60: CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(_bench, "_dynamic_timeout", lambda *a, **k: 60)
+        monkeypatch.setattr(_bench, "_estimate_subtasks_from_history", lambda *a, **k: 1)
+        monkeypatch.setattr(_bench, "_collect_result", lambda *a, **k: {})
+
+        task = {"id": "t1", "task": "做点事", "repo": str(tmp_path), "verification": []}
+        _bench._run_one_task(task, tmp_path, "kimi-coding/kimi-for-coding", "t1", **kw)
+        return captured["config"]
+
+    def test_endpoint_unifies_plan_eval_worker(self, tmp_path, monkeypatch):
+        cfg = self._capture_config(
+            tmp_path, monkeypatch,
+            bench_endpoint="https://api.kimi.com/coding",
+            bench_key_env="KIMI_BENCH_KEY",
+            worker_backend="pi",
+        )
+        # plan_api 指向统一端点（anthropic 协议 + /v1/messages + worker_base_url）
+        pa = cfg["plan_api"]
+        assert pa["provider"] == "anthropic"
+        assert pa["base_url"] == "https://api.kimi.com/coding/v1/messages"
+        assert pa["worker_base_url"] == "https://api.kimi.com/coding"
+        assert pa["api_key"] == "${KIMI_BENCH_KEY}"
+        # pi 的 provider/id 形式 → 端点原生模型 id
+        assert pa["model"] == "kimi-for-coding"
+        # evaluator 同端点（避免回落死代理导致 semantic_pass=null）
+        ev = cfg["evaluator"]
+        assert ev["enabled"] is True
+        assert ev["base_url"] == "https://api.kimi.com/coding/v1/messages"
+        assert ev["model"] == "kimi-for-coding"
+        # worker 侧：pi 臂保留完整 provider/id（pi --model 用）
+        assert cfg["worker_models"]["medium"] == "kimi-coding/kimi-for-coding"
+        assert cfg["worker_backend"] == "pi"
+
+    def test_no_endpoint_keeps_legacy_behavior(self, tmp_path, monkeypatch):
+        cfg = self._capture_config(tmp_path, monkeypatch)
+        # 无用户 config 时的既有退化：deepseek 默认 plan_api，evaluator 仅 enabled
+        assert cfg["plan_api"]["provider"] == "deepseek"
+        assert cfg["evaluator"] == {"enabled": True}
+        assert "worker_backend" not in cfg

@@ -428,6 +428,8 @@ def cmd_bench(args=None) -> None:
     with_delivery = bool(getattr(args, "with_delivery", False))
     with_knowledge = bool(getattr(args, "with_knowledge", False))
     worker_backend = getattr(args, "worker_backend", "") or ""
+    bench_endpoint = getattr(args, "bench_endpoint", "") or ""
+    bench_key_env = getattr(args, "bench_key_env", "") or ""
 
     if not models:
         console.error("至少指定一个 --candidate-models（逗号分隔）")
@@ -509,7 +511,9 @@ def cmd_bench(args=None) -> None:
                              hard_model=getattr(args, "hard_model", "") or "",
                              with_delivery=with_delivery,
                              with_knowledge=with_knowledge,
-                             worker_backend=worker_backend)
+                             worker_backend=worker_backend,
+                             bench_endpoint=bench_endpoint,
+                             bench_key_env=bench_key_env)
         # ISSUE-38：任务结束后清理 fixture 源仓库失效 worktree 注册
         # （timeout/SIGKILL 打断时 pipeline 清理不执行，注册项残留）
         _prune_fixture_worktrees(_repo)
@@ -657,7 +661,8 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
                   source_batch: str = "", results_path: Optional[Path] = None,
                   hard_model: str = "", with_delivery: bool = False,
                   with_knowledge: bool = False,
-                  worker_backend: str = "") -> list[dict]:
+                  worker_backend: str = "",
+                  bench_endpoint: str = "", bench_key_env: str = "") -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
 
     hard_model: CR-建议#5——hard 难度子任务使用的更强模型（留空 = 与候选 model 相同）。
@@ -671,6 +676,9 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     修复重试时注入跨任务历史经验（对照臂 = False）。
     worker_backend: B3/B5 显式 worker backend（如 pi）——注入临时 config 的
     worker_backend，agent_go run 子进程内由 resolve_backend_name 分发。
+    bench_endpoint: B5 双臂同口径——Anthropic 兼容端点（如 kimi coding）。设置后
+    plan_api / evaluator / worker_base_url 统一指向它，两臂共享规划与评估配置，
+    只剩 backend 一个变量；bench_key_env 指定 key 的环境变量名（${VAR} 模板）。
     """
     start = time.time()
 
@@ -695,6 +703,26 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             "model": "sonnet[1m]",
             "max_tokens": 4096,
             "temperature": 0.2,
+        }
+
+    # B5 双臂同口径（--bench-endpoint）：plan_api / evaluator / worker_base_url
+    # 统一指向同一 Anthropic 兼容端点（如 kimi coding），claude 臂与 pi 臂只剩
+    # backend 一个变量。pi 的 provider/id 模型形式 → 端点原生模型 id（取 / 后段）。
+    _ep = ""
+    _ep_key = ""
+    _ep_model = ""
+    if bench_endpoint:
+        _ep = bench_endpoint.rstrip("/")
+        _ep_key = "${%s}" % bench_key_env if bench_key_env else plan_api.get("api_key", "")
+        _ep_model = model.split("/", 1)[-1]
+        plan_api = {
+            "provider": "anthropic",
+            "base_url": _ep + "/v1/messages",
+            "api_key": _ep_key,
+            "model": _ep_model,
+            "max_tokens": 4096,
+            "temperature": 0.2,
+            "worker_base_url": _ep,
         }
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
@@ -725,6 +753,16 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             if hard_model:
                 evaluator_cfg["model"] = hard_model
             config["evaluator"] = evaluator_cfg
+        # B5：--bench-endpoint 时 evaluator 也统一到该端点（覆盖用户 evaluator 继承），
+        # 避免 evaluator 回落到死代理导致 semantic_pass=null、两臂只剩 binary 口径。
+        if bench_endpoint:
+            config["evaluator"] = {
+                "enabled": True,
+                "provider": "anthropic",
+                "base_url": _ep + "/v1/messages",
+                "api_key": _ep_key,
+                "model": _ep_model,
+            }
         # 继承用户的 skills / agent_loop / verification / goal 配置（skill 自动发现等），
         # 否则 bench 默认关闭
         for _k in ("skills", "agent_loop", "verification", "goal"):

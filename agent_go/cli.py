@@ -325,6 +325,10 @@ def _build_parser():
                              help="bench 子命令：C4 KnowledgeStore A/B 注入臂——修复重试时注入跨任务历史经验（对照臂不加此 flag）")
     eval_parser.add_argument("--worker-backend", dest="worker_backend", default="",
                              help="bench 子命令：B3/B5 显式 worker backend（如 pi），注入临时 config 的 worker_backend；留空 = 默认 claude/agent_loop 解析")
+    eval_parser.add_argument("--bench-endpoint", dest="bench_endpoint", default="",
+                             help="bench 子命令：B5 双臂统一 Anthropic 兼容端点（如 https://api.kimi.com/coding）。设置后临时 config 的 plan_api/evaluator/worker_base_url 均指向该端点，两臂共享规划与评估口径，只剩 backend 一个变量")
+    eval_parser.add_argument("--bench-key-env", dest="bench_key_env", default="",
+                             help="bench 子命令：--bench-endpoint 的 API key 环境变量名（写成 ${VAR} 模板由运行时解析，不落明文）")
     eval_parser.add_argument("--yes", "-y", dest="yes", action="store_true",
                              help="跳过 bench 预检等交互确认（headless/后台运行；bench.py _preflight_model_pricing 读取）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
