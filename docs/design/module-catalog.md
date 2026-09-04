@@ -1,7 +1,7 @@
 # agent_go 模块职责目录
 
 > 状态：As-Built 模块映射
-> 更新日期：2026-09-04（补 B4 声明式 backend 路由 + B3 pi_backend + B2 AgentLoop 加固）
+> 更新日期：2026-09-04（补 B6 opencode_backend + B4 声明式 backend 路由 + B3 pi_backend + B2 AgentLoop 加固）
 
 | 模块 | 主要职责 | 关键输出 |
 |---|---|---|
@@ -45,7 +45,7 @@
 | `replay.py` | 执行回放时间线：从 meta/metering/results 重建可视化 | timeline (ASCII/JSON) |
 | `agent_loop.py` | 自主 agent 循环（`--agent-loop`）：tool-use ReAct 直接 API 调用；B2 stuck 检测/no-progress 信号/explore 只读/scope advisory | loop result |
 | `tool_executor.py` | Agent loop 工具注册和执行（Read/Write/Edit/Bash/Grep/Glob/View + 安全规则 + 只读模式） | tool results |
-| `backends/` | 阶段十三 worker backend 抽象包：BaseBackend/BackendContext/SubtaskResult（base）、BackendRegistry/resolve_backend_name（registry）、ClaudeBackend（claude_backend）、AgentLoopBackend（agent_loop_backend）、PiBackend（pi_backend，B3 PoC）、修复路径分发 repair_timeout/run_repair（dispatch） | SubtaskResult |
+| `backends/` | 阶段十三 worker backend 抽象包：BaseBackend/BackendContext/SubtaskResult（base）、BackendRegistry/resolve_backend_name（registry）、ClaudeBackend（claude_backend）、AgentLoopBackend（agent_loop_backend）、PiBackend（pi_backend，B3）、OpenCodeBackend（opencode_backend，B6）、修复路径分发 repair_timeout/run_repair（dispatch） | SubtaskResult |
 | `console.py` | 统一输出抽象层：quiet / verbose 模式，延迟默认绑定，表格渲染 | console output |
 | `tui.py` | Curses 状态仪表盘：实时显示并发子任务进度 | TUI display |
 | `workflow_gen.py` | GitHub Actions workflow 自动生成（`ci` 命令） | workflow YAML |
@@ -135,7 +135,7 @@
 | `diag.py` | llama-defender 诊断数据面客户端（R13-R16 消费侧 C1-C7）：session key 构造/截断口径、fail-open fetch、ledger/metrics/archive/ctx_config/props 封装 |
 | `agent_loop.py` | Autonomous agent loop (--agent-loop): tool-use ReAct loop；B2 hardening: stuck 检测（连续重复调用先提醒后终止）/ no-progress 信号 / explore 只读模式 / scope advisory（files_hint 越界写入提示） |
 | `tool_executor.py` | Tool registry for agent loop: Read/Write/Edit/Bash/Grep/Glob/View + bash safety rules + readonly mode |
-| `backends/` | 阶段十三 worker backend 抽象包（B1/B2/B3/B4）：base（BaseBackend/BackendContext/SubtaskResult）、registry（BackendRegistry/resolve_backend_name，显式声明 + B4 by_type/by_difficulty 声明式路由）、claude_backend（claude -p/greywall，progress 开关）、agent_loop_backend（直接 API 路径）、pi_backend（B3 PoC：pi -p --mode json NDJSON 事件流解析 + 聚合计量 + 零产出错误映射，仅 headless）、dispatch（修复路径 fix/replan/reload 统一分发 + repair_timeout 消重） |
+| `backends/` | 阶段十三 worker backend 抽象包（B1/B2/B3/B4/B6）：base（BaseBackend/BackendContext/SubtaskResult）、registry（BackendRegistry/resolve_backend_name，显式声明 + B4 by_type/by_difficulty 声明式路由）、claude_backend（claude -p/greywall，progress 开关）、agent_loop_backend（直接 API 路径）、pi_backend（B3：pi -p --mode json NDJSON 事件流解析 + 聚合计量 + 零产出错误映射，仅 headless）、opencode_backend（B6：opencode run --format json --auto --pure，step_finish 计量 + readonly 映射 plan agent + Go 挂起 hard_timeout 兜底，仅 headless）、dispatch（修复路径 fix/replan/reload 统一分发 + repair_timeout 消重） |
 | `console.py` | Console output abstraction: quiet/verbose modes, lazy default binding, tables |
 | `tui.py` | Curses status dashboard |
 | `review_agent.py` | Read-only independent review subagent, two-phase review |

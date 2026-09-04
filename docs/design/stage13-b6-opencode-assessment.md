@@ -1,6 +1,7 @@
-# 阶段十三 B6 候选：OpenCode Backend 评估
+# 阶段十三 B6：OpenCode Backend 评估与实现
 
-日期：2026-09-04。状态：调研完成，可行性确认，未实现（等 B5 结论后评估是否立项）。
+日期：2026-09-04。状态：**已立项并实现**（opencode_backend.py + 11 个单元测试 +
+mimo-v2.5-free 真实冒烟通过）；Go 套餐臂评估待月度额度重置。
 
 ## 结论速览
 
@@ -50,3 +51,17 @@ opencode（本机 1.18.27）**支持类 `claude -p` 的无头模式**，可作�
 3. 零产出判定同 pi：无 tokens + 无工具调用 + 无最终文本 → returncode=1。
 4. 路由：B4 声明式配置直接可用（`worker_backend: "opencode"`）。
 5. 价值排序：先跑通 mimo-v2.5-free 零成本臂做 A/B；Go 套餐重置后再评 qwen3.8。
+
+## 实现记录（2026-09-04）
+
+- `agent_go/backends/opencode_backend.py`：`OpenCodeBackend`（name="opencode"），
+  按上述要点 1-4 全部落地；readonly 模式映射 opencode 内置只读 agent（`--agent plan`）。
+- 计量：prompt_tokens = input + cache.read，completion = output；cost 聚合 step_finish.part.cost；
+  事件流不携带 model 信息，actual_model 取 ctx.routed_model。
+- 防御性处理 `type=="error"` 事件（当前实测未见，若未来版本输出则捕获记录）。
+- 测试：`tests/test_backends.py::TestOpenCodeBackend` 11 例（命令构造/readonly/模型透传/
+  超时 kill/未安装 127/容错解析/计量写入/工具错误计数/零产出失败映射/error 事件不误判）。
+- 真实冒烟（mimo-v2.5-free，/tmp 临时仓库）：rc=0，1 次工具调用，
+  35750+90 tokens，$0.00，23s，目标文件真实创建，计量事件正确写入。
+- 待办：Go 套餐额度重置（约 10 天）后评估 qwen3.8-flash 臂；Zen 免费臂 A/B
+  只适合 eval fixture / 公开代码（免费档数据可能用于训练）。
