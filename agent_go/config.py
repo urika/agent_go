@@ -182,6 +182,10 @@ DEFAULT_CONFIG = {
         "hard": "",
     },
     "worker_backend_by_type": {},   # B4 按 agent_type 路由（如 {"explore": "pi"}；优先级高于 by_difficulty）
+    # 促销窗口路由：时间窗内且无显式 backend 声明时优先用指定 backend（需本机可用）。
+    # 字段：backend / start / end（YYYY-MM-DD 闭区间）/ daily_start / daily_end（HH:MM，支持跨午夜）/ tz_offset（默认 +8）。
+    # 例：GLM flash 夜间免费（仅 ZCode 本体）→ {"backend": "zcode", "start": "2026-09-04", "end": "2026-09-20", "daily_start": "23:00", "daily_end": "09:00"}
+    "backend_promo": {},
     "worker_models": {
         "easy": "",                 # S4 复杂度双通道：空 = claude CLI 默认模型
         "medium": "",

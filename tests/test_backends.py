@@ -786,6 +786,163 @@ class TestOpenCodeBackend:
         assert res.stdout == "RECOVERED"
 
 
+def _zcode_success_json(final_text="DONE"):
+    """构造一次成功的 zcode --json 单对象输出。"""
+    import json as _json
+    return _json.dumps({
+        "sessionId": "sess-1",
+        "traceId": "trace-1",
+        "response": final_text,
+        "usage": {"inputTokens": 100, "outputTokens": 50, "cacheReadTokens": 10,
+                  "cacheWriteTokens": 0, "totalTokens": 160},
+        "eventCount": 12,
+        "projection": {"turnCount": 1, "contextUsed": 160},
+    }) + "\n"
+
+
+class TestZCodeBackend:
+    """B7：ZCodeBackend 命令构造、单 JSON 输出解析、超时与容错。"""
+
+    def _ctx(self, tmp_path: Path, null_logger, **kw):
+        defaults = dict(
+            task_md="# 任务\n做点事", worktree=tmp_path, env={}, headless=True,
+            sub_id="sub-1", task_id="task-1", logger=null_logger, config={},
+        )
+        defaults.update(kw)
+        return BackendContext(**defaults)
+
+    def _run(self, tmp_path, null_logger, proc, **kw):
+        from agent_go.backends.zcode_backend import ZCodeBackend
+        with patch("agent_go.backends.zcode_backend._zcode_command_prefix",
+                   return_value=(["/bin/ZCode", "zcode.cjs"], "")), \
+             patch("agent_go.backends.zcode_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            res = ZCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False, **kw))
+        return res, mock_popen
+
+    def test_command_and_parse_success(self, tmp_path, null_logger):
+        res, mock_popen = self._run(tmp_path, null_logger,
+                                    _mock_popen(stdout=_zcode_success_json("全部完成")))
+        cmd = mock_popen.call_args.args[0]
+        assert cmd[:2] == ["/bin/ZCode", "zcode.cjs"]
+        assert "--json" in cmd and "--mode" in cmd
+        i = cmd.index("--mode")
+        assert cmd[i + 1] == "yolo"          # worker 写执行默认 yolo
+        j = cmd.index("--cwd")
+        assert cmd[j + 1] == str(tmp_path)
+        k = cmd.index("--prompt")
+        assert cmd[k + 1].startswith("# 任务")
+        assert res.returncode == 0
+        assert res.sandbox_type == "zcode"
+        assert res.stdout == "全部完成"
+        assert res.kill_reason is None
+        # ELECTRON_RUN_AS_NODE 必须注入
+        assert mock_popen.call_args.kwargs["env"]["ELECTRON_RUN_AS_NODE"] == "1"
+
+    def test_readonly_uses_plan_mode(self, tmp_path, null_logger):
+        res, mock_popen = self._run(tmp_path, null_logger,
+                                    _mock_popen(stdout=_zcode_success_json()),
+                                    extra={"readonly": True})
+        cmd = mock_popen.call_args.args[0]
+        i = cmd.index("--mode")
+        assert cmd[i + 1] == "plan"
+        assert res.returncode == 0
+
+    def test_no_settings_flag_when_unrouted(self, tmp_path, null_logger):
+        _, mock_popen = self._run(tmp_path, null_logger,
+                                  _mock_popen(stdout=_zcode_success_json()))
+        assert "--settings" not in mock_popen.call_args.args[0]
+
+    def test_routed_model_mismatch_warns_but_proceeds(self, tmp_path, null_logger, caplog):
+        """zcode 无 per-run 模型标志：routed_model 与配置不一致时 warning，按配置执行。"""
+        import json as _json
+        import agent_go.backends.zcode_backend as zb
+        user_cfg = tmp_path / "zcode_user_config.json"
+        user_cfg.write_text(_json.dumps({"provider": {"zai": {}}, "model": {"main": "zai/glm-5.2"}}))
+        with patch.object(zb, "ZCODE_USER_CONFIG", user_cfg):
+            with caplog.at_level(logging.WARNING, logger=null_logger.name):
+                res, mock_popen = self._run(tmp_path, null_logger,
+                                            _mock_popen(stdout=_zcode_success_json()),
+                                            routed_model="glm-5.3-flash")
+        cmd = mock_popen.call_args.args[0]
+        assert "--settings" not in cmd
+        assert res.returncode == 0
+        assert any("不一致" in r.message for r in caplog.records)
+
+    def test_configured_model_helper(self, tmp_path, null_logger):
+        import json as _json
+        import agent_go.backends.zcode_backend as zb
+        user_cfg = tmp_path / "cfg.json"
+        user_cfg.write_text(_json.dumps({"model": {"main": "zai/glm-5.3-flash"}}))
+        with patch.object(zb, "ZCODE_USER_CONFIG", user_cfg):
+            assert zb._configured_model(null_logger) == "zai/glm-5.3-flash"
+        # 用户 config 缺失 → 空串（不中断）
+        with patch.object(zb, "ZCODE_USER_CONFIG", tmp_path / "missing.json"):
+            assert zb._configured_model(null_logger) == ""
+
+    def test_timeout_kills_and_reports(self, tmp_path, null_logger):
+        import subprocess as _sp
+        proc = _mock_popen(returncode=-9)
+        proc.communicate.side_effect = [
+            _sp.TimeoutExpired(cmd="zcode", timeout=5),
+            ("", "killed"),
+        ]
+        res, _ = self._run(tmp_path, null_logger, proc, hard_timeout=5)
+        proc.kill.assert_called_once()
+        assert res.kill_reason == "hard_timeout"
+        assert res.returncode == -9
+
+    def test_zcode_app_missing(self, tmp_path, null_logger):
+        from agent_go.backends.zcode_backend import ZCodeBackend
+        with patch("agent_go.backends.zcode_backend._zcode_command_prefix",
+                   return_value=([], "ZCode.app not found")):
+            res = ZCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 127
+        assert "ZCode.app" in res.stderr
+
+    def test_output_with_leading_garbage_tolerated(self, tmp_path, null_logger):
+        """stdout 混入非 JSON 前置行时，从首个 { 起截取解析。"""
+        stream = "some warning line\n" + _zcode_success_json("OK")
+        res, _ = self._run(tmp_path, null_logger, _mock_popen(stdout=stream))
+        assert res.returncode == 0
+        assert res.stdout == "OK"
+
+    def test_meter_event_written(self, tmp_path, null_logger):
+        import json as _json
+        import agent_go.backends.zcode_backend as zb
+        metering = tmp_path / "metering.jsonl"
+        user_cfg = tmp_path / "cfg.json"
+        user_cfg.write_text(_json.dumps({"model": {"main": "zai/glm-5.3-flash"}}))
+        with patch.object(zb, "ZCODE_USER_CONFIG", user_cfg):
+            res, _ = self._run(tmp_path, null_logger,
+                               _mock_popen(stdout=_zcode_success_json()),
+                               config={"_metering_path": str(metering)},
+                               routed_model="glm-5.3-flash")
+        assert res.returncode == 0
+        events = [_json.loads(x) for x in metering.read_text().splitlines() if x.strip()]
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["virtual_model"] == "agentgo-worker-zcode"
+        # 计量按 zcode 配置实际值（model.main），非 routed_model
+        assert ev["actual_model"] == "zai/glm-5.3-flash"
+        assert ev["prompt_tokens"] == 110      # 100 input + 10 cacheRead
+        assert ev["completion_tokens"] == 50
+        assert ev["cost_usd"] == 0.0           # Coding Plan 套餐计费，无 cost 字段
+        assert ev["result"] == "success"
+
+    def test_zero_work_exit_zero_maps_to_failure(self, tmp_path, null_logger):
+        """退出 0 但零产出（无 tokens/最终文本）显式失败。"""
+        res, _ = self._run(tmp_path, null_logger, _mock_popen(stdout="", returncode=0))
+        assert res.returncode == 1
+        assert "zero output" in res.stderr
+
+    def test_turn_failure_returncode_passthrough(self, tmp_path, null_logger):
+        """turn 失败（rc=1）正常透传，不在这里触发回退。"""
+        res, _ = self._run(tmp_path, null_logger,
+                           _mock_popen(stdout="", returncode=1, stderr="turn failed"))
+        assert res.returncode == 1
+        assert res.stderr == "turn failed"
+
+
 class TestBackendRoutingB4:
     """B4：声明式路由 worker_backend_by_difficulty（按难度）/ worker_backend_by_type（按 agent_type）。
 
@@ -855,3 +1012,83 @@ class TestBackendRoutingB4:
             res = run_repair(ctx, is_simple=False)
         assert res.sandbox_type == "pi"
         assert calls == ["pi"]
+
+
+class TestBackendPromo:
+    """backend_promo 促销窗口路由（如 GLM flash 夜间免费仅 ZCode 本体）。
+
+    优先级：显式声明（subtask/config/by_type/by_difficulty）> promo > agent_loop > claude。
+    promo 额外要求：时间窗内 + headless + backend 本机可用。
+    """
+
+    _PROMO = {"backend": "zcode", "start": "2026-09-04", "end": "2026-09-20",
+              "daily_start": "23:00", "daily_end": "09:00", "tz_offset": 8}
+
+    def _now(self, iso: str):
+        from datetime import datetime, timezone, timedelta
+        return datetime.fromisoformat(iso).replace(tzinfo=timezone(timedelta(hours=8)))
+
+    def test_time_active_cross_midnight(self):
+        from agent_go.backends.registry import _promo_time_active
+        # 跨午夜时段 23:00-09:00：23:30 / 02:00 / 08:59 在窗内，12:00 / 22:59 不在
+        assert _promo_time_active(self._PROMO, self._now("2026-09-10T23:30:00"))
+        assert _promo_time_active(self._PROMO, self._now("2026-09-10T02:00:00"))
+        assert _promo_time_active(self._PROMO, self._now("2026-09-10T08:59:00"))
+        assert not _promo_time_active(self._PROMO, self._now("2026-09-10T12:00:00"))
+        assert not _promo_time_active(self._PROMO, self._now("2026-09-10T22:59:00"))
+
+    def test_time_active_date_range(self):
+        from agent_go.backends.registry import _promo_time_active
+        # 日期闭区间 09-04 至 09-20
+        assert _promo_time_active(self._PROMO, self._now("2026-09-04T23:30:00"))
+        assert _promo_time_active(self._PROMO, self._now("2026-09-20T08:00:00"))
+        assert not _promo_time_active(self._PROMO, self._now("2026-09-03T23:30:00"))
+        assert not _promo_time_active(self._PROMO, self._now("2026-09-21T02:00:00"))
+
+    def test_time_active_non_crossing_daily_window(self):
+        from agent_go.backends.registry import _promo_time_active
+        promo = {"daily_start": "09:00", "daily_end": "18:00", "tz_offset": 8}
+        assert _promo_time_active(promo, self._now("2026-09-10T10:00:00"))
+        assert not _promo_time_active(promo, self._now("2026-09-10T20:00:00"))
+
+    def _resolve_with_promo(self, promo, headless=True, available=True, extra_cfg=None):
+        """在固定窗口时间（09-10 23:30）下解析 backend。"""
+        cfg = {"backend_promo": promo}
+        if extra_cfg:
+            cfg.update(extra_cfg)
+
+        class FakeZcode(BaseBackend):
+            name = "zcode"
+
+            def run(self, ctx):
+                return SubtaskResult(returncode=0)
+
+        FakeZcode.available = classmethod(lambda cls: available)
+        with patch("agent_go.backends.registry._promo_time_active", return_value=True), \
+             patch("agent_go.backends.registry.BackendRegistry.get", return_value=FakeZcode):
+            return resolve_backend_name(cfg, {}, headless, False)
+
+    def test_promo_active_routes_to_backend(self):
+        assert self._resolve_with_promo(self._PROMO) == "zcode"
+
+    def test_promo_requires_headless(self):
+        assert self._resolve_with_promo(self._PROMO, headless=False) == "claude"
+
+    def test_promo_backend_unavailable_falls_through(self):
+        assert self._resolve_with_promo(self._PROMO, available=False) == "claude"
+
+    def test_explicit_beats_promo(self):
+        assert self._resolve_with_promo(self._PROMO, extra_cfg={"worker_backend": "pi"}) == "pi"
+
+    def test_promo_inactive_keeps_default(self):
+        with patch("agent_go.backends.registry._promo_time_active", return_value=False):
+            assert resolve_backend_name({"backend_promo": self._PROMO}, {}, True, False) == "claude"
+
+    def test_empty_promo_no_change(self):
+        assert resolve_backend_name({"backend_promo": {}}, {}, True, False) == "claude"
+
+    def test_promo_claude_backend_allowed(self):
+        """promo 指定 claude 时也允许（窗口内收敛到默认路径的显式表达）。"""
+        promo = dict(self._PROMO, backend="claude")
+        with patch("agent_go.backends.registry._promo_time_active", return_value=True):
+            assert resolve_backend_name({"backend_promo": promo}, {}, False, False) == "claude"

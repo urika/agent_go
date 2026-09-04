@@ -66,6 +66,15 @@ class BaseBackend(ABC):
 
     name: ClassVar[str] = ""
 
+    @classmethod
+    def available(cls) -> bool:
+        """backend 在当前机器上是否可用（如对应 CLI 已安装）。
+
+        默认 True（claude/agent_loop 无额外依赖）；需要本机 CLI/应用的 backend
+        （pi/opencode/zcode）可覆盖。promo 路由（backend_promo）据此跳过不可用 backend。
+        """
+        return True
+
     @abstractmethod
     def run(self, ctx: BackendContext) -> SubtaskResult:
         """执行子任务并返回 SubtaskResult。"""

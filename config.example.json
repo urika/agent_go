@@ -159,6 +159,8 @@
   },
   "_worker_backend_routing_note": "B4 声明式 backend 路由（空 = 不覆盖）。优先级：subtask.backend > worker_backend > worker_backend_by_type > worker_backend_by_difficulty > agent_loop 自动规则 > claude。非 claude 仅 headless 生效。注意不要用 deprecated 的 worker_backends（模型名→base_url 映射）",
   "worker_backend_by_type": {},
+  "backend_promo": {},
+  "_backend_promo_note": "促销窗口路由（空 = 不启用）。时间窗内且无任何显式 backend 声明时优先使用指定 backend（需本机可用，仅 headless）。字段：backend / start / end（YYYY-MM-DD 闭区间）/ daily_start / daily_end（HH:MM，支持跨午夜如 23:00-09:00）/ tz_offset（默认 8 = 北京时间）。例：GLM flash 夜间免费仅 ZCode 本体 → {\"backend\": \"zcode\", \"start\": \"2026-09-04\", \"end\": \"2026-09-20\", \"daily_start\": \"23:00\", \"daily_end\": \"09:00\"}",
   "worker_models": {
     "easy": "",
     "medium": "",

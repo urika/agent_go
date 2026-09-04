@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Type
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Type
 
 from .base import BaseBackend
 
@@ -43,6 +44,48 @@ class BackendRegistry:
         cls._registry.clear()
 
 
+def _promo_time_active(promo: dict, now: Optional[datetime] = None) -> bool:
+    """促销窗口时间判定（纯函数，now 可注入便于测试）。
+
+    promo 字段：start/end（日期闭区间，YYYY-MM-DD）、daily_start/daily_end
+    （每日时段，HH:MM，支持跨午夜如 23:00-09:00）、tz_offset（默认 +8 北京时间，
+    固定偏移即可——北京时间无夏令时）。
+    """
+    tz = timezone(timedelta(hours=int(promo.get("tz_offset", 8))))
+    now = now or datetime.now(tz)
+    now = now.astimezone(tz)
+    d = now.date().isoformat()
+    if promo.get("start") and d < promo["start"]:
+        return False
+    if promo.get("end") and d > promo["end"]:
+        return False
+    ds = promo.get("daily_start", "00:00")
+    de = promo.get("daily_end", "23:59")
+    hm = now.strftime("%H:%M")
+    if ds <= de:
+        return ds <= hm <= de
+    # 跨午夜时段（如 23:00-09:00）
+    return hm >= ds or hm <= de
+
+
+def _promo_backend(config: dict, headless: bool) -> str:
+    """促销窗口路由：窗口内且 backend 可用时返回 promo backend 名，否则 ""。"""
+    promo = (config or {}).get("backend_promo") or {}
+    name = promo.get("backend", "")
+    if not name:
+        return ""
+    if name != "claude" and not headless:
+        return ""
+    if not _promo_time_active(promo):
+        return ""
+    try:
+        if not BackendRegistry.get(name).available():
+            return ""
+    except KeyError:
+        return ""
+    return name
+
+
 def resolve_backend_name(
     config: dict,
     subtask: dict,
@@ -66,9 +109,10 @@ def resolve_backend_name(
       2. config.worker_backend（全局显式）
       3. config.worker_backend_by_type[agent_type]
       4. config.worker_backend_by_difficulty[difficulty]
-      5. agent_loop 自动规则（B1 既有）
-      6. claude 兜底
-    以上 1-4 解析出非 claude 时均需 headless，否则回退 claude。
+      5. config.backend_promo（促销窗口路由：时间窗内且 backend 本机可用时生效）
+      6. agent_loop 自动规则（B1 既有）
+      7. claude 兜底
+    以上 1-5 解析出非 claude 时均需 headless，否则回退 claude。
 
     Args:
         config: 运行时生效配置（已合并 CLI 覆盖）。
@@ -92,6 +136,10 @@ def resolve_backend_name(
     if not explicit:
         _by_diff = config.get("worker_backend_by_difficulty", {}) or {}
         explicit = _by_diff.get(subtask.get("difficulty", "medium"), "")
+    # 4.5：backend_promo 促销窗口路由（如 GLM flash 夜间免费仅 ZCode 本体可用）——
+    # 仅在无任何显式声明时生效，且要求 backend 本机可用
+    if not explicit:
+        explicit = _promo_backend(config, headless)
 
     if explicit:
         if explicit != "claude" and not headless:
