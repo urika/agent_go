@@ -687,6 +687,45 @@ class TestOpenCodeBackend:
             OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
         assert "-m" not in mock_popen.call_args.args[0]
 
+    def test_snapshot_disabled_via_opencode_config(self, tmp_path, null_logger):
+        """OPENCODE_CONFIG 注入 {"snapshot": false}（影子仓库跨目录污染修复），运行后清理。"""
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        proc = _mock_popen(stdout=_oc_success_stream())
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            res = OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        env = mock_popen.call_args.kwargs["env"]
+        cfg_path = env.get("OPENCODE_CONFIG", "")
+        assert cfg_path
+        # 运行结束后临时配置已清理；运行期间内容含 snapshot:false
+        assert not Path(cfg_path).exists()
+        assert res.returncode == 0
+
+    def test_snapshot_off_merges_existing_config(self, tmp_path, null_logger):
+        """调用方已有 OPENCODE_CONFIG 时保留其内容，仅覆盖 snapshot 键。"""
+        import json as _json
+        import agent_go.backends.opencode_backend as ob
+        existing = tmp_path / "existing_oc.json"
+        existing.write_text(_json.dumps({"model": "x/y", "snapshot": True}))
+        captured = {}
+        orig = ob.OpenCodeBackend._env_with_snapshot_off
+
+        def capture(ctx):
+            env, path = orig(ctx)
+            captured["cfg"] = _json.loads(Path(path).read_text())
+            return env, path
+
+        proc = _mock_popen(stdout=_oc_success_stream())
+        with patch.object(ob.OpenCodeBackend, "_env_with_snapshot_off", staticmethod(capture)), \
+             patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            res = ob.OpenCodeBackend().run(
+                self._ctx(tmp_path, null_logger, progress=False,
+                          env={"OPENCODE_CONFIG": str(existing)}))
+        assert captured["cfg"]["snapshot"] is False
+        assert captured["cfg"]["model"] == "x/y"
+        assert res.returncode == 0
+
     def test_timeout_kills_and_reports(self, tmp_path, null_logger):
         """Go 套餐额度耗尽等静默挂起场景：hard_timeout 兜底 kill。"""
         import subprocess as _sp

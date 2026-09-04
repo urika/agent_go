@@ -15,7 +15,10 @@ docs/design/stage13-b6-opencode-assessment.md。
 - **必须带 --auto**：否则 run 无限挂起等待权限批准（实测 5 分钟零输出零退出）；
 - 额度耗尽（Go 套餐月限额）时 opencode 重试 3 次后静默挂起，不退出不报错——
   只能依赖 BackendContext.hard_timeout 兜底，务必配置；
-- 事件流不携带 model/provider 信息，计量的 actual_model 取 ctx.routed_model。
+- 事件流不携带 model/provider 信息，计量的 actual_model 取 ctx.routed_model；
+- **snapshot 默认禁用**（OPENCODE_CONFIG 注入 {"snapshot": false}）：opencode 的
+  影子仓库按 base commit 全局共享，agent_go worktree 场景会跨目录污染主仓库
+  （2026-09-05 B6 批量实测，详见 stage13-b6 评估文档）。
 
 仅支持 headless：resolve_backend_name 保证交互模式不路由到 opencode。
 """
@@ -23,8 +26,10 @@ docs/design/stage13-b6-opencode-assessment.md。
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 import time
 
 from .base import BackendContext, BaseBackend, SubtaskResult
@@ -116,6 +121,30 @@ class OpenCodeBackend(BaseBackend):
 
     name = "opencode"
 
+    @staticmethod
+    def _env_with_snapshot_off(ctx: BackendContext) -> tuple:
+        """构造注入 OPENCODE_CONFIG={"snapshot": false} 的环境，返回 (env, 临时配置路径)。
+
+        若调用方已设置 OPENCODE_CONFIG，在其内容基础上合并 snapshot:false（读失败则
+        仅用最小配置）。返回路径供运行结束后清理。
+        """
+        env = dict(ctx.env) if ctx.env else dict(os.environ)
+        oc_cfg: dict = {}
+        existing = env.get("OPENCODE_CONFIG", "")
+        if existing:
+            try:
+                with open(existing, encoding="utf-8") as f:
+                    oc_cfg = json.load(f)
+            except (ValueError, OSError):
+                oc_cfg = {}
+        oc_cfg["snapshot"] = False
+        tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json",
+                                         prefix="opencode-config-", delete=False)
+        json.dump(oc_cfg, tf)
+        tf.close()
+        env["OPENCODE_CONFIG"] = tf.name
+        return env, tf.name
+
     def run(self, ctx: BackendContext) -> SubtaskResult:
         start = time.time()
         oc_bin = shutil.which("opencode")
@@ -139,10 +168,16 @@ class OpenCodeBackend(BaseBackend):
 
         ctx.logger.info(f"[OpenCodeBackend] {ctx.sub_id} 启动 opencode (model={ctx.routed_model or 'default'})")
 
+        # 禁用 opencode snapshot：其影子仓库按 base commit 全局共享（~/.local/share/
+        # opencode/snapshot/<commit>/），agent_go 每个 worktree 都从同一 base commit
+        # 起建，影子仓库记录的是首次注册的目录——snapshot 写回会污染主仓库/其他目录
+        # （2026-09-05 B6 批量污染根因：fixture 主仓库被写、后续任务 dirty-abort）。
+        env, oc_config_path = self._env_with_snapshot_off(ctx)
+
         proc = subprocess.Popen(
             cmd,
             cwd=str(ctx.worktree),
-            env=ctx.env or None,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -169,6 +204,11 @@ class OpenCodeBackend(BaseBackend):
                     ctx.active_pids.discard(proc.pid)
             else:
                 ctx.active_pids.discard(proc.pid)
+            if oc_config_path:
+                try:
+                    os.unlink(oc_config_path)
+                except OSError:
+                    pass
 
         elapsed = time.time() - start
         parsed = _parse_events((stdout or "").splitlines())

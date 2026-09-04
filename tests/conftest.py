@@ -87,3 +87,21 @@ def minimal_plan():
         ],
         "estimated_effort": "1 小时"
     }
+
+
+@pytest.fixture(autouse=True)
+def _disable_backend_promo(request, monkeypatch):
+    """测试套件默认禁用 backend_promo 促销窗口路由。
+
+    背景（2026-09-05 B7）：executor._effective_config 在 config=None 时回退读取
+    真实用户配置 ~/.agent_go/config.json；promo 窗口内 resolve_backend_name 会
+    解析出 zcode 等真实 backend，而多数 executor 测试只 mock 了 claude 路径，
+    导致测试真实拉起外部 CLI 进程（实测 test_executor.py 拉起 3 个 zcode-cli）。
+    TestBackendPromo 自身需要 promo 逻辑，跳过 stub。
+    """
+    cls = getattr(request.node, "cls", None)
+    if cls is not None and cls.__name__ == "TestBackendPromo":
+        return
+    monkeypatch.setattr(
+        "agent_go.backends.registry._promo_backend", lambda config, headless: ""
+    )
