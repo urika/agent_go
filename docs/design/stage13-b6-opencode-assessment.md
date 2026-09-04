@@ -65,3 +65,39 @@ opencode（本机 1.18.27）**支持类 `claude -p` 的无头模式**，可作�
   35750+90 tokens，$0.00，23s，目标文件真实创建，计量事件正确写入。
 - 待办：Go 套餐额度重置（约 10 天）后评估 qwen3.8-flash 臂；Zen 免费臂 A/B
   只适合 eval fixture / 公开代码（免费档数据可能用于训练）。
+
+## B6 批量：opencode × glm-5.3-flash 臂（2026-09-04/05 夜间免费窗口）
+
+golden 6 任务 × repeat 2，worker 走 zai-coding-plan（opencode auth.json），
+planner/evaluator 走 api.z.ai/api/anthropic（ZAI_API_KEY）。
+结果文件：`eval_suite/results_b6_opencode_glm_20260904.jsonl`（26 条原始记录，
+含两轮补跑；dedup 规则：剔除基础设施伪记录后每 (task,repeat) 保留最新真实记录）。
+
+**终版 12/12 通过**（dedup 后），平均 elapsed ~447s，cost 全 $0（免费窗口）。
+对照 B5 同模型双臂：claude 10/12、pi 10/12。
+
+诚实口径备注：
+- 首跑真实通过率 7/8（剔除基础设施伪记录后；fix-missing-default r1 为真实
+  model_failure，补跑后通过）。12/12 含补跑偏向，与 B5 的「首跑+基础设施补跑」
+  口径略有差异（B5 两臂的补跑只替换 planner 崩溃类记录）。
+- conditional-branching / security-hardening 的 failure_class=verification_failure
+  是执行中途验证失败重试后通过的痕迹，binary_pass 为准。
+
+**批量暴露并已修复的 3 个基础设施 bug**（本臂最大的产出）：
+
+1. **api.py decompose_fallback**：planner 401 降级后本地模型输出的 files_hint
+   为 JSON 数组，executor 按 str `.strip()` → AttributeError → system_error
+   （初跑 3 例秒退的根因）。已修：fallback 边界归一化 list→逗号字符串 + 测试。
+2. **opencode snapshot 跨目录污染**：影子仓库（~/.local/share/opencode/snapshot/
+   <base-commit>/）按 base commit 全局共享、worktree 路径记录首次注册目录——
+   agent_go 每个 worktree 同一 base commit，snapshot 写回会污染主仓库甚至
+  无关目录（实测 agent_go 根目录被写入 fixture 文件），并引发后续任务
+   dirty-abort 连锁 5s 伪记录。已修：OpenCodeBackend 注入
+   `OPENCODE_CONFIG={"snapshot": false}`（实测影子仓库不再写入）+ 2 测试。
+3. **backend_promo 破坏测试 hermetic**：executor._effective_config 在 config=None
+   时回退真实用户配置，promo 窗口内 executor 测试（只 mock claude 路径）真实拉起
+   zcode 进程。已修：conftest autouse fixture 默认禁用 promo（TestBackendPromo 豁免）。
+
+**遗留风险**：glm-5.3-flash 作为较弱模型有「漫游」倾向（初跑 security r1 的 bash
+曾越界到 agent_go 根目录跑 pytest）——snapshot 已关，但 bash 工具级的目录约束
+opencode 侧没有硬保证；backend 层面可考虑后续加 cwd 监控或文件系统沙箱。
