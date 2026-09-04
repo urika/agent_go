@@ -602,6 +602,190 @@ class TestPiBackend:
         assert res.stdout == "RECOVERED"
 
 
+def _oc_ndjson(*events):
+    import json as _json
+    return "\n".join(_json.dumps(e) for e in events) + "\n"
+
+
+def _oc_success_stream(final_text="DONE"):
+    """构造一次成功的 opencode NDJSON 事件流（1 次工具调用 + 最终文本回复）。"""
+    return _oc_ndjson(
+        {"type": "step_start", "sessionID": "ses-1", "timestamp": 1,
+         "part": {"id": "p1", "type": "step-start"}},
+        {"type": "tool_use", "sessionID": "ses-1", "timestamp": 2,
+         "part": {"type": "tool", "tool": "write", "callID": "c1",
+                  "state": {"status": "completed", "input": {"filePath": "a.txt"}}}},
+        {"type": "step_finish", "sessionID": "ses-1", "timestamp": 3,
+         "part": {"type": "step-finish", "reason": "tool-calls", "cost": 0.001,
+                  "tokens": {"total": 150, "input": 100, "output": 50, "reasoning": 0,
+                             "cache": {"read": 10, "write": 0}}}},
+        {"type": "step_start", "sessionID": "ses-1", "timestamp": 4,
+         "part": {"id": "p4", "type": "step-start"}},
+        {"type": "text", "sessionID": "ses-1", "timestamp": 5,
+         "part": {"type": "text", "text": final_text}},
+        {"type": "step_finish", "sessionID": "ses-1", "timestamp": 6,
+         "part": {"type": "step-finish", "reason": "stop", "cost": 0.002,
+                  "tokens": {"total": 220, "input": 200, "output": 20, "reasoning": 0,
+                             "cache": {"read": 0, "write": 0}}}},
+    )
+
+
+class TestOpenCodeBackend:
+    """B6：OpenCodeBackend 命令构造、NDJSON 解析、超时与容错。"""
+
+    def _ctx(self, tmp_path: Path, null_logger, **kw):
+        defaults = dict(
+            task_md="# 任务\n做点事", worktree=tmp_path, env={}, headless=True,
+            sub_id="sub-1", task_id="task-1", logger=null_logger, config={},
+        )
+        defaults.update(kw)
+        return BackendContext(**defaults)
+
+    def test_command_and_parse_success(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        proc = _mock_popen(stdout=_oc_success_stream("全部完成"))
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/usr/local/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            res = OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        cmd = mock_popen.call_args.args[0]
+        assert cmd[:6] == ["/usr/local/bin/opencode", "run", "--format", "json", "--auto", "--pure"]
+        assert cmd[-1].startswith("# 任务")
+        assert res.returncode == 0
+        assert res.sandbox_type == "opencode"
+        assert res.stdout == "全部完成"
+        assert res.kill_reason is None
+        # pid 生命周期：结束后从 active_pids 移除
+        assert 4321 not in self._ctx(tmp_path, null_logger).active_pids
+
+    def test_readonly_uses_plan_agent(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OPENCODE_READONLY_AGENT, OpenCodeBackend
+        proc = _mock_popen(stdout=_oc_success_stream())
+        ctx = self._ctx(tmp_path, null_logger, progress=False, extra={"readonly": True})
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            OpenCodeBackend().run(ctx)
+        cmd = mock_popen.call_args.args[0]
+        i = cmd.index("--agent")
+        assert cmd[i + 1] == OPENCODE_READONLY_AGENT
+
+    def test_routed_model_passed_through(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        proc = _mock_popen(stdout=_oc_success_stream())
+        ctx = self._ctx(tmp_path, null_logger, progress=False, routed_model="opencode/mimo-v2.5-free")
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            OpenCodeBackend().run(ctx)
+        cmd = mock_popen.call_args.args[0]
+        i = cmd.index("-m")
+        assert cmd[i + 1] == "opencode/mimo-v2.5-free"
+
+    def test_no_model_flag_when_unrouted(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        proc = _mock_popen(stdout=_oc_success_stream())
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert "-m" not in mock_popen.call_args.args[0]
+
+    def test_timeout_kills_and_reports(self, tmp_path, null_logger):
+        """Go 套餐额度耗尽等静默挂起场景：hard_timeout 兜底 kill。"""
+        import subprocess as _sp
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        proc = _mock_popen(returncode=-9)
+        proc.communicate.side_effect = [
+            _sp.TimeoutExpired(cmd="opencode", timeout=5),
+            ("", "killed"),
+        ]
+        ctx = self._ctx(tmp_path, null_logger, progress=False, hard_timeout=5)
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            res = OpenCodeBackend().run(ctx)
+        proc.kill.assert_called_once()
+        assert res.kill_reason == "hard_timeout"
+        assert res.returncode == -9
+
+    def test_opencode_not_installed(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value=None):
+            res = OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 127
+        assert "opencode" in res.stderr
+
+    def test_malformed_lines_tolerated(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        stream = "garbage line\n{broken json\n" + _oc_success_stream("OK")
+        proc = _mock_popen(stdout=stream)
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            res = OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 0
+        assert res.stdout == "OK"
+
+    def test_meter_event_written(self, tmp_path, null_logger):
+        import json as _json
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        metering = tmp_path / "metering.jsonl"
+        ctx = self._ctx(tmp_path, null_logger, progress=False,
+                        config={"_metering_path": str(metering)},
+                        routed_model="opencode/mimo-v2.5-free")
+        proc = _mock_popen(stdout=_oc_success_stream())
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            OpenCodeBackend().run(ctx)
+        events = [_json.loads(l) for l in metering.read_text().splitlines() if l.strip()]
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["virtual_model"] == "agentgo-worker-opencode"
+        # 事件流不携带 model 信息，actual_model 取 routed_model
+        assert ev["actual_model"] == "opencode/mimo-v2.5-free"
+        assert ev["prompt_tokens"] == 310      # (100+10) + 200
+        assert ev["completion_tokens"] == 70   # 50 + 20
+        assert ev["cost_usd"] == pytest.approx(0.003)
+        assert ev["result"] == "success"
+
+    def test_tool_error_counted_but_result_returned(self, tmp_path, null_logger):
+        """tool_use state.status=error 计数，非零退出码正常返回（验证失败走 retry）。"""
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        stream = _oc_ndjson(
+            {"type": "tool_use", "sessionID": "s1",
+             "part": {"type": "tool", "tool": "bash",
+                      "state": {"status": "error", "input": {}}}},
+            {"type": "text", "sessionID": "s1", "part": {"type": "text", "text": "partial"}},
+            {"type": "step_finish", "sessionID": "s1",
+             "part": {"reason": "stop", "cost": 0.0,
+                      "tokens": {"input": 10, "output": 5, "cache": {"read": 0, "write": 0}}}},
+        )
+        proc = _mock_popen(stdout=stream, returncode=1, stderr="tool boom")
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            res = OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 1
+        assert res.stderr == "tool boom"
+
+    def test_zero_work_exit_zero_maps_to_failure(self, tmp_path, null_logger):
+        """退出 0 但零产出（无 tokens/工具调用/最终文本）必须显式失败。"""
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        proc = _mock_popen(stdout="", returncode=0)
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            res = OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 1
+        assert "zero output" in res.stderr
+
+    def test_error_event_captured(self, tmp_path, null_logger):
+        """防御性：事件流出现 error 事件时记录，但有真实产出不误判失败。"""
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        stream = _oc_ndjson(
+            {"type": "error", "sessionID": "s1", "message": "transient upstream"},
+        ) + _oc_success_stream("RECOVERED")
+        proc = _mock_popen(stdout=stream, returncode=0)
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            res = OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 0
+        assert res.stdout == "RECOVERED"
+
+
 class TestBackendRoutingB4:
     """B4：声明式路由 worker_backend_by_difficulty（按难度）/ worker_backend_by_type（按 agent_type）。
 
