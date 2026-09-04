@@ -683,7 +683,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 | **B2 AgentLoop 能力补齐** 🟡 代码已完成（bench A/B 待 B5） | 修复路径（fix/replan/reload）纳入 backend 分发（backends/dispatch.py）；ACI 工具集 Grep/Glob/View；stuck 检测；no-progress 信号；scope advisory；explore 只读模式 | 在 canonical easy/medium 任务上与 Claude Code 路径 A/B，通过率不劣化、成本下降（B5 验证） |
 | **B3 Pi backend PoC** ✅ PoC + 小规模批量完成 | 接入 `pi -p --mode json --no-session`（pi_backend.py）：NDJSON 事件流解析、聚合计量、hard_timeout、readonly 工具白名单、零产出错误映射；显式选择入口 subtask.backend / config.worker_backend / bench --worker-backend | golden 6 任务 × 2 臂（deepseek-pro / kimi-for-coding）累计 11/12 通过，唯一失败为已修复的基础设施 bug + 额度耗尽（详见 stage13-b3 设计文档）；B5 正式验收待同模型双臂 + repeat≥2 |
 | **B4 backend 路由配置** ✅ | `worker_backend_by_difficulty` / `worker_backend_by_type` 声明式路由（registry.resolve_backend_name，优先级：subtask.backend > worker_backend > by_type > by_difficulty > agent_loop > claude），初始与修复路径同策略；命名避开 deprecated 的 worker_backends | 配置即可切换子任务 backend，无需改代码 ✓（8 个路由优先级测试） |
-| **B5 bench 对比基线** | Claude Code vs AgentLoop vs Pi 在相同任务集上跑 A/B | 只有不劣化于当前默认路径的 backend 才允许扩大使用 |
+| **B5 bench 对比基线** ✅ | Claude Code vs Pi 双臂（同模型 glm-5.3-flash 同端点，golden 6 × repeat 2）：pass_rate 持平 83%，pi elapsed 略优、lint 略多 | 不劣化成立 ✓（详见 stage13-b3 设计文档 B5 节）；pi backend 可选启用，默认路径仍为 claude |
 
 ### 关键路径
 
@@ -692,8 +692,8 @@ B1 标准 backend 接口 ✅（73cfcea）
   -> B2 AgentLoop 补齐 ✅ 代码完成（B0 修复循环拆分已并入；bench A/B 待 B5）
   -> B3 Pi backend PoC ✅（0ea5ce8 之后；golden 6 任务 × 2 臂累计 11/12）
   -> B4 backend 路由配置 ✅（worker_backend_by_difficulty / by_type 声明式路由）
-  -> B5 bench A/B（成本/通过率证据）
-  -> accepted（可选地扩大默认启用范围）
+  -> B5 bench A/B ✅（2026-09-04：glm-5.3-flash 同端点双臂，pass 持平 83%，pi 不劣化）
+  -> accepted（pi backend 可选启用；opencode 列为 B6 候选，评估已入库）
 ```
 
 ### 不做的事
@@ -708,7 +708,7 @@ B1 标准 backend 接口 ✅（73cfcea）
 
 ### 多 Backend / Agent Runtime
 
-状态：从“暂缓”提升为“阶段十三：proposed”；B1/B2 代码已落地（2026-09-03），等待 B5 bench A/B 数据决定是否扩大默认启用范围。
+状态：从“暂缓”提升为“阶段十三：accepted（有条件）”；B1-B5 全部落地（2026-09-04），B5 双臂 bench 证明 pi backend 不劣化（pass 持平 83%），pi 可经 worker_backend / 路由配置可选启用，默认路径仍为 claude；opencode（B6）评估已入库待立项。
 
 触发条件（满足其一即启动）：
 
@@ -847,6 +847,6 @@ M0 产品契约与指标冻结  ✅ accepted
 2. **阶段 C 续项**：C3 局部重规划 ✅（2026-08-21，无进展触发一次拆分建议，默认人工确认，F-VERIFY-6 契约全守）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位，在 delivery-20260820 基线上做两臂对比）。
 3. **并行推进阶段 D 放行评估与阶段十三 多 Backend 架构**：
    - 阶段 D：信任指标（审查后修改率 / 盲区命中率 / 复发可见率）跨任务积累达标后，启动 Reviewer 灰度与 B1 自动 merge 决策。
-   - 阶段十三：B1 标准 backend 抽象、B2 AgentLoop 能力补齐（B0 已并入）与 B3 Pi backend PoC 已落地（pi_backend.py + 显式选择入口 worker_backend，单次 smoke 通过）；下一步 B4 路由配置与 B5 bench A/B（canonical 批量对比）；只有 bench 证明不劣化于当前 Claude Code 默认路径，才允许扩大使用。
+   - 阶段十三：B1-B5 全部落地。B5 双臂 bench（glm-5.3-flash 同端点）证明 pi 不劣化（pass 持平 83%），pi 可选启用；并发调度原则已拍板（云端可并行、本地模型必须串行），pipeline 本地模型自动限流为候选增强；opencode（B6）评估已入库（Zen 免费模型实测可用，Go 套餐月度额度尽）。
 
 在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。

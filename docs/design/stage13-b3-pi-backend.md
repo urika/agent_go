@@ -60,9 +60,40 @@
 - 口径警示：两臂模型不同（flash vs pro）、repeat 不对等（2 vs 1）、n=6——仅作 PoC 可行性证据，
   不作 backend 优劣结论；B5 需同模型双臂 + repeat≥2。
 
-**模型选择策略**（2026-09-04 用户拍板）：优先 kimi / GLM 套餐额度，套餐耗尽才用 deepseek 按量；
-同提供商内优先 flash 级模型控成本。实测探测：kimi-coding/kimi-for-coding 可用；
-zai-coding-cn/glm-5.3-flash 当周额度尽（429，重置 15:17）；deepseek 余额 402。
+**模型选择策略**（2026-09-04 用户拍板，v2 修订）：优先 GLM / kimi 套餐额度（GLM 略优先），
+套餐都耗尽才用 deepseek 按量；同提供商内优先 flash 级模型控成本（glm-5.3-flash /
+deepseek-v4-flash；kimi 无 flash 档，用 kimi-for-coding）。
+当日实测额度状态：glm-5.3-flash 429（每周额度尽，15:17 重置）；kimi 5 小时窗在
+claude 臂 ~12 次执行后耗尽（403，窗口结束自动重置）；deepseek 余额一度 402 后恢复。
+
+## B5 正式双臂 A/B（2026-09-04，golden 6 任务 × repeat 2，同模型同端点）
+
+口径：两臂均为 glm-5.3-flash（GLM 国际站）；planner / evaluator / worker 统一
+`api.z.ai/api/anthropic`（bench `--bench-endpoint` 注入），两臂只剩 backend 一个变量；
+pi 臂 worker 实际走 pi 自定义 provider（zai-global，paas OpenAI 兼容口，同模型）。
+结果文件：`eval_suite/results_b5_claude_glm_20260904.jsonl` / `results_b5_pi_glm_20260904.jsonl`。
+
+| 指标 | claude 臂 | pi 臂 |
+|---|---|---|
+| pass_rate | 10/12（83%） | 10/12（83%） |
+| first-pass | 10/12（83%） | 8/12（67%，2 次经修复回收） |
+| elapsed 均值/中位 | 488s / 408s | 441s / 423s |
+| lint 均值 | 6.7 | 7.7 |
+| 语义评估通过 | 9/11 | 10/12 |
+| 基础设施失败 | 0 | 0（3 次 planner JSON 失败已补跑替换） |
+
+逐任务交叉：conditional-branching r1 claude 失败 pi 通过；security-hardening r1 双臂均失败、
+r2 claude 通过 pi 失败——两臂失败不重合，差异在噪声范围内。
+
+**结论：pi backend 在 golden 套件上 pass_rate 不劣化于 claude 默认路径（持平 83%），
+elapsed 略优，lint 略多（+1/任务），满足 B5 验收门槛。**
+局限：n=12 样本小；成本对比缺失（pi 对自定义 provider 不掌握定价，事件流 cost=0；
+两臂实际均为套餐内零边际成本）；first-pass pi 低 16pp，重试回收机制抹平了终态差异。
+已知风险：GLM flash 作 planner 偶发非法 JSON（本批出现 3 次，基础设施层重试可恢复）。
+
+**B5 后续候选**：pipeline 本地模型自动限流（AGENT_GO_IS_LOCAL 时并行度强制 1，
+见 runtime-design-decisions「并发调度原则」）；opencode backend（B6 评估见
+stage13-b6-opencode-assessment.md，Zen 免费模型已实测可用，可作零成本臂）。
 
 **kimi 臂**（pi + kimi-coding/kimi-for-coding，套餐；`eval_suite/results_pi_kimi_20260904.jsonl`）：
 
