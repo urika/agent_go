@@ -260,13 +260,17 @@ Agent 类型默认配置。
 | `worker_backend` | str | `""` | B3 全局显式 backend（如 `"pi"`，需本机已装对应 CLI） |
 | `worker_backend_by_difficulty` | dict | `{easy/medium/hard: ""}` | B4 按难度路由 backend（空 = 不覆盖） |
 | `worker_backend_by_type` | dict | `{}` | B4 按 agent_type 路由 backend（如 `{"explore": "pi"}`） |
+| `backend_promo` | dict | `{}` | 促销窗口路由（空 = 不启用）。字段：`backend` / `start` / `end`（YYYY-MM-DD 闭区间）/ `daily_start` / `daily_end`（HH:MM，支持跨午夜）/ `tz_offset`（默认 8 = 北京时间）。窗口内且无任何显式声明时优先用指定 backend，要求本机可用（`BaseBackend.available()`） |
 
 解析优先级（高→低）：`subtask.backend` > `worker_backend` > `worker_backend_by_type` >
-`worker_backend_by_difficulty` > agent_loop 自动规则 > claude 兜底。
-解析出非 claude 时仅 headless 生效，交互模式回退 claude（pi/opencode 均为非交互 CLI）。
+`worker_backend_by_difficulty` > `backend_promo`（窗口内） > agent_loop 自动规则 > claude 兜底。
+解析出非 claude 时仅 headless 生效，交互模式回退 claude（pi/opencode/zcode 均为非交互 CLI）。
 修复路径（fix/replan/reload）走同一解析（`backends/dispatch.run_repair`）。
 **命名警示**：勿用 deprecated 的 `worker_backends`（模型名→`ANTHROPIC_BASE_URL` 映射，见
 `plan_api.worker_base_url` 条目），与 B4 路由键语义完全不同。
+
+`backend_promo` 示例（GLM Coding Plan Flash×ZCode 夜间免费，glm-5.3-flash 仅 ZCode 本体免费）：
+`{"backend": "zcode", "start": "2026-09-04", "end": "2026-09-20", "daily_start": "23:00", "daily_end": "09:00"}`
 
 ### `worker_models_fallback`（难度→降级备选模型）
 
