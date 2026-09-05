@@ -858,13 +858,25 @@ M0 产品契约与指标冻结  ✅ accepted
   -> 阶段十三 多 Backend 架构  proposed（B1 标准接口 ✅ / B2 AgentLoop 补齐 ✅ 代码 / B3 Pi PoC ✅）
 ```
 
-下一阶段三件事（按优先级）：
+下一阶段推进队列（2026-09-05 重排，按优先级）：
 
-1. **bench 交付闭环自动验证**：✅ 完成（2026-08-20，`eval bench --with-delivery` 本地交付 merge 闭合判定 + 首个有效 ADR 基线 `delivery-20260820`，见下方基线行）。**M4 goal 回溯**：✅ accepted（同日，`compute_goal_adherence` 正交合规度，「执行全过但漏验收」显式标记）。
-2. **阶段 C 续项**：C3 局部重规划 ✅（2026-08-21，无进展触发一次拆分建议，默认人工确认，F-VERIFY-6 契约全守）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位，在 delivery-20260820 基线上做两臂对比）。
-3. **并行推进阶段 D 放行评估与阶段十三 多 Backend 架构**：
-   - 阶段 D：信任指标（审查后修改率 / 盲区命中率 / 复发可见率）跨任务积累达标后，启动 Reviewer 灰度与 B1 自动 merge 决策。
-   - 阶段十三：B1-B7 全部落地。B5 双臂 bench（glm-5.3-flash 同端点）证明 pi 不劣化（pass 持平 83%），pi 可选启用；B6 opencode backend 已实现并冒烟通过（Zen 免费模型零成本臂可用，Go 套餐月度额度尽、重置后再评估 qwen3.8）；B7 zcode backend 已实现并冒烟通过（glm-5.3-flash 夜间免费活动 23:00-09:00 仅 ZCode 本体完全免费）；四臂 golden 批量齐备（claude 10/12、pi 10/12、opencode 12/12 dedup 后、zcode 首跑 10/12，B6/B7 均 $0）；B8 dsh 调研完成待冒烟，ADR-010 轨迹平台化三层切分确立（代理层不做 LLM 会话管理），阶段 1 轨迹采集随 B8 落地；并发调度原则已拍板（云端可并行、本地模型必须串行），pipeline 本地模型自动限流为候选增强。
-   - **pi 插件生态借鉴**（[stage13-pi-extensions-review](design/stage13-pi-extensions-review.md)，2026-09-05）：候选增强按优先级——① mcp_client 代理工具模式（pi-mcp-adapter：单工具 ~200 token + 动态发现，替代全量 schema 注入）；② C4 知识注入采用 KV-cache 稳定快照（pi-memory：检查点刷新而非逐轮重建，避免本地模型前缀缓存失效）；③ 代理层压缩参照 context-mode「工具结果外置 + FTS5/BM25 按需检索」路线（理念借鉴，ELv2 不引入代码）；④ pi-subagents 的确定性 workflow 脚本（plan 模板固化）为长期候选。注意：pi 臂 bench 必须保持无扩展环境，与生产使用区分。
+**已完成主线**（保留口径备查）：bench 交付闭环 ✅（2026-08-20，`--with-delivery` + 首个 ADR 基线 `delivery-20260820`）；M4 goal 回溯 ✅；C3 局部重规划 ✅（2026-08-21）；阶段十三 B1-B7 ✅ + 四臂 golden 批量齐备（claude 10/12、pi 10/12、opencode 12/12 dedup 后、zcode 首跑 10/12，B6/B7 均 $0）。
+
+**立即可做（无外部依赖，按序推进）**：
+
+1. **B8 dsh 冒烟 → DSHBackend → golden 6×2**（[stage13-b8](design/stage13-b8-dsh-assessment.md)）：前置为本机 Node.js + DeepSeek key + 审批配置模板（headless 失败闭合）；**随 B8 同步落地 ADR-010 阶段 1**（`harvest_trajectory` 钩子，dsh 为首个 full-fidelity 数据源；阶段 2/3 须阶段 1 价值验证背书）。
+2. **mcp_client 代理工具模式**（pi 插件借鉴①）：单工具 ~200 token + 动态发现，替代全量 schema 注入；独立小改，可穿插。
+3. **C4 前置修订：知识注入 KV-cache 稳定快照**（pi 插件借鉴②）→ 然后 **C4 KnowledgeStore A/B**（delivery-20260820 基线两臂对比）。⚠️ 顺序敏感：C4 绕过此修订直接启动会导致注入口径返工（逐轮重建打爆本地模型前缀缓存）。
+4. **pipeline 本地模型自动限流**：原则已拍板（云端可并行、本地串行），只差自动化落地。
+5. **随手项**：`zai/glm-5.3-flash` 定价覆盖（pricing.py）。
+
+**等外部窗口（到点触发，不占当前排期）**：
+
+- Go 套餐额度重置（~09-15）后评估 opencode qwen3.8 臂。
+- 阶段 D 放行评估：A1 口径已修（ISSUE-54 ✅），剩余为**纯样本积累**（≥10 review 决策 + 失败样本），靠真实任务运行自然达成，不刻意刷样本。
+- zcode 官方独立 CLI 发布后迁移（zai-org/feedback#444）。
+- ISSUE-55 巨型模块拆分（web_server 4838 / executor 3103 行）：web_server 拆分等下一个 Web 需求触发。
+
+**长期候选**：pi-subagents 式确定性 workflow 脚本（plan 模板固化）；代理层压缩参照 context-mode「工具结果外置 + FTS5/BM25 按需检索」路线（理念借鉴，ELv2 不引入代码）；ADR-010 阶段 2/3（TaskEvent 词汇、meta.json 投影化、fork-retry）。
 
 在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。
