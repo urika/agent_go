@@ -65,17 +65,91 @@ LLM 消息历史从日志派生，从不单独存储。架构约束：模型能�
 
 - **developer preview 破坏性变更** → 版本 pin（如 `@0.1.0-rc.7`）+ 契约漂移
   检查（复用 `tools/check_llama_contracts.py` 模式）。
-- **审批失败闭合** → 批量前必须落地 permission/approval 配置模板。
-- **计量读 session 日志**（Zstd/v2 内部契约）→ 防腐层翻译 + 版本探测 +
+- **审批失败闭合** → ✅ 已解决（T01）：`DSH_PERMISSION_MODE=danger-full-access`
+  环境变量即审批模板（代价是关沙箱，隔离由 worktree 承担）。
+- **计量读 session 日志**（Zstd/v2 内部契约）→ ✅ 可行性已验证（T01）：
+  `zstd -dc` 可读、`assistant/message` 带 usage；实现时仍需版本探测 +
   失败降级（读不到记未知，不阻塞任务）。
 - **轨迹重放执行靠社区插件** → 不作为依赖项；agent_go 的 fork-retry 走核心
   原语即可。
-- 批量并发时会话目录按 cwd 隔离预计无冲突，待冒烟验证。
+- ~~批量并发时会话目录按 cwd 隔离预计无冲突~~ → ✅ 已确认按 cwd 分目录（T01）。
 
 ## 下一步（B8 实施条件）
 
-1. 手工冒烟（不做 backend）：`npx @deepseek-ai/dsh@<pinned> --profile headless`
-   在 /tmp 临时仓库跑任务，验证审批配置、输出契约、会话日志位置。
-2. 冒烟通过后实现 `DSHBackend`（工作量 ≈ B6）+ 同步落地 ADR-010 阶段 1 的
-   `harvest_trajectory` 钩子（dsh 为首个 full-fidelity 数据源）。
-3. bench 用 deepseek 官方 API 跑 golden 6×2，与现有四臂同口径对比。
+1. ~~手工冒烟~~ ✅ 已完成（2026-09-05，见下节）。
+2. ~~实现 `DSHBackend` + `harvest_trajectory` 钩子~~ ✅ 已完成（T02+T04，见下节）。
+3. ~~bench golden 6×2~~ ✅ 已完成（T03，见下节）。
+
+## T02/T04 实现记录（2026-09-05）
+
+- `agent_go/backends/dsh_backend.py`（~380 行）：命令 `npx -y @deepseek-ai/dsh@0.1.2-rc.1
+  --profile headless`（版本 pin）；非 readonly 注入 `DSH_PERMISSION_MODE=danger-full-access`，
+  readonly 显式移除该变量（防用户 shell 继承全放开值）；rc=0 空 stdout → 零产出失败；
+  hard_timeout 进程组 kill；`available()` = npx + ~/.dsh/settings.yaml 存在性。
+- 计量真源：session 日志 `assistant/message.data.usage`（含 cacheReadTokens）；
+  actual_model 从日志 message.source 回读（dsh 无 per-run 模型标志，日志即真源）；
+  找不到日志仍写零值 metering 事件（管道可见性），全链 fail-open。
+- cwd 编码：dsh 源码 `projectKey()` 移植（分隔符折叠、`~XXXX` 转义、首尾 `--`），
+  有回归测试；编码不命中兜底按 header.cwd 扫描比对。
+- **T04（ADR-010 阶段 1）**：`BaseBackend.harvest_trajectory()` 可选钩子（默认 []）；
+  DSHBackend 首个实现——白名单词汇防腐翻译（chunk 流丢弃、参数截断 300 字符、
+  header version≠0 降级）；executor 接线落盘 `<task_dir>/trajectory/{sub_id}.jsonl`。
+- 测试：TestDSHBackend 16 例；全量非集成 2994 绿；ruff 干净。
+
+## T03 批量：dsh × glm-5.3-flash 臂（2026-09-05，golden 6×2，并行 4）
+
+结果文件：`eval_suite/results_b8_dsh_glm_20260905.jsonl`（12 条，全部真实记录——
+无秒退、无人工 kill）。
+
+**首跑 11/12 通过**（binary_pass 口径，与 B5-B7 一致），平均 elapsed ~420s
+（快于 claude ~488s、zcode ~638s，慢于 pi ~368s），成本字段未知
+（dsh 不报告成本 + glm-5.3-flash 缺定价覆盖，记录为 0 仅占位）。
+
+- 唯一失败：add-simple-caching r1，`plan_gate_blocked`——规划门拦下 planner
+  臆测 API 的 plan（agent_prompt 引用不存在的 `kwargs.items`/`clear_cache`），
+  是**规划层质量事件（planner=glm-5.3-flash）而非 dsh worker 失败**，且门禁行为
+  本身符合设计；r2 同任务通过。
+- **T04 轨迹采集首次实战验证**：每子任务落盘 trajectory jsonl（实测一例 151
+  事件：26 step / 34 次工具调用 / 逐步 usage 含 cacheReadTokens）——dsh 臂是
+  首个带完整执行轨迹的 bench 臂。
+
+**五臂对比（golden 6×2，binary_pass，同模型 glm-5.3-flash）**：
+
+| 臂 | 通过 | 平均耗时 | 备注 |
+|---|---|---|---|
+| claude（B5） | 10/12 | ~488s | 默认路径基线 |
+| pi（B5） | 10/12 | ~368s | 最快 |
+| opencode（B6） | 12/12（dedup 后，首跑真实 7/8） | ~447s | 含补跑偏向 |
+| zcode（B7） | 10/12（首跑零补跑） | ~638s | 最慢；$0 |
+| **dsh（B8）** | **11/12（首跑零补跑）** | **~420s** | 唯一失败为 planner 臆测被门禁拦下 |
+
+## T01 手工冒烟记录（2026-09-05，版本 pin `@0.1.2-rc.1`）
+
+环境：/tmp/dsh_smoke 一次性仓库；模型路由 **z.ai 国际站直连**
+（anthropic-messages 协议，glm-5.3-flash）——本地代理 :4000 的
+chat/completions 与 /v1/messages 均挂起（HTTP=000，30-45s 无响应，
+models 列表正常），疑似昨晚批量后 wedge，未深查。
+
+配置落地（全部非交互）：
+
+- `~/.dsh/settings.yaml`：`llm-pi-ai.providers.zai-glm`（apiKeyEnv=ZAI_API_KEY，
+  api=anthropic-messages，baseURL=https://api.z.ai/api/anthropic，
+  models=[glm-5.3-flash]）。
+- `~/.dsh/profiles/headless/cordis.patch.yml`：id-targeted 覆盖
+  `agent-default-model` → `{provider: zai-glm, model: glm-5.3-flash}`。
+  （默认是 deepseek-official/deepseek-v4-flash；本机 DEEPSEEK_API_KEY 实测为
+  本地代理专用 key，api.deepseek.com 直连 401。）
+- 审批：`DSH_PERMISSION_MODE=danger-full-access`（approval policy 变为
+  never）。**注意此模式同时关沙箱**——隔离边界由 agent_go worktree 承担；
+  只读任务在默认 workspace-write 模式下无需审批即可跑通。
+
+冒烟结果：
+
+| 项 | 结果 |
+|---|---|
+| 只读任务（默认模式） | ✅ exit 0，stdout=最终答复，stderr=reasoning 流 |
+| 编辑+执行验证任务（danger-full-access） | ✅ exit 0，calc.py 真实新增 subtract 并自验打印 2 |
+| 会话日志位置 | `~/.dsh/sessions/--<cwd编码>--/session-<uuid>/session.jsonl.zstd`（按 cwd 分目录，与 bench worktree 隔离天然契合） |
+| 日志结构 | 首行 header（type=session/version/cwd/delegationDepth），后续 seq 事件 |
+| **计量** | ✅ `assistant/message` 事件带 `usage`（input/output/total/**cacheReadTokens**），zstd -dc 可读——harvester 数据源确认 |
+| 事件完整性 | turn/step/tool/call/result/chunk 全词汇实测在场（6 step、5 工具调用、36 chunk） |

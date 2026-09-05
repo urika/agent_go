@@ -79,3 +79,16 @@ class BaseBackend(ABC):
     def run(self, ctx: BackendContext) -> SubtaskResult:
         """执行子任务并返回 SubtaskResult。"""
         ...
+
+    def harvest_trajectory(self, ctx: BackendContext, result: SubtaskResult) -> list[dict]:
+        """可选钩子（ADR-010 阶段 1）：采集本次执行的轨迹事件（只采集不消费）。
+
+        契约：
+        - 返回平台格式事件列表，每事件 ``{"seq", "time", "type", "data"}``；
+          backend 私有格式必须在实现内完成防腐翻译，平台消费端永不直接读
+          backend 原始日志格式；
+        - **fail-open**——任何采集失败（日志缺失/格式漂移/解析错误）都必须
+          自行降级为 warning + 返回 []，不得抛异常影响任务结果；
+        - 默认返回 []（无轨迹源的 backend 无需覆盖）。
+        """
+        return []

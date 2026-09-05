@@ -1,7 +1,7 @@
 """agent_go Worker Backend 包。
 
 提供标准 BaseBackend 接口、BackendRegistry 注册表，
-以及 Claude Code / AgentLoop / pi / opencode / zcode 的实现。
+以及 Claude Code / AgentLoop / pi / opencode / zcode / dsh 的实现。
 """
 
 from .base import BackendContext, BaseBackend, SubtaskResult
@@ -14,6 +14,7 @@ from .agent_loop_backend import AgentLoopBackend
 from .pi_backend import PiBackend
 from .opencode_backend import OpenCodeBackend
 from .zcode_backend import ZCodeBackend
+from .dsh_backend import DSHBackend
 
 __all__ = [
     "BackendContext",
@@ -28,4 +29,5 @@ __all__ = [
     "PiBackend",
     "OpenCodeBackend",
     "ZCodeBackend",
+    "DSHBackend",
 ]

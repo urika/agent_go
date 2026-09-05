@@ -2907,6 +2907,22 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         result = _run_with_backend("claude")
     sandbox_type = result.sandbox_type
     claude_time = result.backend_time
+
+    # ADR-010 阶段 1：轨迹采集钩子（只采集不消费，fail-open）。
+    # 按 result.sandbox_type 取实际执行的 backend（含异常回退 claude 的情形），
+    # 默认实现返回 []，无轨迹源的 backend 不产生文件。
+    try:
+        _trajectory = BackendRegistry.get(sandbox_type)().harvest_trajectory(_backend_ctx, result)
+        if _trajectory:
+            _traj_dir = Path(task_dir) / "trajectory"
+            _traj_dir.mkdir(parents=True, exist_ok=True)
+            with (_traj_dir / f"{sub_id}.jsonl").open("w", encoding="utf-8") as _tf:
+                for _ev in _trajectory:
+                    _tf.write(json.dumps(_ev, ensure_ascii=False) + "\n")
+            logger.info(f"[trajectory] {sub_id} 已落盘 {len(_trajectory)} 条轨迹事件 → {_traj_dir / f'{sub_id}.jsonl'}")
+    except Exception as _hv_err:
+        logger.warning(f"[trajectory] {sub_id} 轨迹采集/落盘失败（忽略，不影响任务）: {_hv_err}")
+
     _wd_stop()
     if _wd_state.get("loop_detected"):
         logger.warning(

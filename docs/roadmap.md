@@ -686,7 +686,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 | **B5 bench 对比基线** ✅ | Claude Code vs Pi 双臂（同模型 glm-5.3-flash 同端点，golden 6 × repeat 2）：pass_rate 持平 83%，pi elapsed 略优、lint 略多 | 不劣化成立 ✓（详见 stage13-b3 设计文档 B5 节）；pi backend 可选启用，默认路径仍为 claude |
 | **B6 OpenCode backend** ✅ 实现 + 冒烟 + 批量完成 | 接入 `opencode run --format json --auto --pure`（opencode_backend.py）：NDJSON 事件流解析（step_finish 计量/tool_use 计数/text 终稿）、聚合计量、hard_timeout（Go 额度耗尽静默挂起的唯一兜底）、readonly 映射内置 plan agent、零产出失败映射、**snapshot 禁用**（影子仓库跨目录污染修复）；路由/bench 入口复用 B3/B4 既有机制 | 契约实测 + 单元测试 13 例 + mimo-v2.5-free 冒烟 + **glm-5.3-flash 臂 golden 6×2 dedup 后 12/12 通过**（免费窗口 $0；首跑真实 7/8，含补跑偏向，详见 stage13-b6）；批量暴露并修复 3 个基础设施 bug（files_hint 归一化 / snapshot 污染 / promo 测试 hermetic） |
 | **B7 ZCode backend** ✅ 实现 + 冒烟 + 批量完成 | 接入 ZCode 内置 CLI（zcode_backend.py）：`ELECTRON_RUN_AS_NODE=1 zcode.cjs --json --mode plan\|yolo --cwd --prompt`，单 JSON 输出解析（response/usage）、聚合计量（cost=0，套餐计费）、readonly→plan、零产出失败映射；独特价值：glm-5.3-flash 夜间免费活动（9-04 至 9-20，23:00-09:00）仅 ZCode 本体完全免费；**大促规则已落地**：`backend_promo` 促销窗口路由（窗口内无显式声明时优先 zcode，显式声明优先，到期自动失效） | 契约实测 + 单元测试 11 例 + glm-5.3-flash 冒烟 ✓ + promo 路由 10 例；**zcode 臂 golden 6×2 首跑 10/12（$0，12 条全真实零伪记录）**，add-simple-caching 2 败复查 3/3 判为方差；局限：无 per-run 模型标志、依赖闭源桌面 app（stage13-b7） |
-| **B8 DeepSeek Harness backend** 🔍 调研完成，待冒烟 | `dsh --profile headless "<task>"`（cwd 即工作区，退出码 0/1/130 干净）；轨迹/日志为五臂最强（事件溯源 Session 日志、无损 attempt、崩溃不丢数据）；**调研促成 ADR-010 三层切分**（代理层不做 LLM 会话管理；dsh 为轨迹平台化首个 full-fidelity 数据源） | 待办：手工冒烟（审批失败闭合需配置模板 + 版本 pin + 计量读 session 日志需防腐层）→ DSHBackend 实现（≈B6 工作量）→ golden 6×2 对比（stage13-b8） |
+| **B8 DeepSeek Harness backend** ✅ 实现 + 冒烟 + 批量完成 | 接入 `dsh --profile headless`（dsh_backend.py，pin 0.1.2-rc.1）：非 readonly 注入 `DSH_PERMISSION_MODE=danger-full-access`（readonly 显式移除防继承）、退出码/零产出映射、session 日志计量（usage 含 cacheReadTokens，日志即真源）、`projectKey()` cwd 编码移植；**同步落地 ADR-010 阶段 1**：`harvest_trajectory` 钩子，dsh 为首个 full-fidelity 数据源（轨迹防腐翻译落盘 trajectory/{sub_id}.jsonl） | 手工冒烟 ✓（只读+编辑双任务）+ 单元测试 16 例 + **golden 6×2 首跑 11/12**（唯一失败为 planner 臆测 API 被规划门拦下，非 dsh worker 失败；~420s 均值快于 claude/zcode）；轨迹采集首次实战验证（151 事件/26 step）（stage13-b8） |
 
 ### 关键路径
 
@@ -699,7 +699,7 @@ B1 标准 backend 接口 ✅（73cfcea）
   -> B6 OpenCode backend ✅（opencode_backend.py + 冒烟通过；Zen 免费模型零成本臂可用）
   -> B7 ZCode backend ✅（zcode_backend.py + 冒烟通过；glm-5.3-flash 夜间免费窗口零成本通道）
   -> B7 批量 ✅（2026-09-05：zcode 臂 golden 6×2 首跑 10/12，$0；add-simple-caching 2 败复查 3/3 通过判为方差，四臂对比完成）
-  -> B8 DeepSeek Harness 🔍 调研完成（stage13-b8；轨迹架构促成 ADR-010 三层切分，待手工冒烟）
+  -> B8 DeepSeek Harness ✅（dsh_backend.py + 冒烟 + golden 6×2 首跑 11/12；ADR-010 阶段 1 harvest_trajectory 同步落地并实战验证）
   -> accepted（pi / opencode / zcode backend 可选启用；Go 套餐评估待额度窗口）
 ```
 
@@ -725,7 +725,7 @@ B1 标准 backend 接口 ✅（73cfcea）
 
 ### 多 Backend / Agent Runtime
 
-状态：从“暂缓”提升为“阶段十三：accepted（有条件）”；B1-B7 全部落地（2026-09-04），B5 双臂 bench 证明 pi backend 不劣化（pass 持平 83%），pi / opencode / zcode 可经 worker_backend / 路由配置可选启用，默认路径仍为 claude；opencode（B6）与 zcode（B7，glm-5.3-flash 夜间免费零成本通道）已实现并冒烟通过，且两臂均已完成 golden 批量（B6 opencode 12/12 dedup 后、B7 zcode 首跑 10/12，均 $0），四臂对比齐备；B8 DeepSeek Harness 调研完成（stage13-b8），其轨迹架构促成 ADR-010 轨迹平台化三层切分（代理层不做 LLM 会话管理），B8 冒烟与 ADR-010 阶段 1 为后续主线；Go 套餐评估待额度重置。
+状态：从“暂缓”提升为“阶段十三：accepted（有条件）”；B1-B8 全部落地（2026-09-05），B5 双臂 bench 证明 pi backend 不劣化（pass 持平 83%），pi / opencode / zcode / dsh 可经 worker_backend / 路由配置可选启用，默认路径仍为 claude；五臂 golden 批量齐备（claude 10/12、pi 10/12、opencode 12/12 dedup 后、zcode 首跑 10/12、dsh 首跑 11/12）；B8 dsh 落地时同步完成 ADR-010 阶段 1（harvest_trajectory 钩子实战验证，dsh 为首个 full-fidelity 轨迹数据源）；Go 套餐评估待额度重置。
 
 触发条件（满足其一即启动）：
 
@@ -864,9 +864,9 @@ M0 产品契约与指标冻结  ✅ accepted
 
 **立即可做（无外部依赖，按序推进）**：
 
-1. **B8 dsh 冒烟 → DSHBackend → golden 6×2**（[stage13-b8](design/stage13-b8-dsh-assessment.md)）：前置为本机 Node.js + DeepSeek key + 审批配置模板（headless 失败闭合）；**随 B8 同步落地 ADR-010 阶段 1**（`harvest_trajectory` 钩子，dsh 为首个 full-fidelity 数据源；阶段 2/3 须阶段 1 价值验证背书）。
+1. ~~**B8 dsh 冒烟 → DSHBackend → golden 6×2**~~ ✅（2026-09-05 轨道 A 全部完成）：冒烟双任务通过（审批模板=DSH_PERMISSION_MODE + z.ai 直连 glm-5.3-flash，本地代理 wedge 绕过）→ DSHBackend 16 例单测 → **golden 6×2 首跑 11/12**（唯一失败为 planner 臆测被规划门拦下，非 dsh worker 失败；~420s 快于 claude/zcode）；**ADR-010 阶段 1 同步落地并实战验证**（trajectory jsonl 每子任务落盘，151 事件/26 step）。五臂对比齐备，详见 [stage13-b8](design/stage13-b8-dsh-assessment.md)。
 2. ~~**mcp_client 代理工具模式**~~ ✅（2026-09-05 T08）：`mcp__proxy` 单工具（list/describe/call，~200 token）替代全量 schema 注入，默认 proxy 模式、`mcp_client.tool_mode=full` 可回退；仅接 agent_loop 注入点，消费降级语义不变（tests +16 例）。
-3. **C4 前置修订：知识注入 KV-cache 稳定快照**（pi 插件借鉴②）→ 然后 **C4 KnowledgeStore A/B**（delivery-20260820 基线两臂对比）。⚠️ 顺序敏感：C4 绕过此修订直接启动会导致注入口径返工（逐轮重建打爆本地模型前缀缓存）。
+3. **C4 前置修订：知识注入 KV-cache 稳定快照**（pi 插件借鉴②）→ 然后 **C4 KnowledgeStore A/B**（delivery-20260820 基线两臂对比）。⚠️ 顺序敏感：C4 绕过此修订直接启动会导致注入口径返工（逐轮重建打爆本地模型前缀缓存）。🔨 前置修订已落地（2026-09-05：`knowledge.snapshot` 默认开，`resolve_repair_knowledge` 快照冻结 + 注入块移至 TASK.md 后稳定前缀位；tests/test_knowledge.py +6 用例）；smoke 注入臂 7/7 AD 验证通过（c4-kv-smoke-inj-20260905）；**decision 双臂 A/B 运行中**（c4-kv-ctl / c4-kv-inj-20260905，29 任务 × repeat 2 × 2 臂，本地代理串行）。
 4. ~~**pipeline 本地模型自动限流**~~ ✅（2026-09-05 T09，ADR-011）：本地路由子任务经任务级 Semaphore(1) 自动串行，云端 --parallel 语义不变；判定与 `AGENT_GO_IS_LOCAL` 同源，逃生开关 `pipeline.local_model_serialize`（tests +11 例）。
 5. ~~**随手项**：`zai/glm-5.3-flash` 定价覆盖~~ ✅（2026-09-05 T10）：pricing.py $0.15/$0.50（z.ai 标准价）+ MODEL_TIER value 档。
 

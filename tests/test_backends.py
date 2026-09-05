@@ -982,6 +982,289 @@ class TestZCodeBackend:
         assert res.stderr == "turn failed"
 
 
+def _dsh_session_text(cwd, version=0):
+    """构造一段 dsh session 日志（header + 覆盖保留/丢弃词汇的事件）。"""
+    import json as _json
+    header = {"type": "session", "version": version, "id": "session-t1",
+              "createdAt": 1000, "cwd": cwd, "delegationDepth": 0}
+    events = [
+        {"type": "turn/start", "seq": 1, "time": 100, "data": {"turn": 1}},
+        {"type": "step/start", "seq": 2, "time": 101, "data": {"turn": 1, "step": 1}},
+        {"type": "user/message", "seq": 3, "time": 102, "surfaceOp": "append",
+         "data": {"content": [{"type": "text", "text": "做点事"}],
+                  "source": {"kind": "user"}, "role": "user", "id": "u1"}},
+        # chunk 流必须被防腐翻译丢弃
+        {"type": "assistant/chunk", "seq": 4, "time": 103,
+         "data": {"turn": 1, "step": 1, "chunk": {"type": "text", "text": "原始流原文"}}},
+        {"type": "assistant/message", "seq": 5, "time": 104,
+         "data": {"turn": 1, "step": 1,
+                  "message": {"role": "assistant",
+                              "content": [{"type": "text", "text": "done"}],
+                              "source": {"kind": "model", "provider": "zai-glm",
+                                         "model": "glm-5.3-flash"}},
+                  "usage": {"inputTokens": 100, "outputTokens": 50,
+                            "totalTokens": 160, "cacheReadTokens": 10}}},
+        {"type": "assistant/message", "seq": 6, "time": 105,
+         "data": {"turn": 1, "step": 2,
+                  "message": {"role": "assistant", "content": [],
+                              "source": {"kind": "model", "provider": "zai-glm",
+                                         "model": "glm-5.3-flash"}},
+                  "usage": {"inputTokens": 200, "outputTokens": 20,
+                            "totalTokens": 220, "cacheReadTokens": 0}}},
+        {"type": "tool/call", "seq": 7, "time": 106,
+         "data": {"turn": 1, "step": 1, "callId": "c1", "name": "bash",
+                  "arguments": "{\"command\":\"" + "x" * 1000 + "\"}"}},
+        {"type": "tool/result", "seq": 8, "time": 107,
+         "data": {"turn": 1, "step": 1,
+                  "message": {"source": {"kind": "tool", "callId": "c1"},
+                              "content": [{"type": "tool-result", "toolCallId": "c1",
+                                           "content": [{"type": "text", "text": "file.py"}],
+                                           "isError": False}],
+                              "role": "user", "id": "r1"}}},
+        {"type": "step/end", "seq": 9, "time": 108, "data": {"turn": 1, "step": 1}},
+        {"type": "turn/end", "seq": 10, "time": 109, "data": {"turn": 1, "reason": {"kind": "completed"}}},
+    ]
+    return "\n".join([_json.dumps(header)] + [_json.dumps(e) for e in events]) + "\n"
+
+
+def _dsh_write_session(sessions_root: Path, worktree: Path, version=0):
+    """把假 session 日志用真实 zstd 压到 <root>/<projectKey>/session-t1/ 下。"""
+    import subprocess as _sp
+    import agent_go.backends.dsh_backend as db
+    import os as _os
+    real = _os.path.realpath(str(worktree))
+    sess_dir = sessions_root / db._project_key(real) / "session-t1"
+    sess_dir.mkdir(parents=True)
+    src = sess_dir / "session.jsonl"
+    src.write_text(_dsh_session_text(real, version=version))
+    dst = sess_dir / "session.jsonl.zstd"
+    _sp.run(["zstd", "-q", "-f", "-o", str(dst), str(src)], check=True)
+    src.unlink()
+    return dst
+
+
+class TestDSHBackend:
+    """B8：DSHBackend 命令构造、权限注入、session 日志计量/轨迹（ADR-010 阶段 1）。"""
+
+    def _ctx(self, tmp_path: Path, null_logger, **kw):
+        defaults = dict(
+            task_md="# 任务\n做点事", worktree=tmp_path, env={}, headless=True,
+            sub_id="sub-1", task_id="task-1", logger=null_logger, config={},
+        )
+        defaults.update(kw)
+        return BackendContext(**defaults)
+
+    def _run(self, tmp_path, null_logger, proc, sessions_root=None, **kw):
+        import shutil as _sh
+        import subprocess as _sp
+        import agent_go.backends.dsh_backend as db
+        # session 根目录默认指向空目录：避免测试扫到真实 ~/.dsh/sessions
+        root = sessions_root or (tmp_path / "no-sessions")
+        real_which = _sh.which
+        real_popen = _sp.Popen
+        npx_calls = []
+
+        def _which(name):
+            return "/usr/local/bin/npx" if name == "npx" else real_which(name)
+
+        # 选择性分发：仅 dsh 的 npx 调用返回 mock；zstd -dc（subprocess.run 内部
+        # 也走 Popen）透传真实实现——dsh 计量/轨迹依赖真实解压。
+        def _popen_dispatch(cmd, *a, **k):
+            if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "npx":
+                npx_calls.append({"args": (cmd,) + a, "kwargs": k})
+                return proc
+            return real_popen(cmd, *a, **k)
+
+        with patch.object(db, "DSH_SESSIONS_ROOT", root), \
+             patch("agent_go.backends.dsh_backend.shutil.which", side_effect=_which), \
+             patch("agent_go.backends.dsh_backend.subprocess.Popen", new=_popen_dispatch):
+            res = db.DSHBackend().run(self._ctx(tmp_path, null_logger, progress=False, **kw))
+        return res, npx_calls[0] if npx_calls else None
+
+    def test_command_construction_and_env(self, tmp_path, null_logger):
+        from agent_go.backends.dsh_backend import DSH_PACKAGE
+        res, call = self._run(tmp_path, null_logger, _mock_popen(stdout="全部完成"))
+        cmd = call["args"][0]
+        assert cmd[:5] == ["npx", "-y", DSH_PACKAGE, "--profile", "headless"]
+        assert DSH_PACKAGE == "@deepseek-ai/dsh@0.1.2-rc.1"   # 版本 pin
+        assert cmd[-1].startswith("# 任务")                    # positional task
+        assert call["kwargs"]["cwd"] == str(tmp_path)
+        env = call["kwargs"]["env"]
+        assert env["DSH_PERMISSION_MODE"] == "danger-full-access"   # 非 readonly 注入
+        assert res.returncode == 0
+        assert res.sandbox_type == "dsh"
+        assert res.stdout == "全部完成"
+        assert res.kill_reason is None
+
+    def test_readonly_omits_permission_mode(self, tmp_path, null_logger):
+        """readonly 不注入 DSH_PERMISSION_MODE，且移除 env 中继承的全放开值。"""
+        _, call = self._run(tmp_path, null_logger, _mock_popen(stdout="ok"),
+                            env={"DSH_PERMISSION_MODE": "danger-full-access"},
+                            extra={"readonly": True})
+        assert "DSH_PERMISSION_MODE" not in call["kwargs"]["env"]
+
+    def test_headless_only(self, tmp_path, null_logger):
+        from agent_go.backends.dsh_backend import DSHBackend
+        res = DSHBackend().run(self._ctx(tmp_path, null_logger, progress=False, headless=False))
+        assert res.returncode == 2
+        assert "headless" in res.stderr
+
+    def test_rc1_failure_passthrough(self, tmp_path, null_logger):
+        res, _ = self._run(tmp_path, null_logger,
+                           _mock_popen(stdout="", stderr="turn failed", returncode=1))
+        assert res.returncode == 1
+        assert res.stderr == "turn failed"
+
+    def test_zero_output_exit_zero_maps_to_failure(self, tmp_path, null_logger):
+        """rc=0 但 stdout 空 → 零产出失败（同 zcode/opencode 语义）。"""
+        res, _ = self._run(tmp_path, null_logger, _mock_popen(stdout="", returncode=0))
+        assert res.returncode == 1
+        assert "zero output" in res.stderr
+
+    def test_hard_timeout_kills_and_reports(self, tmp_path, null_logger):
+        import subprocess as _sp
+        proc = _mock_popen(returncode=-9)
+        proc.communicate.side_effect = [
+            _sp.TimeoutExpired(cmd="dsh", timeout=5),
+            ("", "killed"),
+        ]
+        res, _ = self._run(tmp_path, null_logger, proc, hard_timeout=5)
+        proc.kill.assert_called_once()
+        assert res.kill_reason == "hard_timeout"
+        assert res.returncode == -9
+
+    def test_npx_missing(self, tmp_path, null_logger):
+        from agent_go.backends.dsh_backend import DSHBackend
+        with patch("agent_go.backends.dsh_backend.shutil.which", return_value=None):
+            res = DSHBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert res.returncode == 127
+        assert "npx" in res.stderr
+
+    def test_available_both_branches(self, tmp_path, null_logger):
+        import agent_go.backends.dsh_backend as db
+        settings = tmp_path / "settings.yaml"
+        settings.write_text("providers: {}")
+        with patch.object(db, "DSH_USER_SETTINGS", settings), \
+             patch("agent_go.backends.dsh_backend.shutil.which", return_value="/usr/local/bin/npx"):
+            assert db.DSHBackend.available() is True
+        # npx 缺失 → 不可用
+        with patch.object(db, "DSH_USER_SETTINGS", settings), \
+             patch("agent_go.backends.dsh_backend.shutil.which", return_value=None):
+            assert db.DSHBackend.available() is False
+        # settings.yaml 缺失 → 不可用
+        with patch.object(db, "DSH_USER_SETTINGS", tmp_path / "missing.yaml"), \
+             patch("agent_go.backends.dsh_backend.shutil.which", return_value="/usr/local/bin/npx"):
+            assert db.DSHBackend.available() is False
+
+    def test_project_key_encoding(self):
+        """projectKey 移植：分隔符折叠、点号保留、首尾 '--'（对实测样例回归）。"""
+        from agent_go.backends.dsh_backend import _project_key
+        assert _project_key("/private/tmp/dsh_smoke") == "--private-tmp-dsh_smoke--"
+        assert _project_key("/a.b/c_d/e-f") == "--a.b-c_d-e-f--"
+        assert _project_key("/") == "--root--"
+
+    @pytest.mark.skipif(__import__("shutil").which("zstd") is None,
+                        reason="zstd 未安装")
+    def test_meter_usage_aggregation(self, tmp_path, null_logger):
+        """计量读 session 日志：usage 聚合 + actual_model 从日志回读（真源）。"""
+        import json as _json
+        sessions = tmp_path / "sessions"
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        _dsh_write_session(sessions, worktree)
+        metering = tmp_path / "metering.jsonl"
+        res, _ = self._run(worktree, null_logger, _mock_popen(stdout="done"),
+                           sessions_root=sessions,
+                           config={"_metering_path": str(metering)})
+        assert res.returncode == 0
+        events = [_json.loads(x) for x in metering.read_text().splitlines() if x.strip()]
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["virtual_model"] == "agentgo-worker-dsh"
+        assert ev["actual_provider"] == "zai-glm"
+        assert ev["actual_model"] == "glm-5.3-flash"
+        assert ev["prompt_tokens"] == 310      # (100+10) + (200+0)
+        assert ev["completion_tokens"] == 70   # 50 + 20
+        assert ev["cost_usd"] == 0.0
+        assert ev["result"] == "success"
+
+    def test_meter_failopen_no_log(self, tmp_path, null_logger):
+        """找不到 session 日志：任务结果不受影响，计量按零记录。"""
+        import json as _json
+        metering = tmp_path / "metering.jsonl"
+        res, _ = self._run(tmp_path, null_logger, _mock_popen(stdout="done"),
+                           config={"_metering_path": str(metering)})
+        assert res.returncode == 0
+        assert res.stdout == "done"
+        events = [_json.loads(x) for x in metering.read_text().splitlines() if x.strip()]
+        assert events[0]["prompt_tokens"] == 0
+        assert events[0]["result"] == "success"
+
+    @pytest.mark.skipif(__import__("shutil").which("zstd") is None,
+                        reason="zstd 未安装")
+    def test_harvest_trajectory_translation(self, tmp_path, null_logger):
+        """防腐翻译：chunk 丢弃、usage 保留、tool/call 参数截断、turn/step 边界在场。"""
+        import agent_go.backends.dsh_backend as db
+        sessions = tmp_path / "sessions"
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        _dsh_write_session(sessions, worktree)
+        ctx = self._ctx(worktree, null_logger, progress=False)
+        with patch.object(db, "DSH_SESSIONS_ROOT", sessions):
+            traj = db.DSHBackend().harvest_trajectory(ctx, SubtaskResult(returncode=0))
+        types = [e["type"] for e in traj]
+        assert "assistant/chunk" not in types            # 大字段流丢弃
+        assert types == ["turn/start", "step/start", "user/message", "assistant/message",
+                         "assistant/message", "tool/call", "tool/result", "step/end", "turn/end"]
+        by_type = {e["type"]: e for e in traj}
+        # 平台事件形状 {seq,time,type,data}
+        assert set(by_type["turn/start"].keys()) == {"seq", "time", "type", "data"}
+        # user/message 仅 source/长度
+        um = by_type["user/message"]["data"]
+        assert um == {"source_kind": "user", "role": "user", "text_len": 3}
+        # assistant/message 保留 usage + interrupted + provider/model（取第一条）
+        am = [e for e in traj if e["type"] == "assistant/message"][0]["data"]
+        assert am["usage"]["inputTokens"] == 100
+        assert am["interrupted"] is False
+        assert am["provider"] == "zai-glm" and am["model"] == "glm-5.3-flash"
+        # tool/call：name + 参数摘要截断
+        tc = by_type["tool/call"]["data"]
+        assert tc["name"] == "bash" and tc["call_id"] == "c1"
+        assert len(tc["arguments_summary"]) < 1000 and "..." in tc["arguments_summary"]
+        # tool/result：截断摘要 + is_error
+        tr = by_type["tool/result"]["data"]
+        assert tr["call_id"] == "c1" and tr["is_error"] is False
+        assert tr["result_summary"] == "file.py"
+
+    @pytest.mark.skipif(__import__("shutil").which("zstd") is None,
+                        reason="zstd 未安装")
+    def test_harvest_version_nonzero_degrades(self, tmp_path, null_logger, caplog):
+        """header.version 非实测版本 → warning + 返回 []（防 developer preview 漂移）。"""
+        import agent_go.backends.dsh_backend as db
+        sessions = tmp_path / "sessions"
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        _dsh_write_session(sessions, worktree, version=1)
+        ctx = self._ctx(worktree, null_logger, progress=False)
+        with patch.object(db, "DSH_SESSIONS_ROOT", sessions), \
+             caplog.at_level(logging.WARNING, logger=null_logger.name):
+            traj = db.DSHBackend().harvest_trajectory(ctx, SubtaskResult(returncode=0))
+        assert traj == []
+        assert any("version" in r.message for r in caplog.records)
+
+    def test_harvest_failopen_no_log(self, tmp_path, null_logger):
+        """找不到 session 日志：轨迹采集返回 []，不抛异常。"""
+        import agent_go.backends.dsh_backend as db
+        ctx = self._ctx(tmp_path, null_logger, progress=False)
+        with patch.object(db, "DSH_SESSIONS_ROOT", tmp_path / "no-sessions"):
+            assert db.DSHBackend().harvest_trajectory(ctx, SubtaskResult(returncode=0)) == []
+
+    def test_base_backend_default_harvest_empty(self, tmp_path, null_logger):
+        """BaseBackend 默认钩子返回 []（无轨迹源 backend 无需覆盖）。"""
+        assert ClaudeBackend().harvest_trajectory(
+            self._ctx(tmp_path, null_logger), SubtaskResult(returncode=0)) == []
+
+
 class TestBackendRoutingB4:
     """B4：声明式路由 worker_backend_by_difficulty（按难度）/ worker_backend_by_type（按 agent_type）。
 
