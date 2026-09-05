@@ -685,7 +685,8 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 | **B4 backend 路由配置** ✅ | `worker_backend_by_difficulty` / `worker_backend_by_type` 声明式路由（registry.resolve_backend_name，优先级：subtask.backend > worker_backend > by_type > by_difficulty > agent_loop > claude），初始与修复路径同策略；命名避开 deprecated 的 worker_backends | 配置即可切换子任务 backend，无需改代码 ✓（8 个路由优先级测试） |
 | **B5 bench 对比基线** ✅ | Claude Code vs Pi 双臂（同模型 glm-5.3-flash 同端点，golden 6 × repeat 2）：pass_rate 持平 83%，pi elapsed 略优、lint 略多 | 不劣化成立 ✓（详见 stage13-b3 设计文档 B5 节）；pi backend 可选启用，默认路径仍为 claude |
 | **B6 OpenCode backend** ✅ 实现 + 冒烟 + 批量完成 | 接入 `opencode run --format json --auto --pure`（opencode_backend.py）：NDJSON 事件流解析（step_finish 计量/tool_use 计数/text 终稿）、聚合计量、hard_timeout（Go 额度耗尽静默挂起的唯一兜底）、readonly 映射内置 plan agent、零产出失败映射、**snapshot 禁用**（影子仓库跨目录污染修复）；路由/bench 入口复用 B3/B4 既有机制 | 契约实测 + 单元测试 13 例 + mimo-v2.5-free 冒烟 + **glm-5.3-flash 臂 golden 6×2 dedup 后 12/12 通过**（免费窗口 $0；首跑真实 7/8，含补跑偏向，详见 stage13-b6）；批量暴露并修复 3 个基础设施 bug（files_hint 归一化 / snapshot 污染 / promo 测试 hermetic） |
-| **B7 ZCode backend** ✅ 实现 + 冒烟完成 | 接入 ZCode 内置 CLI（zcode_backend.py）：`ELECTRON_RUN_AS_NODE=1 zcode.cjs --json --mode plan\|yolo --cwd --prompt`，单 JSON 输出解析（response/usage）、聚合计量（cost=0，套餐计费）、readonly→plan、零产出失败映射；独特价值：glm-5.3-flash 夜间免费活动（9-04 至 9-20，23:00-09:00）仅 ZCode 本体完全免费；**大促规则已落地**：`backend_promo` 促销窗口路由（窗口内无显式声明时优先 zcode，显式声明优先，到期自动失效） | 契约实测 + 单元测试 11 例 + glm-5.3-flash 真实冒烟（文件创建 ✓、计量 ✓，11s）+ promo 路由 10 例与真实配置验证（23:02→zcode ✓）；局限：无 per-run 模型标志（模型由 ~/.zcode/cli/config.json 决定）、依赖闭源桌面 app（详见 stage13-b7 设计文档） |
+| **B7 ZCode backend** ✅ 实现 + 冒烟 + 批量完成 | 接入 ZCode 内置 CLI（zcode_backend.py）：`ELECTRON_RUN_AS_NODE=1 zcode.cjs --json --mode plan\|yolo --cwd --prompt`，单 JSON 输出解析（response/usage）、聚合计量（cost=0，套餐计费）、readonly→plan、零产出失败映射；独特价值：glm-5.3-flash 夜间免费活动（9-04 至 9-20，23:00-09:00）仅 ZCode 本体完全免费；**大促规则已落地**：`backend_promo` 促销窗口路由（窗口内无显式声明时优先 zcode，显式声明优先，到期自动失效） | 契约实测 + 单元测试 11 例 + glm-5.3-flash 冒烟 ✓ + promo 路由 10 例；**zcode 臂 golden 6×2 首跑 10/12（$0，12 条全真实零伪记录）**，add-simple-caching 2 败复查 3/3 判为方差；局限：无 per-run 模型标志、依赖闭源桌面 app（stage13-b7） |
+| **B8 DeepSeek Harness backend** 🔍 调研完成，待冒烟 | `dsh --profile headless "<task>"`（cwd 即工作区，退出码 0/1/130 干净）；轨迹/日志为五臂最强（事件溯源 Session 日志、无损 attempt、崩溃不丢数据）；**调研促成 ADR-010 三层切分**（代理层不做 LLM 会话管理；dsh 为轨迹平台化首个 full-fidelity 数据源） | 待办：手工冒烟（审批失败闭合需配置模板 + 版本 pin + 计量读 session 日志需防腐层）→ DSHBackend 实现（≈B6 工作量）→ golden 6×2 对比（stage13-b8） |
 
 ### 关键路径
 
@@ -698,8 +699,19 @@ B1 标准 backend 接口 ✅（73cfcea）
   -> B6 OpenCode backend ✅（opencode_backend.py + 冒烟通过；Zen 免费模型零成本臂可用）
   -> B7 ZCode backend ✅（zcode_backend.py + 冒烟通过；glm-5.3-flash 夜间免费窗口零成本通道）
   -> B7 批量 ✅（2026-09-05：zcode 臂 golden 6×2 首跑 10/12，$0；add-simple-caching 2 败复查 3/3 通过判为方差，四臂对比完成）
+  -> B8 DeepSeek Harness 🔍 调研完成（stage13-b8；轨迹架构促成 ADR-010 三层切分，待手工冒烟）
   -> accepted（pi / opencode / zcode backend 可选启用；Go 套餐评估待额度窗口）
 ```
+
+### 轨迹平台化（ADR-010，阶段十三后续主线）
+
+三层切分：backend 层拥有 LLM 会话真源（私有契约，只读采集）；agent_go 平台层
+拥有任务编排事件日志（唯一真源）+ 能力 seam；代理层保持协议级横切（路由/压缩/
+注入/diag/流量留痕），**不做 LLM 会话管理**。演进：阶段 1 轨迹采集
+（`harvest_trajectory` 钩子，随 B8 落地，dsh/opencode 先行，只采集不消费）→
+阶段 2 平台 TaskEvent 词汇 + meta.json 降为投影（需阶段 1 价值验证背书）→
+阶段 3 fork-retry / 轨迹归因 / 三层关联（按需）。详见
+[ADR-010](design/adr/ADR-010-trajectory-layering.md)。
 
 ### 不做的事
 
@@ -713,7 +725,7 @@ B1 标准 backend 接口 ✅（73cfcea）
 
 ### 多 Backend / Agent Runtime
 
-状态：从“暂缓”提升为“阶段十三：accepted（有条件）”；B1-B7 全部落地（2026-09-04），B5 双臂 bench 证明 pi backend 不劣化（pass 持平 83%），pi / opencode / zcode 可经 worker_backend / 路由配置可选启用，默认路径仍为 claude；opencode（B6）与 zcode（B7，glm-5.3-flash 夜间免费零成本通道）已实现并冒烟通过，且两臂均已完成 golden 批量（B6 opencode 12/12 dedup 后、B7 zcode 首跑 10/12，均 $0），四臂对比齐备，Go 套餐评估待额度重置。
+状态：从“暂缓”提升为“阶段十三：accepted（有条件）”；B1-B7 全部落地（2026-09-04），B5 双臂 bench 证明 pi backend 不劣化（pass 持平 83%），pi / opencode / zcode 可经 worker_backend / 路由配置可选启用，默认路径仍为 claude；opencode（B6）与 zcode（B7，glm-5.3-flash 夜间免费零成本通道）已实现并冒烟通过，且两臂均已完成 golden 批量（B6 opencode 12/12 dedup 后、B7 zcode 首跑 10/12，均 $0），四臂对比齐备；B8 DeepSeek Harness 调研完成（stage13-b8），其轨迹架构促成 ADR-010 轨迹平台化三层切分（代理层不做 LLM 会话管理），B8 冒烟与 ADR-010 阶段 1 为后续主线；Go 套餐评估待额度重置。
 
 触发条件（满足其一即启动）：
 
@@ -852,6 +864,7 @@ M0 产品契约与指标冻结  ✅ accepted
 2. **阶段 C 续项**：C3 局部重规划 ✅（2026-08-21，无进展触发一次拆分建议，默认人工确认，F-VERIFY-6 契约全守）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位，在 delivery-20260820 基线上做两臂对比）。
 3. **并行推进阶段 D 放行评估与阶段十三 多 Backend 架构**：
    - 阶段 D：信任指标（审查后修改率 / 盲区命中率 / 复发可见率）跨任务积累达标后，启动 Reviewer 灰度与 B1 自动 merge 决策。
-   - 阶段十三：B1-B7 全部落地。B5 双臂 bench（glm-5.3-flash 同端点）证明 pi 不劣化（pass 持平 83%），pi 可选启用；B6 opencode backend 已实现并冒烟通过（Zen 免费模型零成本臂可用，Go 套餐月度额度尽、重置后再评估 qwen3.8）；B7 zcode backend 已实现并冒烟通过（glm-5.3-flash 夜间免费活动 23:00-09:00 仅 ZCode 本体完全免费）；四臂 golden 批量齐备（claude 10/12、pi 10/12、opencode 12/12 dedup 后、zcode 首跑 10/12，B6/B7 均 $0）；并发调度原则已拍板（云端可并行、本地模型必须串行），pipeline 本地模型自动限流为候选增强。
+   - 阶段十三：B1-B7 全部落地。B5 双臂 bench（glm-5.3-flash 同端点）证明 pi 不劣化（pass 持平 83%），pi 可选启用；B6 opencode backend 已实现并冒烟通过（Zen 免费模型零成本臂可用，Go 套餐月度额度尽、重置后再评估 qwen3.8）；B7 zcode backend 已实现并冒烟通过（glm-5.3-flash 夜间免费活动 23:00-09:00 仅 ZCode 本体完全免费）；四臂 golden 批量齐备（claude 10/12、pi 10/12、opencode 12/12 dedup 后、zcode 首跑 10/12，B6/B7 均 $0）；B8 dsh 调研完成待冒烟，ADR-010 轨迹平台化三层切分确立（代理层不做 LLM 会话管理），阶段 1 轨迹采集随 B8 落地；并发调度原则已拍板（云端可并行、本地模型必须串行），pipeline 本地模型自动限流为候选增强。
+   - **pi 插件生态借鉴**（[stage13-pi-extensions-review](design/stage13-pi-extensions-review.md)，2026-09-05）：候选增强按优先级——① mcp_client 代理工具模式（pi-mcp-adapter：单工具 ~200 token + 动态发现，替代全量 schema 注入）；② C4 知识注入采用 KV-cache 稳定快照（pi-memory：检查点刷新而非逐轮重建，避免本地模型前缀缓存失效）；③ 代理层压缩参照 context-mode「工具结果外置 + FTS5/BM25 按需检索」路线（理念借鉴，ELv2 不引入代码）；④ pi-subagents 的确定性 workflow 脚本（plan 模板固化）为长期候选。注意：pi 臂 bench 必须保持无扩展环境，与生产使用区分。
 
 在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。
