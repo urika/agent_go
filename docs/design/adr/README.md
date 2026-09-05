@@ -14,3 +14,4 @@
 - [ADR-008 数据驱动 timeout 设置模型（实测 P95 × 余量）](ADR-008-timeout-setting-model.md)
 - [ADR-009 Bench 收敛优先于扩大全量矩阵](ADR-009-bench-convergence.md)
 - [ADR-010 轨迹平台化三层切分（代理层不做 LLM 会话管理）](ADR-010-trajectory-layering.md)
+- [ADR-011 Pipeline 本地模型自动限流（云端并行、本地串行）](ADR-011-local-model-serialize.md)

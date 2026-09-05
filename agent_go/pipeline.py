@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from .console import _LazyConsole
 from .config import write_censored_event
-from .executor import run_subtask
+from .executor import run_subtask, worker_routes_local
 from .git_utils import _set_gc_auto, _worktree_remove, _worktree_prune
 from .failure import classify_failure
 # 解耦：notify 是可选增强，删除模块级 import 以匹配 architecture.md 解耦原则
@@ -442,6 +442,13 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
     meta_lock = threading.Lock()
     active_pids: set = set()
     active_pids_lock = threading.Lock()
+    # T09 本地模型自动限流（并发调度原则 2026-09-04 拍板：云端可并行、本地串行）：
+    # 路由到已验证本地后端（executor.worker_routes_local，与 AGENT_GO_IS_LOCAL 同口径）的
+    # 子任务共用 Semaphore(1) 互斥执行——本地 GPU/内存资源争抢会同时拖垮所有并行子任务
+    # 并污染 elapsed 口径。云端路由子任务不触碰该信号量，仍按 --parallel 并行。
+    # config pipeline.local_model_serialize=False 可关闭（默认开启）。
+    _local_sem = threading.Semaphore(1)
+    _local_serialize = bool(((config or {}).get("pipeline") or {}).get("local_model_serialize", True))
     degraded_count = sum(1 for r in results_map.values() if r.get("status") in ("no_changes", "degraded"))
     total = len(confirmed)
 
@@ -771,13 +778,40 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
                     degraded_count, meta_lock, config,
                 )
         else:
+            # T09：波次内预分类本地/云端路由（判定口径 = executor.worker_routes_local，
+            # 与 run_subtask 注入 AGENT_GO_IS_LOCAL 的判定链同源）。本地子任务经
+            # _local_sem 互斥串行；云端子任务先提交占满 worker 槽位——本地子任务在
+            # 信号量上排队时不会阻塞无关的云端并行。
+            _local_ids: set = set()
+            if _local_serialize and len(wave) > 1:
+                for _st in wave:
+                    try:
+                        if worker_routes_local(_st, config):
+                            _local_ids.add(_st["id"])
+                    except Exception as _le:
+                        # fail-open：判定异常按云端调度（宁可并行也不卡死管线）
+                        logger.warning(f"[local_throttle] {_st['id']} 本地路由判定失败，按云端调度: {_le}")
+                if _local_ids:
+                    logger.info(f"[local_throttle] 本地路由子任务串行执行: {', '.join(sorted(_local_ids))}")
+
+            def _run_one(st, upstream):
+                # 本地路由子任务在信号量保护下执行（互斥=串行）；云端子任务直接执行。
+                if st["id"] in _local_ids:
+                    with _local_sem:
+                        return _invoke_run_subtask(task_id, st, repo, task_dir, logger, upstream,
+                                                   headless, issue_ref, active_pids, active_pids_lock,
+                                                   config.get("_metering_path", ""), config, _interrupted)
+                return _invoke_run_subtask(task_id, st, repo, task_dir, logger, upstream,
+                                           headless, issue_ref, active_pids, active_pids_lock,
+                                           config.get("_metering_path", ""), config, _interrupted)
+
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
                 futures = {}
-                for st in wave:
+                # 云端优先提交（稳定排序，wave 内相对顺序不变）：pool FIFO 语义下云端
+                # 先占槽位/先补位，本地子任务的信号量等待不会挤占云端并行度。
+                for st in sorted(wave, key=lambda s: s["id"] in _local_ids):
                     upstream = {dep: worktree_map[dep] for dep in st.get("depends_on", []) if dep in worktree_map}
-                    fut = executor.submit(_invoke_run_subtask, task_id, st, repo, task_dir, logger, upstream,
-                                          headless, issue_ref, active_pids, active_pids_lock,
-                                          config.get("_metering_path", ""), config, _interrupted)
+                    fut = executor.submit(_run_one, st, upstream)
                     futures[fut] = st
                 for fut in as_completed(futures):
                     st = futures[fut]

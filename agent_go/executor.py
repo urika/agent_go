@@ -335,6 +335,73 @@ def _verify_local_backend(base_url: str, timeout: float = 15.0,
     _local_verify_cache[key] = _result
     return _result
 
+
+def worker_routes_local(subtask: dict, config: Optional[dict]) -> bool:
+    """判定子任务 worker 是否路由到「已验证的本地后端」（T09 pipeline 本地限流的判定口径）。
+
+    口径与 run_subtask 的 worker 路由块（AGENT_GO_IS_LOCAL 注入判定链）保持一致：
+      1. routed_model 解析：cognitive（worker_models_by_cognitive）> task_type
+         （worker_models_by_type）> degrade（config["_degraded"] 降档）> difficulty→worker_models；
+      2. 后端 URL 解析：worker_backends[routed_model]（deprecated 兼容）→ plan_api.worker_base_url；
+      3. URL 指向本机（127.0.0.1/localhost/0.0.0.0/[::1]）；
+      4. _verify_local_backend 深度验证为真本地（R8 路由归因 → /status 声明 → claude 探测；
+         结果按 base_url 缓存——pipeline 调度前预判定后，run_subtask 内部命中同一缓存，
+         不会重复探测）。
+    任一步不成立 → False（按云端调度）。本函数无副作用（不写 env、不记日志），
+    供 pipeline 在提交 worker 前做串行化预分类。
+    注意：与 run_subtask 不同，本函数对空 config 不回退 load_config() 读磁盘——
+    调度侧预判定必须是纯函数（空 config = 无本地 URL = 云端），避免测试/边缘调用
+    触发真实磁盘读取与 localhost 探测；生产路径 cli 传入的合并 config 恒为真值，
+    两种口径在真实输入下完全一致。
+    ⚠️ 若修改 run_subtask 的路由/本地判定块，必须同步本函数（反之亦然）。
+    """
+    cfg: dict = config if isinstance(config, dict) and config else {}
+    difficulty = subtask.get("difficulty", "medium")
+    if difficulty not in ("easy", "medium", "hard"):
+        difficulty = "medium"
+    worker_models = cfg.get("worker_models", {})
+    routed_model = worker_models.get(difficulty, "")
+
+    # 认知模式路由（优先级最高，与 run_subtask 同序）
+    _cog_models = cfg.get("worker_models_by_cognitive", {}) or {}
+    _cog_model = _cog_models.get(_infer_cognitive_mode(subtask), "") if isinstance(_cog_models, dict) else ""
+    if _cog_model:
+        routed_model = _cog_model
+    # task_type 路由（优先于 difficulty）
+    _task_type = subtask.get("task_type")
+    if _task_type:
+        _by_type = cfg.get("worker_models_by_type", {}) or {}
+        _type_model = _by_type.get(_task_type, "") if isinstance(_by_type, dict) else ""
+        if _type_model:
+            routed_model = _type_model
+    # degrade 降档（budget_mode=degrade 生效中）
+    if config and config.get("_degraded"):
+        _degrades_cfg = cfg.get("worker_models_degrades", {}) or {}
+        if _degrades_cfg and isinstance(_degrades_cfg, dict):
+            _deg_target = _degrades_cfg.get(difficulty, "")
+        else:
+            _downgrade_chain = ["hard", "medium", "easy", ""]
+            try:
+                _di = _downgrade_chain.index(difficulty)
+            except ValueError:
+                _di = 1
+            _deg_target = _downgrade_chain[_di + 1] if _di < len(_downgrade_chain) - 1 else ""
+        _deg_model = worker_models.get(_deg_target, "") if _deg_target else ""
+        if _deg_model:
+            routed_model = _deg_model
+
+    # 后端 URL：worker_backends（deprecated 兼容）优先，否则 worker_base_url
+    _worker_backends = cfg.get("worker_backends", {}) or {}
+    _backend_url = ""
+    if routed_model and routed_model in _worker_backends:
+        _backend_url = _resolve_env_value(_worker_backends[routed_model])
+    _worker_url_src = _backend_url or _resolve_env_value((cfg.get("plan_api", {}) or {}).get("worker_base_url", ""))
+    if not _worker_url_src or not re.search(r"(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])", _worker_url_src):
+        return False
+    _really_local, _ = _verify_local_backend(_worker_url_src, routed_model=routed_model)
+    return bool(_really_local)
+
+
 # 模块级常量：路径替换时的边界字符集（在 _build_task_md 和 run_subtask 中共享）
 _BOUNDARY_CHARS = r'\s"\'\(\):/：，。、'
 _BOUNDARY_BEFORE = rf'(?<![^{_BOUNDARY_CHARS}])'

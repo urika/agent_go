@@ -1587,3 +1587,266 @@ def test_no_lost_updates_or_cross_contamination(
         rec = _json.loads(rf.read_text(encoding="utf-8"))
         assert rec["subtask_id"] == f"sub-{i}", f"sub-{i} result.json 被覆盖/错配"
         assert rec.get("content") == f"unique-{i}", f"sub-{i} result.json content 串扰"
+
+# ---------------------------------------------------------------------------
+# T09 本地模型自动限流
+# ---------------------------------------------------------------------------
+
+class _ConcTracker:
+    """并发追踪器：作为 run_subtask 的 side_effect，记录 local/cloud 两类子任务的
+    并发峰值，并用 Barrier(2) 证明两个云端子任务真实同时在场（线程安全）。
+
+    - peak["local"] > 1 ⇔ 本地串行被破坏（确定性：信号量保证峰值恒 ≤1，无计时依赖）
+    - cloud_rendezvous=False ⇔ 两个云端子任务未并行（barrier 5s 超时后确定性地失败，
+      不是偶发）；locals 用 50ms sleep 放大窗口，未串行时峰值必然 >1。
+    """
+
+    def __init__(self, local_ids, local_sleep=0.05):
+        import threading
+        self.local_ids = set(local_ids)
+        self.local_sleep = local_sleep
+        self.lock = threading.Lock()
+        self.cur = {"local": 0, "cloud": 0}
+        self.peak = {"local": 0, "cloud": 0}
+        self.barrier = threading.Barrier(2)
+        self.cloud_rendezvous = False
+
+    def run(self, task_id, st, *args, **kwargs):
+        import threading
+        import time
+        kind = "local" if st["id"] in self.local_ids else "cloud"
+        with self.lock:
+            self.cur[kind] += 1
+            self.peak[kind] = max(self.peak[kind], self.cur[kind])
+        if kind == "cloud":
+            try:
+                self.barrier.wait(timeout=5)
+                self.cloud_rendezvous = True
+            except threading.BrokenBarrierError:
+                pass
+        else:
+            time.sleep(self.local_sleep)
+        with self.lock:
+            self.cur[kind] -= 1
+        return _success_result(st["id"])
+
+
+class TestLocalModelThrottle:
+    """T09 pipeline 本地模型自动限流（并发调度原则 2026-09-04 拍板：云端并行、本地串行）。
+
+    判定函数 worker_routes_local 在 pipeline 命名空间 mock（调度行为与判定口径解耦测试；
+    判定口径本身由 TestWorkerRoutesLocal 覆盖）。
+    """
+
+    @staticmethod
+    def _local_classifier(local_ids):
+        ids = set(local_ids)
+        return lambda st, cfg: st["id"] in ids
+
+    # ── 1. 本地路由子任务自动串行 ────────────────────────────────────────
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_local_subtasks_serialized(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """3 个本地路由子任务 + parallel=3：信号量互斥，并发峰值恒为 1。"""
+        local_ids = {"sub-1", "sub-2", "sub-3"}
+        confirmed = [_make_subtask(sid) for sid in sorted(local_ids)]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        tracker = _ConcTracker(local_ids)
+        mock_run_subtask.side_effect = tracker.run
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        with patch("agent_go.pipeline.worker_routes_local",
+                   side_effect=self._local_classifier(local_ids)):
+            _run_pipeline(
+                confirmed, repo, task_dir, logger,
+                config={}, headless=True, parallel=3,
+                issue_ref="", meta=_default_meta(),
+            )
+
+        assert mock_run_subtask.call_count == 3
+        assert tracker.peak["local"] == 1, \
+            f"本地子任务必须串行（峰值=1），实际峰值={tracker.peak['local']}"
+
+    # ── 2. 云端路由子任务并行语义不变 ────────────────────────────────────
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_cloud_subtasks_still_parallel(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """2 个云端子任务 + parallel=2：Barrier 会合证明真实并行（--parallel 语义不变）。"""
+        confirmed = [_make_subtask("sub-1"), _make_subtask("sub-2")]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        tracker = _ConcTracker(local_ids=())
+        mock_run_subtask.side_effect = tracker.run
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        # 分类器被调用但全部判云端
+        with patch("agent_go.pipeline.worker_routes_local", return_value=False) as mock_cls:
+            _run_pipeline(
+                confirmed, repo, task_dir, logger,
+                config={}, headless=True, parallel=2,
+                issue_ref="", meta=_default_meta(),
+            )
+
+        assert mock_run_subtask.call_count == 2
+        assert mock_cls.call_count == 2, "波次内每个子任务都应做本地路由判定"
+        assert tracker.cloud_rendezvous, "云端子任务未真实并行（barrier 未会合）"
+        assert tracker.peak["cloud"] == 2
+
+    # ── 3. 混合场景：本地串行不阻塞云端并行 ──────────────────────────────
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_mixed_local_serial_cloud_parallel(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """2 本地 + 2 云端 + parallel=4：本地互斥（峰值=1），云端同时并行（会合成功）。"""
+        local_ids = {"sub-l1", "sub-l2"}
+        cloud_ids = ["sub-c1", "sub-c2"]
+        confirmed = [_make_subtask(sid) for sid in sorted(local_ids) + cloud_ids]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        tracker = _ConcTracker(local_ids)
+        mock_run_subtask.side_effect = tracker.run
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        with patch("agent_go.pipeline.worker_routes_local",
+                   side_effect=self._local_classifier(local_ids)):
+            _run_pipeline(
+                confirmed, repo, task_dir, logger,
+                config={}, headless=True, parallel=4,
+                issue_ref="", meta=_default_meta(),
+            )
+
+        assert mock_run_subtask.call_count == 4
+        assert tracker.peak["local"] == 1, "混合场景本地子任务仍须互斥串行"
+        assert tracker.cloud_rendezvous, "本地限流不得阻塞无关的云端并行"
+        assert tracker.peak["cloud"] == 2
+
+    # ── 4. 开关关闭：pipeline.local_model_serialize=false 恢复全并行 ──────
+    @patch("agent_go.pipeline.subprocess.run")
+    @patch("agent_go.pipeline._worktree_prune", return_value=(True, ""))
+    @patch("agent_go.pipeline._worktree_remove", return_value=(True, ""))
+    @patch("agent_go.pipeline._set_gc_auto", return_value=("1", True, ""))
+    @patch("agent_go.pipeline.run_subtask")
+    def test_serialize_disabled_by_config(
+        self, mock_run_subtask, mock_gc, mock_wt_remove, mock_wt_prune, mock_subproc,
+        temp_dir, logger,
+    ):
+        """local_model_serialize=false 时，即使分类器判本地也不限流（逃生开关）。"""
+        local_ids = {"sub-1", "sub-2"}
+        confirmed = [_make_subtask(sid) for sid in sorted(local_ids)]
+        repo, task_dir = _setup_repo_and_task_dir(temp_dir)
+
+        # 全部按 cloud 通道统计：barrier 会合证明未限流
+        tracker = _ConcTracker(local_ids=())
+        mock_run_subtask.side_effect = tracker.run
+        mock_subproc.return_value = MagicMock(returncode=0, stdout="", stderr=b"")
+
+        with patch("agent_go.pipeline.worker_routes_local",
+                   side_effect=self._local_classifier(local_ids)) as mock_cls:
+            _run_pipeline(
+                confirmed, repo, task_dir, logger,
+                config={"pipeline": {"local_model_serialize": False}},
+                headless=True, parallel=2,
+                issue_ref="", meta=_default_meta(),
+            )
+
+        mock_cls.assert_not_called()  # 开关关闭时不应做本地路由判定
+        assert tracker.cloud_rendezvous, "开关关闭后本地路由子任务应恢复并行"
+        assert tracker.peak["cloud"] == 2
+
+
+class TestWorkerRoutesLocal:
+    """worker_routes_local 判定口径（executor）：什么算「本地路由」。
+
+    判定链：routed_model 解析（cognitive > task_type > degrade > difficulty）
+    → worker_backends/worker_base_url → URL 指向本机 → _verify_local_backend 验证真本地。
+    """
+
+    @staticmethod
+    def _cfg(**overrides):
+        cfg = {"plan_api": {"worker_base_url": ""}}
+        cfg.update(overrides)
+        return cfg
+
+    def test_empty_config_is_cloud_without_disk_read(self):
+        """空 config 不回退 load_config 读磁盘，直接判云端（调度侧纯函数语义）。"""
+        from agent_go.executor import worker_routes_local
+        with patch("agent_go.executor._verify_local_backend") as mock_verify:
+            assert worker_routes_local({"id": "s1"}, {}) is False
+            assert worker_routes_local({"id": "s1"}, None) is False
+            mock_verify.assert_not_called()
+
+    def test_remote_url_is_cloud_no_probe(self):
+        """worker_base_url 指向远端 → 判云端且不发起本地探测。"""
+        from agent_go.executor import worker_routes_local
+        cfg = self._cfg(plan_api={"worker_base_url": "https://gateway.example.com"})
+        with patch("agent_go.executor._verify_local_backend") as mock_verify:
+            assert worker_routes_local({"id": "s1"}, cfg) is False
+            mock_verify.assert_not_called()
+
+    @patch("agent_go.executor._verify_local_backend", return_value=(True, "Qwen3.6-27B-4bit"))
+    def test_local_url_verified_local(self, mock_verify):
+        """URL 指向本机 + 深度验证真本地 → 判本地（限流对象）。"""
+        from agent_go.executor import worker_routes_local
+        cfg = self._cfg(plan_api={"worker_base_url": "http://localhost:4000"})
+        assert worker_routes_local({"id": "s1"}, cfg) is True
+        mock_verify.assert_called_once_with("http://localhost:4000", routed_model="")
+
+    @patch("agent_go.executor._verify_local_backend", return_value=(False, "glm-4.7"))
+    def test_local_url_but_actually_cloud(self, mock_verify):
+        """本机代理实际转发云（验证非本地）→ 判云端，不误限流。"""
+        from agent_go.executor import worker_routes_local
+        cfg = self._cfg(plan_api={"worker_base_url": "http://127.0.0.1:4000"})
+        assert worker_routes_local({"id": "s1"}, cfg) is False
+
+    @patch("agent_go.executor._verify_local_backend", return_value=(True, "m"))
+    def test_routed_model_propagates_from_difficulty(self, mock_verify):
+        """difficulty→worker_models 解析的 routed_model 透传给验证（影响 R8 探测口径）。"""
+        from agent_go.executor import worker_routes_local
+        cfg = self._cfg(
+            plan_api={"worker_base_url": "http://localhost:4000"},
+            worker_models={"easy": "", "medium": "", "hard": "claude-opus-4-8"},
+        )
+        assert worker_routes_local({"id": "s1", "difficulty": "hard"}, cfg) is True
+        mock_verify.assert_called_once_with("http://localhost:4000", routed_model="claude-opus-4-8")
+
+    @patch("agent_go.executor._verify_local_backend", return_value=(True, "m"))
+    def test_worker_backends_override_base_url(self, mock_verify):
+        """deprecated worker_backends 按模型名映射本机 URL 时同样判本地（兼容口径）。"""
+        from agent_go.executor import worker_routes_local
+        cfg = self._cfg(
+            worker_models={"easy": "", "medium": "claude-haiku-4-5", "hard": ""},
+            worker_backends={"claude-haiku-4-5": "http://localhost:8000"},
+        )
+        assert worker_routes_local({"id": "s1", "difficulty": "medium"}, cfg) is True
+        mock_verify.assert_called_once_with("http://localhost:8000", routed_model="claude-haiku-4-5")
+
+    @patch("agent_go.executor._verify_local_backend", return_value=(True, "m"))
+    def test_cognitive_override_wins(self, mock_verify):
+        """cognitive 路由覆盖 difficulty（与 run_subtask 同优先级）。"""
+        from agent_go.executor import worker_routes_local
+        cfg = self._cfg(
+            plan_api={"worker_base_url": "http://localhost:4000"},
+            worker_models={"easy": "m-easy", "medium": "m-medium", "hard": "m-hard"},
+            worker_models_by_cognitive={"review": "m-review"},
+        )
+        st = {"id": "s1", "difficulty": "hard", "agent_type": "reviewer"}
+        assert worker_routes_local(st, cfg) is True
+        mock_verify.assert_called_once_with("http://localhost:4000", routed_model="m-review")
