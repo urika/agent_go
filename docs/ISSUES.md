@@ -834,12 +834,18 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 ### ISSUE-55 巨型模块接近可维护性边界：web_server.py 4838 行 / executor.py 3103 行（2026-08-29 系统 Review 遗留）
 
 - **位置**：`agent_go/web_server.py`（4838 行）、`agent_go/executor.py`（3103 行）
-- **状态**：🔲 已登记未修复（2026-08-29，系统 Review 遗留风险，供决策拆分时机）
+- **状态**：🔶 部分已修复（2026-09-05 T12：web_server.py 已拆分，4903 → 238 行组合层 + 5 个新模块；executor.py 部分仍登记，触发线不变）
 - **严重度**：P2（非功能缺陷，纯可维护性——两者均为改动最频繁的核心模块，持续膨胀将放大 review/合并冲突/回归半径）
 
 **问题**：全仓 64 模块 ~38.5K 行中这两个文件合计 ~7.9K 行（~21%）。web_server.py 混合了 HTTP 传输层、鉴权、17+ GET 观测 API、写处置端点、kanban 视图、SSE、配置中心多个关注点；executor.py 混合了 worktree 生命周期、skill 装载、claude spawn、验证循环、metering、葬礼回写等多个关注点。当前测试基线健康（2741 passed），尚无质量信号恶化，但按当前增速（每批次 +50~200 行）将很快超过单文件可高效导航的阈值。
 
 **修复方向**：不急拆（无质量信号恶化，拆分本身有回归风险），但设触发线：任一文件超 5500 行或单次 review diff 超 400 行即启动拆分。候选切面——web_server 按「传输/鉴权」「观测 GET」「写处置 ops」「kanban」「SSE/配置中心」分 4~5 个文件（handler mixin 或 route 模块）；executor 按「worktree 生命周期」「spawn+验证循环」「metering/回写」分 3 个文件。拆分保持公共 API 不变（executor.run_subtask 签名不动），先搬纯函数再做行为等价验证。
+
+**修复**（2026-09-05 T12，web_server.py 部分，用户拍板不再等触发线）：
+- 按候选切面拆为 5 个新模块：`web_data.py`（观测 GET 数据层，1281 行）、`web_frontend.py`（SPA 模板，2054 行）、`web_ops.py`（写处置 mixin WebOpsMixin，605 行）、`web_kanban.py`（看板视图 + WebKanbanMixin，566 行）、`web_handler.py`（传输/鉴权/SSE，WebHandler = WebOpsMixin + BaseHTTPRequestHandler，433 行）；`web_server.py` 保留为组合/入口层（238 行：serve_web/main + 可 patch 叶子符号 + 全量 re-export），遵守 NFR-8。
+- 公共 API 不变：原 64 个模块级符号与 38 个 WebHandler 方法全部可从 `agent_go.web_server` 原路径访问；函数/方法体逐行等价（AST 比对唯一差异为 `_root()` 解析）。测试 monkeypatch 面（`ws.AGENT_GO_DIR`/`CONFIG_PATH`/`load_config`/`probe_local_models`/`_run_cli`/`_bench_results_path`/`_resolve_workspace_file`）保留在组合层，数据层经 `web_data._root()` 运行时解析，补丁语义拆分前后一致。
+- 行为等价验证：`pytest -k web` 225 passed；`test_profiles/test_task_lock/test_kanban_import_spec` 49 passed；ruff/mypy 干净；`_SPA_HTML` 字面量逐字节一致。公共接口无实质变化，未新增 ADR；模块目录已同步（module-catalog.md）。
+- **executor.py 部分仍登记**：触发线不变（超 5500 行或单次 review diff 超 400 行启动），修复循环已随 B2 拆入 backends/dispatch.py。
 
 ## 2026-08-30 worker session join 断链 + settings 钉死（外部会话交叉验证移交）
 
