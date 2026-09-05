@@ -680,7 +680,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 |---|---|---|
 | ~~**B0 执行层重构（前置）**~~ | 已并入 B2（2026-09-03 决策）：B1 落地证明 backend 抽象不依赖 executor 全量拆分；executor 修复循环拆分随 B2 完成，`web_server.py` 拆分挂到下一个 Web 需求触发 | 见 B2 |
 | **B1 标准 backend 接口** ✅ 已完成（73cfcea） | 抽象 `BaseBackend` / `BackendContext` / `SubtaskResult` + `BackendRegistry`，Claude Code 和 AgentLoop 全部适配到同一接口 | 新增 backend 不再修改 `executor.py` 的硬编码 if/else；单元测试覆盖接口契约（tests/test_backends.py） |
-| **B2 AgentLoop 能力补齐** 🟡 代码已完成（bench A/B 待 B5） | 修复路径（fix/replan/reload）纳入 backend 分发（backends/dispatch.py）；ACI 工具集 Grep/Glob/View；stuck 检测；no-progress 信号；scope advisory；explore 只读模式 | 在 canonical easy/medium 任务上与 Claude Code 路径 A/B，通过率不劣化、成本下降（B5 验证） |
+| **B2 AgentLoop 能力补齐** ✅ 代码 + bench A/B 完成（2026-09-05 T11） | 修复路径（fix/replan/reload）纳入 backend 分发（backends/dispatch.py）；ACI 工具集 Grep/Glob/View；stuck 检测；no-progress 信号；scope advisory；explore 只读模式 | golden 6 × repeat 2 同模型同端点 A/B（复用 B5 claude 臂）：pass 8/12 vs 10/12（easy/medium 子集 7/8 vs 8/8），$/pass -26%——**触发条件 1 不成立（成本 ✓ 通过率 ✗），维持 B4 保守路由不扩大**；复测前置：网络重试鲁棒性、timeout 校准、metrics 遗留表补 glm-5.3-flash（详见 stage13-b2 §6） |
 | **B3 Pi backend PoC** ✅ PoC + 小规模批量完成 | 接入 `pi -p --mode json --no-session`（pi_backend.py）：NDJSON 事件流解析、聚合计量、hard_timeout、readonly 工具白名单、零产出错误映射；显式选择入口 subtask.backend / config.worker_backend / bench --worker-backend | golden 6 任务 × 2 臂（deepseek-pro / kimi-for-coding）累计 11/12 通过，唯一失败为已修复的基础设施 bug + 额度耗尽（详见 stage13-b3 设计文档）；B5 正式验收待同模型双臂 + repeat≥2 |
 | **B4 backend 路由配置** ✅ | `worker_backend_by_difficulty` / `worker_backend_by_type` 声明式路由（registry.resolve_backend_name，优先级：subtask.backend > worker_backend > by_type > by_difficulty > agent_loop > claude），初始与修复路径同策略；命名避开 deprecated 的 worker_backends | 配置即可切换子任务 backend，无需改代码 ✓（8 个路由优先级测试） |
 | **B5 bench 对比基线** ✅ | Claude Code vs Pi 双臂（同模型 glm-5.3-flash 同端点，golden 6 × repeat 2）：pass_rate 持平 83%，pi elapsed 略优、lint 略多 | 不劣化成立 ✓（详见 stage13-b3 设计文档 B5 节）；pi backend 可选启用，默认路径仍为 claude |
@@ -692,7 +692,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 
 ```text
 B1 标准 backend 接口 ✅（73cfcea）
-  -> B2 AgentLoop 补齐 ✅ 代码完成（B0 修复循环拆分已并入；bench A/B 待 B5）
+  -> B2 AgentLoop 补齐 ✅ 代码 + bench A/B 完成（2026-09-05：pass 8/12 vs 10/12、$/pass -26%，触发条件 1 不成立，维持保守路由）
   -> B3 Pi backend PoC ✅（0ea5ce8 之后；golden 6 任务 × 2 臂累计 11/12）
   -> B4 backend 路由配置 ✅（worker_backend_by_difficulty / by_type 声明式路由）
   -> B5 bench A/B ✅（2026-09-04：glm-5.3-flash 同端点双臂，pass 持平 83%，pi 不劣化）
@@ -830,7 +830,7 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 | 扩展能力分散资源 | 核心交付链路延期 | 新功能必须通过产品价值评审 |
 | 历史知识污染 | 后续 Plan 质量下降 | 来源、置信度、过期和人工回滚机制 |
 | 多 backend 质量不齐 | 新 backend 未达默认路径能力即启用，拉低 ADR | 标准接口 + bench A/B + 默认不启用，fallback 到 Claude Code |
-| 超大模块可维护性 | `executor.py`（~3.1K 行）、`web_server.py`（~4.7K 行）继续膨胀，改动风险和 review 成本上升 | executor 修复循环拆分已随 B2 完成（backends/dispatch.py）；`web_server.py` 拆分挂下一个 Web 需求；新功能落入新模块而非超大文件（NFR-8） |
+| 超大模块可维护性 | `executor.py`（~3.1K 行）继续膨胀，改动风险和 review 成本上升 | executor 修复循环拆分已随 B2 完成（backends/dispatch.py）；`web_server.py` 已拆分（2026-09-05 T12：5 模块 + 238 行组合层，行为等价）；executor.py 主体仍挂触发线（>5500 行或单 diff >400 行）；新功能落入新模块而非超大文件（NFR-8） |
 | git 对象库并发共享 | 并发 worktree 共享同一对象库，pack/gc 竞争导致偶发执行失败 | `gc.auto` 已禁用；新并发路径必须评估对象库写竞争（NFR-8） |
 | 文档与代码漂移 | PRD/roadmap/catalog 与实现脱节，决策依据失真 | doc-sync 规则强制（接口变更同步 spec.md、契约变更新增 ADR）；review 时抽查 |
 
@@ -865,17 +865,17 @@ M0 产品契约与指标冻结  ✅ accepted
 **立即可做（无外部依赖，按序推进）**：
 
 1. **B8 dsh 冒烟 → DSHBackend → golden 6×2**（[stage13-b8](design/stage13-b8-dsh-assessment.md)）：前置为本机 Node.js + DeepSeek key + 审批配置模板（headless 失败闭合）；**随 B8 同步落地 ADR-010 阶段 1**（`harvest_trajectory` 钩子，dsh 为首个 full-fidelity 数据源；阶段 2/3 须阶段 1 价值验证背书）。
-2. **mcp_client 代理工具模式**（pi 插件借鉴①）：单工具 ~200 token + 动态发现，替代全量 schema 注入；独立小改，可穿插。
+2. ~~**mcp_client 代理工具模式**~~ ✅（2026-09-05 T08）：`mcp__proxy` 单工具（list/describe/call，~200 token）替代全量 schema 注入，默认 proxy 模式、`mcp_client.tool_mode=full` 可回退；仅接 agent_loop 注入点，消费降级语义不变（tests +16 例）。
 3. **C4 前置修订：知识注入 KV-cache 稳定快照**（pi 插件借鉴②）→ 然后 **C4 KnowledgeStore A/B**（delivery-20260820 基线两臂对比）。⚠️ 顺序敏感：C4 绕过此修订直接启动会导致注入口径返工（逐轮重建打爆本地模型前缀缓存）。
-4. **pipeline 本地模型自动限流**：原则已拍板（云端可并行、本地串行），只差自动化落地。
-5. **随手项**：`zai/glm-5.3-flash` 定价覆盖（pricing.py）。
+4. ~~**pipeline 本地模型自动限流**~~ ✅（2026-09-05 T09，ADR-011）：本地路由子任务经任务级 Semaphore(1) 自动串行，云端 --parallel 语义不变；判定与 `AGENT_GO_IS_LOCAL` 同源，逃生开关 `pipeline.local_model_serialize`（tests +11 例）。
+5. ~~**随手项**：`zai/glm-5.3-flash` 定价覆盖~~ ✅（2026-09-05 T10）：pricing.py $0.15/$0.50（z.ai 标准价）+ MODEL_TIER value 档。
 
 **等外部窗口（到点触发，不占当前排期）**：
 
 - Go 套餐额度重置（~09-15）后评估 opencode qwen3.8 臂。
 - 阶段 D 放行评估：A1 口径已修（ISSUE-54 ✅），剩余为**纯样本积累**（≥10 review 决策 + 失败样本），靠真实任务运行自然达成，不刻意刷样本。
 - zcode 官方独立 CLI 发布后迁移（zai-org/feedback#444）。
-- ISSUE-55 巨型模块拆分（web_server 4838 / executor 3103 行）：web_server 拆分等下一个 Web 需求触发。
+- ~~ISSUE-55 巨型模块拆分（web_server 4838 / executor 3103 行）：web_server 拆分等下一个 Web 需求触发~~ web_server 侧 ✅（2026-09-05 T12）：4903 行拆为 web_frontend/web_data/web_ops/web_kanban/web_handler 5 模块 + 238 行组合层，公共 API 行为等价（AST 级验证，tests 225 过）；executor.py 半侧仍登记，触发线不变。
 
 **长期候选**：pi-subagents 式确定性 workflow 脚本（plan 模板固化）；代理层压缩参照 context-mode「工具结果外置 + FTS5/BM25 按需检索」路线（理念借鉴，ELv2 不引入代码）；ADR-010 阶段 2/3（TaskEvent 词汇、meta.json 投影化、fork-retry）。
 

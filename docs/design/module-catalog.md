@@ -1,7 +1,7 @@
 # agent_go 模块职责目录
 
 > 状态：As-Built 模块映射
-> 更新日期：2026-09-04（补 B7 zcode_backend + B6 opencode_backend + B4 声明式 backend 路由 + B3 pi_backend + B2 AgentLoop 加固）
+> 更新日期：2026-09-05（ISSUE-55 web_server.py 拆分为 web_data/web_ops/web_kanban/web_handler/web_frontend + 组合层；前次：B7 zcode_backend + B6 opencode_backend + B4 声明式 backend 路由 + B3 pi_backend + B2 AgentLoop 加固）
 
 | 模块 | 主要职责 | 关键输出 |
 |---|---|---|
@@ -9,7 +9,7 @@
 | `api.py` | LLM API、Plan、降级和缓存 | Plan JSON |
 | `ui.py` | Plan/子任务确认和交互 | confirmed plan/tasks |
 | `planning.py` | 计划检查、难度和耗时预估 | warnings/estimate |
-| `pipeline.py` | DAG wave、并发、生命周期和清理 | meta/results |
+| `pipeline.py` | DAG wave、并发（含 T09 本地模型限流串行）、生命周期和清理 | meta/results |
 | `executor.py` | 单子任务 worktree、Claude、验证和 commit | result/commit/tag |
 | `subtask.py` | Claude headless、watchdog、进程控制 | subprocess result/metering |
 | `delivery.py` | delivery branch 创建与 commit 汇总、Accepted Delivery 判定、mergeability 预检 | delivery branch / delivery result |
@@ -28,7 +28,7 @@
 | `router.py` | 角色和 provider 路由 | routed model |
 | `pricing.py` | 模型价格和档位 | price/tier |
 | `mcp_server.py` | 对外 MCP Server | MCP tools/resources |
-| `mcp_client.py` | 消费外部 MCP 工具 | MCP tool calls |
+| `mcp_client.py` | 消费外部 MCP 工具（T08 代理工具模式：单代理工具动态发现 / 全量注入可配） | MCP tool calls |
 | `artifacts.py` | 产物收集和导出 | artifact manifest |
 | `checkpoint.py` | worktree 快照和恢复 | snapshot |
 | `notify.py` | 多通道事件通知（desktop / webhook / command / IM 适配器） | notification events |
@@ -49,7 +49,12 @@
 | `console.py` | 统一输出抽象层：quiet / verbose 模式，延迟默认绑定，表格渲染 | console output |
 | `tui.py` | Curses 状态仪表盘：实时显示并发子任务进度 | TUI display |
 | `workflow_gen.py` | GitHub Actions workflow 自动生成（`ci` 命令） | workflow YAML |
-| `web_server.py` | Web 操作台：只读观测（17 GET API）+ 写处置（run/resume/cancel/review/merge/pr）+ 配置中心 + 🗂 看板视图 + SSE | HTTP JSON/HTML/SSE |
+| `web_server.py` | Web 操作台组合/入口层（ISSUE-55 拆分后）：serve_web/main 入口 + 可 patch 叶子符号 + 全量 re-export（公共 API 不变） | HTTP JSON/HTML/SSE |
+| `web_data.py` | Web 观测 GET 数据层：17+ api_* 纯函数、任务目录/id 校验、web_audit.jsonl 审计追加 | task/metrics JSON |
+| `web_ops.py` | Web 写处置端点 mixin（WebOpsMixin）：do_POST/do_PUT/do_DELETE + run/resume/cancel/clean/review/merge/pr/confirm/notes/insight/config put | op result + audit |
+| `web_kanban.py` | Web 看板切面：api_kanban 视图 + 任务状态快照缓存 + WebKanbanMixin（建卡/拆解/导入 spec/流转/归档/审批/派发/降级建议） | kanban JSON/cards |
+| `web_handler.py` | Web 传输/鉴权/SSE：WebHandler = WebOpsMixin + BaseHTTPRequestHandler，admin/viewer 多角色守卫 + GET 路由 + SSE 事件流 | HTTP JSON/SSE |
+| `web_frontend.py` | Web 单文件前端 SPA 模板（_SPA_HTML，无外部资源依赖） | HTML/JS |
 | `lint.py` | AST 静态检查：可疑 Python 代码模式（如循环体截断） | lint warnings |
 | `mcp_http.py` | MCP Server HTTP/SSE transport：POST /mcp + GET /mcp (SSE) + /health | HTTP response |
 | `kanban.py` | 看板数据层：~/.agent_go/kanban.jsonl 单文件存储（mtime 缓存+原子写+锁），5 阶段列 × 3 类卡片，阶段流转 + reconcile_cards 惰性状态回流 | kanban board state |
@@ -124,7 +129,7 @@
 | `metadata_migration.py` | Auditable failure-metadata migration for historical task dirs (`migrate failure-metadata`) |
 | `mcp_server.py` | MCP server over stdio: 7 tools (run_task/resume_task/inspect_task/review_task/governance_task/list_tasks/cancel_task) + resources + prompts |
 | `mcp_http.py` | MCP server HTTP/SSE transport: POST /mcp + GET /mcp (SSE) + GET /health, Bearer auth |
-| `mcp_client.py` | MCP consumption layer: subtasks call external MCP tools, namespaced `mcp__{server}__{tool}` |
+| `mcp_client.py` | MCP consumption layer: subtasks call external MCP tools, namespaced `mcp__{server}__{tool}`；T08 代理工具模式（默认）：agent_loop 注入单个 `mcp__proxy` 代理工具（op=list/describe/call 动态发现），`mcp_client.tool_mode=full` 回退全量 schema 注入 |
 | `bench.py` | Model benchmark orchestrator: eval bench over eval_suite tasks；子进程强制 --no-goal（对照实验不引入 goal 变量，防 watchdog 误杀口径噪声）；语义判定取末次有效 verdict（verification_results 跨重试累积）；`plan_quality_blocked` 单列 kill_reason=plan_gate_blocked（不计能力失败） |
 | `bench_schema.py` | Versioned Bench record schema + JSONL validator (M0-4) |
 | `batch_governance.py` | Result batch governance + immutable baseline manifests (M0-10) |
@@ -140,7 +145,12 @@
 | `tui.py` | Curses status dashboard |
 | `review_agent.py` | Read-only independent review subagent, two-phase review |
 | `workflow_gen.py` | GitHub Actions workflow generation (ci command) |
-| `web_server.py` | Web 操作台：只读观测（17 GET API）+ 写处置（run/resume/cancel/clean/review/merge/pr/confirm，token 鉴权 + web_audit.jsonl 审计）+ 配置中心（profile 切换/健康/编辑/diff）+ 🗂 看板视图（kanban 6 写端点，SSE 联动）+ SSE，stdlib http.server + SPA |
+| `web_server.py` | Web 操作台组合/入口层（ISSUE-55 于 2026-09-05 T12 拆分，4903 → 238 行）：保留 serve_web/main 入口、被测试 monkeypatch 的叶子符号（AGENT_GO_DIR/CONFIG_PATH/load_config/probe_local_models/_run_cli/_bench_results_path/_resolve_workspace_file），原公开符号全量 re-export——调用方与测试 import 路径零改动 |
+| `web_data.py` | Web 观测 GET 数据层（拆分自 web_server.py）：17+ api_* 纯函数（tasks/detail/log/metering/replay/plan/overview/cost/models/assessment/cross-judge/bench/baseline/profiles/health/storage/notes/insights/config 等）、_task_dir/_list_task_dirs 路径校验（防穿越）、_audit 审计追加；对可 patch 叶子符号经 `_root()` 在组合层命名空间运行时解析（monkeypatch 语义不变） |
+| `web_ops.py` | Web 写处置端点 mixin（WebOpsMixin(WebKanbanMixin)，拆分自 web_server.py）：do_POST/_route_write_api/do_PUT/do_DELETE + 任务生命周期（run/resume/cancel/clean-old）、审批/交付（review/review-decision/merge/pr/confirm）、notes/blind-spot 归因/insight 生成、PUT /api/config 白名单编辑；全操作写 web_audit.jsonl |
+| `web_kanban.py` | Web 看板切面（拆分自 web_server.py）：api_kanban 卡片分组视图 + _task_status_snapshot（meta mtime:size 签名缓存）+ WebKanbanMixin 看板写端点（create/decompose/import-spec/update/move/archive/delete/review/dispatch/suggest-degrade，含 W2 异步派发回调与状态回流） |
+| `web_handler.py` | Web 传输/鉴权/SSE 层（拆分自 web_server.py）：WebHandler = WebOpsMixin + BaseHTTPRequestHandler；_auth_role/_auth_guard（admin/viewer/open 三态 + Bearer/X-Api-Key/query token）、_reply* 响应工具、do_GET/_route_api 观测路由、_stream_events SSE（任务目录 + kanban.json 签名轮询推送） |
+| `web_frontend.py` | 单文件前端 SPA 模板（拆分自 web_server.py）：_SPA_HTML 内嵌 HTML/JS，无外部资源依赖，由 WebHandler `/` 路由原样返回 |
 | `kanban.py` | 看板数据层：~/.agent_go/kanban.json 单文件存储（mtime 缓存 + 原子写 + 锁），5 阶段列（brainstorm→operations）× 3 类卡片（discussion/implementation/periodic），阶段流转 + history，task_ids 软链接执行任务（与 status.py 执行态正交，不动 meta.json） |
 | `profiles.py` | Profile 管理：local⇄cloud 一键切换（config local/cloud/status）、.current_profile、健康检查（mismatch 检测）、本地 profile 模板生成 |
 | `task_runner.py` | Web 子进程任务运行器（Thin shell 同哲学）：spawn agent_go --yes --json，meta.json 唯一事实源，SIGINT cancel |

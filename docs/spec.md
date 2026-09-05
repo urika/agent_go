@@ -100,6 +100,8 @@ _run_pipeline(confirmed, repo, task_dir, ..., preserve_worktrees=None) → 核�
      degraded 降级产物强制保留+标记）；保留现场净化（.pytest_cache/__pycache__/pyc）
   ── mcp_client: MCPClientPool start_all() 启动 / finally stop_all() 回收（外部 MCP 工具）
   ── S9-B 产物导出：config.artifact_dir 时清理 worktree 前调用 artifacts.export，final report 渲染清单
+  ── T09 本地模型自动限流：worker_routes_local 判定为本地路由的子任务共用 Semaphore(1)
+     互斥串行，云端子任务优先提交、并行语义不变（pipeline.local_model_serialize 可关）
 notify_event(event, context, config) → 任务完成/失败通知 (M1)
 _sanitize_preserved_worktree(wt) → S12 失败清理：净化保留 worktree（移除运行时缓存）
 ```
@@ -139,6 +141,8 @@ run_subtask(task_id, subtask, repo, task_dir, ..., metering_path="", config=None
 _build_sandbox_env()        → 净化环境变量 (敏感词剔除 + AGENT_GO_API_KEY 强制删)
 _apply_resource_limits()    → setrlimit (失败不阻塞)
 _verify_changes()           → 验证循环 + 修复重试（retry_count 注入 context.md + metering）
+worker_routes_local(subtask, config) → T09 本地路由判定（与 AGENT_GO_IS_LOCAL 注入同链，
+                              无副作用；pipeline 波次预分类用，复用 _verify_local_backend 缓存）
 ```
 
 ## subtask.py — Claude 调用原语
@@ -381,6 +385,9 @@ MCPClientPool(config)          → 多 server 连接池 (start_all/stop_all/get_
 MCPServerConnection(command)   → 单 server 生命周期 (subprocess + JSON-RPC initialize 握手)
 _tool_prefix = "mcp__{server}__{tool}"  → 外部工具命名空间（agent_loop tools 合并 + claude --mcp-config 透传）
   ── server 启动失败降级 warning，不阻断 pipeline
+  ── T08 代理工具模式（默认，config.mcp_client.tool_mode=proxy）：agent_loop 只注入单个
+     mcp__proxy 代理工具（PROXY_TOOL_DEFINITION，~200 token），op=list/describe/call 动态发现；
+     tool_mode=full 回退全量 schema 注入；dispatch 对 mcp__proxy 优先进入 op 分发
 ```
 
 ## assessment.py — 评估假阳性数据层
@@ -432,7 +439,8 @@ serve_web(host, port, token) → ThreadingHTTPServer 启动（默认 127.0.0.1:8
 ```
 run_agent_loop(task_md, worktree, env, logger, config) → 工具调用 ReAct 循环
   ── _is_simple_task() 判定：简单任务走直接 API，复杂任务保留 claude -p
-  ── tools 合并 ToolRegistry.definitions() + mcp_client 外部工具（mcp__ 命名空间）
+  ── tools 合并 ToolRegistry.definitions() + mcp_client 外部工具（mcp__ 命名空间；
+     T08 默认代理模式注入单个 mcp__proxy，tool_mode=full 回退全量注入）
   ── 每轮写 metering（virtual_model=agentgo-worker，含 token 统计）
   ── 上限：max_turns（默认 20）/ max_duration（默认 600s）/ api_timeout（120s）
 ```

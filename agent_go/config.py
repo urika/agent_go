@@ -173,6 +173,12 @@ DEFAULT_CONFIG = {
         "default": "developer"      # 默认 Agent 类型
     },
     "artifact_dir": None,           # S9-B 产物导出目录；null = 不导出（产物留在 worktree，向后兼容）
+    "pipeline": {
+        # T09 本地模型自动限流（并发调度原则 2026-09-04 拍板：云端可并行、本地串行）。
+        # True（默认）：路由到已验证本地后端（worker_base_url 指向本机且探测确认为本地模型）
+        # 的子任务在波次内互斥串行；云端路由子任务不受影响，仍按 --parallel 并行。
+        "local_model_serialize": True,
+    },
     "worker_backend": "",           # B3 显式 worker backend（"pi" 等）；空 = 按既有策略解析（claude/agent_loop）
     # B4 声明式 backend 路由（空 = 不覆盖；非 claude 仅 headless 生效）。
     # 注意命名避开 deprecated 的 worker_backends（模型名→ANTHROPIC_BASE_URL 映射）。
@@ -261,6 +267,14 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "scope": "worker",
         },
+    },
+    "mcp_client": {
+        # MCP 消费层工具注入模式（T08 代理工具模式，pi-mcp-adapter 借鉴）。
+        # "proxy"(默认): agent_loop 路径只注入单个 mcp__proxy 代理工具（~200 token），
+        #   模型经 op=list/describe/call 动态发现与调用，避免全量 schema 塞爆上下文；
+        # "full": 回退为 mcp__{server}__{tool} 全量 schema 注入（T08 前行为）。
+        # 仅影响 agent_loop（直接 API）路径；subtask 的 claude --mcp-config 透传不受影响。
+        "tool_mode": "proxy",
     },
 }
 

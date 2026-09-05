@@ -26,6 +26,7 @@ API key 解析优先级：环境变量 `AGENT_GO_API_KEY` > `config.json` `plan_
 | 10 | `skills` | — | Skill 自动发现和加载上限 |
 | 11 | `agents` | — | Agent 类型默认配置 |
 | 12 | `artifact_dir` | `null` | 产物导出目录 |
+| 12a | `pipeline` | `local_model_serialize: true` | Pipeline 调度行为（T09 本地模型自动限流） |
 | 13 | `worker_models` | — | 难度→模型路由 |
 | 14 | `worker_models_fallback` | — | 难度→模型降级备选 |
 | 15 | `worker_models_degrades` | — | 预算降级时难度下移映射 |
@@ -35,6 +36,7 @@ API key 解析优先级：环境变量 `AGENT_GO_API_KEY` > `config.json` `plan_
 | 18 | `cache` | `enabled: true` | Plan 缓存 |
 | 19 | `router` | `enabled: false` | 角色（planner/worker/reviewer）→ provider/model 路由 |
 | 20 | `mcp_servers` | — | 外部 MCP server 配置 |
+| 20a | `mcp_client` | `tool_mode: "proxy"` | MCP 消费层工具注入模式（T08 代理工具模式） |
 | 21 | `knowledge` | `enabled: false` | C4 KnowledgeStore A/B 臂 + 葬礼回写质量 |
 
 ---
@@ -241,6 +243,16 @@ Agent 类型默认配置。
 
 ---
 
+## 12a. `pipeline`
+
+Pipeline 调度行为（T09 本地模型自动限流，并发调度原则 2026-09-04 拍板：云端可并行、本地串行）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `local_model_serialize` | bool | `true` | `true`：`--parallel N > 1` 时，路由到已验证本地后端的子任务在波次内互斥串行（Semaphore=1），云端路由子任务不受影响仍并行。「本地路由」判定口径 = `executor.worker_routes_local`（与 worker `AGENT_GO_IS_LOCAL` 注入同链：cognitive/task_type/degrade/difficulty 解析 routed_model → `worker_backends`/`worker_base_url` → URL 指向本机（127.0.0.1/localhost/0.0.0.0/[::1]）→ 代理探测验证真本地）。置 `false` 关闭自动限流（如本地后端本身支持并发） |
+
+---
+
 ## 13–16. Worker 模型路由
 
 ### `worker_models`（难度→模型）
@@ -414,6 +426,18 @@ Plan 缓存。
 | `scope` | str | 否 | 作用域（`subtask` / `task`） |
 
 内置示例：DEFAULT_CONFIG 自带 `playwright` 条目（`npx @playwright/mcp@latest`，`enabled:false`，`scope:worker`），供浏览器自动化任务启用。
+
+---
+
+## 20a. `mcp_client`
+
+MCP 消费层工具注入模式（T08 代理工具模式，pi-mcp-adapter 借鉴，见 `docs/design/stage13-pi-extensions-review.md` §1）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `tool_mode` | str | `"proxy"` | `"proxy"`：agent_loop 路径只注入单个 `mcp__proxy` 代理工具（~200 token），模型经 `op=list/describe/call` 动态发现与调用；`"full"`：回退为 `mcp__{server}__{tool}` 全量 schema 注入（T08 前行为） |
+
+仅影响 agent_loop（直接 API）路径；subtask 的 `claude --mcp-config` 透传路径不受影响。代理工具的调用/失败语义与全量注入一致（失败返回 error dict，不阻断 pipeline）。
 
 ---
 
