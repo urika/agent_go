@@ -33,6 +33,13 @@ class TestResolvePrice:
         assert p is not None
         assert p == MODEL_PRICES["claude-haiku-4-5"]
 
+    def test_glm_5_3_flash(self):
+        """T10：zai/glm-5.3-flash 定价覆盖（z.ai 标准价 $0.15/$0.50）。"""
+        p = resolve_price("glm-5.3-flash")
+        assert p is not None
+        assert p["prompt"] == pytest.approx(0.15)
+        assert p["completion"] == pytest.approx(0.50)
+
 
 class TestMissingPriceModels:
     def test_all_known(self):
@@ -73,6 +80,7 @@ class TestModelTier:
         assert model_tier("claude-opus-4-8") == "frontier"
         assert model_tier("claude-sonnet-5") == "value"
         assert model_tier("claude-haiku-4-5") == "lite"
+        assert model_tier("glm-5.3-flash") == "value"
 
     def test_suffix_stripped_variant(self):
         """带版本后缀的变体回退到基础名分级。"""

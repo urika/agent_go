@@ -85,6 +85,7 @@ MODEL_PRICES = {
     "glm-5.1":                 {"prompt": 0.8333, "completion": 3.3333},  # GLM-5.1（¥6/24，阿里云百炼=智谱官网）
     "glm-5.2":                 {"prompt": 1.1111, "completion": 3.8889},  # GLM-5.2（¥8/28，智谱官方，settings 默认 sonnet）
     "glm-5.3":                 {"prompt": 0.60, "completion": 2.40},      # GLM-5.3（¥4.2/¥16.8 未命中缓存，2026-08 方案 B evaluator）
+    "glm-5.3-flash":           {"prompt": 0.15, "completion": 0.50},      # GLM-5.3-Flash（z.ai 标准价 $0.15/$0.50，缓存输入 $0.03；限时 5 折至 2026-09-09）
     "glm-4.5-air":             {"prompt": 0.1111, "completion": 0.2778},  # GLM-4.5-Air（¥0.8/2，2025-07-29 官方）
 
     # ── 旧版保留（⚰️ 供旧 metering 日志兼容） ──
@@ -117,7 +118,7 @@ MODEL_TIER: dict[str, list[str]] = {
         "qwen3-max", "qwen-plus",
         "doubao-1.5-pro-32k",
         "kimi-k2", "kimi-k2.5",
-        "glm-5", "glm-4.6", "glm-4.7",
+        "glm-5", "glm-4.6", "glm-4.7", "glm-5.3-flash",
     ],
     "lite": [
         # 轻量 — 高频、低成本、延迟敏感
