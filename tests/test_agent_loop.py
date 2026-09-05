@@ -625,3 +625,99 @@ class TestAgentLoopB2Hardening:
                               make_config(agent_loop={"no_progress_turns": 2}))
         assert result.returncode == 0  # 信号不终止
         assert any("no-progress" in r.message for r in caplog.records)
+
+
+class _FakeMCPPool:
+    """模拟 MCPClientPool：记录 dispatch 调用，proxy/full 两种注入各返回固定定义。"""
+
+    def __init__(self):
+        self.dispatched = []
+
+    def proxy_definitions(self):
+        return [{"name": "mcp__proxy", "description": "代理工具",
+                 "inputSchema": {"type": "object"}}]
+
+    def tool_definitions(self):
+        return [{"name": "mcp__excel__read_sheet", "description": "读表",
+                 "inputSchema": {"type": "object"}}]
+
+    def dispatch(self, full_name, arguments):
+        self.dispatched.append((full_name, arguments))
+        return {"success": True, "output": "ok"}
+
+
+class TestAgentLoopMCPProxy:
+    """T08 代理工具模式：agent_loop 注入模式选择 + mcp__proxy 路由"""
+
+    @patch("urllib.request.urlopen")
+    def test_default_proxy_mode_injects_single_proxy_tool(self, mock_urlopen, logger, temp_dir):
+        """默认（mcp_client.tool_mode=proxy）：tools 含 mcp__proxy 而非全量 schema"""
+        mock_urlopen.return_value = MockResponse(anthropic_response(text="完成"))
+        pool = _FakeMCPPool()
+        config = make_config()
+        config["_mcp_pool"] = pool
+
+        loop = AgentLoop(logger)
+        result = loop.run("任务", temp_dir, make_route(), "key", config)
+        assert result.returncode == 0
+
+        tool_names = [t["name"] for t in json.loads(mock_urlopen.call_args_list[0][0][0].data)["tools"]]
+        assert "mcp__proxy" in tool_names
+        assert "mcp__excel__read_sheet" not in tool_names
+
+    @patch("urllib.request.urlopen")
+    def test_full_mode_falls_back_to_full_injection(self, mock_urlopen, logger, temp_dir):
+        """tool_mode=full：回退为全量 schema 注入（T08 前行为）"""
+        mock_urlopen.return_value = MockResponse(anthropic_response(text="完成"))
+        pool = _FakeMCPPool()
+        config = make_config(mcp_client={"tool_mode": "full"})
+        config["_mcp_pool"] = pool
+
+        loop = AgentLoop(logger)
+        result = loop.run("任务", temp_dir, make_route(), "key", config)
+        assert result.returncode == 0
+
+        tool_names = [t["name"] for t in json.loads(mock_urlopen.call_args_list[0][0][0].data)["tools"]]
+        assert "mcp__excel__read_sheet" in tool_names
+        assert "mcp__proxy" not in tool_names
+
+    @patch("urllib.request.urlopen")
+    def test_proxy_tool_call_dispatched_to_pool(self, mock_urlopen, logger, temp_dir):
+        """模型调用 mcp__proxy → 经 dispatch 路由到连接池（op 分发在池内完成）"""
+        mock_urlopen.side_effect = [
+            MockResponse(anthropic_response(tool_calls=[{
+                "id": "t1", "name": "mcp__proxy", "input": {"op": "list"},
+            }])),
+            MockResponse(anthropic_response(text="完成")),
+        ]
+        pool = _FakeMCPPool()
+        config = make_config()
+        config["_mcp_pool"] = pool
+
+        loop = AgentLoop(logger)
+        result = loop.run("任务", temp_dir, make_route(), "key", config)
+        assert result.returncode == 0
+        assert pool.dispatched == [("mcp__proxy", {"op": "list"})]
+
+    @patch("urllib.request.urlopen")
+    def test_broken_pool_degrades_to_native_tools(self, mock_urlopen, logger, temp_dir):
+        """池获取工具定义抛异常 → 只用原生工具（降级语义保持）"""
+        mock_urlopen.return_value = MockResponse(anthropic_response(text="完成"))
+
+        class _BrokenPool:
+            def proxy_definitions(self):
+                raise RuntimeError("池故障")
+
+            def tool_definitions(self):
+                raise RuntimeError("池故障")
+
+        config = make_config()
+        config["_mcp_pool"] = _BrokenPool()
+
+        loop = AgentLoop(logger)
+        result = loop.run("任务", temp_dir, make_route(), "key", config)
+        assert result.returncode == 0
+
+        tool_names = [t["name"] for t in json.loads(mock_urlopen.call_args_list[0][0][0].data)["tools"]]
+        assert "Read" in tool_names
+        assert not any(n.startswith("mcp__") for n in tool_names)

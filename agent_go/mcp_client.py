@@ -9,6 +9,12 @@
 协议：NDJSON over stdio，protocolVersion "2024-11-05"。
 生命周期：pipeline 启动时 start_all()，三个退出点 stop_all()（复用 mcp_server.py 的 terminate→kill 模式）。
 
+T08 代理工具模式（pi-mcp-adapter 借鉴，docs/design/stage13-pi-extensions-review.md §1）：
+agent_loop（直接 API，上下文最贵）路径默认只注入单个 ~200 token 的代理工具
+（PROXY_TOOL_DEFINITION），模型经 op=list/describe/call 动态发现与调用，
+替代把全部 MCP 工具 schema 注入 prompt；config["mcp_client"]["tool_mode"]="full"
+回退为全量注入（T08 前行为）。subtask 的 claude --mcp-config 透传路径不受影响。
+
 参考：docs/design/office-capability-extension.md §2
 """
 
@@ -20,13 +26,39 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
-__all__ = ["MCPServerConnection", "MCPClientPool"]
+__all__ = ["MCPServerConnection", "MCPClientPool", "PROXY_TOOL_NAME", "PROXY_TOOL_DEFINITION"]
 
 logger = logging.getLogger("agent_go.mcp.client")
 
 JSONRPC_VERSION = "2.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 _TOOL_PREFIX = "mcp__"
+
+# T08 代理工具：保留名，dispatch 优先于 server 路由匹配（与真实 server 名冲突概率极低）
+PROXY_TOOL_NAME = f"{_TOOL_PREFIX}proxy"
+PROXY_TOOL_DEFINITION = {
+    "name": PROXY_TOOL_NAME,
+    "description": (
+        "外部 MCP 工具代理：动态发现并调用已连接的 MCP server 工具。"
+        "op=list 列出 server 及工具（可用 server 参数过滤）；"
+        "op=describe 查看单个工具的完整 schema（server+tool 必填）；"
+        "op=call 调用工具（server/tool/arguments 必填，tool 不带前缀）。"
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "op": {
+                "type": "string",
+                "enum": ["list", "describe", "call"],
+                "description": "list=发现工具; describe=查看 schema; call=调用",
+            },
+            "server": {"type": "string", "description": "server 名（describe/call 必填，list 可选过滤）"},
+            "tool": {"type": "string", "description": "工具名（不带 mcp__ 前缀，describe/call 必填）"},
+            "arguments": {"type": "object", "description": "op=call 时传给工具的参数"},
+        },
+        "required": ["op"],
+    },
+}
 
 # 超时（秒）—— 与 mcp_server.py 的 _read_agentgo_start(30s) / bench 的 grace 对齐
 _INIT_TIMEOUT = 10      # initialize 握手
@@ -252,8 +284,9 @@ class MCPClientPool:
     用法：
         pool = MCPClientPool(config.get("mcp_servers", {}))
         pool.start_all()           # pipeline 启动时
-        pool.tool_definitions()    # 合并进 AgentLoop tools
-        pool.dispatch(name, args)  # 路由工具调用
+        pool.tool_definitions()    # 合并进 AgentLoop tools（全量注入，tool_mode=full）
+        pool.proxy_definitions()   # T08 代理工具模式（默认）：单代理工具动态发现
+        pool.dispatch(name, args)  # 路由工具调用（含代理工具 mcp__proxy）
         pool.stop_all()            # pipeline 退出时（finally / 3 个退出点）
     """
 
@@ -314,8 +347,17 @@ class MCPClientPool:
                 logger.debug("MCP server %s 工具列表获取失败: %s", conn.name, e)
         return tools
 
+    def proxy_definitions(self) -> list[dict]:
+        """T08 代理工具模式：有任一已连接 server 时返回单个代理工具定义，否则空列表。"""
+        with self._lock:
+            has_server = bool(self._servers)
+        return [PROXY_TOOL_DEFINITION] if has_server else []
+
     def dispatch(self, full_name: str, arguments: dict) -> dict:
         """按 mcp__{server}__{tool} 路由到对应 server。返回 {success, output/error}。"""
+        # T08 代理工具：保留名优先匹配，进入 op 分发（list/describe/call）
+        if full_name == PROXY_TOOL_NAME:
+            return self._dispatch_proxy(arguments or {})
         # 解析命名空间：mcp__excel__read_sheet → server=excel, tool=read_sheet
         if not full_name.startswith(_TOOL_PREFIX):
             return {"success": False, "error": f"非 MCP 工具（缺少 {_TOOL_PREFIX} 前缀）: {full_name}"}
@@ -328,6 +370,76 @@ class MCPClientPool:
         if conn is None:
             return {"success": False, "error": f"MCP server 未连接: {server_name}"}
         return conn.call_tool(tool_name, arguments or {})
+
+    # ── T08 代理工具 op 分发（list / describe / call）──────────────
+
+    def _dispatch_proxy(self, arguments: dict) -> dict:
+        """代理工具的 op 分发。所有失败路径返回 error dict（不抛异常，与 dispatch 一致）。"""
+        op = arguments.get("op", "")
+        server_name = arguments.get("server", "") or ""
+        tool_name = arguments.get("tool", "") or ""
+        if op == "list":
+            return self._proxy_list(server_name)
+        if op == "describe":
+            return self._proxy_describe(server_name, tool_name)
+        if op == "call":
+            return self._proxy_call(server_name, tool_name, arguments.get("arguments") or {})
+        return {"success": False, "error": f"未知 op: {op!r}（允许: list/describe/call）"}
+
+    def _proxy_list(self, server_name: str) -> dict:
+        """op=list：紧凑目录（server → 工具名 + 截断描述），供模型按需发现。"""
+        with self._lock:
+            servers = {n: c for n, c in self._servers.items() if not server_name or n == server_name}
+        if not servers:
+            if server_name:
+                return {"success": False, "error": f"MCP server 未连接: {server_name}"}
+            return {"success": True, "output": json.dumps({"servers": {}}, ensure_ascii=False)}
+        catalog: dict[str, list[dict]] = {}
+        for name, conn in servers.items():
+            prefix = f"{_TOOL_PREFIX}{name}__"
+            try:
+                tools = conn.list_tools()
+            except Exception as e:
+                logger.debug("MCP server %s 工具列表获取失败: %s", name, e)
+                continue
+            entries = []
+            for t in tools:
+                entry: dict[str, str] = {"name": t.get("name", "")[len(prefix):]}
+                desc = (t.get("description") or "").strip()
+                if desc:
+                    entry["description"] = desc[:120]
+                entries.append(entry)
+            catalog[name] = entries
+        return {"success": True, "output": json.dumps({"servers": catalog}, ensure_ascii=False)}
+
+    def _proxy_describe(self, server_name: str, tool_name: str) -> dict:
+        """op=describe：返回单个工具的完整定义（含 inputSchema），调用前按需查看。"""
+        if not server_name or not tool_name:
+            return {"success": False, "error": "op=describe 需要 server 和 tool 参数"}
+        with self._lock:
+            conn = self._servers.get(server_name)
+        if conn is None:
+            return {"success": False, "error": f"MCP server 未连接: {server_name}"}
+        prefix = f"{_TOOL_PREFIX}{server_name}__"
+        try:
+            tools = conn.list_tools()
+        except Exception as e:
+            return {"success": False, "error": f"MCP server {server_name} 工具列表获取失败: {e}"}
+        for t in tools:
+            if t.get("name") == f"{prefix}{tool_name}":
+                return {"success": True, "output": json.dumps(t, ensure_ascii=False)}
+        return {"success": False,
+                "error": f"工具不存在: {server_name}/{tool_name}（先用 op=list 查看可用工具）"}
+
+    def _proxy_call(self, server_name: str, tool_name: str, arguments: dict) -> dict:
+        """op=call：等价于 dispatch(mcp__{server}__{tool})，复用同一降级语义。"""
+        if not server_name or not tool_name:
+            return {"success": False, "error": "op=call 需要 server 和 tool 参数"}
+        with self._lock:
+            conn = self._servers.get(server_name)
+        if conn is None:
+            return {"success": False, "error": f"MCP server 未连接: {server_name}"}
+        return conn.call_tool(tool_name, arguments)
 
     def mcp_config_for_claude(self) -> dict:
         """生成 claude CLI --mcp-config 透传用的 JSON（claude 原生 MCP 消费格式）。

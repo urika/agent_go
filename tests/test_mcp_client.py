@@ -18,6 +18,7 @@ import pytest
 from agent_go.mcp_client import (
     MCPServerConnection,
     MCPClientPool,
+    PROXY_TOOL_NAME,
     _parse_tool_result,
     _TOOL_PREFIX,
 )
@@ -506,3 +507,171 @@ class TestMCPClientPool:
         pool = MCPClientPool({})
         cfg = pool.mcp_config_for_claude()
         assert cfg == {"mcpServers": {}}
+
+
+# ═══════════════════════════════════════════════════════════════
+# T08 代理工具模式（mcp__proxy：单工具动态发现 + 调用）
+# ═══════════════════════════════════════════════════════════════
+
+class TestMCPClientProxy:
+    """代理工具：proxy_definitions 注入 + dispatch(mcp__proxy) 的 op 分发。"""
+
+    def _started_pool(self, mock_popen, tools_by_server: dict) -> MCPClientPool:
+        """按 server 数构造 mock 进程（每个 init + list_tools 预取），返回已启动的池。"""
+        procs = [
+            _mock_proc_with_responses([_init_response(1), _tools_list_response(2, tools)])
+            for tools in tools_by_server.values()
+        ]
+        mock_popen.side_effect = procs
+        pool = MCPClientPool({name: {"command": "x", "args": []} for name in tools_by_server})
+        pool.start_all()
+        return pool
+
+    def test_proxy_definitions_empty_pool(self):
+        """无已连接 server → 不暴露代理工具"""
+        pool = MCPClientPool({})
+        pool.start_all()
+        assert pool.proxy_definitions() == []
+
+    @patch("subprocess.Popen")
+    def test_proxy_definitions_connected(self, mock_popen):
+        """有已连接 server → 返回单个代理工具定义"""
+        pool = self._started_pool(mock_popen, {"excel": [{"name": "read_sheet"}]})
+        defs = pool.proxy_definitions()
+        assert len(defs) == 1
+        assert defs[0]["name"] == PROXY_TOOL_NAME
+        assert defs[0]["inputSchema"]["required"] == ["op"]
+        pool.stop_all()
+
+    @patch("subprocess.Popen")
+    def test_dispatch_proxy_list_all_servers(self, mock_popen):
+        """op=list 返回所有 server 的紧凑目录（工具名去前缀）"""
+        pool = self._started_pool(mock_popen, {
+            "excel": [{"name": "read_sheet", "description": "读表"}],
+            "ppt": [{"name": "make_slide"}, {"name": "add_text", "description": "加文字"}],
+        })
+        result = pool.dispatch(PROXY_TOOL_NAME, {"op": "list"})
+
+        assert result["success"] is True
+        catalog = json.loads(result["output"])["servers"]
+        assert set(catalog) == {"excel", "ppt"}
+        assert catalog["excel"] == [{"name": "read_sheet", "description": "读表"}]
+        assert [t["name"] for t in catalog["ppt"]] == ["make_slide", "add_text"]
+        pool.stop_all()
+
+    @patch("subprocess.Popen")
+    def test_dispatch_proxy_list_filter_server(self, mock_popen):
+        """op=list + server 过滤只列指定 server"""
+        pool = self._started_pool(mock_popen, {
+            "excel": [{"name": "read_sheet"}],
+            "ppt": [{"name": "make_slide"}],
+        })
+        result = pool.dispatch(PROXY_TOOL_NAME, {"op": "list", "server": "ppt"})
+
+        assert result["success"] is True
+        catalog = json.loads(result["output"])["servers"]
+        assert set(catalog) == {"ppt"}
+        pool.stop_all()
+
+    @patch("subprocess.Popen")
+    def test_dispatch_proxy_list_unknown_server(self, mock_popen):
+        """op=list 指定未连接 server → 错误（不抛异常）"""
+        pool = self._started_pool(mock_popen, {"excel": [{"name": "t"}]})
+        result = pool.dispatch(PROXY_TOOL_NAME, {"op": "list", "server": "ghost"})
+        assert result["success"] is False
+        assert "未连接" in result["error"]
+        pool.stop_all()
+
+    @patch("subprocess.Popen")
+    def test_dispatch_proxy_describe_returns_schema(self, mock_popen):
+        """op=describe 返回单个工具的完整定义（含 inputSchema）"""
+        schema = {"type": "object", "properties": {"file": {"type": "string"}}}
+        pool = self._started_pool(mock_popen, {
+            "excel": [{"name": "read_sheet", "description": "读表", "inputSchema": schema}],
+        })
+        result = pool.dispatch(PROXY_TOOL_NAME, {"op": "describe", "server": "excel", "tool": "read_sheet"})
+
+        assert result["success"] is True
+        definition = json.loads(result["output"])
+        assert definition["name"] == f"{_TOOL_PREFIX}excel__read_sheet"
+        assert definition["inputSchema"] == schema
+        pool.stop_all()
+
+    @patch("subprocess.Popen")
+    def test_dispatch_proxy_describe_unknown_tool(self, mock_popen):
+        """op=describe 工具不存在 → 错误并提示先用 list"""
+        pool = self._started_pool(mock_popen, {"excel": [{"name": "read_sheet"}]})
+        result = pool.dispatch(PROXY_TOOL_NAME, {"op": "describe", "server": "excel", "tool": "ghost"})
+
+        assert result["success"] is False
+        assert "工具不存在" in result["error"]
+        pool.stop_all()
+
+    def test_dispatch_proxy_describe_missing_params(self):
+        """op=describe 缺 server/tool → 参数错误（不抛异常）"""
+        pool = MCPClientPool({})
+        result = pool.dispatch(PROXY_TOOL_NAME, {"op": "describe", "server": "excel"})
+        assert result["success"] is False
+        assert "server" in result["error"] and "tool" in result["error"]
+
+    @patch("subprocess.Popen")
+    def test_dispatch_proxy_call_routes(self, mock_popen):
+        """op=call 等价于 dispatch 全名路由（start_all 预取 list 后 call_tool id=3）"""
+        proc = _mock_proc_with_responses([
+            _init_response(1),
+            _tools_list_response(2, [{"name": "read_sheet"}]),
+            _tool_call_response(3, {"content": [{"type": "text", "text": "A1:B2 数据"}]}),
+        ])
+        mock_popen.return_value = proc
+
+        pool = MCPClientPool({"excel": {"command": "x", "args": []}})
+        pool.start_all()
+        result = pool.dispatch(PROXY_TOOL_NAME, {
+            "op": "call", "server": "excel", "tool": "read_sheet",
+            "arguments": {"file": "a.xlsx"},
+        })
+
+        assert result["success"] is True
+        assert result["output"] == "A1:B2 数据"
+        pool.stop_all()
+
+    @patch("subprocess.Popen")
+    def test_dispatch_proxy_call_server_error_degrades(self, mock_popen):
+        """op=call server 返回错误 → error dict（与全量注入路径降级语义一致）"""
+        proc = _mock_proc_with_responses([
+            _init_response(1),
+            _tools_list_response(2, [{"name": "bad_tool"}]),
+            _error_response(3, -32000, "参数错误"),
+        ])
+        mock_popen.return_value = proc
+
+        pool = MCPClientPool({"s": {"command": "x", "args": []}})
+        pool.start_all()
+        result = pool.dispatch(PROXY_TOOL_NAME, {"op": "call", "server": "s", "tool": "bad_tool"})
+
+        assert result["success"] is False
+        assert "参数错误" in result["error"]
+        pool.stop_all()
+
+    def test_dispatch_proxy_call_unknown_server(self):
+        """op=call 未连接 server → 错误（不抛异常）"""
+        pool = MCPClientPool({})
+        result = pool.dispatch(PROXY_TOOL_NAME, {"op": "call", "server": "ghost", "tool": "t"})
+        assert result["success"] is False
+        assert "未连接" in result["error"]
+
+    def test_dispatch_proxy_unknown_op(self):
+        """未知 / 缺失 op → 错误（不抛异常）"""
+        pool = MCPClientPool({})
+        for args in ({"op": "delete"}, {}):
+            result = pool.dispatch(PROXY_TOOL_NAME, args)
+            assert result["success"] is False
+            assert "op" in result["error"]
+
+    @patch("subprocess.Popen")
+    def test_full_injection_unaffected(self, mock_popen):
+        """tool_definitions 全量注入路径不受代理模式影响（向后兼容）"""
+        pool = self._started_pool(mock_popen, {"excel": [{"name": "read_sheet"}]})
+        tools = pool.tool_definitions()
+        assert [t["name"] for t in tools] == [f"{_TOOL_PREFIX}excel__read_sheet"]
+        pool.stop_all()

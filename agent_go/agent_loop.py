@@ -195,7 +195,10 @@ class AgentLoop:
         _mcp_pool = config.get("_mcp_pool") if config else None
         if _mcp_pool is not None:
             try:
-                _mcp_tools = _mcp_pool.tool_definitions()
+                # T08 代理工具模式（默认）：单代理工具动态发现；tool_mode=full 回退全量注入
+                _mcp_mode = (config.get("mcp_client", {}) or {}).get("tool_mode", "proxy")
+                _mcp_tools = _mcp_pool.tool_definitions() if _mcp_mode == "full" \
+                    else _mcp_pool.proxy_definitions()
                 if _mcp_tools:
                     tools = tools + _mcp_tools
             except Exception:
