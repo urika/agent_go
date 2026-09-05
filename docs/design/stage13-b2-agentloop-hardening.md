@@ -87,4 +87,70 @@ subtask `files_hint` 经 `BackendContext.extra` 透传为 `scope_hint`；Write/E
 
 - 新增/更新测试：`test_backends.py`（dispatch 分发/容错/timeout/progress）、`test_tool_executor.py`（Grep/Glob/View/只读）、`test_agent_loop.py`（stuck/no-progress/只读/scope）。
 - 既有双 patch 测试回退为单 patch（修复循环现走 backend 分发，`agent_go.executor._run_headless` 已删除）。
-- 全量 pytest 通过；B5 bench A/B（通过率/成本证据）是本阶段 accepted 的剩余门槛。
+- 全量 pytest 通过；~~B5 bench A/B（通过率/成本证据）是本阶段 accepted 的剩余门槛~~ → 已于 2026-09-05 执行（T11），结果见 §6。
+
+## 6. B2 bench A/B：AgentLoop vs Claude Code（T11，2026-09-05）
+
+口径完全复用 B5：golden 6 任务 × repeat 2，glm-5.3-flash 同端点（`api.z.ai/api/anthropic`，
+bench `--bench-endpoint` 注入 planner/evaluator/worker），两臂只剩 backend 一个变量；
+AgentLoop 臂经 `--worker-backend agent_loop` 显式分发（含修复路径）。
+对照臂复用 B5 claude 臂数据（`results_b5_claude_glm_20260904.jsonl`，09-04 同口径产出）。
+
+- 结果文件：`eval_suite/results_b2_agentloop_glm_20260905.jsonl`（+ `.proxy_context.json` 口径快照）；
+  补跑：`eval_suite/rerun_t11_agentloop/results_rerun.jsonl`，经
+  `tools/recompute_bench_results.py --merge --apply` 替换 4 条（备份 `.bak_prerecompute`）。
+
+| 指标 | claude 臂（B5） | agent_loop 臂（T11） |
+|---|---|---|
+| pass_rate | 10/12（83%） | **8/12（67%）**；首跑原始 4/12（33%） |
+| first-pass | 10/12 | 8/12 |
+| easy 子集 | 4/4 | 4/4 |
+| medium 子集 | 4/4 | 3/4 |
+| hard 子集 | 2/4 | 1/4 |
+| elapsed 均值/中位 | 488s / 408s | 537s / 513s |
+| lint 均值 | 6.7 | 4.5 |
+| 语义评估通过 | 9/11 | 6/7 |
+| token 归一化成本¹ | $0.2283（$/pass $0.0228） | $0.1352（$/pass $0.0169，-26%） |
+
+¹ 两臂 record 的 `cost_usd` 不可直接对比（claude 臂为 claude CLI 自报、按内部价目；agent_loop 臂因
+`metrics.estimate_cost` 遗留表缺 `("anthropic","glm-5.3-flash")` 条目记录为 0——计量缺口，见下）。
+故按 metering 原始 token 数统一以 pricing.py glm-5.3-flash 价目（$0.15/$0.50 每 Mtok）归一化；
+claude 臂 prompt_tokens 含缓存读（实际费率更低），归一化高估其成本，即 AgentLoop 成本优势为保守下界。
+两臂实际均为 GLM 套餐内零边际成本（同 B5）。
+
+逐任务交叉（agent_loop 臂，括号 = 首跑失败经补跑通过）：
+
+| 任务（难度） | claude | agent_loop |
+|---|---|---|
+| add-format-helper（easy） | 2/2 | 2/2 |
+| fix-missing-default（easy） | 2/2 | 2/2（2 补） |
+| implement-done-command（medium） | 2/2 | 2/2（2 补） |
+| add-simple-caching（medium） | 2/2 | 1/2 |
+| security-hardening-taskmgr（hard） | 1/2 | 0/2 |
+| conditional-branching-datapipeline（hard） | 1/2 | 1/2 |
+
+补跑说明（沿用 B5「planner 基础设施失败补跑替换」先例，含补跑偏向，已如实披露）：
+4 条首跑失败判定为基础设施/口径污染后各补跑 1 次并全部通过——
+1 条 `plan_gate_blocked`（GLM flash planner 非法 JSON，B5 已知风险）；
+3 条 `stuck_or_hardtimeout`：首跑时段 z.ai 端点网络抖动明显（日志多次 SSL handshake timeout /
+connection reset，AgentLoop 逐轮直连 API 对抖动敏感），且 bench 动态 timeout（easy 504s /
+medium 960s）校准自 claude 速度历史，AgentLoop 尚未跑完即被 SIGTERM；补跑时 timeout 随臂内
+P95 自愈（655s/1248s）+ 网络平稳，4 条全部通过（225-576s）。
+
+终态 4 条失败均为 `verification_failure`（真实能力失败，不重跑）：AgentLoop 在
+security-hardening（0/2，claude 臂 1/2 亦弱）与两个 medium/hard 任务的 1 个 repeat 上
+验证不过且修复回收失败（「验证修复后的 Git 提交/tag 失败，停止重试」）。
+
+**判定（roadmap §8 触发条件 1：通过率不劣化 + 成本下降）：不成立。**
+成本下降成立（归一化 $/pass -26%，且为保守下界）；通过率劣化（67% vs 83%；
+B2 口径的 easy/medium 子集 7/8 vs 8/8）。n=12 样本小，差距集中在 security-hardening
+与 2 个方差级 repeat，但按字面门槛「不劣化」不满足。
+
+**建议（AgentLoop 去留）：留，但维持现有保守定位，不扩大默认启用。**
+数据恰好验证 B4 既有默认路由（`agent_loop` 自动规则仅 `is_simple` 生效）：easy 子集 4/4 持平
+且 token 成本更低；medium/hard 上 glm-5.3-flash 直驱 AgentLoop 的验证通过率与修复回收率
+不足。后续若要复测，先补：① worker 直连 API 的网络重试鲁棒性（抖动敏感是首跑 3 超时的主因）；
+② bench 动态 timeout 对慢速臂的校准（首跑宜用臂内历史或放宽余量）；③ `metrics.estimate_cost`
+遗留定价表补 `("anthropic","glm-5.3-flash")`（(0.15, 0.50)，与 T10 pricing.py 条目对齐），
+否则 agent_loop 臂 record `total_cost_usd`=0 且 `_collect_result` 把真实失败误标 `kill_reason=infra`
+（本臂 3 条 verification_failure 被误标）；④ 扩样（n≥20）降低方差。

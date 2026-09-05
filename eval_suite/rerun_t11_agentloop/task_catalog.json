@@ -1,0 +1,105 @@
+{
+  "add-format-helper": {
+    "task_version": "d16a321bf23fdcf6",
+    "suites": [
+      "core",
+      "smoke",
+      "golden",
+      "decision"
+    ],
+    "risk_types": [
+      "single_file"
+    ],
+    "business_relevance": "medium",
+    "runtime_cost": "low",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "fix-missing-default": {
+    "task_version": "cfcc49a54c3219bd",
+    "suites": [
+      "core",
+      "smoke",
+      "golden",
+      "decision"
+    ],
+    "risk_types": [
+      "bugfix"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "low",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "implement-done-command": {
+    "task_version": "b7236f20a60f3da3",
+    "suites": [
+      "core",
+      "smoke",
+      "golden",
+      "decision"
+    ],
+    "risk_types": [
+      "cross_file",
+      "cli"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "add-simple-caching": {
+    "task_version": "00c700378e3abe17",
+    "suites": [
+      "core",
+      "golden",
+      "decision"
+    ],
+    "risk_types": [
+      "cache"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  },
+  "security-hardening-taskmgr": {
+    "task_version": "eb8de8793b04200a",
+    "suites": [
+      "core",
+      "stress",
+      "golden",
+      "decision"
+    ],
+    "risk_types": [
+      "security"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "high",
+    "high_variance": true,
+    "semantic_probe": true,
+    "delivery_probe": true
+  },
+  "conditional-branching-datapipeline": {
+    "task_version": "eac68ac34b7c2a91",
+    "suites": [
+      "core",
+      "stress",
+      "golden",
+      "decision"
+    ],
+    "risk_types": [
+      "branching",
+      "pipeline"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "high",
+    "high_variance": true,
+    "semantic_probe": false,
+    "delivery_probe": true
+  }
+}

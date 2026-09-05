@@ -1,0 +1,52 @@
+{
+  "available": true,
+  "proxy_base_url": "http://localhost:4000",
+  "ctx_config": {
+    "diag_enabled": true,
+    "engine_enabled": true,
+    "compression_mode": "semantic",
+    "compress_enabled": false,
+    "compression_profile": "balanced",
+    "bm25_enabled": true,
+    "feedback_injection_enabled": false,
+    "epoch_S": 110000,
+    "window_K": 24,
+    "prefix_breaks_by_session": {},
+    "prefix_breaks_total": 0,
+    "replayable_drops_enabled": false
+  },
+  "route_config": {
+    "route_enabled": true,
+    "cloud_model": "deepseek-v4-flash",
+    "cloud_key_set": true,
+    "cloud_concurrent": 2,
+    "provider_quota": {
+      "deepseek": {
+        "exhausted": false,
+        "resets_at_epoch": null,
+        "resets_at_iso": null
+      },
+      "kimi": {
+        "exhausted": false,
+        "resets_at_epoch": null,
+        "resets_at_iso": null
+      },
+      "local-9b": {
+        "exhausted": false,
+        "resets_at_epoch": null,
+        "resets_at_iso": null
+      },
+      "zhipu": {
+        "exhausted": false,
+        "resets_at_epoch": null,
+        "resets_at_iso": null
+      },
+      "zhipu-cn": {
+        "exhausted": false,
+        "resets_at_epoch": null,
+        "resets_at_iso": null
+      }
+    }
+  },
+  "captured_at": "2026-09-05T01:51:33.643819+00:00"
+}
