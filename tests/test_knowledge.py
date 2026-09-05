@@ -13,7 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_go.knowledge import (_match_deviations, _match_verify_states,
-                                _pattern_similar, build_repair_knowledge)
+                                _pattern_similar, build_repair_knowledge,
+                                resolve_repair_knowledge)
 
 
 class TestPatternSimilar:
@@ -260,3 +261,111 @@ class TestKnowledgeInjection:
         assert mock_fix.call_count >= 1
         prompt = str(mock_fix.call_args_list[0].args[0])
         assert "历史经验" not in prompt
+
+
+class TestResolveSnapshot:
+    """KV-cache 稳定快照（C4 前置修订）：knowledge.snapshot 策略。"""
+
+    def test_snapshot_reused_without_rebuild(self, tmp_path, logger):
+        """快照存在且开关开 → 原样复用，不重新匹配（fresh=False）。"""
+        frozen = {"text": "### 历史经验\n- x", "sources": ["p-1"]}
+        with patch("agent_go.knowledge.build_repair_knowledge",
+                   side_effect=AssertionError("不应重新构建")):
+            ctx, fresh, new_snap = resolve_repair_knowledge(
+                {"id": "sub-1"}, "pytest tests/", tmp_path,
+                {"knowledge": {"enabled": True}}, logger, snapshot=frozen)
+        assert ctx is frozen and fresh is False and new_snap is frozen
+
+    def test_snapshot_disabled_rebuilds(self, tmp_path, logger):
+        """snapshot=false → 逐轮重建（对照/调试路径）。"""
+        frozen = {"text": "### 历史经验\n- x", "sources": ["p-1"]}
+        with patch("agent_go.knowledge.build_repair_knowledge",
+                   return_value={"text": "new", "sources": ["p-2"]}) as mock_build:
+            ctx, fresh, new_snap = resolve_repair_knowledge(
+                {"id": "sub-1"}, "pytest tests/", tmp_path,
+                {"knowledge": {"enabled": True, "snapshot": False}},
+                logger, snapshot=frozen)
+        assert mock_build.call_count == 1
+        assert ctx == {"text": "new", "sources": ["p-2"]}
+        assert fresh is True and new_snap is frozen, "开关关时不更新快照"
+
+    def test_empty_build_not_frozen(self, tmp_path, logger):
+        """首次构建无命中（空文本）→ 不冻结，后续轮次仍可命中新数据。"""
+        with patch("agent_go.config.AGENT_GO_DIR", tmp_path):
+            ctx, fresh, new_snap = resolve_repair_knowledge(
+                {"id": "sub-1"}, "pytest tests/", tmp_path / "task",
+                {"knowledge": {"enabled": True}}, logger, snapshot=None)
+        assert ctx == {"text": "", "sources": []}
+        assert fresh is True and new_snap is None
+
+    def test_nonempty_build_frozen(self, tmp_path, logger):
+        """首次构建有命中 → 冻结为快照。"""
+        _write_problems(tmp_path / "problems.jsonl", [
+            _problem("p-1", "pytest tests/ 失败", status="resolved",
+                     resolution_summary="先 source venv"),
+        ])
+        with patch("agent_go.config.AGENT_GO_DIR", tmp_path):
+            ctx, fresh, new_snap = resolve_repair_knowledge(
+                {"id": "sub-1"}, "pytest tests/", tmp_path / "task",
+                {"knowledge": {"enabled": True}}, logger, snapshot=None)
+        assert fresh is True and new_snap == ctx and ctx["text"]
+
+
+class TestSnapshotInjection:
+    """executor 集成：快照下两轮修复的知识块逐字节一致且位于稳定前缀。"""
+
+    def _run_verify(self, temp_repo, task_dir, logger, config):
+        from agent_go.executor import _verify_changes
+        return _verify_changes(
+            "task-1", "sub-1", dict(_SUBTASK_TPL), temp_repo, headless=True,
+            task_md="# Task", env={}, tag_name="task-1/sub-1",
+            active_pids=set(), active_pids_lock=Lock(), logger=logger,
+            task_dir=task_dir, config=config)
+
+    def test_snapshot_stable_prefix_across_retries(
+            self, temp_repo, task_dir, logger, tmp_path):
+        problems_path = tmp_path / "global_store"
+        _write_problems(problems_path / "problems.jsonl", [
+            _problem("p-xyz", "pytest tests/ 失败", status="resolved",
+                     resolution_summary="先 source venv 再跑 pytest"),
+        ])
+        with patch("subprocess.run", side_effect=_git_fail_then_pass()), \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.config.AGENT_GO_DIR", problems_path):
+            mock_fix.return_value = MagicMock(returncode=0)
+            self._run_verify(
+                temp_repo, task_dir, logger,
+                {"verification": {"max_retries": 2},
+                 "knowledge": {"enabled": True}})
+
+        assert mock_fix.call_count == 2, "max_retries=2 且验证持续失败应有 2 次修复"
+        prompts = [str(c.args[0]) for c in mock_fix.call_args_list]
+        prefixes = [p.split("## ⚠️ 验证失败")[0] for p in prompts]
+        assert prefixes[0] == prefixes[1], \
+            "快照下 TASK.md+知识块稳定前缀应逐字节一致（KV-cache 可复用）"
+        for p in prompts:
+            assert "历史经验" in p
+            assert p.index("历史经验") < p.index("## ⚠️ 验证失败"), \
+                "知识块应置于逐轮变化的失败头之前"
+
+    def test_snapshot_disabled_prompts_diverge_allowed(
+            self, temp_repo, task_dir, logger, tmp_path):
+        """snapshot=false 对照路径：每轮都重新构建（不冻结）。"""
+        problems_path = tmp_path / "global_store"
+        _write_problems(problems_path / "problems.jsonl", [
+            _problem("p-xyz", "pytest tests/ 失败", status="resolved",
+                     resolution_summary="先 source venv 再跑 pytest"),
+        ])
+        with patch("subprocess.run", side_effect=_git_fail_then_pass()), \
+             patch("agent_go.backends.claude_backend._run_headless") as mock_fix, \
+             patch("agent_go.config.AGENT_GO_DIR", problems_path), \
+             patch("agent_go.knowledge.build_repair_knowledge",
+                   wraps=build_repair_knowledge) as spy_build:
+            mock_fix.return_value = MagicMock(returncode=0)
+            self._run_verify(
+                temp_repo, task_dir, logger,
+                {"verification": {"max_retries": 2},
+                 "knowledge": {"enabled": True, "snapshot": False}})
+
+        assert mock_fix.call_count == 2
+        assert spy_build.call_count == 2, "snapshot=false 时每轮都应重新匹配"

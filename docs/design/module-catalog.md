@@ -61,7 +61,7 @@
 | `profiles.py` | Profile 管理：local⇄cloud 一键切换（config local/cloud/status）、健康检查、本地 profile 模板生成 | active profile |
 | `task_runner.py` | Web 子进程任务运行器：spawn agent_go --yes --json，meta.json 唯一事实源，SIGINT cancel | subprocess task run |
 | `web_confirm.py` | Web 计划确认协议：pending/decision 文件协议 + 阻塞轮询，30min 超时自动取消 | confirm decision |
-| `knowledge.py` | C4 KnowledgeStore 注入臂：从 Problem/deviation/verify_state 提取历史经验注入 repair prompt（可开关/suppressed_ids+dormant 可淘汰/knowledge_injected 埋点） | knowledge context |
+| `knowledge.py` | C4 KnowledgeStore 注入臂：从 Problem/deviation/verify_state 提取历史经验注入 repair prompt（可开关/suppressed_ids+dormant 可淘汰/knowledge_injected 埋点）；KV-cache 稳定快照（resolve_repair_knowledge，knowledge.snapshot 默认开：首次非空知识块跨重试冻结复用，注入块置于 TASK.md 后稳定前缀位） | knowledge context |
 | `knowledge_ab.py` | C4 A/B 判定分析器：两臂 pass_rate/ADR/$/AD 汇总 + 三门槛判定（ADR↑/成本不劣化/可淘汰）→ PRODUCTIZE/ROLLBACK | A/B verdict report |
 | `problems.py` | 跨任务 Problem 实体（B4/H3）：三态+复发重开、半衰期 dormant、葬礼 resolution_summary、LLM 根因级 summarize_resolution、全局 problems.jsonl upsert | Problem records |
 | `replan.py` | C3 局部重规划（F-VERIFY-6）：无进展触发一次 Plan 拆分建议（LLM+启发式兜底），最多一次/继承父预算 | replan suggestion |
@@ -116,7 +116,7 @@
 | `deviation.py` | Spec/Architecture/acceptance deviation records: model, persistence, aggregation (M2.5) |
 | `problems.py` | Cross-task Problem entity (B4/H3): 三态+复发重开, 半衰期(stale_after_days→dormant), 葬礼(resolution_summary), 全局 ~/.agent_go/problems.jsonl upsert；「越用越聪明」数据层；C4 葬礼回写（record_resolution：重试后成功回写「模式+解法」；summarize_resolution LLM 根因级总结，knowledge.resolution_llm 开关，fail-open 降级 diffstat 级） |
 | `replan.py` | C3 局部重规划（F-VERIFY-6）：无进展触发一次 Plan 拆分建议（LLM+启发式兜底），最多一次/继承父预算/默认人工确认/不扩大任务图；AG-3 确定性决策层（`decide_escalation` 决策表 + `TaskCircuitBreaker` 熔断 + 幂等闸，agent 侧自有失败信号口径，输出 EscalationDecision 契约）；AG-4/5 reload 动作（task-context 证据包 + pin 锚点，task_context.enabled 默认关，fail-open 降级 split/retry） |
-| `knowledge.py` | C4 KnowledgeStore A/B 注入臂：从 Problem/deviation/verify_state 提取历史经验注入 repair prompt（可开关/可淘汰/knowledge_injected 埋点） |
+| `knowledge.py` | C4 KnowledgeStore A/B 注入臂：从 Problem/deviation/verify_state 提取历史经验注入 repair prompt（可开关/可淘汰/knowledge_injected 埋点）；KV-cache 稳定快照（resolve_repair_knowledge，knowledge.snapshot 默认开，C4 前置修订） |
 | `status.py` | Canonical task state machine (M0-2, 8 states) |
 | `exit_codes.py` | Semantic process exit codes for CLI tools |
 | `failure.py` | Stable failure classes and policy (M0-3) |

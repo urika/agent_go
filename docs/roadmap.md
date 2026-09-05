@@ -857,18 +857,18 @@ M0 产品契约与指标冻结  ✅ accepted
   -> 阶段 C 智能闭环    C1/C2/C3 ✅ + C4 KnowledgeStore A/B smoke ✅（葬礼回写链路已闭环）
   -> 阶段 D 自治决策    → 信任指标放行门达标 + B1 决策后
   -> 阶段 E Spec-as-Source  仅试点
-  -> 阶段十三 多 Backend 架构  proposed（B1 标准接口 ✅ / B2 AgentLoop 补齐 ✅ 代码 / B3 Pi PoC ✅）
+  -> 阶段十三 多 Backend 架构  ✅ accepted（有条件，B1-B8 全部落地；Go 套餐评估待额度重置）
 ```
 
 下一阶段推进队列（2026-09-05 重排，按优先级）：
 
-**已完成主线**（保留口径备查）：bench 交付闭环 ✅（2026-08-20，`--with-delivery` + 首个 ADR 基线 `delivery-20260820`）；M4 goal 回溯 ✅；C3 局部重规划 ✅（2026-08-21）；阶段十三 B1-B7 ✅ + 四臂 golden 批量齐备（claude 10/12、pi 10/12、opencode 12/12 dedup 后、zcode 首跑 10/12，B6/B7 均 $0）。
+**已完成主线**（保留口径备查）：bench 交付闭环 ✅（2026-08-20，`--with-delivery` + 首个 ADR 基线 `delivery-20260820`）；M4 goal 回溯 ✅；C3 局部重规划 ✅（2026-08-21）；阶段十三 B1-B8 ✅ + 五臂 golden 批量齐备（claude 10/12、pi 10/12、opencode 12/12 dedup 后、zcode 首跑 10/12、dsh 首跑 11/12，B6/B7 $0）。
 
 **立即可做（无外部依赖，按序推进）**：
 
 1. ~~**B8 dsh 冒烟 → DSHBackend → golden 6×2**~~ ✅（2026-09-05 轨道 A 全部完成）：冒烟双任务通过（审批模板=DSH_PERMISSION_MODE + z.ai 直连 glm-5.3-flash，本地代理 wedge 绕过）→ DSHBackend 16 例单测 → **golden 6×2 首跑 11/12**（唯一失败为 planner 臆测被规划门拦下，非 dsh worker 失败；~420s 快于 claude/zcode）；**ADR-010 阶段 1 同步落地并实战验证**（trajectory jsonl 每子任务落盘，151 事件/26 step）。五臂对比齐备，详见 [stage13-b8](design/stage13-b8-dsh-assessment.md)。
 2. ~~**mcp_client 代理工具模式**~~ ✅（2026-09-05 T08）：`mcp__proxy` 单工具（list/describe/call，~200 token）替代全量 schema 注入，默认 proxy 模式、`mcp_client.tool_mode=full` 可回退；仅接 agent_loop 注入点，消费降级语义不变（tests +16 例）。
-3. **C4 前置修订：知识注入 KV-cache 稳定快照**（pi 插件借鉴②）→ 然后 **C4 KnowledgeStore A/B**（delivery-20260820 基线两臂对比）。⚠️ 顺序敏感：C4 绕过此修订直接启动会导致注入口径返工（逐轮重建打爆本地模型前缀缓存）。🔨 前置修订已落地（2026-09-05：`knowledge.snapshot` 默认开，`resolve_repair_knowledge` 快照冻结 + 注入块移至 TASK.md 后稳定前缀位；tests/test_knowledge.py +6 用例）；smoke 注入臂 7/7 AD 验证通过（c4-kv-smoke-inj-20260905）；**decision 双臂 A/B 运行中**（c4-kv-ctl / c4-kv-inj-20260905，29 任务 × repeat 2 × 2 臂，本地代理串行）。
+3. **C4 前置修订：知识注入 KV-cache 稳定快照**（pi 插件借鉴②）→ 然后 **C4 KnowledgeStore A/B**（delivery-20260820 基线两臂对比）。⚠️ 顺序敏感：C4 绕过此修订直接启动会导致注入口径返工（逐轮重建打爆本地模型前缀缓存）。✅ 前置修订已落地（2026-09-05：`knowledge.snapshot` 默认开，`resolve_repair_knowledge` 快照冻结 + 注入块移至 TASK.md 后稳定前缀位；tests/test_knowledge.py +6 用例）；✅ **decision 双臂 A/B 完成**（c4-kv-ctl / c4-kv-inj-20260905，29 任务 × repeat 2 × 2 臂，本地代理串行，Ornith-1.5-35B 后端——与 delivery-20260820 Qwen3.8 基线按 Metric Freeze 不混比，两臂内部对比）：ADR 0.914→0.983 ✅（任务级 28/29→29/29，唯一翻转 batch-done），但 $/AD $0.00167→$0.00200（+19.6% > 10% 容忍）❌，可淘汰记录不足 —— 判定 **ROLLBACK**（与 08-21 smoke 同结论：ADR 升、成本门不过；注入参与率 4~6/58 仍低，inj 臂重试 6 次反多于 ctl 4 次，成本差主要来自重试次数而非注入 token）。`knowledge.enabled` 维持默认关，全量重约待知识库积累（T07 口径）。
 4. ~~**pipeline 本地模型自动限流**~~ ✅（2026-09-05 T09，ADR-011）：本地路由子任务经任务级 Semaphore(1) 自动串行，云端 --parallel 语义不变；判定与 `AGENT_GO_IS_LOCAL` 同源，逃生开关 `pipeline.local_model_serialize`（tests +11 例）。
 5. ~~**随手项**：`zai/glm-5.3-flash` 定价覆盖~~ ✅（2026-09-05 T10）：pricing.py $0.15/$0.50（z.ai 标准价）+ MODEL_TIER value 档。
 

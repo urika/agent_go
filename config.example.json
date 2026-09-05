@@ -84,7 +84,8 @@
     "enabled": false,
     "max_items": 3,
     "suppressed_ids": [],
-    "resolution_llm": true
+    "resolution_llm": true,
+    "snapshot": true
   },
   "evaluator": {
     "_comment": "LLM 语义评估器。验证命令通过后对 Claude 输出做语义判断",

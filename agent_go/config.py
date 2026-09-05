@@ -114,11 +114,14 @@ DEFAULT_CONFIG = {
     # resolution_llm：葬礼回写时用 LLM 把「失败报错+修复内容」总结为根因+做法
     # （根因级 resolution_summary，保护未来 A/B 判定效度）；fail-open，
     # 失败/关闭自动降级为 diffstat 级摘要。默认开启（单次调用成本可忽略）。
+    # snapshot：KV-cache 稳定快照（C4 前置修订）——首次构建的非空知识块跨重试
+    # 冻结复用，逐轮重建会打爆本地模型前缀缓存；置 false 退化为逐轮重建（对照/调试）。
     "knowledge": {
         "enabled": False,
         "max_items": 3,
         "suppressed_ids": [],
         "resolution_llm": True,
+        "snapshot": True,
     },
     "evaluator": {
         "enabled": False,               # 默认关闭（向后兼容 + 成本可控）

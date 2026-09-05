@@ -894,16 +894,24 @@ def _build_repair_prompt(
     """构建增强的修复提示词，注入完整失败上下文（Phase 1 验证循环）。
 
     包含：
+    - 历史经验（C4 KnowledgeStore：跨任务失败记忆，可开关，A/B 实验臂）——
+      紧随 TASK.md，与快照冻结配合构成逐轮字节一致的稳定前缀（保 KV-cache）
     - 范围偏差（L1 Scope Compliance）：越界改动 / 遗漏改动的文件级对比
     - 失败命令及其 stdout/stderr 输出
     - 当前 git diff（让 Claude 看到自己改了什么）
     - 历史修复尝试摘要（避免重复同样错误）
     - LLM 语义评估反馈（Phase 3）
     - 独立只读审查意见（两阶段审查：独立模型黑盒分析失败根因）
-    - 历史经验（C4 KnowledgeStore：跨任务失败记忆，可开关，A/B 实验臂）
     - 剩余机会提示
     """
     parts = [task_md, "", "---", ""]
+
+    # C4 KnowledgeStore 历史经验（可开关；A/B 实验臂，knowledge.enabled=true 时注入）。
+    # 置于失败头之前：TASK.md + 知识块在 knowledge.snapshot 冻结下逐轮不变，
+    # 本地模型前缀缓存得以复用；逐轮变化段全部排在其后。
+    if knowledge_context and knowledge_context.get("text"):
+        parts.append(knowledge_context["text"])
+        parts.append("")
 
     # 失败标题
     if attempt >= max_retries:
@@ -960,11 +968,6 @@ def _build_repair_prompt(
             for _sug_line in str(readonly_review["suggestions"]).split("\n"):
                 if _sug_line.strip():
                     parts.append(f"- {_sug_line.strip()}")
-        parts.append("")
-
-    # C4 KnowledgeStore 历史经验（可开关；A/B 实验臂，knowledge.enabled=true 时注入）
-    if knowledge_context and knowledge_context.get("text"):
-        parts.append(knowledge_context["text"])
         parts.append("")
 
     # 失败命令及输出
@@ -1505,6 +1508,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     verification_results = []
     verification_ms = 0
     verification_history: list[dict] = []
+    # C4 KnowledgeStore KV-cache 稳定快照：首次构建的非空知识块跨重试冻结复用
+    _knowledge_snapshot: Optional[dict] = None
 
     # Phase 3: 读取 LLM 语义评估配置（运行时 config 优先，CLI --semantic-eval 可覆盖）
     _full_cfg: dict = _effective_config(config)
@@ -2213,6 +2218,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             # C4 KnowledgeStore 历史经验注入（可开关，A/B 实验臂；默认关闭）。
             # 从 Problem/deviation/verify_state 提取跨任务失败记忆，fail-open。
             # 每次注入落 knowledge_injected 事件（来源 id 可审计、可淘汰）。
+            # KV-cache 稳定快照（knowledge.snapshot 默认开）：首次构建的非空知识块
+            # 跨重试冻结复用，逐轮重建会打爆本地模型前缀缓存（C4 前置修订）。
             knowledge_context = None
             if (_cfg.get("knowledge", {}) or {}).get("enabled", False):
                 _kn_hint = ""
@@ -2220,15 +2227,21 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     _kn_hint = str(semantic_feedback.get("reason", "") or "")
                 if not _kn_hint and failed_cmds:
                     _kn_hint = failed_cmds[0]
-                knowledge_context = _safe_optional_call(
-                    ".knowledge", "build_repair_knowledge", logger,
+                _kn_res = _safe_optional_call(
+                    ".knowledge", "resolve_repair_knowledge", logger,
                     subtask, _kn_hint, task_dir, _full_cfg, logger,
-                    fallback=None, label="knowledge.build_repair_knowledge",
+                    _knowledge_snapshot,
+                    fallback=None, label="knowledge.resolve_repair_knowledge",
                 )
+                if _kn_res:
+                    knowledge_context, _kn_fresh, _knowledge_snapshot = _kn_res
+                else:
+                    knowledge_context, _kn_fresh = None, False
                 if knowledge_context and knowledge_context.get("sources"):
                     log_event(logger, "knowledge_injected", {
                         "sub_id": sub_id, "attempt": retry_count,
                         "sources": knowledge_context["sources"],
+                        "snapshot": not _kn_fresh,
                     })
 
             fix_prompt = _build_repair_prompt(

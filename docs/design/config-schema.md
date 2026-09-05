@@ -451,6 +451,7 @@ C4 KnowledgeStore：修复重试时向 repair prompt 注入跨任务历史经验
 | `max_items` | int | `3` | 单次注入的最大经验条数 |
 | `suppressed_ids` | list | `[]` | 按 Problem id 屏蔽错误知识（可淘汰机制） |
 | `resolution_llm` | bool | `true` | 葬礼回写时用 LLM 把「失败报错+修复内容」总结为根因+做法（根因级 `resolution_summary`）；fail-open，失败/关闭降级为 diffstat 级摘要 |
+| `snapshot` | bool | `true` | KV-cache 稳定快照（C4 前置修订）：每子任务首次构建的非空知识块跨重试冻结复用，注入块置于 TASK.md 之后构成逐轮字节一致的稳定前缀；`false` 退化为逐轮重建（对照/调试） |
 
 ---
 

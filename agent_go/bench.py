@@ -776,9 +776,12 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             config.setdefault("skills", {})["auto_discover"] = False
             config.setdefault("skills", {})["max_auto_skills"] = 0
         # --with-knowledge：C4 KnowledgeStore A/B 注入臂
+        # snapshot=True 显式固定 KV-cache 稳定快照口径（C4 前置修订），
+        # 避免浅合并丢字段后依赖默认值漂移
         if with_knowledge:
             config["knowledge"] = {"enabled": True, "max_items": 3,
-                                   "suppressed_ids": []}
+                                   "suppressed_ids": [],
+                                   "resolution_llm": True, "snapshot": True}
         # --worker-backend：B3/B5 显式 worker backend（如 pi），
         # agent_go run 子进程内由 resolve_backend_name 分发（含修复路径）
         if worker_backend:

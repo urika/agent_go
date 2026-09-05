@@ -196,3 +196,31 @@ def build_repair_knowledge(subtask: dict, pattern_hint: str,
         if logger:
             logger.debug(f"[knowledge] 经验提取失败（忽略）: {e}")
         return {"text": "", "sources": []}
+
+
+def resolve_repair_knowledge(subtask: dict, pattern_hint: str,
+                             task_dir: Optional[Path], config: dict,
+                             logger=None, snapshot: Optional[dict] = None,
+                             ) -> tuple:
+    """KV-cache 稳定快照包装（C4 前置修订，knowledge.snapshot 默认开）。
+
+    repair prompt 逐轮重建知识块会打爆本地模型前缀缓存：匹配 hint 逐轮变化
+    → 命中条目变 → 注入文本变 → 稳定前缀断裂。快照语义：每个子任务首次构建
+    出非空知识块后冻结，后续重试原样复用，配合 _build_repair_prompt 把知识块
+    置于 TASK.md 之后、逐轮变化段之前，保证稳定前缀逐字节一致。
+
+    返回 (context, fresh, new_snapshot)：
+    - snapshot 非空且开关开 → (snapshot, False, snapshot)，不重新匹配。
+    - 否则构建新块；文本非空且开关开时冻结为 new_snapshot。
+    - 构建结果为空不冻结——后续轮次仍允许命中新产生的 verify_state/deviation。
+    - snapshot=False 退化为逐轮重建（对照/调试用）。
+    """
+    cfg = (config or {}).get("knowledge", {}) or {}
+    snapshot_on = bool(cfg.get("snapshot", True))
+    if snapshot_on and snapshot and snapshot.get("text"):
+        return snapshot, False, snapshot
+    ctx = build_repair_knowledge(subtask, pattern_hint, task_dir, config, logger)
+    new_snapshot = snapshot
+    if snapshot_on and ctx and ctx.get("text"):
+        new_snapshot = ctx
+    return ctx, True, new_snapshot
