@@ -71,7 +71,25 @@ ELECTRON_RUN_AS_NODE=1 /Applications/ZCode.app/Contents/MacOS/ZCode \
 - 实测（23:02 +08:00）：headless 无显式声明 → zcode；交互模式 → claude；
   显式 pi → pi。窗口到期（09-20 后）自动失效，无需手工摘除。
 
+## B7 批量：zcode × glm-5.3-flash 臂（2026-09-05 07:20-07:38 免费窗口）
+
+golden 6 任务 × repeat 2，并行 4，worker 走 zcode（模型由 ~/.zcode/cli/config.json
+model.main=zai/glm-5.3-flash 决定，无 per-run 标志），planner/evaluator 走
+api.z.ai/api/anthropic。结果文件：`eval_suite/results_b7_zcode_glm_20260905.jsonl`
+（12 条，全部真实记录——无 system_error、无 <30s 早退、无人工 kill，是四臂中
+唯一无需 dedup/补跑的一批）。
+
+**首跑 10/12 通过**（binary_pass 口径，与 B6 一致），平均 elapsed ~611s
+（慢于 opencode 臂 ~447s），cost 全 $0（免费窗口）。
+
+- 失败 2 条均为 add-simple-caching（r1/r2），终态 VERIFICATION_FAILED
+  「能力失败优先」——真实 model_failure，非基础设施问题。
+- failure_class=verification_failure 的 5 条（conditional-branching r1/r2、
+  security-hardening r1/r2、fix-missing-default r2）是执行中途验证失败重试后
+  通过的痕迹，binary_pass 为准（同 B6 口径）。
+- add-format-helper r1 kill_reason=cleanup_race + timed_out=True 但 binary_pass
+  =True（commit 已完成，清理阶段超时），计通过。
+
 ## 待办
 
-- 免费窗口内跑 zcode 臂 golden 6 × repeat 2，与 claude/pi/opencode 三臂四方对比。
 - 若 ZCode 官方发布稳定独立 CLI（zai-org/feedback#444 在跟踪），迁移过去。

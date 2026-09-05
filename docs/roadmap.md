@@ -697,7 +697,8 @@ B1 标准 backend 接口 ✅（73cfcea）
   -> B5 bench A/B ✅（2026-09-04：glm-5.3-flash 同端点双臂，pass 持平 83%，pi 不劣化）
   -> B6 OpenCode backend ✅（opencode_backend.py + 冒烟通过；Zen 免费模型零成本臂可用）
   -> B7 ZCode backend ✅（zcode_backend.py + 冒烟通过；glm-5.3-flash 夜间免费窗口零成本通道）
-  -> accepted（pi / opencode / zcode backend 可选启用；四臂对比与 Go 套餐评估待额度窗口）
+  -> B7 批量 ✅（2026-09-05：zcode 臂 golden 6×2 首跑 10/12，$0，四臂对比完成）
+  -> accepted（pi / opencode / zcode backend 可选启用；Go 套餐评估待额度窗口）
 ```
 
 ### 不做的事
@@ -712,7 +713,7 @@ B1 标准 backend 接口 ✅（73cfcea）
 
 ### 多 Backend / Agent Runtime
 
-状态：从“暂缓”提升为“阶段十三：accepted（有条件）”；B1-B7 全部落地（2026-09-04），B5 双臂 bench 证明 pi backend 不劣化（pass 持平 83%），pi / opencode / zcode 可经 worker_backend / 路由配置可选启用，默认路径仍为 claude；opencode（B6）与 zcode（B7，glm-5.3-flash 夜间免费零成本通道）已实现并冒烟通过，Go 套餐评估待额度重置。
+状态：从“暂缓”提升为“阶段十三：accepted（有条件）”；B1-B7 全部落地（2026-09-04），B5 双臂 bench 证明 pi backend 不劣化（pass 持平 83%），pi / opencode / zcode 可经 worker_backend / 路由配置可选启用，默认路径仍为 claude；opencode（B6）与 zcode（B7，glm-5.3-flash 夜间免费零成本通道）已实现并冒烟通过，且两臂均已完成 golden 批量（B6 opencode 12/12 dedup 后、B7 zcode 首跑 10/12，均 $0），四臂对比齐备，Go 套餐评估待额度重置。
 
 触发条件（满足其一即启动）：
 
@@ -851,6 +852,6 @@ M0 产品契约与指标冻结  ✅ accepted
 2. **阶段 C 续项**：C3 局部重规划 ✅（2026-08-21，无进展触发一次拆分建议，默认人工确认，F-VERIFY-6 契约全守）→ C4 KnowledgeStore A/B（Problem/deviation/verify_state 数据已就位，在 delivery-20260820 基线上做两臂对比）。
 3. **并行推进阶段 D 放行评估与阶段十三 多 Backend 架构**：
    - 阶段 D：信任指标（审查后修改率 / 盲区命中率 / 复发可见率）跨任务积累达标后，启动 Reviewer 灰度与 B1 自动 merge 决策。
-   - 阶段十三：B1-B7 全部落地。B5 双臂 bench（glm-5.3-flash 同端点）证明 pi 不劣化（pass 持平 83%），pi 可选启用；B6 opencode backend 已实现并冒烟通过（Zen 免费模型零成本臂可用，Go 套餐月度额度尽、重置后再评估 qwen3.8）；B7 zcode backend 已实现并冒烟通过（glm-5.3-flash 夜间免费活动 23:00-09:00 仅 ZCode 本体完全免费）；并发调度原则已拍板（云端可并行、本地模型必须串行），pipeline 本地模型自动限流为候选增强。
+   - 阶段十三：B1-B7 全部落地。B5 双臂 bench（glm-5.3-flash 同端点）证明 pi 不劣化（pass 持平 83%），pi 可选启用；B6 opencode backend 已实现并冒烟通过（Zen 免费模型零成本臂可用，Go 套餐月度额度尽、重置后再评估 qwen3.8）；B7 zcode backend 已实现并冒烟通过（glm-5.3-flash 夜间免费活动 23:00-09:00 仅 ZCode 本体完全免费）；四臂 golden 批量齐备（claude 10/12、pi 10/12、opencode 12/12 dedup 后、zcode 首跑 10/12，B6/B7 均 $0）；并发调度原则已拍板（云端可并行、本地模型必须串行），pipeline 本地模型自动限流为候选增强。
 
 在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。
