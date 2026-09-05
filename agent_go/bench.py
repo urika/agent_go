@@ -2037,7 +2037,8 @@ roles: {json.dumps({k: (v if isinstance(v, str) else (v or {}).get('model')) for
     c = content.strip()
     c = _re.sub(r"^```(?:json)?\s*|\s*```$", "", c, flags=_re.MULTILINE).strip()
     try:
-        start = c.find("{"); end = c.rfind("}")
+        start = c.find("{")
+        end = c.rfind("}")
         data = json.loads(c[start:end+1])
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"[llm_rerank] 响应解析失败，回退规则候选: {e}")
