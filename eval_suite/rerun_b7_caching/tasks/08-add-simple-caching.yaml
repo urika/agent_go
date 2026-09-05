@@ -1,0 +1,25 @@
+id: add-simple-caching
+difficulty: medium
+repo: eval_suite/fixtures/task-mgr
+task: |
+  在 src/utils.py 中新增一个简单的缓存装饰器 `cached(func)`，并在 src/storage.py 中使用它来缓存 load_all 的结果，避免重复读文件。
+  
+  具体：
+  1. 在 src/utils.py 新增 cached 装饰器：
+     - 内部维护一个 dict 作为缓存（键=函数名+参数hash，值=返回值）
+     - 被装饰的函数首次调用正常执行，结果缓存
+     - 后续调用返回缓存值
+     - 新增 clear_cache() 函数清空缓存
+  2. 在 src/storage.py 中给 load_all 方法加上 @cached 装饰器
+  3. 确保现有 tests 全部通过（缓存不应改变行为）
+verification:
+  - "python -m pytest tests/test_storage.py tests/test_models_utils.py -q"
+  - "python -c \"from src.utils import cached, clear_cache; call_count=[0]; @cached\ndef f(x):\n call_count[0]+=1; return x*2\nassert f(3)==6 and f(3)==6; assert call_count[0]==1; clear_cache(); assert f(3)==6; assert call_count[0]==2; print('OK')\""
+timeout: 720
+
+# S10 成本控制（默认关闭；开启前先基于 bench 实测校准预算）
+cost_control:
+  enabled: false
+  max_budget_usd: 0.25
+  per_subtask_budget_usd: 0.2
+  on_exceed: stop

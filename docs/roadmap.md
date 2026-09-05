@@ -697,7 +697,7 @@ B1 标准 backend 接口 ✅（73cfcea）
   -> B5 bench A/B ✅（2026-09-04：glm-5.3-flash 同端点双臂，pass 持平 83%，pi 不劣化）
   -> B6 OpenCode backend ✅（opencode_backend.py + 冒烟通过；Zen 免费模型零成本臂可用）
   -> B7 ZCode backend ✅（zcode_backend.py + 冒烟通过；glm-5.3-flash 夜间免费窗口零成本通道）
-  -> B7 批量 ✅（2026-09-05：zcode 臂 golden 6×2 首跑 10/12，$0，四臂对比完成）
+  -> B7 批量 ✅（2026-09-05：zcode 臂 golden 6×2 首跑 10/12，$0；add-simple-caching 2 败复查 3/3 通过判为方差，四臂对比完成）
   -> accepted（pi / opencode / zcode backend 可选启用；Go 套餐评估待额度窗口）
 ```
 

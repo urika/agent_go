@@ -1,0 +1,18 @@
+{
+  "add-simple-caching": {
+    "task_version": "00c700378e3abe17",
+    "suites": [
+      "core",
+      "golden",
+      "decision"
+    ],
+    "risk_types": [
+      "cache"
+    ],
+    "business_relevance": "high",
+    "runtime_cost": "medium",
+    "high_variance": false,
+    "semantic_probe": false,
+    "delivery_probe": true
+  }
+}

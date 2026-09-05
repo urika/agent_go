@@ -83,7 +83,10 @@ api.z.ai/api/anthropic。结果文件：`eval_suite/results_b7_zcode_glm_2026090
 （慢于 opencode 臂 ~447s），cost 全 $0（免费窗口）。
 
 - 失败 2 条均为 add-simple-caching（r1/r2），终态 VERIFICATION_FAILED
-  「能力失败优先」——真实 model_failure，非基础设施问题。
+  「能力失败优先」。**复查（同日 08:45，单任务 ×3 并行 3）：3/3 通过**
+  （165s/220s/335s，远快于失败时的 665s 超时）——判定为执行超时型方差
+  而非 zcode harness 系统性短板；结果文件
+  `eval_suite/results_b7_caching_recheck_20260905.jsonl`。
 - failure_class=verification_failure 的 5 条（conditional-branching r1/r2、
   security-hardening r1/r2、fix-missing-default r2）是执行中途验证失败重试后
   通过的痕迹，binary_pass 为准（同 B6 口径）。
