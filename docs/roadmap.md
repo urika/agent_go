@@ -2,7 +2,7 @@
 
 > 版本：v4.5
 > 更新日期：2026-09-03
-> 当前阶段：M0-M4、M4.5（模型池化，hard 94.4%）已 `accepted`；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1-W4 已交付；阶段 C C1/C2/C3 + C4 KnowledgeStore A/B smoke 与葬礼回写链路已落地；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立；阶段十三「多 Backend 架构」已提出（proposed）
+> 当前阶段：M0-M4、M4.5（模型池化，hard 94.4%）已 `accepted`；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1-W4 已交付；阶段 C C1/C2/C3 + C4 KnowledgeStore A/B smoke 与葬礼回写链路已落地；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立；阶段十三「多 Backend 架构」已 `accepted（有条件）`（B1-B8 全部落地，Go 套餐评估待额度重置）
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
@@ -660,7 +660,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 
 目标：把 agent_go 从“Claude Code 包装器”演进为“可插拔多 Agent Runtime 编排器”，在保持默认路径稳定的前提下，引入开源/定制化 backend，并通过 bench 验证其 Accepted Delivery Rate 和 Cost per Accepted Delivery。
 
-状态：`proposed`（等待 AgentLoop 改造基线或 Pi backend PoC 数据）。
+状态：`accepted（有条件）`（2026-09-05 翻转，B1-B8 全部落地；唯一遗留为 Go 套餐评估，待额度重置 ~09-15）。历史：proposed（等待 AgentLoop 改造基线或 Pi backend PoC 数据）。
 
 架构 review（2026-09-03）确认：worker backend 单点依赖 Claude Code 是当前最大结构性风险（P0），本阶段即为对该风险的正面回应。
 
@@ -707,7 +707,9 @@ B1 标准 backend 接口 ✅（73cfcea）
 
 三层切分：backend 层拥有 LLM 会话真源（私有契约，只读采集）；agent_go 平台层
 拥有任务编排事件日志（唯一真源）+ 能力 seam；代理层保持协议级横切（路由/压缩/
-注入/diag/流量留痕），**不做 LLM 会话管理**。演进：阶段 1 轨迹采集
+注入/diag/流量留痕），**不做 LLM 会话管理**；代理压缩按路由分流（云端路由透传、
+本地模型路由保留管理——`claude -p` 无上下文长度旗标，本地窗口防护只能由代理承担，
+详见 ADR-010 补充）。演进：阶段 1 轨迹采集
 （`harvest_trajectory` 钩子，随 B8 落地，dsh/opencode 先行，只采集不消费）→
 阶段 2 平台 TaskEvent 词汇 + meta.json 降为投影（需阶段 1 价值验证背书）→
 阶段 3 fork-retry / 轨迹归因 / 三层关联（按需）。详见
@@ -808,7 +810,7 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 
 在 M0-M3 通过前，以下事项不进入关键路径：
 
-- 多 Runtime Worker（M3 已 accepted；已从“暂缓”提升为阶段十三：proposed，等待 AgentLoop 改造或 Pi backend PoC 数据后再决定）
+- ~~多 Runtime Worker~~（已提升为阶段十三并于 2026-09-05 `accepted（有条件）`，B1-B8 全部落地，见 §7.14）
 - IDE 插件
 - 完整项目管理和 issue 生命周期
 - 自动 Skill 蒸馏

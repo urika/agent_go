@@ -53,6 +53,26 @@ agent_go 平台层
 例外：agent_loop 路径（agent_go 直接驱动 API）下代理的压缩/注入即该路径的
 会话管理，现状合理、保持不动；但它天然无法推广到 CLI backend 路径。
 
+### 补充（2026-09-05）：代理层上下文管理按路由分流
+
+调研确认 `claude -p` **没有指定上下文长度的旗标**（窗口由模型决定；仅有
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 输出上限与 auto-compact 开关
+`DISABLE_AUTOCOMPACT=1` / 阈值 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`——后者写在
+settings.json `env` 块会被静默忽略，须真实环境变量注入）。由此推导代理层
+上下文管理的分流原则：
+
+- **云端路由（claude 直连 / z.ai glm 等）→ 代理透传，不压缩不截断。**
+  Claude Code 自身按其认定的窗口做 auto-compact 与会话簿记；代理再截断即
+  双重管理——backend 以为还在的消息被截掉，上下文发散、prefix cache 互踢。
+  且 `-p` 是每子任务一次的短会话，打满窗口概率低，代理压缩弊大于利。
+- **本地模型路由（Ornith 35B 等经 :4000）→ 代理管理是唯一防线，必须保留。**
+  Claude Code 以为自己有 200K 窗口、auto-compact 阈值 ~160K，永远赶不上本地
+  模型的真实窗口；溢出防护完全靠代理层。配套动作：本地路由时给 worker 注入
+  `DISABLE_AUTOCOMPACT=1`，避免 backend 在错误时点再压一轮。
+
+落地形态：代理按路由元数据分流（如 `context_managed_by: proxy | client`，
+云端默认 client 透传、本地默认 proxy 管理）；agent_go 侧无需改动。
+
 ## dsh 概念映射
 
 | dsh 概念 | 落到哪层 | 对应物 |
