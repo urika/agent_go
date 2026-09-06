@@ -25,12 +25,15 @@ from .web_data import (
     api_audit,
     api_baseline,
     api_bench_batches,
+    api_bench_result_files,
     api_bench_results,
+    api_bench_review,
     api_config,
     api_config_diff,
     api_cost,
     api_cross_judge,
     api_decisions,
+    api_delivery_diff,
     api_deviation,
     api_health,
     api_insight_report,
@@ -48,9 +51,12 @@ from .web_data import (
     api_storage,
     api_subtask_detail,
     api_task,
+    api_task_file,
     api_task_report,
     api_task_review,
     api_tasks,
+    api_trajectory,
+    api_worktree_diff,
     api_worktrees,
 )
 from .web_frontend import _SPA_HTML
@@ -205,6 +211,41 @@ class WebHandler(WebOpsMixin, BaseHTTPRequestHandler):
                 data_log = _extract_subtask_log(parts[2], parts[3])
                 self._reply_json(200, {"lines": data_log})
                 return
+            # ── 排障页（trajectory / worktree 现场；404 仅当 task 不存在）──
+            if len(parts) == 5 and parts[1] == "tasks" and parts[4] == "trajectory":
+                data = api_trajectory(parts[2], parts[3])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 5 and parts[1] == "tasks" and parts[4] == "worktree-diff":
+                data = api_worktree_diff(parts[2], parts[3])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            # ── Bench 页配套（交付 diff / 产物文本；404 仅当 task 不存在）──
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "delivery-diff":
+                data = api_delivery_diff(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 5 and parts[1] == "tasks" and parts[4] == "file":
+                name = next((unquote(p[5:]) for p in query.split("&")
+                             if p.startswith("name=")), "")
+                if not name:
+                    self._reply_json(400, {"error": "缺少 name 参数"})
+                    return
+                data = api_task_file(parts[2], parts[3], name)
+                if data is None:
+                    self._reply_json(404, {"error": "file not found"})
+                else:
+                    self._reply_json(200, data)
+                return
             # ── 审批/交付数据（M2/R9-R10）──
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "review":
                 data = api_task_review(parts[2])
@@ -328,6 +369,22 @@ class WebHandler(WebOpsMixin, BaseHTTPRequestHandler):
                 return
             if len(parts) == 2 and parts[1] == "bench-batches":
                 self._reply_json(200, api_bench_batches())
+                return
+            # ── 🧪 Bench 复核页（results_*.jsonl 批次）──
+            if len(parts) == 3 and parts[1] == "bench" and parts[2] == "batches":
+                self._reply_json(200, api_bench_result_files())
+                return
+            if len(parts) == 3 and parts[1] == "bench" and parts[2] == "review":
+                batch = next((unquote(p[6:]) for p in query.split("&")
+                              if p.startswith("batch=")), "")
+                if not batch:
+                    self._reply_json(400, {"error": "缺少 batch 参数"})
+                    return
+                data = api_bench_review(batch)
+                if data is None:
+                    self._reply_json(404, {"error": "batch not found"})
+                else:
+                    self._reply_json(200, data)
                 return
             if len(parts) == 2 and parts[1] == "proxy-policies":
                 self._reply_json(200, api_proxy_policies())

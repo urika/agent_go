@@ -197,6 +197,10 @@ _SPA_HTML = """<!DOCTYPE html>
     width:100%; background:var(--panel); border:1px solid var(--border); color:var(--text);
     padding:5px 8px; border-radius:6px; font-size:12px; margin-bottom:6px; }
   .kanban-form textarea { resize:vertical; font-family:inherit; line-height:1.5; }
+  .ts-sub-row { cursor:pointer; }
+  .ts-sub-row:hover td { background:rgba(88,166,255,0.06); }
+  .ts-sel td { background:rgba(88,166,255,0.12); }
+  .ts-group td { color:var(--dim); font-size:12px; background:#0b0d11; }
 </style>
 </head>
 <body>
@@ -205,6 +209,8 @@ _SPA_HTML = """<!DOCTYPE html>
   <nav class="nav-tabs">
     <button class="nav-tab" data-view="kanban">🗂 看板</button>
     <button class="nav-tab active" data-view="tasks">📋 任务</button>
+    <button class="nav-tab" data-view="troubleshoot">🔧 排障</button>
+    <button class="nav-tab" data-view="bench">🧪 Bench</button>
     <button class="nav-tab" data-view="insight">🧠 洞察</button>
     <button class="nav-tab" data-view="overview">📊 总览</button>
     <button class="nav-tab" data-view="cost">💰 成本</button>
@@ -977,6 +983,369 @@ function renderTimeline(d) {
     : '<div class="kv"><dt>无时间线</dt><dd></dd></div>';
 }
 
+// ── 排障（Troubleshoot）────────────────────────────────────
+// 排障动线：选任务 → ①子任务矩阵 ②worktree 现场 ③时间线 ④执行轨迹 ⑤计量。
+// 深链：#troubleshoot/<task-id>/<sub-id>；SSE 自动刷新不覆盖本页（手动刷新）。
+let tsState = {taskId: '', subId: ''};
+
+function tsHash(taskId, subId) {
+  let h = '#troubleshoot';
+  if (taskId) h += '/' + taskId;
+  if (taskId && subId) h += '/' + subId;
+  return h;
+}
+
+function tsParseHash() {
+  const h = location.hash || '';
+  if (!h.startsWith('#troubleshoot')) return {taskId: '', subId: ''};
+  // '#troubleshoot/<task>/<sub>' → ['#troubleshoot','<task>','<sub>']
+  const segs = h.split('/').slice(1);
+  return {taskId: segs[0] || '', subId: segs[1] || ''};
+}
+
+async function loadTroubleshoot() {
+  tsState = tsParseHash();
+  try {
+    const d = await api('/api/tasks');
+    // 失败/阻断任务排前（排障动线以排错为主），同组按 mtime 倒序
+    const items = (d.tasks || []).slice().sort((a, b) => {
+      const wa = ((a.failed || 0) + (a.blocked || 0)) > 0 ? 1 : 0;
+      const wb = ((b.failed || 0) + (b.blocked || 0)) > 0 ? 1 : 0;
+      return wb - wa || (b.mtime || 0) - (a.mtime || 0);
+    });
+    if (!tsState.taskId && items.length) {
+      tsState.taskId = items[0].id;
+      history.replaceState(null, '', tsHash(tsState.taskId, ''));
+    }
+    renderTsPicker(items);
+    setConn(true);
+    if (tsState.taskId) await renderTsDetail();
+  } catch (e) {
+    setConn(false);
+    document.getElementById('mainView').innerHTML =
+      '<div class="err">加载失败: '+esc(e.message)+'</div>';
+  }
+}
+
+function renderTsPicker(items) {
+  const opts = items.map(t => {
+    const bad = (t.failed || 0) + (t.blocked || 0);
+    const label = (bad ? '🔴 ' : '') + t.id + '（' + (t.status || '') +
+      (bad ? ' 失败/阻断 ' + bad : '') + '）' +
+      (t.task ? ' ' + String(t.task).slice(0, 30) : '');
+    return '<option value="'+esc(t.id)+'"'+(t.id === tsState.taskId ? ' selected' : '')+
+      '>'+esc(label)+'</option>';
+  }).join('');
+  document.getElementById('mainView').innerHTML =
+    '<div class="op-bar">'+
+    '<label class="dim">任务：</label>'+
+    '<select id="tsTaskSel" class="run-input" style="min-width:340px">'+
+    (items.length ? opts : '<option value="">（无任务）</option>')+'</select>'+
+    '<button class="btn" id="tsRefresh">🔄 刷新</button>'+
+    '<span class="dim" style="font-size:11px">排障五步：子任务矩阵 → 现场 → 时间线 → 轨迹 → 计量</span>'+
+    '</div>'+
+    '<div id="tsDetail"></div>';
+  const sel = document.getElementById('tsTaskSel');
+  sel.onchange = () => {
+    tsState = {taskId: sel.value, subId: ''};
+    history.replaceState(null, '', tsHash(tsState.taskId, ''));
+    renderTsDetail();
+  };
+  document.getElementById('tsRefresh').onclick = () => loadTroubleshoot();
+}
+
+async function renderTsDetail() {
+  const slot = document.getElementById('tsDetail');
+  if (!slot) return;
+  slot.innerHTML = '<div class="loading">加载任务详情…</div>';
+  const tid = encodeURIComponent(tsState.taskId);
+  try {
+    const [detail, metering, replay] = await Promise.all([
+      api('/api/tasks/'+tid),
+      api('/api/tasks/'+tid+'/metering'),
+      api('/api/tasks/'+tid+'/replay'),
+    ]);
+    // 每个子任务的计量成本（metering rows 按 subtask_id 聚合）
+    const costBySub = {};
+    (metering.rows || []).forEach(r => {
+      if (r.subtask_id) costBySub[r.subtask_id] = (costBySub[r.subtask_id] || 0) + (r.cost_usd || 0);
+    });
+    const subs = detail.subtasks || [];
+    // 未指定子任务时默认选中第一个失败/阻断项（否则第一项）
+    if (!tsState.subId) {
+      const bad = subs.find(s => s.status === 'failed' || s.status === 'blocked');
+      tsState.subId = ((bad || subs[0] || {}).id) || '';
+      if (tsState.subId) history.replaceState(null, '', tsHash(tsState.taskId, tsState.subId));
+    }
+    slot.innerHTML =
+      '<div class="section-title">① 子任务矩阵（点击行选中失败项）</div>'+renderTsMatrix(subs, costBySub)+
+      '<div class="section-title">② 现场（worktree diff）· '+esc(tsState.subId || '未选中')+'</div>'+
+      '<div id="tsScene"></div>'+
+      '<div class="section-title">③ 时间线（replay）</div>'+renderTimeline(replay)+
+      '<div class="section-title">④ 执行轨迹 · '+esc(tsState.subId || '未选中')+'</div>'+
+      '<div id="tsTraj"></div>'+
+      '<div class="section-title">⑤ 计量</div>'+renderMetering(metering);
+    bindTsMatrix(slot);
+    loadTsScene();
+    loadTsTrajectory();
+  } catch (e) {
+    slot.innerHTML = '<div class="err">加载失败: '+esc(e.message)+'</div>';
+  }
+}
+
+function renderTsMatrix(subs, costBySub) {
+  if (!subs.length) return '<div class="kv"><dt>无子任务</dt><dd></dd></div>';
+  const rows = subs.map(s => {
+    const st = s.status || 'pending';
+    const cls = SUBTASK_STATUS_COLORS[st] || 'st-pending';
+    const sel = s.id === tsState.subId;
+    return '<tr class="ts-sub-row'+(sel ? ' ts-sel' : '')+'" data-id="'+esc(s.id)+'">'+
+      '<td>'+(sel ? '▶ ' : '')+esc(s.id)+'</td>'+
+      '<td>'+esc(s.title || '')+'</td>'+
+      '<td><span class="'+cls+'">'+subtaskStatusIcon(st)+' '+esc(st)+'</span></td>'+
+      '<td>'+fmtDur(s.duration_sec)+'</td>'+
+      '<td>'+(s.retry_count ?? '—')+'</td>'+
+      '<td>'+fmtCost(costBySub[s.id])+'</td>'+
+      '<td>'+esc(s.failure_reason || '')+'</td></tr>';
+  }).join('');
+  return '<table class="kv-table"><thead><tr><th>ID</th><th>标题</th><th>状态</th>'+
+    '<th>耗时</th><th>重试</th><th>成本</th><th>失败原因</th></tr></thead>'+
+    '<tbody>'+rows+'</tbody></table>';
+}
+
+function bindTsMatrix(slot) {
+  slot.querySelectorAll('.ts-sub-row').forEach(row => {
+    row.addEventListener('click', () => {
+      tsState.subId = row.dataset.id;
+      history.replaceState(null, '', tsHash(tsState.taskId, tsState.subId));
+      renderTsDetail();
+    });
+  });
+}
+
+async function loadTsScene() {
+  const slot = document.getElementById('tsScene');
+  if (!slot) return;
+  if (!tsState.subId) {
+    slot.innerHTML = '<div class="kv"><dt>未选中子任务</dt><dd></dd></div>';
+    return;
+  }
+  slot.innerHTML = '<div class="loading">加载现场…</div>';
+  try {
+    const d = await api('/api/tasks/'+encodeURIComponent(tsState.taskId)+'/'+
+                        encodeURIComponent(tsState.subId)+'/worktree-diff');
+    if (!d.available) {
+      slot.innerHTML = '<div class="warn-banner">⚠️ '+esc(d.reason || '现场不可用')+'</div>';
+      return;
+    }
+    let html = d.stat ? '<pre>'+esc(d.stat)+'</pre>'
+      : '<div class="dim">git diff HEAD --stat：无已跟踪改动</div>';
+    if (d.status) html += '<div class="dim">git status --short：</div><pre>'+esc(d.status)+'</pre>';
+    if (d.diff) {
+      html += '<div class="dim">git diff HEAD'+(d.diff_truncated ? '（已截断至 200KB）' : '')+
+        '：</div><pre>'+esc(d.diff)+'</pre>';
+    } else if (!d.stat && !d.status) {
+      html += '<div class="dim">worktree 无未提交改动</div>';
+    }
+    slot.innerHTML = html;
+  } catch (e) {
+    slot.innerHTML = '<div class="err">现场加载失败: '+esc(e.message)+'</div>';
+  }
+}
+
+async function loadTsTrajectory() {
+  const slot = document.getElementById('tsTraj');
+  if (!slot) return;
+  if (!tsState.subId) {
+    slot.innerHTML = '<div class="kv"><dt>未选中子任务</dt><dd></dd></div>';
+    return;
+  }
+  slot.innerHTML = '<div class="loading">加载轨迹…</div>';
+  try {
+    const d = await api('/api/tasks/'+encodeURIComponent(tsState.taskId)+'/'+
+                        encodeURIComponent(tsState.subId)+'/trajectory');
+    if (!d.available) {
+      slot.innerHTML = '<div class="kv"><dt>该 backend 无执行级轨迹</dt>'+
+        '<dd>仅 dsh 等 backend 落盘 trajectory/*.jsonl（ADR-010 阶段 1）</dd></div>';
+      return;
+    }
+    slot.innerHTML = renderTsTrajectory(d.events || [], d.truncated);
+  } catch (e) {
+    slot.innerHTML = '<div class="err">轨迹加载失败: '+esc(e.message)+'</div>';
+  }
+}
+
+function renderTsTrajectory(events, truncated) {
+  if (!events.length) return '<div class="kv"><dt>轨迹为空</dt><dd></dd></div>';
+  const rows = [];
+  events.forEach(ev => {
+    const t = ev.type || '';
+    const d = ev.data || {};
+    // turn/step 事件作为分组标题行，其余事件一行一条
+    if (t === 'turn/start') {
+      rows.push('<tr class="ts-group"><td colspan="3">🔄 turn '+esc(d.turn ?? '?')+'</td></tr>');
+      return;
+    }
+    if (t === 'step/start') {
+      rows.push('<tr class="ts-group"><td colspan="3">└ step '+esc(d.step ?? '?')+'</td></tr>');
+      return;
+    }
+    let body = '';
+    if (t === 'user/message') {
+      body = 'source='+esc(d.source_kind || d.role || '')+' · 文本 '+(d.text_len || 0)+' 字符';
+    } else if (t === 'assistant/message' || t === 'assistant/attempt') {
+      const u = d.usage || {};
+      body = 'tokens in='+(u.inputTokens || 0)+' out='+(u.outputTokens || 0)+
+        (u.cacheReadTokens ? ' cache='+u.cacheReadTokens : '')+
+        (d.model ? ' · '+esc(d.model) : '')+
+        (d.interrupted ? ' · ⚠️ interrupted' : '');
+    } else if (t === 'tool/call') {
+      body = '🔧 '+esc(d.name || '')+' '+esc(d.arguments_summary || '');
+    } else if (t === 'tool/result') {
+      body = (d.is_error ? '❌ ' : '↩ ')+esc(d.result_summary || '');
+    } else {
+      body = esc(JSON.stringify(d));
+    }
+    rows.push('<tr><td>'+(ev.seq ?? '')+'</td><td>'+esc(t)+'</td><td>'+body+'</td></tr>');
+  });
+  return (truncated ? '<div class="warn-banner">事件过多，已截断至前 2000 条</div>' : '')+
+    '<table class="kv-table"><thead><tr><th>#</th><th>类型</th><th>内容</th></tr></thead>'+
+    '<tbody>'+rows.join('')+'</tbody></table>';
+}
+
+// ── Bench（🧪 结果复核）────────────────────────────────────
+// 批次下拉（eval_suite/results_*.jsonl）→ 臂汇总表 → 每题一节（折叠原文 + run 表）。
+// run 行动作：「排障」深链 #troubleshoot/<agent_task_id>、「交付 diff」页内展开。
+let benchState = {batch: ''};
+
+function benchBadge(v) {
+  if (v === true) return '<span class="st-completed">✅</span>';
+  if (v === false) return '<span class="st-failed">❌</span>';
+  return '<span class="dim">—</span>';
+}
+
+async function loadBench() {
+  try {
+    const d = await api('/api/bench/batches');
+    const items = d.batches || [];
+    if (!benchState.batch && items.length) benchState.batch = items[0].name;
+    const opts = items.map(b =>
+      '<option value="'+esc(b.name)+'"'+(b.name === benchState.batch ? ' selected' : '')+
+      '>'+esc(b.name)+'</option>').join('');
+    document.getElementById('mainView').innerHTML =
+      '<div class="op-bar">'+
+      '<label class="dim">批次：</label>'+
+      '<select id="benchBatchSel" class="run-input" style="min-width:360px">'+
+      (items.length ? opts : '<option value="">（eval_suite 下无 results_*.jsonl）</option>')+
+      '</select>'+
+      '<button class="btn" id="benchRefresh">🔄 刷新</button>'+
+      '<span class="dim" style="font-size:11px">臂 = worker_backend + model；'+
+      'run 行可跳排障页或页内查看交付 diff</span>'+
+      '</div>'+
+      '<div id="benchDetail"></div>';
+    const sel = document.getElementById('benchBatchSel');
+    sel.onchange = () => { benchState.batch = sel.value; renderBenchDetail(); };
+    document.getElementById('benchRefresh').onclick = () => loadBench();
+    setConn(true);
+    if (benchState.batch) await renderBenchDetail();
+  } catch (e) {
+    setConn(false);
+    document.getElementById('mainView').innerHTML =
+      '<div class="err">加载失败: '+esc(e.message)+'</div>';
+  }
+}
+
+async function renderBenchDetail() {
+  const slot = document.getElementById('benchDetail');
+  if (!slot) return;
+  slot.innerHTML = '<div class="loading">加载批次复核数据…</div>';
+  try {
+    const d = await api('/api/bench/review?batch='+encodeURIComponent(benchState.batch));
+    slot.innerHTML = renderBenchReview(d);
+    bindBenchDiffButtons(slot);
+  } catch (e) {
+    slot.innerHTML = '<div class="err">批次加载失败: '+esc(e.message)+'</div>';
+  }
+}
+
+function renderBenchReview(d) {
+  let html = '';
+  if (d.yaml_available === false) {
+    html += '<div class="warn-banner">⚠️ 运行环境缺少 PyYAML（dev 依赖），题目原文降级为空；'+
+      'run 数据不受影响</div>';
+  }
+  // 臂汇总表
+  const armRows = (d.arms || []).map(a =>
+    '<tr><td>'+esc(a.label)+'</td><td>'+a.binary_pass+' / '+a.total+'</td>'+
+    '<td>'+fmtCost(a.cost)+'</td></tr>').join('');
+  html += '<div class="section-title">臂汇总（'+esc(d.batch)+' · 共 '+(d.total_runs || 0)+' runs）</div>'+
+    '<table class="kv-table"><thead><tr><th>臂</th><th>binary_pass</th><th>成本</th></tr></thead>'+
+    '<tbody>'+(armRows || '<tr><td colspan="3" class="dim">无记录</td></tr>')+'</tbody></table>';
+  // 每题一节
+  (d.tasks || []).forEach(t => {
+    html += '<div class="section-title">'+esc(t.task_id)+
+      (t.difficulty ? ' <small class="dim">('+esc(t.difficulty)+')</small>' : '')+'</div>';
+    const verif = (t.verification || []).map(v => String(v)).join('\\n');
+    if (t.task_text || verif) {
+      html += '<details style="margin:6px 0"><summary style="cursor:pointer">题目原文'+
+        (t.repo ? '（repo: '+esc(t.repo)+'）' : '')+'</summary>'+
+        (t.task_text ? '<pre>'+esc(t.task_text)+'</pre>' : '')+
+        (verif ? '<div class="dim">verification:</div><pre>'+esc(verif)+'</pre>' : '')+
+        '</details>';
+    } else {
+      html += '<div class="dim" style="font-size:12px;margin:4px 0">（无题目原文 YAML）</div>';
+    }
+    const rows = t.runs.map((r, i) => {
+      const atid = r.agent_task_id || '';
+      const trouble = r.task_dir_exists && atid
+        ? '<a href="#troubleshoot/'+esc(atid)+'">排障</a>'
+        : '<span class="dim">已清理</span>';
+      const diffBtn = r.task_dir_exists && atid
+        ? '<button class="btn bench-diff-btn" data-task="'+esc(atid)+'" data-slot="'+
+          esc(t.task_id)+'-'+i+'">交付 diff</button>'
+        : '<span class="dim">—</span>';
+      return '<tr><td>'+esc(r.arm)+'</td><td>'+(r.repeat ?? '—')+'</td>'+
+        '<td>'+benchBadge(r.binary_pass)+'</td><td>'+benchBadge(r.semantic_pass)+'</td>'+
+        '<td>'+esc(r.kill_reason || '')+'</td><td>'+fmtDur(r.elapsed_sec)+'</td>'+
+        '<td>'+fmtCost(r.total_cost_usd)+'</td><td>'+benchBadge(r.accepted_delivery)+'</td>'+
+        '<td>'+trouble+'</td><td>'+diffBtn+'</td></tr>'+
+        '<tr><td colspan="10" style="padding:0;border:none">'+
+        '<div id="bdiff-'+esc(t.task_id)+'-'+i+'"></div></td></tr>';
+    }).join('');
+    html += '<table class="kv-table"><thead><tr><th>臂</th><th>rep</th><th>binary</th>'+
+      '<th>semantic</th><th>kill_reason</th><th>耗时</th><th>成本</th><th>delivery</th>'+
+      '<th>排障</th><th>交付</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  });
+  return html;
+}
+
+function bindBenchDiffButtons(slot) {
+  slot.querySelectorAll('.bench-diff-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const box = document.getElementById('bdiff-'+btn.dataset.slot);
+      if (!box) return;
+      // 再次点击折叠（toggle）
+      if (box.innerHTML) { box.innerHTML = ''; return; }
+      box.innerHTML = '<div class="loading" style="padding:8px">加载交付 diff…</div>';
+      try {
+        const d = await api('/api/tasks/'+encodeURIComponent(btn.dataset.task)+'/delivery-diff');
+        if (!d.available) {
+          box.innerHTML = '<div class="warn-banner">⚠️ '+esc(d.reason || '交付 diff 不可用')+'</div>';
+          return;
+        }
+        box.innerHTML =
+          (d.stat ? '<pre>'+esc(d.stat)+'</pre>' : '')+
+          '<div class="dim">git diff '+esc((d.base_commit || '').slice(0, 10))+'..'+
+          esc(d.delivery_branch || '')+
+          (d.diff_truncated ? '（已截断至 200KB）' : '')+'：</div>'+
+          '<pre>'+esc(d.diff || '（无 diff 内容）')+'</pre>';
+      } catch (e) {
+        box.innerHTML = '<div class="err">diff 加载失败: '+esc(e.message)+'</div>';
+      }
+    });
+  });
+}
+
 // ── 看板（Kanban）──────────────────────────────────────
 let kanbanData = null;
 let kanbanRepoFilter = '';
@@ -1558,6 +1927,8 @@ function switchView(name) {
   main.innerHTML = '<div class="loading">加载中…</div>';
   // 返回 loader 的 Promise，调用方可链式等待渲染完成
   if (name === 'tasks') return loadTasks();
+  if (name === 'troubleshoot') return loadTroubleshoot();
+  if (name === 'bench') return loadBench();
   if (name === 'kanban') return loadKanban();
   if (name === 'insight') return loadInsight();
   if (name === 'archive') return loadTasks('/api/archive');
@@ -2045,8 +2416,15 @@ document.getElementById('searchInput').addEventListener('input', renderTasks);
 document.querySelectorAll('.nav-tab').forEach(tab => {
   tab.addEventListener('click', () => switchView(tab.dataset.view));
 });
+// 排障页深链：hash 变化指向 #troubleshoot 时切入排障视图
+window.addEventListener('hashchange', () => {
+  if ((location.hash || '').startsWith('#troubleshoot') && currentView !== 'troubleshoot') {
+    switchView('troubleshoot');
+  }
+});
 bindKanbanKeyboard();
-loadTasks();
+if ((location.hash || '').startsWith('#troubleshoot')) switchView('troubleshoot');
+else loadTasks();
 connectSSE();
 </script>
 </body>

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1059,6 +1060,332 @@ def api_worktrees(task_id: str) -> Optional[dict]:
             "failure_reason": result.get("failure_reason", preserved_data.get("failure_reason", "")),
         })
     return {"task_id": task_id, "worktrees": entries}
+
+
+MAX_TRAJECTORY_EVENTS = 2000  # 轨迹事件截断上限（防大响应）
+MAX_DIFF_CHARS = 200 * 1024   # worktree diff 全文截断上限（~200KB）
+
+
+def api_trajectory(task_id: str, sub_id: str) -> Optional[dict]:
+    """子任务执行级轨迹（ADR-010 阶段 1）：trajectory/<sub_id>.jsonl。
+
+    仅 task 不存在 / id 非法时返回 None（路由层 404）。轨迹文件不存在时返回
+    available=False（非 404）——只有部分 backend（如 dsh）落轨迹文件，
+    前端据此显示「该 backend 无执行级轨迹」。坏行跳过，超限截断。
+    """
+    if not _valid_sub_id(sub_id):
+        return None
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    base: dict[str, Any] = {"task_id": task_id, "subtask_id": sub_id,
+                            "available": False, "events": [], "truncated": False}
+    traj_path = td / "trajectory" / f"{sub_id}.jsonl"
+    if not traj_path.exists():
+        return base
+    events: list[dict] = []
+    truncated = False
+    try:
+        with open(traj_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if len(events) >= MAX_TRAJECTORY_EVENTS:
+                    truncated = True
+                    break
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue  # 坏行跳过（partial write / 采集失败残留）
+    except OSError:
+        return base
+    base["available"] = True
+    base["events"] = events
+    base["truncated"] = truncated
+    return base
+
+
+def _run_git(cwd: Path, args: list) -> tuple:
+    """在指定目录执行 git 命令，返回 (returncode, stdout, stderr)。
+
+    异常/超时归一为 returncode=-1，stderr 为原因；调用方按非零 rc 统一失败。
+    """
+    try:
+        p = subprocess.run(["git"] + list(args), cwd=str(cwd),
+                           capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return -1, "", "git 命令超时（30s）"
+    except OSError as e:
+        return -1, "", f"git 执行失败: {e}"
+    return p.returncode, p.stdout, p.stderr
+
+
+def api_worktree_diff(task_id: str, sub_id: str) -> Optional[dict]:
+    """子任务 worktree 现场（排障页）：git diff HEAD --stat / status --short / diff 全文。
+
+    仅 task 不存在 / id 非法时返回 None（路由层 404）；sub 不在 meta.subtasks、
+    worktree 已清理、git 执行失败均返回 available=False + reason（非 404）。
+    worktree 路径由 _task_dir + 校验后的 sub_id 拼接，无路径穿越面。
+    """
+    if not _valid_sub_id(sub_id):
+        return None
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    base: dict[str, Any] = {"task_id": task_id, "subtask_id": sub_id,
+                            "available": False, "reason": "",
+                            "stat": "", "status": "", "diff": "",
+                            "diff_truncated": False}
+    meta = _task_meta(td)
+    sub_ids = {st.get("id") for st in (meta.get("subtasks", []) or [])
+               if isinstance(st, dict)}
+    if sub_id not in sub_ids:
+        base["reason"] = "subtask not found"
+        return base
+    wt = td / sub_id / "work"
+    # 与 api_worktrees 同口径：目录 + .git 都存在才算有效 worktree
+    if not wt.is_dir() or not (wt / ".git").exists():
+        base["reason"] = "worktree 不存在（已清理或未保留；默认仅失败/阻断子任务保留现场）"
+        return base
+    rc, stat, err = _run_git(wt, ["diff", "HEAD", "--stat"])
+    if rc != 0:
+        base["reason"] = f"git diff --stat 失败: {err.strip()[:200]}"
+        return base
+    rc, status_out, err = _run_git(wt, ["status", "--short"])
+    if rc != 0:
+        base["reason"] = f"git status 失败: {err.strip()[:200]}"
+        return base
+    rc, diff, err = _run_git(wt, ["diff", "HEAD"])
+    if rc != 0:
+        base["reason"] = f"git diff 失败: {err.strip()[:200]}"
+        return base
+    truncated = len(diff) > MAX_DIFF_CHARS
+    base.update({"available": True, "stat": stat, "status": status_out,
+                 "diff": diff[:MAX_DIFF_CHARS], "diff_truncated": truncated})
+    return base
+
+
+# ── Bench 复核（🧪 Bench 页）：eval_suite/results_*.jsonl + 题目 YAML ──
+
+# bench 批次文件名白名单：results_*.jsonl，防路径穿越
+_BENCH_BATCH_RE = re.compile(r"^results_[A-Za-z0-9_.-]+\.jsonl$")
+MAX_TASK_FILE_CHARS = 512 * 1024  # 任务产物文本截断上限（~512KB）
+# 产物查看白名单：execution.log 在任务根目录，TASK.md/context.md 在 sub 目录下
+_TASK_FILE_WHITELIST = ("TASK.md", "context.md", "execution.log")
+
+
+def _eval_suite_dir() -> Path:
+    """eval_suite 目录定位（优先 cwd、回退仓库根，经组合层便于测试 patch）。"""
+    return Path(_root()._resolve_workspace_file("eval_suite"))
+
+
+def api_bench_result_files() -> dict:
+    """eval_suite/results_*.jsonl 批次列表（mtime 倒序），供 Bench 页批次下拉。"""
+    base = _eval_suite_dir()
+    items: list[dict[str, Any]] = []
+    if base.is_dir():
+        for p in base.glob("results_*.jsonl"):
+            if not p.is_file() or not _BENCH_BATCH_RE.match(p.name):
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            items.append({"name": p.name, "mtime": st.st_mtime, "size": st.st_size})
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"batches": items, "count": len(items)}
+
+
+def _load_bench_task_defs(suites: list) -> Optional[dict]:
+    """加载题目原文 YAML：eval_suite/<suite>_tasks/tasks/*.yaml，回退 eval_suite/tasks/*.yaml。
+
+    yaml 是 dev 依赖，runtime 可能缺失：返回 None 表示降级（页面照常渲染，
+    题目原文为空）。正常返回 dict：task_id → {task, difficulty, repo, verification}。
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+    base = _eval_suite_dir()
+    dirs = [base / f"{s}_tasks" / "tasks" for s in suites if s]
+    dirs.append(base / "tasks")  # 老批次 fallback（与 tools/gen_bench_review_index.py 同目录）
+    defs: dict[str, Any] = {}
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.yaml")):
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue  # 坏 yaml 跳过，不阻断整个批次
+            if not isinstance(data, dict) or not data.get("id"):
+                continue
+            defs.setdefault(str(data["id"]), {
+                "task": data.get("task", "") or "",
+                "difficulty": data.get("difficulty", "") or "",
+                "repo": data.get("repo", "") or "",
+                "verification": data.get("verification", []) or [],
+            })
+    return defs
+
+
+def api_bench_review(batch: str) -> Optional[dict]:
+    """单个 bench 批次的复核数据（🧪 Bench 页主体）。
+
+    batch 为结果文件名（results_*.jsonl；白名单正则 + 解析后路径仍须在
+    eval_suite 内，双重防穿越）；文件不存在返回 None（路由层 404）。
+    臂 = worker_backend+model 分组；任务按结果中出现顺序，run 按臂+repeat 排序。
+    """
+    if not batch or not _BENCH_BATCH_RE.match(batch):
+        return None
+    base = _eval_suite_dir()
+    path = (base / batch).resolve()
+    if base.resolve() not in path.parents:
+        return None
+    if not path.is_file():
+        return None
+    records = [r for r in _read_jsonl(path) if isinstance(r, dict)]
+
+    def _arm_label(r: dict) -> str:
+        return f"{r.get('worker_backend') or '?'} / {r.get('model') or '?'}"
+
+    # 臂汇总：按 worker_backend+model 分组
+    arms_map: dict[str, dict[str, Any]] = {}
+    for r in records:
+        label = _arm_label(r)
+        arm = arms_map.setdefault(label, {"label": label, "binary_pass": 0, "total": 0, "cost": 0.0})
+        arm["total"] += 1
+        if r.get("binary_pass"):
+            arm["binary_pass"] += 1
+        arm["cost"] += r.get("total_cost_usd") or 0
+    arms = sorted(arms_map.values(), key=lambda a: a["label"])
+    for a in arms:
+        a["cost"] = round(a["cost"], 4)
+
+    # 题目原文（yaml 缺失时 defs=None，页面降级显示空原文）
+    suites: list[str] = []
+    for r in records:
+        s = r.get("suite")
+        if s and s not in suites:
+            suites.append(s)
+    defs = _load_bench_task_defs(suites)
+
+    # 任务：按结果中出现顺序组织，run 归属 task_id
+    task_order: list[str] = []
+    first_rec: dict[str, dict] = {}
+    runs_by_task: dict[str, list] = {}
+    for r in records:
+        if not r.get("task_id"):
+            continue
+        tid = str(r["task_id"])
+        if tid not in runs_by_task:
+            task_order.append(tid)
+            first_rec[tid] = r
+            runs_by_task[tid] = []
+        task_dir = r.get("task_dir") or ""
+        runs_by_task[tid].append({
+            "repeat": r.get("repeat"),
+            "worker_backend": r.get("worker_backend") or "",
+            "model": r.get("model") or "",
+            "arm": _arm_label(r),
+            "binary_pass": r.get("binary_pass"),
+            "semantic_pass": r.get("semantic_pass"),
+            "kill_reason": r.get("kill_reason") or "",
+            "elapsed_sec": r.get("elapsed_sec"),
+            "total_cost_usd": r.get("total_cost_usd"),
+            "accepted_delivery": r.get("accepted_delivery"),
+            "agent_task_id": Path(task_dir).name if task_dir else "",
+            "task_dir_exists": bool(task_dir) and Path(task_dir).is_dir(),
+        })
+    tasks = []
+    for tid in task_order:
+        y = (defs or {}).get(tid, {})
+        runs = sorted(runs_by_task[tid],
+                      key=lambda x: (x["arm"], x["repeat"] if x["repeat"] is not None else 0))
+        tasks.append({
+            "task_id": tid,
+            "difficulty": first_rec[tid].get("difficulty") or y.get("difficulty") or "",
+            "task_text": y.get("task", ""),
+            "verification": y.get("verification", []),
+            "repo": y.get("repo", ""),
+            "runs": runs,
+        })
+    return {"batch": batch, "yaml_available": defs is not None,
+            "total_runs": len(records), "arms": arms, "tasks": tasks}
+
+
+def api_task_file(task_id: str, sub_id: str, name: str) -> Optional[dict]:
+    """任务产物文本查看：白名单 TASK.md/context.md/execution.log。
+
+    execution.log 在任务根目录（sub_id 传 "-" 或空，忽略）；TASK.md/context.md
+    在 sub 目录下。id 非法 / 任务不存在 / name 不在白名单 → None（路由层 404）；
+    文件不存在 → available=False（非 404）。内容超 512KB 截断 + truncated 标记。
+    """
+    if name not in _TASK_FILE_WHITELIST:
+        return None
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    if name == "execution.log":
+        path = td / name
+    else:
+        if not _valid_sub_id(sub_id):
+            return None
+        path = td / sub_id / name
+    base: dict[str, Any] = {"task_id": task_id, "subtask_id": sub_id, "name": name,
+                            "available": False, "content": "", "truncated": False, "size": 0}
+    if not path.is_file():
+        return base
+    try:
+        size = path.stat().st_size
+        with open(path, encoding="utf-8", errors="replace") as f:
+            content = f.read(MAX_TASK_FILE_CHARS + 1)
+    except OSError:
+        return base
+    truncated = len(content) > MAX_TASK_FILE_CHARS
+    base.update({"available": True, "content": content[:MAX_TASK_FILE_CHARS],
+                 "truncated": truncated, "size": size})
+    return base
+
+
+def api_delivery_diff(task_id: str) -> Optional[dict]:
+    """交付分支 diff（Bench 页「交付 diff」）：git diff <base_commit>..<delivery_branch>。
+
+    repo/base_commit/delivery_branch 取自 meta.json，缺任一 → available=False+reason
+    （非 404）；仅 task 不存在 / id 非法返回 None。repo 为 meta.json 中的本地路径，
+    只读 git diff（--stat + 全文，200KB 截断），风险可接受。
+    """
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    base: dict[str, Any] = {"task_id": task_id, "available": False, "reason": "",
+                            "repo": "", "base_commit": "", "delivery_branch": "",
+                            "stat": "", "diff": "", "diff_truncated": False}
+    meta = _task_meta(td)
+    repo = str(meta.get("repo") or "")
+    base_commit = str(meta.get("base_commit") or "")
+    branch = str(meta.get("delivery_branch") or "")
+    base.update({"repo": repo, "base_commit": base_commit, "delivery_branch": branch})
+    if not (repo and base_commit and branch):
+        base["reason"] = "meta.json 缺少 repo/base_commit/delivery_branch（非交付任务或旧格式）"
+        return base
+    repo_path = Path(repo)
+    if not repo_path.is_dir():
+        base["reason"] = f"repo 目录不存在: {repo}"
+        return base
+    rc, stat, err = _run_git(repo_path, ["diff", f"{base_commit}..{branch}", "--stat"])
+    if rc != 0:
+        base["reason"] = f"git diff --stat 失败: {err.strip()[:200]}"
+        return base
+    rc, diff, err = _run_git(repo_path, ["diff", f"{base_commit}..{branch}"])
+    if rc != 0:
+        base["reason"] = f"git diff 失败: {err.strip()[:200]}"
+        return base
+    truncated = len(diff) > MAX_DIFF_CHARS
+    base.update({"available": True, "stat": stat,
+                 "diff": diff[:MAX_DIFF_CHARS], "diff_truncated": truncated})
+    return base
 
 
 def api_audit(limit: int = 100) -> dict:
