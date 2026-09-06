@@ -406,11 +406,11 @@ L0 内容（system prompt + 工具定义）由客户端决定，代理只能「�
 
 ## 11. Phase 1 详细设计：LCP 边界检查点复用 + 驱逐治理
 
-> 状态：设计（v0.1，2026-09-06，基于 Phase 0 E1 实证 + rapid-mlx 0.12.12 源码核验）
-> 实现位置：`vllm_mlx/memory_cache.py`（引擎侧；homebrew Cellar venv 内，需 overlay/vendor 或上游 PR 路径）
+> 状态：**fetch 侧已实现**（2026-09-06，llama.cpp `9ae90c8`；补丁归档 `patches/vllm-mlx/0.12.12/`，开关 `PROXY_CACHE_LCP_SNAPDOWN` 默认关，无生产者故行为与补丁前逐字节一致）；生产侧（多边界捕获）待做
+> 实现位置：`vllm_mlx/memory_cache.py`（引擎侧；homebrew Cellar venv 内，补丁副本归档 llama.cpp 仓库）
 > 验收工具：`tools/phase0_cache_diag.py`（before/after 同口径）
 
-### 11.1 根因链（代码级实证）
+### 11.1 根因链（代码级实证，已核验至源码）
 
 | # | 环节 | 证据 |
 |---|------|------|
@@ -424,26 +424,33 @@ L0 内容（system prompt + 工具定义）由客户端决定，代理只能「�
 
 ### 11.2 机制：边界检查点 + LCP 降档（snap-down）
 
+**实测修正（2026-09-06，对 6,918 个 LCP 事件逐条量化，修正 v0.1 的两个错误假设）**：
+1. **中位发散点在请求的 81% 处**（非尾部）——理想 snap-down（B=LCP）后 LCP 路径仍需重算 3,825 万 tokens（均值 5,489/次），但对比现状 1.74 亿已是 **4.6×**
+2. **单边界检查点仅救 2.6%**——现有 boundary_snapshot 位置（条目末尾前 ~15 tokens 的 generation header 处）几乎总在发散点之后 → **多边界捕获是生产侧必做项**，不是优化项
+3. **检查点只需存线性态**——KV 层可 trim，fetch 时从条目数组直接切片；每检查点 MB 级 vs KV 条目 GB 级（内存开销 ~10% 量级），v0.1「检查点 ≈ KV@B」的内存估算作废
+
 **核心不变式**：`全注意力 KV 可 trim；线性递归态不可 trim 但可检查点。复用永远从检查点出发，绝不从条目末态回卷。`
 
-**Store 侧（改造 `store()`/条目结构）**：
-1. 每个条目除末态外，维护**边界检查点表** `{B_i → 全层状态快照}`（B_i 为消息边界 token 位置；快照 = KV 层 trim 至 B_i + ArraysCache 层在 B_i 处的递归态）
-2. 每条目保留最近 M 个检查点（默认 M=8，超限淘汰最旧），检查点内存 ≈ KV@B（不可避免）+ 线性态（每层 O(1)，可忽略）
-3. 快照必须不可变深拷贝（`mx.evaluate` 后隔离，复用路径现有 deepcopy 语义沿用）
+**Store 侧（已实现，`memory_cache.py`）**：
+1. 条目增加 `nontrim_layer_indices`（创建时算一次）+ `linear_checkpoints: {B → [nontrim 层状态快照]}`，检查点内存计入 `entry.memory_bytes`（驱逐核算诚实）
+2. `store(..., linear_checkpoints=)` 新 kwarg；`snapshot_linear_states(cache)` 模块级函数供 scheduler 在 prefill 跨越消息边界时捕获（递归态不可事后回卷，只能现场存）
+3. 快照 deepcopy 状态容器（防原地更新污染），MLX 数组不可变故引用共享安全
 
-**Fetch 侧（改造 LCP 分支 `memory_cache.py:2093-2141`）**：
+**Fetch 侧（已实现，LCP 分支 flag 门控）**：
 ```text
 现路径：LCP 候选 → 任一层 forbids_trim → 整条拒绝（现状，全量重算）
-新路径：LCP 候选 → 命中检查点表找 B ≤ LCP 的最大 B_i
-        → 返回 (快照@B_i, tokens[B_i:] 为 remaining)   # 降档复用
-        → 无可用检查点（B_1 > LCP）才整条放弃
+新路径：LCP 候选 → 检查点表找 B ≤ lcp 的最大 B_i
+        → _build_snapdown_view：KV 层 _trim_cache_offset 切片到 B_i
+          + 递归层 _restore_recurrent_layer 恢复检查点态
+        → 任一层失败 / 无 B ≤ lcp / 结构不一致 → 安全回退既有 MISS 路径
+        → 成功：match_type=lcp_snapdown，snapdown_hits/tokens_saved 进 stats
 ```
-- 重算成本从 `requested_len` 降为 `requested_len - B_i`——实测尾部发散（divergence 在最后一条消息内）时 B_i ≈ LCP - 一个消息长度，重算量从 41K → 数百 tokens
-- supersequence / prefix 路径**不动**（纯 append 已健康，E1 证实）
+- exact / supersequence / prefix 路径**零改动**（单元测试 T5 验证 prefix 路径含 boundary 条目场景不受影响；supersequence 对递归层的既有跳过是 issue #427 已知行为，非本补丁职责）
 
 **正确性约束（Gate A，一票否决）**：
 - 检查点复用 vs 全量 prefill，greedy 解码（temp=0）输出**逐 token 一致**（探针集 ≥10 个多轮上下文）
 - 已知理论风险：线性态累积误差在「检查点快照 → 续算」与「全量重算」两条路径间可能有浮点级差异——若 Gate A 出现 token 分歧，降级为「检查点仅用于 KV 层、线性层从 B_i 重算」（仍省 ~99% 算力，因线性层算力占比小）
+- 单元测试已覆盖机制层（15→7 项真实 mlx 层断言：flag 关逐字节一致、snap-down 命中、无候选/结构损坏回退、条目本体隔离）；**模型级 Gate A 待静默窗口**
 
 ### 11.3 驱逐治理（与 11.2 耦合，不可分开治）
 
@@ -485,12 +492,17 @@ E1 第二击穿源：5,207 次压力驱逐 / 8,412 条目（cache_max 7.7GB，�
 ### 11.7 实施顺序
 
 ```text
-P1a 边界检查点存储 + LCP snap-down（Gate A → Gate B1）   ~1 天
-P1b 段链去重 + 链感知驱逐（Gate B2）                      ~1 天
-P1c phase0 probe/probe-swa 静默窗口补跑（E2/E3 收尾）      0.5h（批跑结束后）
+P1a   fetch 侧消费基础（memory_cache.py）        ✅ 2026-09-06（llama.cpp 9ae90c8，flag 默认关）
+P1a.2 生产侧多边界捕获（request.py 边界列表 →
+      engine_core 透传 → scheduler insert_segments
+      N 段 + 每 end_of_segment 调 snapshot_linear_states
+      累积 → 全量 store 传入）                    下一个动工窗口
+P1a.3 Gate A 模型级验证 + 开 flag + phase0 复测   静默窗口（批跑结束后，~0.5h）
+P1b   段链去重 + 链感知驱逐（Gate B2）            ~1 天
+P1c   phase0 probe/probe-swa（E2/E3 收尾）        0.5h（与 P1a.3 同窗口）
 ```
 
-前置协调：llama.cpp 仓库当前有并行会话未提交改动（ctx_recall 区域，与 scheduler/cache 策略无交集），动工前对齐提交窗口。
+前置协调：已解除（llama.cpp 并行会话改动已各自提交；pre-commit 四层门禁全过：1634 单测 / 签名 / 行为快照 / Promptfoo shadow 5/5）。
 
 ---
 
