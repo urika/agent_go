@@ -59,13 +59,20 @@ metering.jsonl）；B 组 = A 组 + `trajectory/<sub>.jsonl`。判定标准：�
   编排事件——这正是阶段 2 TaskEvent 词汇（plan/decompose/subtask_start/…）的
   正面动机：轨迹补执行级，TaskEvent 补编排级。
 
-## 附带异常（登记，不在本评估下结论）
+## 附带异常（已定位修复，2026-09-06）
 
 - 批量中 add-format-helper / fix-missing-default 两条结果的 task_dir 指向
-  **2026-09-05 的旧任务目录**（task-20260905-153438-689-*，kill_reason=
-  cleanup_race、failure_class=timeout 但 binary_pass=True）——疑似 bench 复用了
-  昨日任务目录，且 fixture 当时已被污染（正确实现可能已存在），pass 真实性存疑。
-  需复查 bench 任务目录分配/去重逻辑。
+  **2026-09-05 的旧任务目录**（task-20260905-153438-689-*，binary_pass=True）。
+  **已确认为假阳性**（ISSUE-59）：两个 run 均在 PLAN 阶段被 cooperative timeout
+  SIGTERM 杀掉（subprocess_exit=-15，本次目录 task-20260906-120214-027-c487/8f37
+  无 meta.json），`bench._collect_result` 兜底全盘扫描按 meta.task 文本匹配到了
+  前一天同 golden 任务的成功目录，把旧结果计为本次通过。
+  修复：兜底扫描限定为运行启动后新建的目录（`exclude_dirs=_before_dirs`），
+  回归测试 tests/test_bench.py::test_collect_result_fallback_excludes_before_dirs。
+  这两条记录应从 adr010-p2-oczen 臂统计中剔除——剔除后该臂 binary_pass
+  实为 1/6（conditional-branching-datapipeline），非 3/6；另
+  implement-done-command 系 PWD 泄漏（ISSUE-58）的 no_changes 空通过，
+  已被语义评估正确判负（binary_pass=False）。
 
 ## 判定与后续
 
@@ -75,4 +82,4 @@ metering.jsonl）；B 组 = A 组 + `trajectory/<sub>.jsonl`。判定标准：�
 | 阶段 2 启动 | ✅ 背书通过——切入面收窄为 TaskEvent 骨架事件（规划级归因盲区） |
 | meta.json 投影化 | 维持 ADR 节奏（双写一个版本周期），不提前 |
 | per-attempt 轨迹命名 | 列入阶段 2/3 待办（失败 attempt 轨迹丢失问题） |
-| bench 目录复用异常 | 登记待查（见上） |
+| bench 目录复用异常 | ✅ 已定位修复（ISSUE-59，exclude_dirs 限定兜底扫描范围） |

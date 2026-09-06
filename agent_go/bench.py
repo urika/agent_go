@@ -856,7 +856,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     # explicit_merge_commit，evaluate_accepted_delivery 才能给出真实读数。
     if with_delivery and _resolved_td is not None:
         _apply_bench_delivery(_resolved_td, repo)
-    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch)  # type: ignore[return-value]
+    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch, exclude_dirs=_before_dirs)  # type: ignore[return-value]
 
 
 def _apply_bench_delivery(td: Path, repo: Path) -> None:
@@ -1168,7 +1168,8 @@ def _collect_result(task_id: str, model: str, elapsed: float,
                     exact_td: "Optional[Path]" = None,
                     expected_task: str = "",
                     timed_out: bool = False,
-                    source_batch: str = "") -> dict:
+                    source_batch: str = "",
+                    exclude_dirs: "Optional[set[Path]]" = None) -> dict:
     """从 agent_go 任务目录读 metering + meta，聚合为一条结果。
 
     exact_td: 精确任务目录（从子进程输出解析，优先）。
@@ -1176,6 +1177,9 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     expected_task: 期望任务描述，用于校验目录内容匹配（防止并发/残留错配）。
     timed_out: 任务是否因超时被强制终止（cooperative timeout 触发 SIGTERM/SIGKILL）。
     source_batch: 批次标识（如 baseline / smoke-*），用于跨批次追溯与全量对比。
+    exclude_dirs: 运行启动前已存在的目录快照——兜底全盘扫描时必须排除，
+        否则超时被杀、本次目录无 meta.json 的任务会错配到历史同名任务目录，
+        把旧批次结果计为本次通过（2026-09-06 adr010-p2-oczen 批量两条假阳性根因）。
     若都无法定位匹配目录则返回空数据记录（task_dir=""）。
     """
     td = exact_td if (exact_td and _dir_matches_task(exact_td, expected_task)) else None
@@ -1189,8 +1193,11 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         else:
             td = sorted(new_dirs, reverse=True)[0]
     if td is None and expected_task:
-        # 回退：全盘扫描 meta.task 匹配的最近目录（并发进程污染差集时的兜底）
+        # 回退：全盘扫描 meta.task 匹配的最近目录（并发进程污染差集时的兜底）。
+        # 限定为运行启动后新建的目录，防止错配历史同名任务目录（假阳性）。
         task_dirs = sorted(AGENT_GO_DIR.glob("task-*"), reverse=True)
+        if exclude_dirs is not None:
+            task_dirs = [d for d in task_dirs if d not in exclude_dirs]
         td = next((d for d in task_dirs if _dir_matches_task(d, expected_task)), None)
     elif td is None:
         # 兼容旧调用路径：按名称排序取最新

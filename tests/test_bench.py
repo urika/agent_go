@@ -116,6 +116,48 @@ def test_collect_result_fallback_scan(tmp_path, monkeypatch):
     assert str(good) == result["task_dir"]
 
 
+def test_collect_result_fallback_excludes_before_dirs(tmp_path, monkeypatch):
+    """exclude_dirs（运行启动前快照）内的历史同名目录不得被兜底扫描错配。
+
+    回归：2026-09-06 adr010-p2-oczen 批量——超时被 SIGTERM 杀在 PLAN 阶段，
+    本次目录无 meta.json，兜底扫描错配到前一天同 golden 任务的成功目录，
+    把旧结果计为本次通过（假阳性）。
+    """
+    from agent_go import bench
+    monkeypatch.setattr(bench, "AGENT_GO_DIR", tmp_path)
+    stale = tmp_path / "task-20260905-153438-689-c7c0"
+    _write_meta(stale, "Add truncate_text helper")
+    # 本次运行新建的目录（被杀在 PLAN 阶段，无 meta.json）
+    fresh_no_meta = tmp_path / "task-20260906-120214-027-c487"
+    fresh_no_meta.mkdir()
+    result = _collect_result(
+        "add-format-helper", "m", 10.0, -15, "",
+        new_dirs={fresh_no_meta}, exact_td=None,
+        expected_task="Add truncate_text helper", timed_out=True,
+        exclude_dirs={stale},
+    )
+    assert result["task_dir"] == ""
+    assert result["pass_rate"] == 0
+    assert result["binary_pass"] is False
+
+
+def test_collect_result_fallback_exclude_dirs_still_finds_fresh(tmp_path, monkeypatch):
+    """exclude_dirs 不排除运行后新建的匹配目录（并发污染差集时兜底仍生效）。"""
+    from agent_go import bench
+    monkeypatch.setattr(bench, "AGENT_GO_DIR", tmp_path)
+    stale = tmp_path / "task-20260905-153438-689-c7c0"
+    _write_meta(stale, "Add truncate_text helper")
+    fresh = tmp_path / "task-20260906-120214-027-c487"
+    _write_meta(fresh, "Add truncate_text helper")
+    result = _collect_result(
+        "add-format-helper", "m", 10.0, 0, "",
+        new_dirs=set(), exact_td=None,
+        expected_task="Add truncate_text helper",
+        exclude_dirs={stale},
+    )
+    assert str(fresh) == result["task_dir"]
+
+
 def _write_full_meta(td: Path, task: str, status: str, results: list) -> None:
     td.mkdir(parents=True, exist_ok=True)
     (td / "meta.json").write_text(json.dumps({

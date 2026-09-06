@@ -916,3 +916,31 @@ worktree 内，可观测但缺拦截）；②verification 增加 worktree 外写
 ③弱模型路由时收紧 allowed_tools。注意：agent_go 外侧无法直接拦截 CLI backend
 进程内的文件写——现实抓手是轨迹审计 + 事后检测。
 
+
+### ISSUE-59 bench 兜底扫描错配历史同名任务目录：超时 run 计为通过（假阳性）
+
+- **位置**：`bench._collect_result` 全盘扫描兜底分支
+- **状态**：✅ 已修复（2026-09-06，exclude_dirs 限定兜底范围 + 2 例回归测试）
+- **严重度**：P1（测量完整性：批量结果静默虚增通过率，直接污染模型对比结论）
+- **发现场景**：ADR-010 阶段 2 价值评估（opencode/Zen 免费臂 golden 6×1 批量，
+  docs/design/adr010-phase2-value-check.md「附带异常」小节登记后定位）。
+
+**问题**：run 在 PLAN 阶段被 cooperative timeout SIGTERM 杀掉时，本次任务目录
+已创建但无 meta.json（`exact_td` 解析与差集筛选均因 `_dir_matches_task` 失败而
+落空），`_collect_result` 兜底全盘扫描按 meta.task 文本匹配到**历史任意日期**的
+同 golden 任务成功目录，把旧批次的 completed/verify_ok 计为本次通过。实测
+adr010-p2-oczen 批量中 add-format-helper / fix-missing-default 两条「通过」
+（binary_pass=True、kill_reason=cleanup_race）实为 2026-09-05 dsh 臂旧目录数据，
+剔除后该臂 binary_pass 从 3/6 降为 1/6。
+
+**根因**：兜底分支（设计用于并发进程污染差集时找回本次目录）只校验任务描述
+文本匹配，未校验目录创建时间是否在本次运行启动之后；golden 任务描述跨批次
+不变，历史目录必然匹配。
+
+**修复**：`_collect_result` 新增 `exclude_dirs` 参数（调用点传入运行启动前的
+目录快照 `_before_dirs`），兜底扫描先排除快照内目录——历史目录永不错配，
+运行后新建的目录（并发污染差集场景）仍可被兜底找回。
+
+**测试**：tests/test_bench.py::test_collect_result_fallback_excludes_before_dirs
+（超时+无 meta 场景返回空记录）、::test_collect_result_fallback_exclude_dirs_still_finds_fresh
+（兜底对新建目录仍生效）。
