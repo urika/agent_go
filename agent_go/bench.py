@@ -427,6 +427,7 @@ def cmd_bench(args=None) -> None:
     suite = getattr(args, "bench_suite", "") or ""
     with_delivery = bool(getattr(args, "with_delivery", False))
     with_knowledge = bool(getattr(args, "with_knowledge", False))
+    fork_retry = bool(getattr(args, "fork_retry", False))
     worker_backend = getattr(args, "worker_backend", "") or ""
     bench_endpoint = getattr(args, "bench_endpoint", "") or ""
     bench_key_env = getattr(args, "bench_key_env", "") or ""
@@ -511,6 +512,7 @@ def cmd_bench(args=None) -> None:
                              hard_model=getattr(args, "hard_model", "") or "",
                              with_delivery=with_delivery,
                              with_knowledge=with_knowledge,
+                             fork_retry=fork_retry,
                              worker_backend=worker_backend,
                              bench_endpoint=bench_endpoint,
                              bench_key_env=bench_key_env)
@@ -529,6 +531,8 @@ def cmd_bench(args=None) -> None:
             _r2.setdefault("source_batch", source_batch)
             # C4 KnowledgeStore A/B：臂标记（True=注入臂 / False=对照臂）
             _r2.setdefault("knowledge_arm", with_knowledge)
+            # ADR-010 阶段 3 fork-retry A/B：臂标记
+            _r2.setdefault("fork_retry_arm", fork_retry)
             # B3/B5：backend 臂标记（"" = 默认 claude/agent_loop 解析）
             _r2.setdefault("worker_backend", worker_backend)
             _r2.setdefault("planner_model", "")
@@ -660,7 +664,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
                   preserve: bool = False, no_skills: bool = False,
                   source_batch: str = "", results_path: Optional[Path] = None,
                   hard_model: str = "", with_delivery: bool = False,
-                  with_knowledge: bool = False,
+                  with_knowledge: bool = False, fork_retry: bool = False,
                   worker_backend: str = "",
                   bench_endpoint: str = "", bench_key_env: str = "") -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
@@ -782,6 +786,11 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
             config["knowledge"] = {"enabled": True, "max_items": 3,
                                    "suppressed_ids": [],
                                    "resolution_llm": True, "snapshot": True}
+        # --fork-retry：ADR-010 阶段 3 A/B 注入臂——修复重试续跑 backend 会话
+        # （仅对 supports_fork_retry 的 backend 生效；对照臂不加此 flag）。
+        # 放在 verification 继承之后，确保覆盖用户 config 的同名字段。
+        if fork_retry:
+            config.setdefault("verification", {})["fork_retry"] = True
         # --worker-backend：B3/B5 显式 worker backend（如 pi），
         # agent_go run 子进程内由 resolve_backend_name 分发（含修复路径）
         if worker_backend:

@@ -1109,6 +1109,40 @@ def test_cmd_bench_orchestrates_tasks_models_repeat(tmp_path):
         assert "repeat" in rec
 
 
+def test_cmd_bench_fork_retry_threading(tmp_path):
+    """ADR-010 阶段 3：--fork-retry 透传到 _run_one_task 且记录带臂标记。"""
+    import argparse
+    from agent_go.bench import cmd_bench
+
+    tasks_dir = tmp_path / "eval_suite"
+    (tasks_dir / "tasks").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tasks_dir / "tasks" / "t1.yaml").write_text(
+        f"id: t1\nrepo: {repo}\ntask: do task 1\nverification: ['true']\n",
+        encoding="utf-8")
+
+    out = tmp_path / "results.jsonl"
+    captured = {}
+
+    def _fake_run_one_task(task, _repo, model, task_id, **kw):
+        captured.update(kw)
+        return {"task_id": task_id, "model": model, "binary_pass": True, "per_subtask": []}
+
+    args = argparse.Namespace(
+        tasks=str(tasks_dir), candidate_models="m1", repeat=1,
+        output=str(out), source_batch="bench", no_skills=False,
+        yes=True, eval_all=False, fork_retry=True)
+
+    with patch("agent_go.bench._run_one_task", side_effect=_fake_run_one_task), \
+         patch("agent_go.bench._preflight_model_pricing", return_value=True):
+        cmd_bench(args)
+
+    assert captured.get("fork_retry") is True
+    rec = json.loads(out.read_text(encoding="utf-8").strip().split("\n")[0])
+    assert rec["fork_retry_arm"] is True
+
+
 def test_cmd_bench_no_models_errors(tmp_path):
     """CR-G6：未指定 --candidate-models → 报错 sys.exit。"""
     import argparse
