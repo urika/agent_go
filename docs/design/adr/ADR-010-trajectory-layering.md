@@ -131,6 +131,11 @@ settings.json `env` 块会被静默忽略，须真实环境变量注入）。由
   续跑修复（省冷启动重新探索 token）；默认关闭保测量口径。dsh 不做：pinned
   0.1.2-rc.1 的 headless profile 无 resume/fork 原语（仅 tui profile 有
   `--resume`），待 dsh 后续版本再评估。
+  **A/B 实证（2026-09-06，[adr010-phase3-forkretry-ab](../adr010-phase3-forkretry-ab.md)）**：
+  golden 6×1 注入臂 6/6 全过但零重试——续跑路径未触发，臂间差异由 ISSUE-58
+  PWD 修复解释（对照臂 2/6 含三个 PWD 泄漏失败模式）；`--session` 原语经
+  独立冒烟验证（同会话续跑 + 上下文保留回答正确）。token 节省量级待有重试
+  的批量实证。
 
 **明确不做**：代理层不建会话状态；不复制 dsh 完整事件溯源（agent_go 不管模型
 上下文，无需从日志重建 LLM 历史）；不自建轨迹重放执行（fork-retry 已覆盖主要
