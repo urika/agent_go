@@ -11,6 +11,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_probe_caches(tmp_path, monkeypatch):
+    """探测 TTL 缓存隔离（2026-09-06 probe 洪泛修复配套）。
+
+    executor 探测缓存新增文件层（~/.agent_go/probe_cache.json，跨进程共享）——
+    测试必须与真实文件隔离，否则开发机上真实探测结果会让 mock 测试假通过/假失败。
+    每个测试：文件层指向 tmp_path，内存层清空。
+    """
+    from agent_go import executor as _ex
+    monkeypatch.setattr(_ex, "_PROBE_CACHE_PATH", tmp_path / "probe_cache.json")
+    _ex._local_model_probe_cache.clear()
+    _ex._route_attr_cache.clear()
+    _ex._local_verify_cache.clear()
+
+
 @pytest.fixture
 def logger():
     """返回一个只写 DEBUG 级别的内存 logger，不产生文件输出。"""

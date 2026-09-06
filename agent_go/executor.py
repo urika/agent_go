@@ -96,8 +96,9 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
     if not base_url:
         return ""
     key = base_url.rstrip("/")
-    if key in _local_model_probe_cache:
-        return _local_model_probe_cache[key]
+    _hit = _probe_lookup(_local_model_probe_cache, "model", key)
+    if _hit is not None:
+        return str(_hit)
     model = ""
     # 1. 结构化路径：/api/status JSON → backend.model_name（fail-open）
     _status = diag.fetch_json(key, "/api/status", timeout)
@@ -129,18 +130,98 @@ def _probe_local_model(base_url: str, timeout: float = 2.0) -> str:
                 model = m.group(1).strip()
         except Exception:
             model = ""
-    if model:
-        _local_model_probe_cache[key] = model
+    # 成功长 TTL（SIGHUP 切换后窗口自愈）；失败也写（短 TTL 退避，防 /status 重发洪泛）
+    _probe_store(_local_model_probe_cache, "model", key, model, bool(model))
     return model
 
 
 # 本地后端验证缓存：base_url → (is_really_local, actual_model)。
-# 探测调用有真实 API 成本，缓存避免每子任务重复探测（代理热切换 SIGHUP 时
-# 用 _local_model_probe_cache 的失效逻辑兜底——成功结果缓存，失败不缓存可重试）。
+# 探测调用有真实 API 成本，缓存避免每子任务重复探测。
 _local_verify_cache: dict[str, tuple[bool, str]] = {}
 
 # R8 路由归因探测缓存：base_url+routed_model → (route_target, route_actual_model, reason)。
 _route_attr_cache: dict[str, tuple[str, str, str]] = {}
+
+# ── 探测 TTL 缓存（2026-09-06 probe 洪泛修复）──────────────────────────────
+# 原机制「进程内 dict + 仅成功缓存」有两个洪泛放大器（实测 1525 次/小时，每 ~3.5s 一发）：
+#   ① 失败不缓存 → 代理忙（大请求占满 --max-num-seqs 1 的唯一 slot）时探测失败/超时，
+#      下一次调用立即重发 POST——洪泛与被测对象（rep1 实验）互相踩踏，甚至挤死并行任务；
+#   ② 进程内缓存对多进程无效 → web 派发/批跑每个任务一个新进程，各自冷启动探测。
+# 修复：双层 TTL——内存 dict（进程内快路径）+ 文件（跨进程共享 ~/.agent_go/probe_cache.json）。
+# 成功长 TTL（代理 SIGHUP 热切换后最多 TTL 窗口自愈），失败短 TTL（退避，消灭重发洪泛）。
+_PROBE_TTL_OK_SEC = 300.0
+_PROBE_TTL_FAIL_SEC = 60.0
+_PROBE_CACHE_PATH = Path.home() / ".agent_go" / "probe_cache.json"
+_probe_cache_lock = threading.Lock()
+
+
+def _probe_cache_file_get(kind: str, key: str) -> Optional[tuple]:
+    """文件层读取。命中返回 (value, ok, ts)；无/过期/损坏返回 None（fail-open）。"""
+    try:
+        raw = json.loads(_PROBE_CACHE_PATH.read_text())
+        entry = (raw.get("entries") or {}).get(f"{kind}|{key}")
+        if not isinstance(entry, dict) or not isinstance(entry.get("v"), list):
+            return None
+        ttl = _PROBE_TTL_OK_SEC if entry.get("ok") else _PROBE_TTL_FAIL_SEC
+        if time.time() - float(entry.get("ts") or 0) >= ttl:
+            return None
+        return (tuple(entry["v"]), bool(entry.get("ok")), float(entry.get("ts") or 0))
+    except Exception:
+        return None
+
+
+def _probe_cache_file_put(kind: str, key: str, value: tuple, ok: bool) -> None:
+    """文件层写入（per-pid 临时文件 + 原子替换；跨进程并发 last-writer-wins 可接受）。"""
+    try:
+        with _probe_cache_lock:
+            path = _PROBE_CACHE_PATH
+            try:
+                raw = json.loads(path.read_text()) if path.exists() else {}
+            except Exception:
+                raw = {}
+            entries = raw.get("entries") if isinstance(raw, dict) and isinstance(raw.get("entries"), dict) else {}
+            entries[f"{kind}|{key}"] = {"v": list(value), "ok": bool(ok), "ts": time.time()}
+            if len(entries) > 512:  # 体积护栏：探测键空间小，正常到不了；超限丢最旧一半
+                entries = dict(sorted(
+                    entries.items(),
+                    key=lambda kv: float((kv[1] or {}).get("ts") or 0) if isinstance(kv[1], dict) else 0.0,
+                )[-256:])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"schema": 1, "entries": entries}))
+            os.replace(tmp, path)
+    except Exception:
+        pass  # 缓存写失败不影响探测主路径
+
+
+def _probe_lookup(cache: dict, kind: str, key: str) -> Optional[tuple]:
+    """双层缓存读取：内存 → 文件（命中回填内存）。未命中/过期返回 None。
+
+    内存条目两种形态：(value, ok, ts)（_probe_store 写入）或裸 value tuple
+    （测试播种/旧形态）——裸形态视为有效命中（不判 TTL），播种语义不变。
+    """
+    entry = cache.get(key)
+    if entry is not None:
+        if (isinstance(entry, tuple) and len(entry) == 3
+                and isinstance(entry[1], bool) and isinstance(entry[2], (int, float))):
+            _val, ok, ts = entry
+            if time.time() - ts < (_PROBE_TTL_OK_SEC if ok else _PROBE_TTL_FAIL_SEC):
+                return entry[0]
+            cache.pop(key, None)  # 过期淘汰，走文件层/重探
+        else:
+            return entry
+    fentry = _probe_cache_file_get(kind, key)
+    if fentry is not None:
+        cache[key] = fentry
+        return fentry[0]
+    return None
+
+
+def _probe_store(cache: dict, kind: str, key: str, value: tuple, ok: bool) -> None:
+    """双层写入：内存 + 文件。失败结果也写（短 TTL 退避）——这是洪泛修复的核心。"""
+    entry = (value, ok, time.time())
+    cache[key] = entry
+    _probe_cache_file_put(kind, key, value, ok)
 
 
 def _start_diag_watchdog(config, env, task_id, sub_id, logger):
@@ -221,8 +302,9 @@ def _probe_route_attribution(base_url: str, routed_model: str = "",
     if not base_url:
         return ("", "", "")
     key = base_url.rstrip("/") + "|" + (routed_model or "")
-    if key in _route_attr_cache:
-        return _route_attr_cache[key]
+    _hit = _probe_lookup(_route_attr_cache, "route", key)
+    if _hit is not None:
+        return _hit
     target = actual = reason = ""
     try:
         import urllib.request as _urlreq
@@ -247,8 +329,9 @@ def _probe_route_attribution(base_url: str, routed_model: str = "",
             resp.read(256)
     except Exception:
         pass
-    if target:
-        _route_attr_cache[key] = (target, actual, reason)
+    # 失败/无 R8 头也按短 TTL 缓存（退避）：代理忙时不再每调用一发 POST（洪泛修复核心）。
+    # 旧代理无 R8 → 60s 后重试而非每次调用重试，兼容路径仍可恢复。
+    _probe_store(_route_attr_cache, "route", key, (target, actual, reason), bool(target))
     return (target, actual, reason)
 
 
@@ -274,8 +357,9 @@ def _verify_local_backend(base_url: str, timeout: float = 15.0,
     if not base_url:
         return (False, "")
     key = base_url.rstrip("/")
-    if key in _local_verify_cache:
-        return _local_verify_cache[key]
+    _hit = _probe_lookup(_local_verify_cache, "verify", key)
+    if _hit is not None:
+        return _hit
 
     # R8 路由归因优先（llama.cpp R8）：force_fallback 模型（opus-4-7 等）按 URL/status
     # 会误判 local（/status 声明本地模型但实际走云端）。route_target 是代理真实路由
@@ -284,7 +368,8 @@ def _verify_local_backend(base_url: str, timeout: float = 15.0,
     if _rt:
         _is_local_r8 = (_rt == "local")
         _result_r8 = (_is_local_r8, _ra or _probe_local_model(base_url, timeout=3.0))
-        _local_verify_cache[key] = _result_r8
+        # R8 应答 = 确定性归因（含判云结果）→ 长 TTL；与 route 层缓存口径一致
+        _probe_store(_local_verify_cache, "verify", key, _result_r8, True)
         return _result_r8
 
     # 1. /status 声明（可靠，HTTP 快速）
@@ -333,7 +418,9 @@ def _verify_local_backend(base_url: str, timeout: float = 15.0,
             pass  # 探测失败 → 维持 /status 判定
 
     _result = (_is_local, _actual)
-    _local_verify_cache[key] = _result
+    # 拿到真实模型名（无论判本地还是判云）= 成功判定 → 长 TTL；
+    # (False, "") 判定失败 → 短 TTL 退避，防失败重发洪泛
+    _probe_store(_local_verify_cache, "verify", key, _result, bool(_actual))
     return _result
 
 
