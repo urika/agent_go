@@ -406,7 +406,7 @@ L0 内容（system prompt + 工具定义）由客户端决定，代理只能「�
 
 ## 11. Phase 1 详细设计：LCP 边界检查点复用 + 驱逐治理
 
-> 状态：**fetch 侧（P1a）+ 生产侧（P1a.2）均已实现**（2026-09-06，llama.cpp `9ae90c8` + `d87b3f7`；补丁归档 `patches/vllm-mlx/0.12.12/` 共 5 文件，开关 `PROXY_CACHE_LCP_SNAPDOWN` 默认关=行为与补丁前逐字节一致）。剩余：Gate A 模型级验证 + 开 flag + phase0 复测（静默窗口）
+> 状态：**P1a 全链路已上线**（2026-09-06，llama.cpp `9ae90c8` + `d87b3f7` + `b77f643`；开关 `PROXY_CACHE_LCP_SNAPDOWN=1` 已进生产 conf）。**Gate A PASS**：模型级逐 token 一致，snap 9.4s vs cold 279.0s（**29.7×**），单请求复用 97.1%。剩余：真实负载 phase0 复测（Gate B1）、P1b 段链去重、E2/E3 探针（静默窗口被并行实验流量占用，活跃守卫正确拦截推迟）
 > 实现位置：`vllm_mlx/memory_cache.py`（引擎侧；homebrew Cellar venv 内，补丁副本归档 llama.cpp 仓库）
 > 验收工具：`tools/phase0_cache_diag.py`（before/after 同口径）
 
@@ -500,9 +500,16 @@ P1a.2 生产侧多边界捕获                           ✅ 2026-09-06（llama.
       纯函数：去重/间距/limit 尾部优先）→ scheduler
       N 段 insert_segments + 每 end_of_segment 现场
       snapshot_linear_states 累积（M=8）→ 全量 store 挂载
-P1a.3 Gate A 模型级验证 + 开 flag + phase0 复测   静默窗口（批跑结束后，~0.5h）
+P1a.3 Gate A 模型级验证 + 开 flag                ✅ 2026-09-06（llama.cpp b77f643）
+      调试中修复三处：模板 assistant 标记导致严格守卫
+      全空（放宽——正确性由 B ≤ lcp 不变式保证）/
+      LCP 扫描窗口 ±4 + 检查点候选优先（多会话混缓存
+      下带检查点条目未必是 bisect 紧邻）/ 边界条目挂载
+      Gate A PASS：B=13848 reused 97.1%，snap 9.4s vs
+      cold 279.0s（29.7×），输出逐字一致
 P1b   段链去重 + 链感知驱逐（Gate B2）            ~1 天
-P1c   phase0 probe/probe-swa（E2/E3 收尾）        0.5h（与 P1a.3 同窗口）
+P1c   phase0 复测（Gate B1）+ E2/E3 探针          下个静默窗口
+      （E2/E3 曾因并行实验流量回归推迟——活跃守卫生效）
 ```
 
 前置协调：已解除（llama.cpp 并行会话改动已各自提交；pre-commit 四层门禁全过：1634 单测 / 签名 / 行为快照 / Promptfoo shadow 5/5）。
