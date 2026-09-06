@@ -43,6 +43,10 @@ class BackendContext:
     # 进度展示开关：False 时 ClaudeBackend headless 路径不起 ticker 线程、
     # 不打印结束行（修复路径保持控制台安静的既有行为）。
     progress: bool = True
+    # ADR-010 阶段 3 fork-retry：非空时 backend 续跑该会话（而非冷启动新会话）。
+    # 由 dispatch.run_repair 在 config verification.fork_retry 启用且 backend
+    # 支持时注入；不支持的 backend 忽略此字段（冷启动行为不变）。
+    resume_session: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -65,6 +69,11 @@ class BaseBackend(ABC):
     """
 
     name: ClassVar[str] = ""
+
+    # ADR-010 阶段 3：backend 是否支持 fork-retry（续跑上次会话做修复，
+    # 省冷启动重新探索的 token）。支持的 backend 需同时实现 load_resume_session
+    # 并在 run() 中消费 ctx.resume_session。
+    supports_fork_retry: ClassVar[bool] = False
 
     @classmethod
     def available(cls) -> bool:
@@ -92,3 +101,12 @@ class BaseBackend(ABC):
         - 默认返回 []（无轨迹源的 backend 无需覆盖）。
         """
         return []
+
+    def load_resume_session(self, ctx: BackendContext) -> str:
+        """可选钩子（ADR-010 阶段 3 fork-retry）：读取上次执行持久化的会话 id。
+
+        供 dispatch.run_repair 在 verification.fork_retry 启用时注入
+        ctx.resume_session。契约同 harvest_trajectory：fail-open 返回 ""，
+        不支持的 backend 无需覆盖。
+        """
+        return ""

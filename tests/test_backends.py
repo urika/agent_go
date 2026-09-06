@@ -342,6 +342,84 @@ class TestRunRepair:
         assert res.returncode == 0
         assert calls == ["pi", "claude"]
 
+    # ── ADR-010 阶段 3 fork-retry：verification.fork_retry 启用且 backend 支持时续跑会话 ──
+
+    def test_fork_retry_injects_resume_session(self, tmp_path, null_logger):
+        calls = []
+
+        class FakeOc(BaseBackend):
+            name = "opencode"
+            supports_fork_retry = True
+
+            def load_resume_session(self, ctx):
+                return "ses-abc"
+
+            def run(self, ctx):
+                calls.append(ctx.resume_session)
+                return SubtaskResult(returncode=0, sandbox_type="opencode")
+
+        cfg = {"worker_backend": "opencode", "verification": {"fork_retry": True}}
+        with patch("agent_go.backends.dispatch.BackendRegistry.get", return_value=FakeOc):
+            res = run_repair(self._ctx(tmp_path, null_logger, config=cfg), is_simple=False)
+        assert res.returncode == 0
+        assert calls == ["ses-abc"]
+
+    def test_fork_retry_default_off(self, tmp_path, null_logger):
+        """默认关闭：即使 backend 支持且有会话可续，也不注入 resume_session。"""
+        calls = []
+
+        class FakeOc(BaseBackend):
+            name = "opencode"
+            supports_fork_retry = True
+
+            def load_resume_session(self, ctx):
+                return "ses-abc"
+
+            def run(self, ctx):
+                calls.append(ctx.resume_session)
+                return SubtaskResult(returncode=0, sandbox_type="opencode")
+
+        cfg = {"worker_backend": "opencode"}
+        with patch("agent_go.backends.dispatch.BackendRegistry.get", return_value=FakeOc):
+            run_repair(self._ctx(tmp_path, null_logger, config=cfg), is_simple=False)
+        assert calls == [""]
+
+    def test_fork_retry_unsupported_backend_ignored(self, tmp_path, null_logger):
+        """backend 未声明 supports_fork_retry（如 claude）时不注入。"""
+        calls = []
+
+        class FakeClaude(BaseBackend):
+            name = "claude"
+
+            def run(self, ctx):
+                calls.append(ctx.resume_session)
+                return SubtaskResult(returncode=0)
+
+        cfg = {"verification": {"fork_retry": True}}
+        with patch("agent_go.backends.dispatch.BackendRegistry.get", return_value=FakeClaude):
+            run_repair(self._ctx(tmp_path, null_logger, config=cfg), is_simple=True)
+        assert calls == [""]
+
+    def test_fork_retry_no_session_cold_start(self, tmp_path, null_logger):
+        """启用且支持但未捕获到会话（load 返回空）→ 冷启动，不注入。"""
+        calls = []
+
+        class FakeOc(BaseBackend):
+            name = "opencode"
+            supports_fork_retry = True
+
+            def load_resume_session(self, ctx):
+                return ""
+
+            def run(self, ctx):
+                calls.append(ctx.resume_session)
+                return SubtaskResult(returncode=0, sandbox_type="opencode")
+
+        cfg = {"worker_backend": "opencode", "verification": {"fork_retry": True}}
+        with patch("agent_go.backends.dispatch.BackendRegistry.get", return_value=FakeOc):
+            run_repair(self._ctx(tmp_path, null_logger, config=cfg), is_simple=False)
+        assert calls == [""]
+
 
 class TestClaudeBackendProgress:
     """progress=False（修复路径）保持控制台安静：不起 ticker 线程。"""
@@ -749,6 +827,48 @@ class TestOpenCodeBackend:
             res = OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
         assert res.returncode == 127
         assert "opencode" in res.stderr
+
+    # ── ADR-010 阶段 3 fork-retry：--session 续跑 + sessionID 捕获 ──
+
+    def test_resume_session_adds_session_flag(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        proc = _mock_popen(stdout=_oc_success_stream())
+        ctx = self._ctx(tmp_path, null_logger, progress=False, resume_session="ses-abc")
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            OpenCodeBackend().run(ctx)
+        cmd = mock_popen.call_args.args[0]
+        i = cmd.index("--session")
+        assert cmd[i + 1] == "ses-abc"
+        # 任务文本仍是最后一个参数（修复 prompt 作为新消息追加）
+        assert cmd[-1].startswith("# 任务")
+
+    def test_no_resume_no_session_flag(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        proc = _mock_popen(stdout=_oc_success_stream())
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc) as mock_popen:
+            OpenCodeBackend().run(self._ctx(tmp_path, null_logger, progress=False))
+        assert "--session" not in mock_popen.call_args.args[0]
+
+    def test_session_id_persisted_and_loadable(self, tmp_path, null_logger):
+        """run() 从事件流提取 sessionID 落盘；load_resume_session 读回（fork-retry 闭环）。"""
+        from agent_go.backends.opencode_backend import SESSION_FILENAME, OpenCodeBackend
+        proc = _mock_popen(stdout=_oc_success_stream())
+        # worktree 用 tmp_path/work 子目录：session 文件落盘在 tmp_path（隔离其他测试）
+        ctx = self._ctx(tmp_path / "work", null_logger, progress=False)
+        backend = OpenCodeBackend()
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            backend.run(ctx)
+        # _oc_success_stream 的 sessionID = ses-1；落盘在 worktree 同级
+        assert (tmp_path / SESSION_FILENAME).read_text() == "ses-1"
+        assert backend.load_resume_session(ctx) == "ses-1"
+
+    def test_load_resume_session_missing_file(self, tmp_path, null_logger):
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        assert OpenCodeBackend().load_resume_session(
+            self._ctx(tmp_path / "work", null_logger)) == ""
 
     def test_malformed_lines_tolerated(self, tmp_path, null_logger):
         from agent_go.backends.opencode_backend import OpenCodeBackend

@@ -52,6 +52,10 @@ DEFAULT_CONFIG = {
         "block_on_failure": True,       # 验证失败是否阻断下游依赖（--no-verify-block 可关）
         "diverge_similarity_threshold": 0.3,  # 打地鼠检测：连续两次语义评估缺陷指纹相似度低于此值 → 提前终止重试
         "revert_threshold": 2,          # 回退/振荡检测：同一 worktree 累积 diff 状态出现次数 ≥ 此值 → 判定循环振荡终止
+        # ADR-010 阶段 3 fork-retry：验证失败的修复重试续跑 backend 上次会话
+        # （省冷启动重新探索 token），而非全新会话注入失败上下文。仅对声明
+        # supports_fork_retry 的 backend 生效（当前 opencode）；默认关闭保测量口径。
+        "fork_retry": False,
         # C3 局部重规划（PRD F-VERIFY-6 受控策略升级）：无进展（verify_revert/
         # divergence/失败模式重复）时生成一次 Plan 拆分建议。契约：最多一次、
         # 继承父预算（同一 sub_id 计量，L2 上限继续约束）、默认人工确认、

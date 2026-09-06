@@ -44,6 +44,7 @@
     },
     "diverge_similarity_threshold": 0.3,
     "revert_threshold": 2,
+    "fork_retry": false,
     "readonly_review": {
       "enabled": false,
       "threshold": 2,

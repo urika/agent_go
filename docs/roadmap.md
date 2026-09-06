@@ -717,7 +717,10 @@ events.py 编排级事件日志 + executor/cli/pipeline 埋点 + per-attempt 轨
 meta.json 投影化维持双写节奏，replay/recover 迁移暂缓）→
 阶段 3 fork-retry / 轨迹归因 / 三层关联（按需；**轨迹归因已落地** 2026-09-06：
 trajectory_signals.py 提取 path_violations=ISSUE-58 隔离绕过/repeated_edits 等信号，
-入 meta results + subtask_end 事件 + 排障页归因横幅，不改 pass/fail 判定）。
+入 meta results + subtask_end 事件 + 排障页归因横幅，不改 pass/fail 判定；
+**fork-retry opencode 臂已落地** 2026-09-06：`verification.fork_retry=true` 时
+修复重试经 `--session` 续跑上次会话（sessionID 从事件流捕获落盘），默认关闭；
+dsh headless 0.1.2-rc.1 无 resume 原语不做）。
 另：ISSUE-59 bench 兜底扫描错配历史同名目录假阳性已修复（exclude_dirs，2026-09-06）。
 详见 [ADR-010](design/adr/ADR-010-trajectory-layering.md)。
 

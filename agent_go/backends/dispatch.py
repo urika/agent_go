@@ -47,6 +47,22 @@ def run_repair(ctx: BackendContext, is_simple: bool) -> SubtaskResult:
     # 从 ctx 合成 subtask 视图；显式 subtask.backend 在修复路径不存在，不影响）。
     _sub_view = {"agent_type": ctx.agent_type, "difficulty": ctx.difficulty}
     backend_name = resolve_backend_name(ctx.config, _sub_view, ctx.headless, is_simple)
+
+    # ADR-010 阶段 3 fork-retry：verification.fork_retry 启用且 backend 支持时，
+    # 续跑上次会话做修复（模型保留首次探索上下文，省冷启动重读 token）。
+    # fail-open：任何环节失败都按冷启动原流程走，绝不影响修复执行。
+    if (ctx.config or {}).get("verification", {}).get("fork_retry", False):
+        try:
+            _backend = BackendRegistry.get(backend_name)()
+            if _backend.supports_fork_retry:
+                _sid = _backend.load_resume_session(ctx)
+                if _sid:
+                    ctx.resume_session = _sid
+                    ctx.logger.info(
+                        f"[fork-retry] {ctx.sub_id} 续跑会话 {_sid[:24]}（backend={backend_name}）")
+        except Exception as _fr_err:
+            ctx.logger.debug(f"[fork-retry] 会话注入失败，按冷启动继续（忽略）: {_fr_err}")
+
     if backend_name != "claude":
         # 非默认 backend（agent_loop / 显式声明的 pi 等）：执行失败时回退 claude
         try:

@@ -51,6 +51,10 @@ OPENCODE_READONLY_AGENT = "plan"
 # run() 落盘的原始事件流文件名（worktree 同级，即 subtask 目录下）。
 EVENTS_FILENAME = "opencode_events.ndjson"
 
+# fork-retry（ADR-010 阶段 3）：run() 每次执行后把事件流中的 sessionID 落盘到
+# worktree 同级该文件，供修复重试续跑（opencode run --session <id>）。
+SESSION_FILENAME = "opencode_session_id"
+
 
 def _parse_events(lines: list) -> dict:
     """解析 opencode NDJSON 事件流，聚合最终结果与用量。
@@ -207,6 +211,15 @@ class OpenCodeBackend(BaseBackend):
     """
 
     name = "opencode"
+    supports_fork_retry = True
+
+    def load_resume_session(self, ctx: BackendContext) -> str:
+        """读取上次 run() 落盘的 sessionID（fail-open：缺文件/空文件 → ""）。"""
+        try:
+            path = Path(ctx.worktree).parent / SESSION_FILENAME
+            return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+        except OSError:
+            return ""
 
     @staticmethod
     def _env_with_snapshot_off(ctx: BackendContext) -> tuple:
@@ -251,9 +264,15 @@ class OpenCodeBackend(BaseBackend):
             cmd += ["--agent", OPENCODE_READONLY_AGENT]
         if ctx.routed_model:
             cmd += ["-m", ctx.routed_model]
+        # fork-retry（ADR-010 阶段 3）：续跑上次会话——模型保留首次探索的上下文，
+        # 修复指令（ctx.task_md 含验证失败详情）作为新消息追加，省冷启动重读 token。
+        if ctx.resume_session:
+            cmd += ["--session", ctx.resume_session]
         cmd.append(ctx.task_md)
 
-        ctx.logger.info(f"[OpenCodeBackend] {ctx.sub_id} 启动 opencode (model={ctx.routed_model or 'default'})")
+        ctx.logger.info(
+            f"[OpenCodeBackend] {ctx.sub_id} 启动 opencode (model={ctx.routed_model or 'default'}"
+            f"{', resume=' + ctx.resume_session[:24] if ctx.resume_session else ''})")
 
         # 禁用 opencode snapshot：其影子仓库按 base commit 全局共享（~/.local/share/
         # opencode/snapshot/<commit>/），agent_go 每个 worktree 都从同一 base commit
@@ -299,6 +318,7 @@ class OpenCodeBackend(BaseBackend):
 
         elapsed = time.time() - start
         self._persist_events(ctx, stdout or "")
+        self._persist_session_id(ctx, stdout or "")
         parsed = _parse_events((stdout or "").splitlines())
 
         # 零产出（无 tokens/工具调用/最终文本）的退出 0 必须显式映射为失败，
@@ -374,6 +394,30 @@ class OpenCodeBackend(BaseBackend):
             path.write_text(stdout, encoding="utf-8")
         except Exception as exc:
             ctx.logger.warning(f"[OpenCodeBackend] {ctx.sub_id} 事件流落盘失败（忽略）: {exc}")
+
+    @staticmethod
+    def _persist_session_id(ctx: BackendContext, stdout: str) -> None:
+        """从事件流提取 sessionID 落盘（worktree 同级），供 fork-retry 续跑。
+
+        每条 opencode 事件都带 sessionID，取第一条即可；续跑（--session）产生的
+        新事件流仍是同一会话，幂等覆盖。fail-open：提取/写失败仅 debug。
+        """
+        try:
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                sid = event.get("sessionID", "")
+                if sid:
+                    path = Path(ctx.worktree).parent / SESSION_FILENAME
+                    path.write_text(sid, encoding="utf-8")
+                    return
+        except Exception as exc:
+            ctx.logger.debug(f"[OpenCodeBackend] {ctx.sub_id} sessionID 落盘失败（忽略）: {exc}")
 
     def harvest_trajectory(self, ctx: BackendContext, result: SubtaskResult) -> list:
         """ADR-010 阶段 1 第二数据源：读取 run() 落盘的 opencode 事件流，

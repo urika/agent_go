@@ -103,6 +103,7 @@ Plan 生成专用 API 配置。非空时**完全覆盖** `plan_api`（Planner �
 | `block_on_failure` | bool | `true` | 验证失败时阻止下游子任务 |
 | `diverge_similarity_threshold` | float | `0.3` | 打地鼠检测：连续两次语义评估缺陷指纹相似度低于此值 → 提前终止重试 |
 | `revert_threshold` | int | `2` | 连续 revert 次数达到该值终止重试（检测「改了又改回」空转） |
+| `fork_retry` | bool | `false` | ADR-010 阶段 3：修复重试续跑 backend 上次会话（省冷启动 token），仅对声明 `supports_fork_retry` 的 backend 生效（当前 opencode）；默认关闭保测量口径 |
 | `readonly_review` | object | `{enabled:false}` | 独立只读审查 subagent（两阶段审查，见下） |
 | `architecture_review` | object | `{enabled:false}` | 架构合规独立审查（见下） |
 

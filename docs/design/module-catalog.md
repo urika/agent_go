@@ -47,7 +47,7 @@
 | `trajectory_signals.py` | 轨迹归因信号提取（ADR-010 阶段 3）：只读消费 trajectory/*.jsonl，提取 path_violations（ISSUE-58 隔离绕过）/repeated_edits/tool_errors 等；纯函数 fail-open，不改 pass/fail 判定 | trajectory signals |
 | `agent_loop.py` | 自主 agent 循环（`--agent-loop`）：tool-use ReAct 直接 API 调用；B2 stuck 检测/no-progress 信号/explore 只读/scope advisory | loop result |
 | `tool_executor.py` | Agent loop 工具注册和执行（Read/Write/Edit/Bash/Grep/Glob/View + 安全规则 + 只读模式） | tool results |
-| `backends/` | 阶段十三 worker backend 抽象包：BaseBackend/BackendContext/SubtaskResult（base，含 ADR-010 harvest_trajectory 可选钩子）、BackendRegistry/resolve_backend_name（registry）、ClaudeBackend（claude_backend）、AgentLoopBackend（agent_loop_backend）、PiBackend（pi_backend，B3）、OpenCodeBackend（opencode_backend，B6）、ZCodeBackend（zcode_backend，B7）、DSHBackend（dsh_backend，B8）、修复路径分发 repair_timeout/run_repair（dispatch） | SubtaskResult |
+| `backends/` | 阶段十三 worker backend 抽象包：BaseBackend/BackendContext/SubtaskResult（base，含 ADR-010 harvest_trajectory 钩子 + 阶段 3 fork-retry 契约 resume_session/supports_fork_retry/load_resume_session）、BackendRegistry/resolve_backend_name（registry）、ClaudeBackend（claude_backend）、AgentLoopBackend（agent_loop_backend）、PiBackend（pi_backend，B3）、OpenCodeBackend（opencode_backend，B6，支持 fork-retry 会话续跑）、ZCodeBackend（zcode_backend，B7）、DSHBackend（dsh_backend，B8）、修复路径分发 repair_timeout/run_repair（dispatch，含 fork_retry 会话注入） | SubtaskResult |
 | `console.py` | 统一输出抽象层：quiet / verbose 模式，延迟默认绑定，表格渲染 | console output |
 | `tui.py` | Curses 状态仪表盘：实时显示并发子任务进度 | TUI display |
 | `workflow_gen.py` | GitHub Actions workflow 自动生成（`ci` 命令） | workflow YAML |

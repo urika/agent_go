@@ -123,7 +123,14 @@ settings.json `env` 块会被静默忽略，须真实环境变量注入）。由
   repeated_edits、tool_errors、mutation_without_worktree_change；纯函数 fail-open，
   不改 pass/fail 判定）；executor 将 signals 写入 meta results + subtask_end 事件 +
   可疑 warning；排障页 api_trajectory 返回 signals 并在轨迹面板顶部渲染归因横幅。
-  其余三项（fork-retry / session_key 关联 / KnowledgeStore 取料）仍按需。
+  其余两项（session_key 关联 / KnowledgeStore 取料）仍按需。
+  ✅ **fork-retry（opencode 臂）已落地**：`BackendContext.resume_session` +
+  `BaseBackend.supports_fork_retry`/`load_resume_session` 契约；opencode 每次 run
+  从事件流捕获 sessionID 落盘（worktree 同级 `opencode_session_id`），
+  `verification.fork_retry=true` 时 dispatch.run_repair 注入 `--session <id>`
+  续跑修复（省冷启动重新探索 token）；默认关闭保测量口径。dsh 不做：pinned
+  0.1.2-rc.1 的 headless profile 无 resume/fork 原语（仅 tui profile 有
+  `--resume`），待 dsh 后续版本再评估。
 
 **明确不做**：代理层不建会话状态；不复制 dsh 完整事件溯源（agent_go 不管模型
 上下文，无需从日志重建 LLM 历史）；不自建轨迹重放执行（fork-retry 已覆盖主要
