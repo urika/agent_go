@@ -824,6 +824,79 @@ class TestOpenCodeBackend:
         assert res.returncode == 0
         assert res.stdout == "RECOVERED"
 
+    def _run_with_worktree(self, tmp_path, null_logger, stream, **kw):
+        """在 tmp_path/work 作为 worktree 跑一次 run（事件流落盘到 tmp_path）。"""
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        worktree = tmp_path / "work"
+        worktree.mkdir()
+        proc = _mock_popen(stdout=stream)
+        with patch("agent_go.backends.opencode_backend.shutil.which", return_value="/bin/opencode"), \
+             patch("agent_go.backends.opencode_backend.subprocess.Popen", return_value=proc):
+            res = OpenCodeBackend().run(self._ctx(worktree, null_logger, progress=False, **kw))
+        return res, worktree
+
+    def test_events_persisted_and_harvested(self, tmp_path, null_logger):
+        """ADR-010 阶段 1 第二数据源：run() 落盘原始事件流，harvest 防腐翻译为平台事件。"""
+        from agent_go.backends.opencode_backend import EVENTS_FILENAME, OpenCodeBackend
+        res, worktree = self._run_with_worktree(
+            tmp_path, null_logger, _oc_success_stream("全部完成"),
+            routed_model="opencode/mimo-v2.5-free")
+        assert res.returncode == 0
+        # 原始事件流落盘在 worktree 同级（subtask 目录）
+        events_file = tmp_path / EVENTS_FILENAME
+        assert events_file.exists()
+        assert "step_finish" in events_file.read_text()
+        # harvest 翻译：turn 边界合成 + step/tool/usage 词汇
+        traj = OpenCodeBackend().harvest_trajectory(
+            self._ctx(worktree, null_logger, routed_model="opencode/mimo-v2.5-free"),
+            SubtaskResult(returncode=0))
+        types = [e["type"] for e in traj]
+        assert types == ["turn/start", "step/start", "tool/call", "tool/result",
+                         "assistant/message", "step/end", "step/start",
+                         "assistant/message", "step/end", "turn/end"]
+        assert all(set(e.keys()) == {"seq", "time", "type", "data"} for e in traj)
+        assert [e["seq"] for e in traj] == list(range(1, len(traj) + 1))
+        tc = traj[2]["data"]
+        assert tc["name"] == "write" and tc["call_id"] == "c1"
+        assert "a.txt" in tc["arguments_summary"]
+        tr = traj[3]["data"]
+        assert tr["is_error"] is False and "completed" in tr["result_summary"]
+        am = traj[4]["data"]
+        assert am["usage"] == {"inputTokens": 110, "outputTokens": 50, "cacheReadTokens": 10}
+        assert am["model"] == "opencode/mimo-v2.5-free"
+        assert am["reason"] == "tool-calls"
+        assert traj[-1] == {"seq": len(traj), "time": traj[-1]["time"],
+                            "type": "turn/end", "data": {"turn": 1, "reason": "stop"}}
+
+    def test_harvest_failopen_no_events_file(self, tmp_path, null_logger):
+        """事件流文件缺失（旧任务/落盘失败）→ warning + []，不抛异常。"""
+        from agent_go.backends.opencode_backend import OpenCodeBackend
+        worktree = tmp_path / "work"
+        worktree.mkdir()
+        ctx = self._ctx(worktree, null_logger)
+        assert OpenCodeBackend().harvest_trajectory(ctx, SubtaskResult(returncode=0)) == []
+
+    def test_harvest_skips_bad_lines_and_unknown_types(self, tmp_path, null_logger):
+        """坏行跳过、未知类型跳过、text 丢弃、error 事件译为 assistant/attempt。"""
+        import agent_go.backends.opencode_backend as ob
+        lines = (_oc_ndjson(
+            {"type": "mystery", "sessionID": "s1", "timestamp": 1, "part": {}},
+            {"type": "error", "sessionID": "s1", "timestamp": 2,
+             "part": {"message": "quota exhausted"}},
+            {"type": "text", "sessionID": "s1", "timestamp": 3,
+             "part": {"text": "不应出现"}},
+        ) + "not-json-garbage\n").splitlines()
+        traj = ob._translate_events(lines)
+        types = [e["type"] for e in traj]
+        assert types == ["turn/start", "assistant/attempt", "turn/end"]
+        assert "quota exhausted" in traj[1]["data"]["error"]
+
+    def test_translate_empty_stream(self, tmp_path, null_logger):
+        """空流（挂起被硬超时杀死）→ 空轨迹，不合成 turn 边界。"""
+        import agent_go.backends.opencode_backend as ob
+        assert ob._translate_events([]) == []
+        assert ob._translate_events(["", "  \n", "garbage"]) == []
+
 
 def _zcode_success_json(final_text="DONE"):
     """构造一次成功的 zcode --json 单对象输出。"""

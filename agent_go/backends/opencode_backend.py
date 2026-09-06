@@ -20,6 +20,11 @@ docs/design/stage13-b6-opencode-assessment.md。
   影子仓库按 base commit 全局共享，agent_go worktree 场景会跨目录污染主仓库
   （2026-09-05 B6 批量实测，详见 stage13-b6 评估文档）。
 
+轨迹采集（ADR-010 阶段 1 第二数据源）：opencode 的 NDJSON 事件流只在 run()
+期间经 stdout 可见（executor 用全新实例调 harvest_trajectory，实例状态不可靠），
+因此 run() 结束时把原始事件流落盘到 worktree 同级目录（opencode_events.ndjson），
+harvest_trajectory 再读取并防腐翻译为平台事件。全程 fail-open。
+
 仅支持 headless：resolve_backend_name 保证交互模式不路由到 opencode。
 """
 
@@ -31,6 +36,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
 from .base import BackendContext, BaseBackend, SubtaskResult
 from .registry import BackendRegistry
@@ -41,6 +47,9 @@ _console = _LazyConsole()
 
 # opencode 内置只读 agent（plan 禁用 edit/write/bash 变更类工具）。
 OPENCODE_READONLY_AGENT = "plan"
+
+# run() 落盘的原始事件流文件名（worktree 同级，即 subtask 目录下）。
+EVENTS_FILENAME = "opencode_events.ndjson"
 
 
 def _parse_events(lines: list) -> dict:
@@ -106,6 +115,84 @@ def _parse_events(lines: list) -> dict:
         "saw_error": saw_error,
         "error_message": error_message,
     }
+
+
+def _truncate(text: object, limit: int = 300) -> str:
+    """轨迹摘要截断（与 dsh harvester 同语义：长文本只留前缀）。"""
+    s = str(text or "")
+    return s if len(s) <= limit else s[:limit] + "..."
+
+
+def _translate_events(lines: list, routed_model: str = "") -> list:
+    """opencode NDJSON 事件流 → 平台轨迹事件（防腐翻译，不原样透传 opencode 格式）。
+
+    保留词汇（与 dsh harvester 同一 schema，排障页直接可渲染）：
+    turn/start|end（opencode 单次 run 即一个 turn，合成边界）、step/start|end、
+    assistant/message（usage + model，来自 step_finish）、tool/call、tool/result、
+    assistant/attempt（error 事件）。text 事件丢弃（最终文本已在 run stdout）。
+    不认识的类型跳过；无法解析的行跳过。
+    """
+    out: list = []
+    seq = 0
+    step = 0
+
+    def _emit(etype: str, data: dict, ts: object) -> None:
+        nonlocal seq
+        seq += 1
+        out.append({"seq": seq, "time": ts, "type": etype, "data": data})
+
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        etype = event.get("type", "")
+        part = event.get("part", {}) or {}
+        ts = event.get("timestamp")
+
+        if not out:
+            _emit("turn/start", {"turn": 1}, ts)  # 单次 run 合成 turn 边界
+        if etype == "step_start":
+            step += 1
+            _emit("step/start", {"turn": 1, "step": step}, ts)
+        elif etype == "tool_use":
+            state = part.get("state", {}) or {}
+            call_id = part.get("callID", "")
+            name = part.get("tool", "")
+            _emit("tool/call", {"turn": 1, "step": step, "call_id": call_id,
+                                "name": name,
+                                "arguments_summary": _truncate(json.dumps(
+                                    state.get("input", {}), ensure_ascii=False))}, ts)
+            status = state.get("status", "")
+            _emit("tool/result", {"turn": 1, "step": step, "call_id": call_id,
+                                  "is_error": status == "error",
+                                  "result_summary": _truncate(
+                                      state.get("output", "") or f"status={status}")}, ts)
+        elif etype == "step_finish":
+            tokens = part.get("tokens", {}) or {}
+            cache = tokens.get("cache", {}) or {}
+            _emit("assistant/message", {
+                "turn": 1, "step": step,
+                "usage": {"inputTokens": tokens.get("input", 0) + cache.get("read", 0),
+                          "outputTokens": tokens.get("output", 0),
+                          "cacheReadTokens": cache.get("read", 0)},
+                "model": routed_model,
+                "reason": part.get("reason", "")}, ts)
+            _emit("step/end", {"turn": 1, "step": step, "reason": part.get("reason", "")}, ts)
+        elif etype == "error":
+            _emit("assistant/attempt", {"turn": 1, "step": step,
+                                        "error": _truncate(part.get("message")
+                                                           or event.get("message") or "error event")}, ts)
+        # text 及其余类型丢弃
+
+    if out:
+        seq += 1
+        out.append({"seq": seq, "time": out[-1]["time"], "type": "turn/end",
+                    "data": {"turn": 1, "reason": out[-1]["data"].get("reason", "")}})
+    return out
 
 
 @BackendRegistry.register
@@ -211,6 +298,7 @@ class OpenCodeBackend(BaseBackend):
                     pass
 
         elapsed = time.time() - start
+        self._persist_events(ctx, stdout or "")
         parsed = _parse_events((stdout or "").splitlines())
 
         # 零产出（无 tokens/工具调用/最终文本）的退出 0 必须显式映射为失败，
@@ -273,3 +361,35 @@ class OpenCodeBackend(BaseBackend):
             "task_id": ctx.task_id,
             "subtask_id": ctx.sub_id,
         })
+
+    @staticmethod
+    def _persist_events(ctx: BackendContext, stdout: str) -> None:
+        """把原始 NDJSON 事件流落盘到 subtask 目录（worktree 同级），供
+        harvest_trajectory 事后读取（executor 用全新实例调钩子，实例状态不可靠）。
+        fail-open：写失败仅 warning。"""
+        try:
+            if not stdout.strip():
+                return
+            path = Path(ctx.worktree).parent / EVENTS_FILENAME
+            path.write_text(stdout, encoding="utf-8")
+        except Exception as exc:
+            ctx.logger.warning(f"[OpenCodeBackend] {ctx.sub_id} 事件流落盘失败（忽略）: {exc}")
+
+    def harvest_trajectory(self, ctx: BackendContext, result: SubtaskResult) -> list:
+        """ADR-010 阶段 1 第二数据源：读取 run() 落盘的 opencode 事件流，
+        防腐翻译为平台事件；全程 fail-open（缺文件/格式漂移仅 warning + []）。"""
+        try:
+            path = Path(ctx.worktree).parent / EVENTS_FILENAME
+            if not path.exists():
+                ctx.logger.warning(f"[OpenCodeBackend] {ctx.sub_id} 未找到事件流文件，轨迹采集跳过")
+                return []
+            trajectory = _translate_events(
+                path.read_text(encoding="utf-8").splitlines(), ctx.routed_model)
+            if not trajectory:
+                return []
+            ctx.logger.info(
+                f"[OpenCodeBackend] {ctx.sub_id} 轨迹采集: {len(trajectory)} 条平台轨迹")
+            return trajectory
+        except Exception as exc:  # 防腐边界兜底：任何意外都不影响任务结果
+            ctx.logger.warning(f"[OpenCodeBackend] {ctx.sub_id} 轨迹采集失败（忽略）: {exc}")
+            return []
