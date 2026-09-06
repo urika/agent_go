@@ -406,7 +406,7 @@ L0 内容（system prompt + 工具定义）由客户端决定，代理只能「�
 
 ## 11. Phase 1 详细设计：LCP 边界检查点复用 + 驱逐治理
 
-> 状态：**fetch 侧已实现**（2026-09-06，llama.cpp `9ae90c8`；补丁归档 `patches/vllm-mlx/0.12.12/`，开关 `PROXY_CACHE_LCP_SNAPDOWN` 默认关，无生产者故行为与补丁前逐字节一致）；生产侧（多边界捕获）待做
+> 状态：**fetch 侧（P1a）+ 生产侧（P1a.2）均已实现**（2026-09-06，llama.cpp `9ae90c8` + `d87b3f7`；补丁归档 `patches/vllm-mlx/0.12.12/` 共 5 文件，开关 `PROXY_CACHE_LCP_SNAPDOWN` 默认关=行为与补丁前逐字节一致）。剩余：Gate A 模型级验证 + 开 flag + phase0 复测（静默窗口）
 > 实现位置：`vllm_mlx/memory_cache.py`（引擎侧；homebrew Cellar venv 内，补丁副本归档 llama.cpp 仓库）
 > 验收工具：`tools/phase0_cache_diag.py`（before/after 同口径）
 
@@ -493,10 +493,13 @@ E1 第二击穿源：5,207 次压力驱逐 / 8,412 条目（cache_max 7.7GB，�
 
 ```text
 P1a   fetch 侧消费基础（memory_cache.py）        ✅ 2026-09-06（llama.cpp 9ae90c8，flag 默认关）
-P1a.2 生产侧多边界捕获（request.py 边界列表 →
-      engine_core 透传 → scheduler insert_segments
-      N 段 + 每 end_of_segment 调 snapshot_linear_states
-      累积 → 全量 store 传入）                    下一个动工窗口
+P1a.2 生产侧多边界捕获                           ✅ 2026-09-06（llama.cpp d87b3f7）
+      request.py 边界字段 → engine_core 透传 →
+      batched.py _compute_prefix_boundaries（消息
+      截断渲染 + token LCP + select_checkpoint_positions
+      纯函数：去重/间距/limit 尾部优先）→ scheduler
+      N 段 insert_segments + 每 end_of_segment 现场
+      snapshot_linear_states 累积（M=8）→ 全量 store 挂载
 P1a.3 Gate A 模型级验证 + 开 flag + phase0 复测   静默窗口（批跑结束后，~0.5h）
 P1b   段链去重 + 链感知驱逐（Gate B2）            ~1 天
 P1c   phase0 probe/probe-swa（E2/E3 收尾）        0.5h（与 P1a.3 同窗口）
