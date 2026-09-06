@@ -404,6 +404,96 @@ L0 内容（system prompt + 工具定义）由客户端决定，代理只能「�
 
 ---
 
+## 11. Phase 1 详细设计：LCP 边界检查点复用 + 驱逐治理
+
+> 状态：设计（v0.1，2026-09-06，基于 Phase 0 E1 实证 + rapid-mlx 0.12.12 源码核验）
+> 实现位置：`vllm_mlx/memory_cache.py`（引擎侧；homebrew Cellar venv 内，需 overlay/vendor 或上游 PR 路径）
+> 验收工具：`tools/phase0_cache_diag.py`（before/after 同口径）
+
+### 11.1 根因链（代码级实证）
+
+| # | 环节 | 证据 |
+|---|------|------|
+| 1 | Ornith（qwen3_5_moe）是**混合注意力架构**：线性注意力层用 `ArraysCache(size=2)` 递归状态，仅部分层用全注意力 `KVCache` | `mlx_lm/models/qwen3_5.py:304` `make_cache()` |
+| 2 | `ArraysCache.is_trimmable()` 返回 False——线性递归态 S(L) 不可倒推 S(l<L)（数学上不可逆），拒绝 trim 是**正确行为** | `memory_cache.py:1414` `_RECURRENT_STATE_CACHE_CLASSES = {"ArraysCache", "MambaCache"}` |
+| 3 | LCP 复用路径要求整条条目所有层可 trim → **该模型所有条目都含 ArraysCache → LCP 复用被结构性禁止** | `memory_cache.py:2096-2136`（`_layer_forbids_trim` 任一层 True 即整条拒绝） |
+| 4 | 轮次重渲染天然产生尾部发散（generation header 摘除、tool_use→tool_result 重编码、代理 epoch 重写）→ 后继轮落入 LCP 路径 → 全量重算 | E1：6,918 次 LCP unavailable / 1.36 亿 tokens 可复用而未复用 |
+| 5 | 纯 append 轮走 supersequence/prefix 路径不受影响 → 命中时近乎完美 | E1：46% 请求 HIT，命中桶增量 ≤0.1 |
+
+**结论**：不是 trim 实现有 bug，是 **trim 这件事对混合架构不成立**。正确的机制不是「回卷」，而是「**检查点**」——线性态在消息边界 B 处的快照 S(B)，对共享前缀 0..B 的任何请求都是合法续算状态。
+
+### 11.2 机制：边界检查点 + LCP 降档（snap-down）
+
+**核心不变式**：`全注意力 KV 可 trim；线性递归态不可 trim 但可检查点。复用永远从检查点出发，绝不从条目末态回卷。`
+
+**Store 侧（改造 `store()`/条目结构）**：
+1. 每个条目除末态外，维护**边界检查点表** `{B_i → 全层状态快照}`（B_i 为消息边界 token 位置；快照 = KV 层 trim 至 B_i + ArraysCache 层在 B_i 处的递归态）
+2. 每条目保留最近 M 个检查点（默认 M=8，超限淘汰最旧），检查点内存 ≈ KV@B（不可避免）+ 线性态（每层 O(1)，可忽略）
+3. 快照必须不可变深拷贝（`mx.evaluate` 后隔离，复用路径现有 deepcopy 语义沿用）
+
+**Fetch 侧（改造 LCP 分支 `memory_cache.py:2093-2141`）**：
+```text
+现路径：LCP 候选 → 任一层 forbids_trim → 整条拒绝（现状，全量重算）
+新路径：LCP 候选 → 命中检查点表找 B ≤ LCP 的最大 B_i
+        → 返回 (快照@B_i, tokens[B_i:] 为 remaining)   # 降档复用
+        → 无可用检查点（B_1 > LCP）才整条放弃
+```
+- 重算成本从 `requested_len` 降为 `requested_len - B_i`——实测尾部发散（divergence 在最后一条消息内）时 B_i ≈ LCP - 一个消息长度，重算量从 41K → 数百 tokens
+- supersequence / prefix 路径**不动**（纯 append 已健康，E1 证实）
+
+**正确性约束（Gate A，一票否决）**：
+- 检查点复用 vs 全量 prefill，greedy 解码（temp=0）输出**逐 token 一致**（探针集 ≥10 个多轮上下文）
+- 已知理论风险：线性态累积误差在「检查点快照 → 续算」与「全量重算」两条路径间可能有浮点级差异——若 Gate A 出现 token 分歧，降级为「检查点仅用于 KV 层、线性层从 B_i 重算」（仍省 ~99% 算力，因线性层算力占比小）
+
+### 11.3 驱逐治理（与 11.2 耦合，不可分开治）
+
+E1 第二击穿源：5,207 次压力驱逐 / 8,412 条目（cache_max 7.7GB，条目为整上下文单拷贝，40K tokens/条 → 有效容量仅个位数条目）。
+
+1. **链去重（主杠杆）**：条目结构从「每轮全量拷贝」改为「段链」——后继轮只存 delta 段 + 引用前驱检查点。会话内存 ≈ 1 份全量 + N 份增量，有效容量提升一个数量级
+2. **链感知驱逐**：被链引用的前驱不可独立驱逐（引用计数）；优先驱逐「无引用的叶子 + 最久未命中链」；现有 LRU `move_to_end` 语义保留
+3. **预算暂不动**：Metal 活跃 25.1GB / 峰值 29.2 / cap 28.1——7.7GB 上调空间极小，去重才是真杠杆；去重后重估 `cache_max`
+4. 新指标：`evicted_reusable_entries`（被逐条目中「最近 N 轮命中过」的计数，健康应 ≈0）
+
+### 11.4 与代理层的协同（依赖关系）
+
+- append-only 纪律（§4.7）**减少发散频率**（少产生 LCP 事件）；边界检查点**降低残余发散的代价**。两层互补，各自独立有效
+- **字节级确定性是硬依赖**：epoch 压缩区若跨 epoch 渲染不一致，发散点移到上下文前部 → snap-down 重算成本 = 全文 - 前部位置，重新爆炸。§4.7 确定性序列化（key 定序、模板固定）从「缓存友好」升级为「正确性前提」
+- 压缩区内容跨 epoch 不变的属性（§3「epoch 间静态」）由此获得量化红利
+
+### 11.5 验收（phase0 工具 before/after，同口径）
+
+| 指标 | Before（E1 实测） | Gate B1（snap-down） | Gate B2（+去重/驱逐） |
+|------|------|------|------|
+| 增量占比（token 加权） | 0.3712 | **<0.15** | **<0.10** |
+| LCP unavailable 浪费 tokens | 1.36 亿/全量日志 | ↓≥90% | ↓≥95%（事件本身应趋零） |
+| 压力驱逐（evicted_reusable） | 8,412 条目 | 不劣化 | ≈0 |
+| TTFT P95 | 164.1s | <60s | <30s |
+| Gate A 输出一致性 | — | 逐 token 一致（或降级模式一致） | 同左 |
+
+新指标埋点：`lcp_snapdown_events / snapdown_reused_tokens / checkpoint_overhead_bytes / evicted_reusable_entries`（进 `/metrics` 会话维度，即 R16 载体）。
+
+### 11.6 风险与回退
+
+| 风险 | 对策 |
+|------|------|
+| 检查点快照内存放大（M×每条目） | M=8 起步 + 只存线性态增量的最小快照；实测 checkpoint_overhead_bytes 后调 |
+| 检查点复用的浮点路径差 → 输出分歧 | Gate A 一票否决；降级模式（线性层从 B_i 重算）兜底，仍省 ~99% |
+| 链引用计数的并发竞态 | 单 worker（--max-num-seqs 1）内串行，风险低；引入并发时加锁 |
+| engine 包为 homebrew Cellar 内第三方（升级被覆盖） | overlay/vendor 补丁 + 上游 PR 双轨；补丁带版本探测（0.12.12 实测） |
+| 混合架构线性层行为随 mlx_lm 版本漂移 | Gate A 纳入回归（升级 mlx_lm 必跑） |
+
+### 11.7 实施顺序
+
+```text
+P1a 边界检查点存储 + LCP snap-down（Gate A → Gate B1）   ~1 天
+P1b 段链去重 + 链感知驱逐（Gate B2）                      ~1 天
+P1c phase0 probe/probe-swa 静默窗口补跑（E2/E3 收尾）      0.5h（批跑结束后）
+```
+
+前置协调：llama.cpp 仓库当前有并行会话未提交改动（ctx_recall 区域，与 scheduler/cache 策略无交集），动工前对齐提交窗口。
+
+---
+
 ## 9. agent_go 侧落地清单
 
 > 本设计 proxy-centric，agent_go 端**无核心改动**；以下为口径/协调/闭环三类触点。防过度落地：压缩、epoch、台账实现全在代理进程内（§4.10 ①）；TASK.md/agent_prompt 是子任务启动时一次性注入（首条消息，非每轮变化的 L0），不违反 §4.1 前缀纪律，**不需要改**。
