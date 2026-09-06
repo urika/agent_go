@@ -286,10 +286,30 @@ L0 内容（system prompt + 工具定义）由客户端决定，代理只能「�
 
 ### Phase 0：诊断确认（0.5 天，先行）
 
-- llama-defender 记录每轮请求的 llama-server 日志指标：`n_past / n_tokens / prompt_eval_ms`
-- 输出：每轮增量占比曲线。验收：现状 `n_tokens/n_past ≈ 1.0` 坐实缓存击穿诊断
-- **隔离对照实验**：绕过代理改写，直接向 llama-server 发 append-only 序列（固定前缀 + 增量尾部），验证 `n_tokens/n_past < 0.1`——把「llama-server 缓存本身可用」与「代理改写是元凶」两个假设分开：若直发也不命中，问题在服务端/模型侧（SWA 等），设计需先退化
-- 同时验证 SWA 缓存语义（§4.8 ⚠️ 项）
+> **状态：E1 完成（2026-09-06），E2/E3 工具就绪待静默窗口**。工具：`tools/phase0_cache_diag.py`（analyze / probe / probe-swa 三子命令，主动探针带批跑活跃守卫）。
+>
+> **环境修正**：后端实际为 **rapid-mlx（MLX 引擎）**，非 llama-server——§4.8 的 llama-server 配置表（`cache_prompt`/`id_slot`/KV 量化）不适用，MLX 侧为「条目式 prompt cache（LCP 对齐 + Metal 压力驱逐）」，语义不同但五层架构与 append-only 原则不变。SWA 验证对象改为 MLX 条目缓存语义（E3）。
+
+**E1 结果**（`llama-server.log` 全量 17,787 请求 / 5.47 亿 prompt tokens，被动零干扰）：
+
+| 指标 | 数值 | 解读 |
+|------|------|------|
+| 增量占比（token 加权） | **0.3712** | 63% 的 prefill 算力是重算——击穿真实存在，但非 100% 全坏 |
+| ratio 分布 | **双峰**：36% 请求 ≤0.1（命中时 99%+ 复用），54% 请求 >0.9（整段全量）；P50=1.0 | 系统二态：对齐即近乎完美，发散即全损——问题不在缓存能力，在**对齐率** |
+| LCP unavailable | 6,918 次，重算 1.74 亿 tokens，其中 **78.2%（1.36 亿）本可复用** | **头号击穿源**：条目与请求在消息内部发散 → 整条作废（all-or-nothing），99% 相同也全量重算；占总 prefill 算力 **67%** |
+| 压力驱逐 | 5,207 事件 / 8,412 条目（cache_max 7.7GB vs 模型活跃 25-29GB） | 第二击穿源：可命中条目在下轮到达前被挤出 |
+| 首 token 延迟 | P50 11.1s / P95 164.1s | 与批跑观测 ~3min/轮吻合（P95） |
+| 上下文规模 | chars P50 59K / P95 164K / max 1.29M | 上下文膨胀真实且严重 |
+
+**诊断修订**（替代 v0.1 §0.3 的「每轮改写 → ≈1.0 全击穿」单因假设）：
+1. 引擎前缀缓存能力已被证明可用（36% 请求增量 ≤0.1）——「引擎/SWA 缓存坏了」假设基本排除（E3 受控验证待做，收尾确认）
+2. 击穿主因是**对齐失败**：中段发散（改写/客户端微调）触发 LCP non-trimmable 整条作废 + Metal 压力驱逐。append-only 纪律（§4.7 布局不变式）仍是对的药，但 **Phase 1 头号优化目标更新为「部分条目复用」**（LCP trim：发散点截断复用而非整条丢弃）——仅此一项可把增量占比从 0.371 压到 ~0.12，叠加驱逐治理可望 <0.1 达标
+3. 缓存预算（7.7GB）相对上下文规模偏小，驱逐治理需一并纳入 Phase 1（预算加大或条目粒度细化）
+
+- llama-defender 记录每轮请求的 llama-server 日志指标：`n_past / n_tokens / prompt_eval_ms`（✅ 已由 rapid-mlx 原生日志覆盖，`[schedule]` 行含 prompt_tokens/tokens_to_prefill/cached）
+- ~~输出：每轮增量占比曲线~~（✅ `analyze` 子命令输出 + `--json`）
+- **隔离对照实验**：绕过代理直发 append-only（`probe` 子命令，⚠️ 批跑运行期禁用——探针会在 Metal 压力下驱逐在跑会话缓存条目）
+- 同时验证 SWA 缓存语义（`probe-swa` 子命令；MLX 语义下改为验证「固定前缀 + 变尾不产生部分前缀重算」）
 
 ### Phase 1：核心改造（1-2 天）——append-only + 写入期压缩 + epoch
 
