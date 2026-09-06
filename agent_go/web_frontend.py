@@ -1180,10 +1180,32 @@ async function loadTsTrajectory(attempt) {
             : '<a href="javascript:void(0)" onclick="loadTsTrajectory('+n+')">'+n+'</a>'
         ).join(' ')+'</div>';
     }
-    slot.innerHTML = bar + renderTsTrajectory(d.events || [], d.truncated);
+    slot.innerHTML = bar + renderTsSignals(d.signals) + renderTsTrajectory(d.events || [], d.truncated);
   } catch (e) {
     slot.innerHTML = '<div class="err">轨迹加载失败: '+esc(e.message)+'</div>';
   }
+}
+
+// ADR-010 阶段 3：轨迹归因信号横幅（path_violations=ISSUE-58 隔离绕过模式，
+// 配合子任务状态 no_changes 即疑似「空通过」，优先复核）
+function renderTsSignals(sg) {
+  if (!sg) return '';
+  const bits = [];
+  if ((sg.path_violations || []).length) {
+    bits.push('⚠️ worktree 外写入 '+sg.path_violations.length+' 处（ISSUE-58 模式）: '+
+      sg.path_violations.slice(0,3).map(p => '<code>'+esc(p)+'</code>').join(', ')+
+      (sg.path_violations.length > 3 ? ' …' : ''));
+  }
+  if (sg.mutation_without_worktree_change) {
+    bits.push('⚠️ 全部写调用落在 worktree 外——若状态为 no_changes 则疑似空通过');
+  }
+  if ((sg.repeated_edits || []).length) {
+    bits.push('🔁 重复编辑: '+
+      sg.repeated_edits.map(e => '<code>'+esc(e.file)+'</code> ×'+e.count).join(', '));
+  }
+  if (sg.tool_errors) bits.push('❌ 工具错误 '+sg.tool_errors+' 次');
+  if (!bits.length) return '';
+  return '<div class="warn-banner">'+bits.join('<br>')+'</div>';
 }
 
 function renderTsTrajectory(events, truncated) {

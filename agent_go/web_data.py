@@ -1081,7 +1081,7 @@ def api_trajectory(task_id: str, sub_id: str, attempt: int = 0) -> Optional[dict
         return None
     base: dict[str, Any] = {"task_id": task_id, "subtask_id": sub_id,
                             "available": False, "events": [], "truncated": False,
-                            "attempt": 0, "attempts": []}
+                            "attempt": 0, "attempts": [], "signals": None}
     traj_dir = td / "trajectory"
     attempts = sorted(
         int(p.stem.rsplit("-", 1)[1])
@@ -1119,6 +1119,21 @@ def api_trajectory(task_id: str, sub_id: str, attempt: int = 0) -> Optional[dict
     base["available"] = True
     base["events"] = events
     base["truncated"] = truncated
+    # ADR-010 阶段 3：对当前展示的 attempt 提取归因信号（排障横幅数据源）。
+    # worktree 基准取自 meta results；取不到则跳过路径违规判定（不误报）。
+    try:
+        from .trajectory_signals import extract_signals
+        _wt = ""
+        _meta_path = td / "meta.json"
+        if _meta_path.exists():
+            _meta = json.loads(_meta_path.read_text(encoding="utf-8"))
+            for _r in _meta.get("results", []):
+                if (_r.get("subtask_id") or _r.get("id")) == sub_id:
+                    _wt = _r.get("worktree", "") or ""
+                    break
+        base["signals"] = extract_signals(events, _wt)
+    except Exception:
+        pass  # fail-open：信号缺失不影响轨迹展示
     return base
 
 

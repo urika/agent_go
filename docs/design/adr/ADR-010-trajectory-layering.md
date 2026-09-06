@@ -118,6 +118,12 @@ settings.json `env` 块会被静默忽略，须真实环境变量注入）。由
   排障页轨迹面板支持 attempt 切换。meta.json 投影化维持双写节奏（未动）。
 - **阶段 3（按需）**：轨迹驱动失败归因；fork-retry（dsh fork / opencode session
   resume）；代理流量留痕与平台事件 session_key 关联；KnowledgeStore 从轨迹取料。
+  **状态（2026-09-06）**：✅ **轨迹驱动失败归因已落地**——`trajectory_signals.py`
+  （只读消费 trajectory/*.jsonl，提取 path_violations＝ISSUE-58 隔离绕过模式、
+  repeated_edits、tool_errors、mutation_without_worktree_change；纯函数 fail-open，
+  不改 pass/fail 判定）；executor 将 signals 写入 meta results + subtask_end 事件 +
+  可疑 warning；排障页 api_trajectory 返回 signals 并在轨迹面板顶部渲染归因横幅。
+  其余三项（fork-retry / session_key 关联 / KnowledgeStore 取料）仍按需。
 
 **明确不做**：代理层不建会话状态；不复制 dsh 完整事件溯源（agent_go 不管模型
 上下文，无需从日志重建 LLM 历史）；不自建轨迹重放执行（fork-retry 已覆盖主要

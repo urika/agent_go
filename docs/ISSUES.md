@@ -911,10 +911,11 @@ execution.log 只见「无文件变更」，根因完全不可见；轨迹逐条
 worktree 路径（副本返回，不动调用方 env），对 claude/pi/opencode/zcode/dsh 全部
 backend 生效。
 
-**遗留方向**（未做，按需）：①轨迹层 tool/call 参数审计（path 必须 resolve 在
-worktree 内，可观测但缺拦截）；②verification 增加 worktree 外写事后探测；
-③弱模型路由时收紧 allowed_tools。注意：agent_go 外侧无法直接拦截 CLI backend
-进程内的文件写——现实抓手是轨迹审计 + 事后检测。
+**遗留方向**（按需）：①~~轨迹层 tool/call 参数审计~~ ✅ 可观测部分已落地
+（2026-09-06，ADR-010 阶段 3 `trajectory_signals.py`：path_violations 信号自动提取，
+入 meta results + 排障页归因横幅；拦截仍缺）；②verification 增加 worktree 外写
+事后探测；③弱模型路由时收紧 allowed_tools。注意：agent_go 外侧无法直接拦截 CLI
+backend 进程内的文件写——现实抓手是轨迹审计 + 事后检测。
 
 
 ### ISSUE-59 bench 兜底扫描错配历史同名任务目录：超时 run 计为通过（假阳性）

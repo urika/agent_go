@@ -715,8 +715,11 @@ NDJSON 事件流防腐翻译，真实冒烟 10 事件含 cache 命中可见）�
 阶段 2 平台 TaskEvent 词汇 + meta.json 降为投影（✅ 2026-09-06 价值验证通过并落地骨架：
 events.py 编排级事件日志 + executor/cli/pipeline 埋点 + per-attempt 轨迹命名；
 meta.json 投影化维持双写节奏，replay/recover 迁移暂缓）→
-阶段 3 fork-retry / 轨迹归因 / 三层关联（按需）。详见
-[ADR-010](design/adr/ADR-010-trajectory-layering.md)。
+阶段 3 fork-retry / 轨迹归因 / 三层关联（按需；**轨迹归因已落地** 2026-09-06：
+trajectory_signals.py 提取 path_violations=ISSUE-58 隔离绕过/repeated_edits 等信号，
+入 meta results + subtask_end 事件 + 排障页归因横幅，不改 pass/fail 判定）。
+另：ISSUE-59 bench 兜底扫描错配历史同名目录假阳性已修复（exclude_dirs，2026-09-06）。
+详见 [ADR-010](design/adr/ADR-010-trajectory-layering.md)。
 
 ### 不做的事
 

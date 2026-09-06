@@ -3126,8 +3126,28 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         "crash_but_verified": verify_results.get("crash_but_verified", False),
         "verification_results": verification_results,
     })
+    # ADR-010 阶段 3：轨迹驱动归因信号（只读消费 trajectory/ 全部 attempt，fail-open）。
+    # 信号是归因注解，不改 pass/fail 判定；path_violations + no_changes = ISSUE-58
+    # 疑似「空通过」（写动作全打在 worktree 外，worktree diff 观测不到），记 warning。
+    _traj_signals = None
+    try:
+        from .trajectory_signals import collect_subtask_signals
+        _traj_signals = collect_subtask_signals(task_dir, sub_id, str(worktree))
+    except Exception:
+        _traj_signals = None
+    if _traj_signals and _traj_signals.get("path_violations"):
+        logger.warning(
+            f"[trajectory] {sub_id} 检测到 worktree 外写入 "
+            f"{len(_traj_signals['path_violations'])} 处"
+            f"（{_traj_signals['path_violations'][0][:80]} 等），worktree 隔离被绕过"
+            f"（ISSUE-58 模式）"
+            + ("；status=no_changes 疑似空通过" if status == "no_changes" else ""))
+
     emit_event(str(task_dir), "subtask_end", sub_id=sub_id, status=status,
                failure_class=failure_class or "", retries=retry_count,
+               traj_tool_calls=(_traj_signals or {}).get("tool_calls", 0),
+               traj_mutations=(_traj_signals or {}).get("mutations", 0),
+               traj_path_violations=len((_traj_signals or {}).get("path_violations") or []),
                failure_reason=failure_reason[:200])
     # H2 谦逊层：子任务级层间归因（确定性，fail-open）
     try:
@@ -3263,6 +3283,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
              "commit_hash": verify_results.get("commit_hash", ""),
              "failure_class": failure_class,
              "layer_attribution": layer_attribution,
+             # ADR-010 阶段 3：轨迹归因信号（无轨迹源的 backend 为 None）；
+             # path_violations 非空 = 疑似 ISSUE-58 隔离绕过，复核时优先看
+             "trajectory_signals": _traj_signals,
              "problem_id": problem_id,
              # C4 葬礼回写：重试后成功时回写的 Problem id（未回写为空）
              "resolution_problem_id": resolution_problem_id,
