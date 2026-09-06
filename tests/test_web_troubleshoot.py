@@ -156,6 +156,48 @@ class TestApiTrajectory:
         assert d["truncated"] is True
         assert len(d["events"]) == 2
 
+    def _write_attempt(self, ts_tasks, sub_id: str, attempt: int, marker: str):
+        td = ts_tasks["dir"] / TASK_ID / "trajectory"
+        (td / f"{sub_id}.attempt-{attempt}.jsonl").write_text(
+            json.dumps({"seq": 1, "time": 1.0, "type": "turn/start",
+                        "data": {"turn": 1, "marker": marker}}) + "\n", encoding="utf-8")
+
+    def test_attempt_files_preferred_latest(self, ts_tasks):
+        """ADR-010 阶段 2：有 attempt 文件时默认取最新 attempt（而非旧格式 sub.jsonl）。"""
+        from agent_go.web_data import api_trajectory
+        self._write_attempt(ts_tasks, "sub-1", 1, "first")
+        self._write_attempt(ts_tasks, "sub-1", 2, "second")
+        d = api_trajectory(TASK_ID, "sub-1")
+        assert d["available"] is True
+        assert d["attempts"] == [1, 2]
+        assert d["attempt"] == 2
+        assert d["events"][0]["data"]["marker"] == "second"
+
+    def test_attempt_explicit_selection(self, ts_tasks):
+        from agent_go.web_data import api_trajectory
+        self._write_attempt(ts_tasks, "sub-1", 1, "first")
+        self._write_attempt(ts_tasks, "sub-1", 2, "second")
+        d = api_trajectory(TASK_ID, "sub-1", attempt=1)
+        assert d["attempt"] == 1
+        assert d["events"][0]["data"]["marker"] == "first"
+
+    def test_attempt_missing_returns_unavailable(self, ts_tasks):
+        """指定不存在的 attempt → available=False（attempts 列表仍返回）。"""
+        from agent_go.web_data import api_trajectory
+        self._write_attempt(ts_tasks, "sub-1", 1, "first")
+        d = api_trajectory(TASK_ID, "sub-1", attempt=9)
+        assert d["available"] is False
+        assert d["attempts"] == [1]
+
+    def test_legacy_fallback_when_no_attempts(self, ts_tasks):
+        """无 attempt 文件时回退旧格式 <sub>.jsonl（向后兼容）。"""
+        from agent_go.web_data import api_trajectory
+        d = api_trajectory(TASK_ID, "sub-1")
+        assert d["available"] is True
+        assert d["attempts"] == []
+        assert d["attempt"] == 0
+        assert [e["seq"] for e in d["events"]] == [1, 2, 3]
+
 
 class TestApiWorktreeDiff:
     """数据层：api_worktree_diff（mock subprocess.run，不跑真 git）。"""

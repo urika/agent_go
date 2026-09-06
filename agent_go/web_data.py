@@ -1066,11 +1066,12 @@ MAX_TRAJECTORY_EVENTS = 2000  # 轨迹事件截断上限（防大响应）
 MAX_DIFF_CHARS = 200 * 1024   # worktree diff 全文截断上限（~200KB）
 
 
-def api_trajectory(task_id: str, sub_id: str) -> Optional[dict]:
-    """子任务执行级轨迹（ADR-010 阶段 1）：trajectory/<sub_id>.jsonl。
+def api_trajectory(task_id: str, sub_id: str, attempt: int = 0) -> Optional[dict]:
+    """子任务执行级轨迹（ADR-010 阶段 1/2）：trajectory/<sub_id>[.attempt-N].jsonl。
 
+    attempt=0（默认）取最新 attempt（无 attempt 文件时回退旧格式 <sub_id>.jsonl）。
     仅 task 不存在 / id 非法时返回 None（路由层 404）。轨迹文件不存在时返回
-    available=False（非 404）——只有部分 backend（如 dsh）落轨迹文件，
+    available=False（非 404）——只有部分 backend（dsh/opencode）落轨迹文件，
     前端据此显示「该 backend 无执行级轨迹」。坏行跳过，超限截断。
     """
     if not _valid_sub_id(sub_id):
@@ -1079,8 +1080,23 @@ def api_trajectory(task_id: str, sub_id: str) -> Optional[dict]:
     if td is None:
         return None
     base: dict[str, Any] = {"task_id": task_id, "subtask_id": sub_id,
-                            "available": False, "events": [], "truncated": False}
-    traj_path = td / "trajectory" / f"{sub_id}.jsonl"
+                            "available": False, "events": [], "truncated": False,
+                            "attempt": 0, "attempts": []}
+    traj_dir = td / "trajectory"
+    attempts = sorted(
+        int(p.stem.rsplit("-", 1)[1])
+        for p in traj_dir.glob(f"{sub_id}.attempt-*.jsonl")
+        if p.stem.rsplit("-", 1)[1].isdigit()
+    ) if traj_dir.exists() else []
+    base["attempts"] = attempts
+    if attempt > 0:
+        traj_path = traj_dir / f"{sub_id}.attempt-{attempt}.jsonl"
+        base["attempt"] = attempt
+    elif attempts:
+        base["attempt"] = attempts[-1]
+        traj_path = traj_dir / f"{sub_id}.attempt-{attempts[-1]}.jsonl"
+    else:
+        traj_path = traj_dir / f"{sub_id}.jsonl"  # 旧格式回退
     if not traj_path.exists():
         return base
     events: list[dict] = []

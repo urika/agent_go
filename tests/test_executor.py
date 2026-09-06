@@ -36,6 +36,7 @@ from agent_go.executor import (
     _build_repair_prompt,
     _copy_tree_skip_special,
     _backend_env,
+    _harvest_and_store,
 )
 
 
@@ -1570,6 +1571,63 @@ class TestBackendEnv:
         be = _backend_env(None, "/tmp/wt/work")
         assert be["PWD"] == "/tmp/wt/work"
         assert "PATH" in be  # 继承 os.environ 其余内容
+
+
+class TestHarvestAndStore:
+    """_harvest_and_store（ADR-010 阶段 2）：per-attempt 轨迹落盘 + 旧格式兼容。"""
+
+    class _FakeBackend:
+        def __init__(self, events):
+            self._events = events
+
+        def harvest_trajectory(self, ctx, result):
+            return self._events
+
+    def _run(self, tmp_path, logger, events, attempt):
+        from agent_go.backends.base import SubtaskResult
+        import agent_go.executor as ex
+        with patch.object(ex.BackendRegistry, "get",
+                          return_value=lambda *a, **k: self._FakeBackend(events)):
+            _harvest_and_store(tmp_path, "sub-1", None, SubtaskResult(returncode=0),
+                               "opencode", logger, attempt=attempt)
+
+    def test_attempt_naming_and_legacy_compat(self, tmp_path, logger):
+        events = [{"seq": 1, "time": 1, "type": "turn/start", "data": {"turn": 1}}]
+        self._run(tmp_path, logger, events, attempt=1)
+        traj = tmp_path / "trajectory"
+        # attempt-1 文件 + 旧格式兼容副本（内容一致）
+        assert (traj / "sub-1.attempt-1.jsonl").exists()
+        assert (traj / "sub-1.jsonl").read_text() == (traj / "sub-1.attempt-1.jsonl").read_text()
+
+    def test_later_attempts_no_legacy_overwrite_no_collision(self, tmp_path, logger):
+        """后续 attempt 不写旧格式文件；同 attempt 冲突时自动递增不覆盖。"""
+        events = [{"seq": 1, "time": 1, "type": "turn/start", "data": {"turn": 1}}]
+        self._run(tmp_path, logger, events, attempt=1)
+        self._run(tmp_path, logger, events, attempt=2)
+        self._run(tmp_path, logger, events, attempt=2)  # 冲突 → 落 attempt-3
+        traj = tmp_path / "trajectory"
+        assert (traj / "sub-1.attempt-2.jsonl").exists()
+        assert (traj / "sub-1.attempt-3.jsonl").exists()
+        # 旧格式副本保持 attempt-1 内容（不被后续 attempt 覆盖）
+        assert (traj / "sub-1.jsonl").exists()
+
+    def test_empty_trajectory_no_file(self, tmp_path, logger):
+        self._run(tmp_path, logger, [], attempt=1)
+        assert not (tmp_path / "trajectory").exists()
+
+    def test_failopen_on_backend_error(self, tmp_path, logger):
+        """harvest 抛异常 → 仅 warning，不上抛。"""
+        import agent_go.executor as ex
+
+        class _Boom:
+            def harvest_trajectory(self, ctx, result):
+                raise RuntimeError("boom")
+
+        from agent_go.backends.base import SubtaskResult
+        with patch.object(ex.BackendRegistry, "get", return_value=lambda *a, **k: _Boom()):
+            _harvest_and_store(tmp_path, "sub-1", None, SubtaskResult(returncode=0),
+                               "dsh", logger, attempt=1)
+        assert not (tmp_path / "trajectory").exists()
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -1153,7 +1153,7 @@ async function loadTsScene() {
   }
 }
 
-async function loadTsTrajectory() {
+async function loadTsTrajectory(attempt) {
   const slot = document.getElementById('tsTraj');
   if (!slot) return;
   if (!tsState.subId) {
@@ -1163,13 +1163,24 @@ async function loadTsTrajectory() {
   slot.innerHTML = '<div class="loading">加载轨迹…</div>';
   try {
     const d = await api('/api/tasks/'+encodeURIComponent(tsState.taskId)+'/'+
-                        encodeURIComponent(tsState.subId)+'/trajectory');
+                        encodeURIComponent(tsState.subId)+'/trajectory'+
+                        (attempt ? '?attempt='+attempt : ''));
     if (!d.available) {
       slot.innerHTML = '<div class="kv"><dt>该 backend 无执行级轨迹</dt>'+
-        '<dd>仅 dsh 等 backend 落盘 trajectory/*.jsonl（ADR-010 阶段 1）</dd></div>';
+        '<dd>dsh/opencode 落盘 trajectory/*.jsonl（ADR-010 阶段 1/2）</dd></div>';
       return;
     }
-    slot.innerHTML = renderTsTrajectory(d.events || [], d.truncated);
+    let bar = '';
+    if ((d.attempts || []).length > 1) {
+      // 多 attempt（重试）：切换器，默认最新；失败 attempt 的轨迹通常最有归因价值
+      bar = '<div style="margin-bottom:6px">attempt: '+
+        d.attempts.map(n =>
+          n === d.attempt
+            ? '<b>['+n+']</b>'
+            : '<a href="javascript:void(0)" onclick="loadTsTrajectory('+n+')">'+n+'</a>'
+        ).join(' ')+'</div>';
+    }
+    slot.innerHTML = bar + renderTsTrajectory(d.events || [], d.truncated);
   } catch (e) {
     slot.innerHTML = '<div class="err">轨迹加载失败: '+esc(e.message)+'</div>';
   }

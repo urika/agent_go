@@ -111,9 +111,11 @@ settings.json `env` 块会被静默忽略，须真实环境变量注入）。由
   replay/checkpoint/recover 迁移为日志重建。
   **状态（2026-09-06）**：✅ 价值验证通过（[adr010-phase2-value-check](../adr010-phase2-value-check.md)：
   轨迹在两个 worker 级失败案例中提供决定性因果信息，直接促成 ISSUE-58 P1 修复）；
-  阶段 2 背书启动，切入面收窄为 TaskEvent 骨架事件（规划级归因盲区），
-  meta.json 投影化维持双写节奏；per-attempt 轨迹命名（`<sub>.attempt-N.jsonl`）
-  列入待办（重试覆盖同名文件，失败 attempt 轨迹丢失）。
+  ✅ **骨架事件已落地**：`events.py`（TaskEvent 最小词汇 + `<task_dir>/events.jsonl`
+  append-only，fail-open/线程安全），埋点覆盖 cli（plan/decompose）、executor
+  （subtask_start/model_attempt/verify/commit/retry/subtask_end）、pipeline（task_end）；
+  per-attempt 轨迹命名（`<sub>.attempt-N.jsonl` + 旧格式兼容副本）同步落地，
+  排障页轨迹面板支持 attempt 切换。meta.json 投影化维持双写节奏（未动）。
 - **阶段 3（按需）**：轨迹驱动失败归因；fork-retry（dsh fork / opencode session
   resume）；代理流量留痕与平台事件 session_key 关联；KnowledgeStore 从轨迹取料。
 

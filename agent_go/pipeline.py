@@ -1289,6 +1289,17 @@ def _run_pipeline_impl(confirmed: list[dict[str, Any]], repo: Path, task_dir: Pa
     # ── 任务完成通知（M1） ──
     # 事件优先级：on_blocked > on_failed > on_complete（一次管线只派发一个事件）
     event = "on_blocked" if has_blocked else "on_failed" if has_failed else "on_complete"
+    # ADR-010 阶段 2：编排级 task_end 事件（events.jsonl）
+    try:
+        from .events import emit_event as _emit
+        _status_counts: dict[str, int] = {}
+        for _r in results_map.values():
+            _st = (_r or {}).get("status", "unknown")
+            _status_counts[_st] = _status_counts.get(_st, 0) + 1
+        _emit(str(task_dir), "task_end", event=event, status_counts=_status_counts,
+              total_subtasks=len(results_map))
+    except Exception as _ev_err:
+        logger.debug(f"[events] task_end 写入失败（忽略）: {_ev_err}")
     # 解耦：动态 import + try/except——notify 是可选增强，失败不中断
     try:
         from .notify import notify_event

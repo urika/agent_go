@@ -712,8 +712,9 @@ B1 标准 backend 接口 ✅（73cfcea）
 详见 ADR-010 补充）。演进：阶段 1 轨迹采集（`harvest_trajectory` 钩子，只采集不消费）——
 ✅ dsh 臂已实战验证（2026-09-05，151 事件/26 step）+ opencode 臂已落地（2026-09-06，
 NDJSON 事件流防腐翻译，真实冒烟 10 事件含 cache 命中可见）；claude 黑盒不做 →
-阶段 2 平台 TaskEvent 词汇 + meta.json 降为投影（2026-09-06 启动评估立项：取真实失败案例
-验证轨迹归因价值，通过才动）→
+阶段 2 平台 TaskEvent 词汇 + meta.json 降为投影（✅ 2026-09-06 价值验证通过并落地骨架：
+events.py 编排级事件日志 + executor/cli/pipeline 埋点 + per-attempt 轨迹命名；
+meta.json 投影化维持双写节奏，replay/recover 迁移暂缓）→
 阶段 3 fork-retry / 轨迹归因 / 三层关联（按需）。详见
 [ADR-010](design/adr/ADR-010-trajectory-layering.md)。
 

@@ -21,6 +21,7 @@ from .backends import BackendContext, BackendRegistry, resolve_backend_name, rep
 from .git_utils import _worktree_create, init_git_repo
 from .metrics import collect_timing, collect_change_stats, collect_merge_result
 from .artifacts import ARTIFACT_DIR_NAME
+from .events import emit_event
 from . import diag
 # 解耦原则：evaluator 是可选增强，不静态 import（避免核心模块强绑增强模块的传递依赖）。
 # 改为调用点（_verify_changes 内 evaluator_enabled 守卫后）动态 import。
@@ -437,6 +438,32 @@ def _backend_env(env: Optional[dict], worktree) -> dict:
     be = dict(env) if env else dict(os.environ)
     be["PWD"] = str(worktree)
     return be
+
+
+def _harvest_and_store(task_dir, sub_id: str, backend_ctx, result, sandbox_type: str,
+                       logger, attempt: int) -> None:
+    """ADR-010：采集本次 attempt 的轨迹并落盘 trajectory/<sub_id>.attempt-N.jsonl。
+
+    兼容：attempt=1 时同时写一份 <sub_id>.jsonl（旧消费端——排障页 api_trajectory、
+    既有任务目录——读无后缀文件）；fail-open，任何失败仅 warning。
+    """
+    try:
+        trajectory = BackendRegistry.get(sandbox_type)().harvest_trajectory(backend_ctx, result)
+        if not trajectory:
+            return
+        traj_dir = Path(task_dir) / "trajectory"
+        traj_dir.mkdir(parents=True, exist_ok=True)
+        text = "".join(json.dumps(ev, ensure_ascii=False) + "\n" for ev in trajectory)
+        target = traj_dir / f"{sub_id}.attempt-{attempt}.jsonl"
+        while target.exists():  # 同一轮多个修复动作（reload/replan/fix）不互相覆盖
+            attempt += 1
+            target = traj_dir / f"{sub_id}.attempt-{attempt}.jsonl"
+        target.write_text(text, encoding="utf-8")
+        if attempt == 1:
+            (traj_dir / f"{sub_id}.jsonl").write_text(text, encoding="utf-8")
+        logger.info(f"[trajectory] {sub_id} attempt-{attempt} 已落盘 {len(trajectory)} 条轨迹事件 → {target}")
+    except Exception as exc:
+        logger.warning(f"[trajectory] {sub_id} attempt-{attempt} 轨迹采集/落盘失败（忽略，不影响任务）: {exc}")
 
 
 def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, logger: logging.Logger,
@@ -1499,6 +1526,9 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
         logger.info(f"已打 tag (无新增变更): {tag_name}")
     else:
         logger.warning(f"Git 完成边界失败，禁止将 {sub_id} 作为成功结果传递")
+    emit_event(str(task_dir) if task_dir else None, "commit", sub_id=sub_id,
+               tag=tag_name if git_ok else "", has_changes=bool(has_changes),
+               ok=bool(git_ok))
 
     git_commit_ms = (time.time() - git_start) * 1000
     commit_hash = ""
@@ -1630,6 +1660,18 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         headless=True, progress=False, tag_name="",
                         hard_timeout=_reload_timeout)
                     _reload_result = run_repair(_reload_bctx, _is_simple)
+                    emit_event(str(task_dir), "retry", sub_id=sub_id,
+                               attempt=retry_count + 1, max_retries=max_retries,
+                               kind="reload", reason=trigger_reason)
+                    emit_event(str(task_dir), "model_attempt", sub_id=sub_id,
+                               attempt=retry_count + 1, backend=_reload_result.sandbox_type,
+                               model=_reload_bctx.routed_model or "",
+                               returncode=_reload_result.returncode,
+                               kill_reason=getattr(_reload_result, "kill_reason", None) or "",
+                               elapsed_sec=round(getattr(_reload_result, "backend_time", 0.0), 2))
+                    _harvest_and_store(task_dir, sub_id, _reload_bctx, _reload_result,
+                                       _reload_result.sandbox_type, logger,
+                                       attempt=retry_count + 1)
                     _reload_kr = getattr(_reload_result, "kill_reason", None)
                     if isinstance(_reload_kr, str) and _reload_kr:
                         _latest_kill_reason[0] = _reload_kr
@@ -1716,6 +1758,18 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 headless=True, progress=False, tag_name="",
                 hard_timeout=_replan_timeout)
             _replan_result = run_repair(_replan_bctx, _is_simple)
+            emit_event(str(task_dir), "retry", sub_id=sub_id,
+                       attempt=retry_count + 1, max_retries=max_retries,
+                       kind="replan", reason=trigger_reason)
+            emit_event(str(task_dir), "model_attempt", sub_id=sub_id,
+                       attempt=retry_count + 1, backend=_replan_result.sandbox_type,
+                       model=_replan_bctx.routed_model or "",
+                       returncode=_replan_result.returncode,
+                       kill_reason=getattr(_replan_result, "kill_reason", None) or "",
+                       elapsed_sec=round(getattr(_replan_result, "backend_time", 0.0), 2))
+            _harvest_and_store(task_dir, sub_id, _replan_bctx, _replan_result,
+                               _replan_result.sandbox_type, logger,
+                               attempt=retry_count + 1)
             _replan_kr = getattr(_replan_result, "kill_reason", None)
             if isinstance(_replan_kr, str) and _replan_kr:
                 _latest_kill_reason[0] = _replan_kr
@@ -2279,7 +2333,18 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 backend_ctx, task_md=fix_prompt, sub_id=f"{subtask['id']}-fix-{retry_count}",
                 headless=True, progress=False, tag_name="",
                 hard_timeout=retry_timeout)
+            emit_event(str(task_dir), "retry", sub_id=subtask["id"],
+                       attempt=retry_count + 1, max_retries=max_retries, kind="fix",
+                       reason="verification_failed")
             _fix_result = run_repair(_fix_bctx, _is_simple)
+            emit_event(str(task_dir), "model_attempt", sub_id=subtask["id"],
+                       attempt=retry_count + 1, backend=_fix_result.sandbox_type,
+                       model=_fix_bctx.routed_model or "",
+                       returncode=_fix_result.returncode,
+                       kill_reason=getattr(_fix_result, "kill_reason", None) or "",
+                       elapsed_sec=round(getattr(_fix_result, "backend_time", 0.0), 2))
+            _harvest_and_store(task_dir, subtask["id"], _fix_bctx, _fix_result,
+                               _fix_result.sandbox_type, logger, attempt=retry_count + 1)
             # S12-P0 G1：捕获 fix 重试的 kill_reason（修复超时等）
             # 仅接受真实字符串值（防御 MagicMock 等测试替身对象）
             _fix_kr = getattr(_fix_result, "kill_reason", None)
@@ -2547,6 +2612,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     logger.info(f"─── {sub_id} START: {subtask['title']} ───")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
                 "depends_on": subtask.get("depends_on", []), "headless": headless, "issue": issue_ref})
+    emit_event(str(task_dir), "subtask_start", sub_id=sub_id, title=subtask["title"],
+               difficulty=subtask.get("difficulty", ""),
+               depends_on=subtask.get("depends_on", []))
 
     clone_start = time.time()
 
@@ -2935,20 +3003,16 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     sandbox_type = result.sandbox_type
     claude_time = result.backend_time
 
-    # ADR-010 阶段 1：轨迹采集钩子（只采集不消费，fail-open）。
+    emit_event(str(task_dir), "model_attempt", sub_id=sub_id, attempt=1,
+               backend=sandbox_type, model=routed_model or "",
+               returncode=result.returncode, kill_reason=result.kill_reason or "",
+               elapsed_sec=round(claude_time, 2))
+
+    # ADR-010 阶段 1/2：轨迹采集（只采集不消费，fail-open），按 attempt 命名——
+    # 重试会重跑 backend，同名覆盖会丢失失败 attempt 的轨迹（最有价值的部分）。
     # 按 result.sandbox_type 取实际执行的 backend（含异常回退 claude 的情形），
     # 默认实现返回 []，无轨迹源的 backend 不产生文件。
-    try:
-        _trajectory = BackendRegistry.get(sandbox_type)().harvest_trajectory(_backend_ctx, result)
-        if _trajectory:
-            _traj_dir = Path(task_dir) / "trajectory"
-            _traj_dir.mkdir(parents=True, exist_ok=True)
-            with (_traj_dir / f"{sub_id}.jsonl").open("w", encoding="utf-8") as _tf:
-                for _ev in _trajectory:
-                    _tf.write(json.dumps(_ev, ensure_ascii=False) + "\n")
-            logger.info(f"[trajectory] {sub_id} 已落盘 {len(_trajectory)} 条轨迹事件 → {_traj_dir / f'{sub_id}.jsonl'}")
-    except Exception as _hv_err:
-        logger.warning(f"[trajectory] {sub_id} 轨迹采集/落盘失败（忽略，不影响任务）: {_hv_err}")
+    _harvest_and_store(task_dir, sub_id, _backend_ctx, result, sandbox_type, logger, attempt=1)
 
     _wd_stop()
     if _wd_state.get("loop_detected"):
@@ -2983,6 +3047,15 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     verify_ok = verify_results["verify_ok"]
     retry_count = verify_results["retry_count"]
     verification_results = verify_results["verification_results"]
+
+    emit_event(str(task_dir), "verify", sub_id=sub_id, ok=bool(verify_ok),
+               retries=retry_count,
+               failed_commands=[vr.get("command", "")[:120] for vr in verification_results
+                                if vr.get("exit_code", 0) not in (0, -1) and not vr.get("rejected")],
+               rejected_commands=[vr.get("command", "")[:120] for vr in verification_results
+                                  if vr.get("rejected")],
+               semantic_fail=any(vr.get("type") == "semantic" and not vr.get("passed", True)
+                                 for vr in verification_results))
 
     # 7. Generate context (use original verification, not path-rewritten)
     _generate_context(subtask, task_dir, sub_id, logger, headless, result, verify_ok, summary,
@@ -3053,6 +3126,9 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         "crash_but_verified": verify_results.get("crash_but_verified", False),
         "verification_results": verification_results,
     })
+    emit_event(str(task_dir), "subtask_end", sub_id=sub_id, status=status,
+               failure_class=failure_class or "", retries=retry_count,
+               failure_reason=failure_reason[:200])
     # H2 谦逊层：子任务级层间归因（确定性，fail-open）
     try:
         from .failure import attribute_layer

@@ -12,7 +12,7 @@ Guidance for AI coding agents working in this repository. This file keeps only c
 
 ## Project Overview
 
-agent_go is a modular Python CLI tool (74 modules, ~40,100 lines) that wraps Claude Code with a structured Plan → Decompose → Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
+agent_go is a modular Python CLI tool (75 modules, ~43,600 lines) that wraps Claude Code with a structured Plan → Decompose → Execute workflow. It calls external LLM APIs to generate execution plans, then runs each step as an isolated subtask in a git worktree with Claude Code. Supports concurrent execution, interrupt/resume/crash-recovery, config-driven role-skill mapping, verification loop with auto-retry, role-aware and difficulty-based model routing, worktree preservation for failed tasks, multi-channel notification, remote branch push, and an MCP server/client layer (agent_go can be consumed as an MCP server and can itself consume external MCP tools inside subtasks).
 
 ## Tech Stack & Build
 
@@ -134,7 +134,7 @@ Full checklist with examples: `docs/design/code-review-checklist.md`.
 ## File Organization
 
 ```
-agent_go/           # 74 Python modules (~40,100 lines); catalog: docs/design/module-catalog.md
+agent_go/           # 75 Python modules (~43,600 lines); catalog: docs/design/module-catalog.md
 tests/              # 115 test files, 2863 tests; fixtures in conftest.py
 eval_suite/         # eval bench suite: golden_tasks/ m3_tasks/ phaseD_tasks/ fixtures/ baselines/, results_*.jsonl
 docs/design/        # Design docs + reference docs split out of AGENTS.md (see top table); adr/ for ADRs

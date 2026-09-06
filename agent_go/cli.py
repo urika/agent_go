@@ -16,6 +16,7 @@ from .console import Console, set_default_console, _LazyConsole
 from .api import generate_plan, decompose_fallback
 from .ui import confirm_plan, plan_to_md, plan_to_subtasks, confirm_subtasks
 from .utils import read_reference_docs, _detect_tool_versions
+from .events import emit_event
 from .pipeline import _run_pipeline
 from .skills import load_skills, discover_skills, render_skill_for_plan, list_skills
 from .spec import parse_spec, validate_spec_l1, render_spec_template, detect_step_conflicts, extract_do_not_touch
@@ -1233,6 +1234,10 @@ def cmd_run(args=None):
                 (task_dir / "PLAN.md").write_text(plan_to_md(confirmed_plan), encoding="utf-8")
                 _save_plan_snapshot(task_dir, confirmed_plan, iteration)
                 logger.info(f"[PLAN] PLAN.md 已保存 (v{iteration})")
+                emit_event(str(task_dir), "plan",
+                           steps=len(confirmed_plan.get("steps", [])), iteration=iteration)
+                emit_event(str(task_dir), "decompose",
+                           count=len(subtasks), subtasks=[s.get("id", "") for s in subtasks])
                 # S12-P2 G5：规划期欠分解检测——hard 子任务 + 总子任务数过少 → 提示可能撞超时
                 try:
                     from .planning import check_under_decomposition

@@ -213,7 +213,10 @@ class WebHandler(WebOpsMixin, BaseHTTPRequestHandler):
                 return
             # ── 排障页（trajectory / worktree 现场；404 仅当 task 不存在）──
             if len(parts) == 5 and parts[1] == "tasks" and parts[4] == "trajectory":
-                data = api_trajectory(parts[2], parts[3])
+                _attempt = next((p[8:] for p in query.split("&")
+                                 if p.startswith("attempt=")), "")
+                data = api_trajectory(parts[2], parts[3],
+                                      attempt=int(_attempt) if _attempt.isdigit() else 0)
                 if data is None:
                     self._reply_json(404, {"error": "task not found"})
                 else:

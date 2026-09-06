@@ -43,6 +43,7 @@
 | `metadata_migration.py` | 历史任务元数据迁移工具（schema 升级/字段补齐） | migrated metadata |
 | `eval.py` | 评估分析：quality / perf / cost (per-role) / reliability / UX + eval gate | eval report |
 | `replay.py` | 执行回放时间线：从 meta/metering/results 重建可视化 | timeline (ASCII/JSON) |
+| `events.py` | TaskEvent 最小词汇 + 每任务 append-only `events.jsonl`（ADR-010 阶段 2 编排级事件真源，fail-open/线程安全） | task events |
 | `agent_loop.py` | 自主 agent 循环（`--agent-loop`）：tool-use ReAct 直接 API 调用；B2 stuck 检测/no-progress 信号/explore 只读/scope advisory | loop result |
 | `tool_executor.py` | Agent loop 工具注册和执行（Read/Write/Edit/Bash/Grep/Glob/View + 安全规则 + 只读模式） | tool results |
 | `backends/` | 阶段十三 worker backend 抽象包：BaseBackend/BackendContext/SubtaskResult（base，含 ADR-010 harvest_trajectory 可选钩子）、BackendRegistry/resolve_backend_name（registry）、ClaudeBackend（claude_backend）、AgentLoopBackend（agent_loop_backend）、PiBackend（pi_backend，B3）、OpenCodeBackend（opencode_backend，B6）、ZCodeBackend（zcode_backend，B7）、DSHBackend（dsh_backend，B8）、修复路径分发 repair_timeout/run_repair（dispatch） | SubtaskResult |
