@@ -101,10 +101,15 @@ settings.json `env` 块会被静默忽略，须真实环境变量注入）。由
 - **阶段 1（随 B8 dsh 落地）**：`BaseBackend.harvest_trajectory()` 可选钩子
   （fail-open）；dsh harvester + opencode 事件流落盘 →
   `<task_dir>/trajectory/{sub_id}.jsonl`；只采集不消费，用真实失败案例验证价值。
+  **状态（2026-09-06）**：钩子 + dsh harvester ✅ 已实战验证（golden 批量每子任务
+  落盘，151 事件/26 step）；opencode harvester（NDJSON 事件流）已立项为下一增量，
+  是第二 full-fidelity 数据源；claude 黑盒不做。
 - **阶段 2（价值验证后）**：定义 TaskEvent 最小词汇
   （plan/decompose/subtask_start/model_attempt/verify/commit/retry/subtask_end）；
   executor/pipeline 发射骨架事件；meta.json 双写一个版本周期后切为投影；
   replay/checkpoint/recover 迁移为日志重建。
+  **状态（2026-09-06）**：启动评估已立项——阶段 1 数据够格背书，取真实失败案例
+  验证 trajectory 归因价值，通过才动本阶段，不通过则继续冻结。
 - **阶段 3（按需）**：轨迹驱动失败归因；fork-retry（dsh fork / opencode session
   resume）；代理流量留痕与平台事件 session_key 关联；KnowledgeStore 从轨迹取料。
 

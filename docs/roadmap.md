@@ -709,9 +709,10 @@ B1 标准 backend 接口 ✅（73cfcea）
 拥有任务编排事件日志（唯一真源）+ 能力 seam；代理层保持协议级横切（路由/压缩/
 注入/diag/流量留痕），**不做 LLM 会话管理**；代理压缩按路由分流（云端路由透传、
 本地模型路由保留管理——`claude -p` 无上下文长度旗标，本地窗口防护只能由代理承担，
-详见 ADR-010 补充）。演进：阶段 1 轨迹采集
-（`harvest_trajectory` 钩子，随 B8 落地，dsh/opencode 先行，只采集不消费）→
-阶段 2 平台 TaskEvent 词汇 + meta.json 降为投影（需阶段 1 价值验证背书）→
+详见 ADR-010 补充）。演进：阶段 1 轨迹采集（`harvest_trajectory` 钩子，只采集不消费）——
+✅ dsh 臂已实战验证（2026-09-05，151 事件/26 step），opencode harvester 已立项为下一增量 →
+阶段 2 平台 TaskEvent 词汇 + meta.json 降为投影（2026-09-06 启动评估立项：取真实失败案例
+验证轨迹归因价值，通过才动）→
 阶段 3 fork-retry / 轨迹归因 / 三层关联（按需）。详见
 [ADR-010](design/adr/ADR-010-trajectory-layering.md)。
 
@@ -871,6 +872,8 @@ M0 产品契约与指标冻结  ✅ accepted
 3. **C4 前置修订：知识注入 KV-cache 稳定快照**（pi 插件借鉴②）→ 然后 **C4 KnowledgeStore A/B**（delivery-20260820 基线两臂对比）。⚠️ 顺序敏感：C4 绕过此修订直接启动会导致注入口径返工（逐轮重建打爆本地模型前缀缓存）。✅ 前置修订已落地（2026-09-05：`knowledge.snapshot` 默认开，`resolve_repair_knowledge` 快照冻结 + 注入块移至 TASK.md 后稳定前缀位；tests/test_knowledge.py +6 用例）；✅ **decision 双臂 A/B 完成**（c4-kv-ctl / c4-kv-inj-20260905，29 任务 × repeat 2 × 2 臂，本地代理串行，Ornith-1.5-35B 后端——与 delivery-20260820 Qwen3.8 基线按 Metric Freeze 不混比，两臂内部对比）：ADR 0.914→0.983 ✅（任务级 28/29→29/29，唯一翻转 batch-done），但 $/AD $0.00167→$0.00200（+19.6% > 10% 容忍）❌，可淘汰记录不足 —— 判定 **ROLLBACK**（与 08-21 smoke 同结论：ADR 升、成本门不过；注入参与率 4~6/58 仍低，inj 臂重试 6 次反多于 ctl 4 次，成本差主要来自重试次数而非注入 token）。`knowledge.enabled` 维持默认关，全量重约待知识库积累（T07 口径）。
 4. ~~**pipeline 本地模型自动限流**~~ ✅（2026-09-05 T09，ADR-011）：本地路由子任务经任务级 Semaphore(1) 自动串行，云端 --parallel 语义不变；判定与 `AGENT_GO_IS_LOCAL` 同源，逃生开关 `pipeline.local_model_serialize`（tests +11 例）。
 5. ~~**随手项**：`zai/glm-5.3-flash` 定价覆盖~~ ✅（2026-09-05 T10）：pricing.py $0.15/$0.50（z.ai 标准价）+ MODEL_TIER value 档。
+6. **opencode harvester：ADR-010 阶段 1 钩子扩展至第二臂**（2026-09-06 评估立项）：opencode 有 NDJSON 事件流可落盘为 `trajectory/{sub_id}.jsonl`，是 dsh 之后自然的第二 full-fidelity 数据源；claude 黑盒无解、不做。低成本高价值，参照 dsh harvester 实现。
+7. **ADR-010 阶段 2 启动评估**（2026-09-06 评估立项）：阶段 1 已有实战数据（dsh 臂 golden 批量轨迹落盘，151 事件/26 step），按 ADR 门禁「阶段 2 须价值验证背书」现已够格评估——取真实失败案例验证 trajectory 能否显著缩短归因时间，通过才动 TaskEvent 词汇 + meta.json 投影化；不通过则阶段 2 继续冻结。轨迹 UI、fork-retry、会话重建维持「按需/不做」。
 
 **等外部窗口（到点触发，不占当前排期）**：
 
@@ -879,6 +882,6 @@ M0 产品契约与指标冻结  ✅ accepted
 - zcode 官方独立 CLI 发布后迁移（zai-org/feedback#444）。
 - ~~ISSUE-55 巨型模块拆分（web_server 4838 / executor 3103 行）：web_server 拆分等下一个 Web 需求触发~~ web_server 侧 ✅（2026-09-05 T12）：4903 行拆为 web_frontend/web_data/web_ops/web_kanban/web_handler 5 模块 + 238 行组合层，公共 API 行为等价（AST 级验证，tests 225 过）；executor.py 半侧仍登记，触发线不变。
 
-**长期候选**：pi-subagents 式确定性 workflow 脚本（plan 模板固化）；代理层压缩参照 context-mode「工具结果外置 + FTS5/BM25 按需检索」路线（理念借鉴，ELv2 不引入代码）；ADR-010 阶段 2/3（TaskEvent 词汇、meta.json 投影化、fork-retry）。
+**长期候选**：pi-subagents 式确定性 workflow 脚本（plan 模板固化）；代理层压缩参照 context-mode「工具结果外置 + FTS5/BM25 按需检索」路线（理念借鉴，ELv2 不引入代码）；ADR-010 阶段 3（fork-retry / 轨迹归因 / 三层关联，按需）。
 
 在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。
