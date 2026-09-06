@@ -879,3 +879,40 @@ decision-20260812 基线 35 条中 7 条 `infrastructure_failure`，其中 6 条
 **后续如需恢复 bigmodel**：从备份恢复 env 块，或改用按需 env profile / wrapper 脚本，避免常驻 env 块劫持 agent_go worker。
 
 **影响**：本次处置同时闭环了 ISSUE-56（worker session join 断链）。根因是 settings env 钉死导致 worker 直连云端，本地代理收不到会话 key；拆除后 session key 立即在代理侧可见。
+
+### ISSUE-58 弱模型经绝对路径绕过 worktree 隔离写入（PWD 泄漏）
+
+- **位置**：worker backend 执行层 → 根因修复于 `executor._backend_env`（BackendContext 构造点统一改写）
+- **状态**：✅ 已修复（2026-09-06，PWD 改写 + tests/test_executor.py::TestBackendEnv 3 例）
+- **严重度**：P1（批量级污染：一次 bench 即可污染 fixture 主仓库与宿主仓库，且静默）
+- **发现场景**：opencode harvester 冒烟（mimo-v2.5-free，空 worktree），模型直接向
+  `write` 工具传入绝对路径 `/Users/jinsongwang/workspace/agent_go/hello.txt`，
+  写入 agent_go 主仓库根目录而非 worktree（轨迹 tool/call 事件可见完整 input）。
+
+**问题**：agent_go 的 worktree 隔离假设 worker 在 worktree 内写文件；绝对路径写入
+不产生 worktree git diff，executor 的 scope/do_not_touch 检查（基于 worktree diff）
+观测不到，验证循环无从发现。强模型未见此行为，弱模型/空上下文场景概率上升。
+
+**升级确认（2026-09-06，ADR-010 阶段 2 评估批量）**：opencode/Zen 臂 golden 6×1
+批量中，implement-done-command 任务（task-20260906-120214-027-a875）的 worker
+从第一个 tool/call 起全部操作 `/Users/jinsongwang/workspace/agent_go/` 绝对路径——
+在主仓库根新建 `src/`（storage.py/models.py/cli.py 等）、改写
+`eval_suite/fixtures/task-mgr/src/`（fixture 主仓库污染）、主仓库 tests/ 混入
+test_security.py/test_branching.py。worktree 全程零改动 → executor 判定 no_changes，
+execution.log 只见「无文件变更」，根因完全不可见；轨迹逐条 tool/call 可见绝对路径。
+
+**根因**：父进程（bench/CLI）cwd=被测主仓库，`PWD` 环境变量经
+`env=dict(os.environ)` 原样泄漏进 backend 子进程；subprocess `cwd=` 只改实际目录、
+不改 `PWD`。opencode 把 `PWD` 作为项目根上下文暴露给模型，弱模型据此用绝对路径
+写主仓库。B6（2026-09-05）记为「snapshot 污染」的 fixture 写入事件，部分案例
+实际可能同为 PWD 泄漏所致（snapshot:false 已禁用影子仓库写回，但挡不住绝对路径直写）。
+
+**修复**：`executor._backend_env()`——BackendContext 构造点将 `PWD` 统一改写为
+worktree 路径（副本返回，不动调用方 env），对 claude/pi/opencode/zcode/dsh 全部
+backend 生效。
+
+**遗留方向**（未做，按需）：①轨迹层 tool/call 参数审计（path 必须 resolve 在
+worktree 内，可观测但缺拦截）；②verification 增加 worktree 外写事后探测；
+③弱模型路由时收紧 allowed_tools。注意：agent_go 外侧无法直接拦截 CLI backend
+进程内的文件写——现实抓手是轨迹审计 + 事后检测。
+

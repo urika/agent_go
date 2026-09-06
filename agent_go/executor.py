@@ -425,6 +425,20 @@ def _effective_config(config: Optional[dict]) -> dict:
         return {}
 
 
+def _backend_env(env: Optional[dict], worktree) -> dict:
+    """构造 worker backend 子进程环境（ISSUE-58）。
+
+    父进程（bench/CLI）的 cwd 通常是被测主仓库，``PWD`` 环境变量会原样泄漏进
+    backend 子进程——opencode 等 CLI 会把 ``PWD`` 当作项目根上下文暴露给模型，
+    弱模型实测据此用绝对路径把文件写进主仓库，绕过 worktree 隔离（2026-09-06
+    opencode/Zen 臂批量污染 fixture 与主仓库根 src/，轨迹 tool/call 事件可复现）。
+    统一将 ``PWD`` 改写为 worktree 路径；不改动调用方的 env 字典（副本返回）。
+    """
+    be = dict(env) if env else dict(os.environ)
+    be["PWD"] = str(worktree)
+    return be
+
+
 def _run_verification_cmd(vcmd: str, worktree: Path, attempt: int, env: dict, logger: logging.Logger,
                           task_id: str = "", sub_id: str = "") -> dict:
     """执行单条验证命令，返回结果 dict。避免 shlex.split 和安全门禁逻辑重复。"""
@@ -2867,7 +2881,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     _backend_ctx = BackendContext(
         task_md=task_md,
         worktree=worktree,
-        env=env,
+        env=_backend_env(env, worktree),
         headless=headless,
         agent=agent,
         agent_type=subtask.get("agent_type", "developer"),

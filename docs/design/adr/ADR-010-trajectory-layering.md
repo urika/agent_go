@@ -109,8 +109,11 @@ settings.json `env` 块会被静默忽略，须真实环境变量注入）。由
   （plan/decompose/subtask_start/model_attempt/verify/commit/retry/subtask_end）；
   executor/pipeline 发射骨架事件；meta.json 双写一个版本周期后切为投影；
   replay/checkpoint/recover 迁移为日志重建。
-  **状态（2026-09-06）**：启动评估已立项——阶段 1 数据够格背书，取真实失败案例
-  验证 trajectory 归因价值，通过才动本阶段，不通过则继续冻结。
+  **状态（2026-09-06）**：✅ 价值验证通过（[adr010-phase2-value-check](../adr010-phase2-value-check.md)：
+  轨迹在两个 worker 级失败案例中提供决定性因果信息，直接促成 ISSUE-58 P1 修复）；
+  阶段 2 背书启动，切入面收窄为 TaskEvent 骨架事件（规划级归因盲区），
+  meta.json 投影化维持双写节奏；per-attempt 轨迹命名（`<sub>.attempt-N.jsonl`）
+  列入待办（重试覆盖同名文件，失败 attempt 轨迹丢失）。
 - **阶段 3（按需）**：轨迹驱动失败归因；fork-retry（dsh fork / opencode session
   resume）；代理流量留痕与平台事件 session_key 关联；KnowledgeStore 从轨迹取料。
 

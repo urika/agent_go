@@ -35,6 +35,7 @@ from agent_go.executor import (
     _check_scope_compliance,
     _build_repair_prompt,
     _copy_tree_skip_special,
+    _backend_env,
 )
 
 
@@ -1548,6 +1549,27 @@ class TestIsSimpleTask:
                    "depends_on": ["sub-1", "sub-2", "sub-3"]}
 
         assert _is_simple_task(subtask) is False
+
+
+class TestBackendEnv:
+    """_backend_env（ISSUE-58）：PWD 改写为 worktree，防弱模型以主仓库为项目根。"""
+
+    def test_pwd_rewritten_to_worktree(self):
+        env = {"PWD": "/Users/x/main-repo", "PATH": "/usr/bin"}
+        be = _backend_env(env, "/tmp/wt/sub-1/work")
+        assert be["PWD"] == "/tmp/wt/sub-1/work"
+        assert be["PATH"] == "/usr/bin"
+        # 不改动调用方字典
+        assert env["PWD"] == "/Users/x/main-repo"
+
+    def test_pwd_injected_when_absent(self):
+        be = _backend_env({}, "/tmp/wt/work")
+        assert be["PWD"] == "/tmp/wt/work"
+
+    def test_none_env_falls_back_to_environ(self):
+        be = _backend_env(None, "/tmp/wt/work")
+        assert be["PWD"] == "/tmp/wt/work"
+        assert "PATH" in be  # 继承 os.environ 其余内容
 
 
 # ═══════════════════════════════════════════════════════════════

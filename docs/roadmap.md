@@ -874,7 +874,7 @@ M0 产品契约与指标冻结  ✅ accepted
 4. ~~**pipeline 本地模型自动限流**~~ ✅（2026-09-05 T09，ADR-011）：本地路由子任务经任务级 Semaphore(1) 自动串行，云端 --parallel 语义不变；判定与 `AGENT_GO_IS_LOCAL` 同源，逃生开关 `pipeline.local_model_serialize`（tests +11 例）。
 5. ~~**随手项**：`zai/glm-5.3-flash` 定价覆盖~~ ✅（2026-09-05 T10）：pricing.py $0.15/$0.50（z.ai 标准价）+ MODEL_TIER value 档。
 6. ~~**opencode harvester：ADR-010 阶段 1 钩子扩展至第二臂**~~ ✅（2026-09-06）：run() 落盘原始 NDJSON 事件流（worktree 同级 `opencode_events.ndjson`，executor 新实例调钩子故实例状态不可靠），`harvest_trajectory` 防腐翻译为平台事件（合成 turn 边界 + step/tool/usage 词汇，与 dsh 同 schema）；真实冒烟通过（Zen 免费模型，25s $0，10 事件含 cacheReadTokens，第二步 cache 命中 20736 可见）；tests +4 例。claude 黑盒无解、不做。
-7. **ADR-010 阶段 2 启动评估**（2026-09-06 评估立项）：阶段 1 已有实战数据（dsh 臂 golden 批量轨迹落盘，151 事件/26 step），按 ADR 门禁「阶段 2 须价值验证背书」现已够格评估——取真实失败案例验证 trajectory 能否显著缩短归因时间，通过才动 TaskEvent 词汇 + meta.json 投影化；不通过则阶段 2 继续冻结。轨迹 UI、fork-retry、会话重建维持「按需/不做」。
+7. ~~**ADR-010 阶段 2 启动评估**~~ ✅（2026-09-06，[value-check](design/adr010-phase2-value-check.md)）：opencode/Zen 臂 golden 6×1（$0）产出 3 失败 + 1 重试恢复案例；轨迹在 worker 级失败中提供决定性因果信息（直接促成 ISSUE-58 PWD 泄漏 P1 根因确认与修复），dsh plan_gate_blocked 边界案例证明规划级归因需 TaskEvent 补位——**阶段 2 背书启动，切入面收窄为 TaskEvent 骨架事件**；meta.json 投影化维持双写节奏；新待办：per-attempt 轨迹命名（重试覆盖失败 attempt 轨迹）、bench 目录复用异常待查（两条结果指向 0905 旧任务目录，pass 真实性存疑）。
 
 **等外部窗口（到点触发，不占当前排期）**：
 
