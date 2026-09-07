@@ -494,15 +494,20 @@ E1 第二击穿源：5,207 次压力驱逐 / 8,412 条目（cache_max 7.7GB，�
 **下一轮 = 验收轮**：P1a 是唯一新变量，跑完即做 Gate B1 正式归因。不做其他机制的 A/B（避免混杂）；P1b 开发可并行但不上线（单变量原则）。
 
 **正式验收口径**（`phase0_cache_diag.py analyze` 已支持窗口切分）：
-1. **窗口**：轮次起点的日志字节偏移（`--from-offset`，轮启动时记录 `stat -c%s`/`os.path.getsize`）或首个 `--from-marker "LCP snapdown"` 之后
+1. **窗口**：轮次起点执行 `phase0_cache_diag.py mark`（写入 `logs/phase0_round_marker.json`：日志字节偏移 + 引擎 PID + snapdown flag 快照），验收时 `analyze --from-marker-file <marker>` 切窗——工具链已实测（mark 检出 engine_pid=41912、flag=1）
 2. **排除**：批跑会话首个请求（cold warmup）、诊断/探针流量
-3. **指标**：token 加权增量占比 **< 0.15**；>30K 大请求子集单列（目标走向 <0.10，属 Gate B2/P1b 后）
-4. **记录**：轮次 manifest 必须含 `PROXY_CACHE_LCP_SNAPDOWN=1`（环境快照口径；swe-eval 侧 controls 字段，需协调）
+3. **指标**：token 加权增量占比 **< 0.15**；>30K 大请求子集单列（目标走向 <0.10，属 Gate B2/P1b 后）；**Metal peak 报告已内建**（analyze 解析 `[Metal memory]` 行——实测窗口 peak 29.1GB vs cap 28.1GB，#4 越限观察有了量化口径）
+4. **记录（swe-eval 侧协作片段，待对齐）**：实验 yaml `controls:` 加一行 +
+   ```yaml
+   controls:
+     PROXY_CACHE_LCP_SNAPDOWN: "1"   # 引擎侧 env（manage.sh conf export），非代理 env
+   ```
+   注意该 flag 生效在**引擎进程 env**（batched.py 读 os.environ），与既有 PROXY_* 代理 env 不同层——manifest 注明区分。
 
 **附带决议**：
 - 引擎重启协调协议已设立（llama.cpp `docs/05-operations-changelog/engine-restart-coordination-20260906.md` + CLAUDE.md 硬规则块）：批跑/实验运行期间引擎冻结，重启前三查并公告，紧急 OOM 先斩后奏须登记。**404 风暴已归因闭环**（llama.cpp `58d503a`）：重启加载窗口的客户端重试风暴（日志内 205 次重启累积 8,452 个 404，非流氓客户端）；`_wait_for_ready` 已改功能性探针（真实模型名 1-token 请求）修复
-- 遗留观察项：Metal 峰值 29.2GB > cap 28.1GB（越限运行）——下轮留意 OOM 余量，P1b 驱逐治理的输入
-- epoch 压缩区跨 epoch 渲染的**字节级确定性**仍待实际翻转验证（§11.4 依赖；与 ctx_engine 演进方联合检查）
+- 遗留观察项：Metal 峰值 29.2GB > cap 28.1GB（越限运行）——analyze 已内建峰值报告，下轮持续观察；P1b 驱逐治理的输入。另：并行会话已将引擎缓存调至 `--cache-memory-mb 12288 --hybrid-cache-entries 32`（驱逐治理调优已在他们侧启动，P1b 前需对齐）
+- **#5 epoch × snapdown 字节级确定性验证程序**（实证待数据）：线上 `PROXY_CTX_ENGINE_ENABLED=true` 已生效但观察窗口内尚无真实 epoch 翻转（`epochs>=1` 会话为零）。验证程序：① 轮后从代理日志筛 `epochs>=1` 会话；② 查这些会话 post-epoch 轮次的引擎 cache_fetch——HIT/snapdown（确定性成立）vs LCP unavailable 且 shared 占比骤降（确定性被破坏，需 ctx_engine 侧修序列化）；③ 正式确认仍需 ctx_engine 演进方对压缩区渲染做确定性 code review
 
 ### 11.8 实施顺序与状态
 

@@ -27,6 +27,7 @@ import os
 import random
 import re
 import string
+import subprocess
 import sys
 import time
 import urllib.request
@@ -53,31 +54,42 @@ RE_FIRST_TOKEN = re.compile(r"first token after ([\d.]+)s")
 
 
 def analyze(log_path: str, json_out: str = "", last_n: int = 200,
-            from_offset: int = 0, from_marker: str = "") -> int:
+            from_offset: int = 0, from_marker: str = "",
+            from_marker_file: str = "") -> int:
     reqs = []          # per-request: dict(req, uid, prompt, prefill, cached, ratio)
     lcp_events = []    # (shared, entry_len, requested_len, non_trimmable)
     evictions = []     # evicted entry counts
     ctx_sizes = []     # (msgs, total_chars) per [REQUEST]
     ttfts = []         # first token latency (s)
     stores = 0
-    warmups = []       # 每会话/每前缀族首个请求（验收口径排除项，近似：连续 MISS 后首个 HIT/大 prompt）
+    metal_peaks = []   # (active, peak) GB——验收清单 #4：Metal 越限观察
     started = False
+
+    if from_marker_file and not from_offset:
+        try:
+            from_offset = json.load(open(from_marker_file)).get("offset", 0)
+        except Exception:
+            print(f"⚠️ marker 文件不可读: {from_marker_file}（忽略，全量分析）")
 
     with open(log_path, "r", errors="replace") as f:
         pos = 0
         for line in f:
             line_offset = pos
             pos += len(line.encode("utf-8", errors="replace"))
-            # 窗口定位：--from-offset 字节起点 / --from-marker 首次出现行之后
+            # 窗口定位：--from-offset 字节起点 / --from-marker-file / --from-marker
             if not started:
                 if from_offset and line_offset >= from_offset:
                     started = True
                 elif from_marker and from_marker in line:
                     started = True
-                elif not from_offset and not from_marker:
+                elif not from_offset and not from_marker and not from_marker_file:
                     started = True
                 else:
                     continue
+            m = RE_METAL.search(line)
+            if m:
+                metal_peaks.append((float(m.group(1)), float(m.group(2))))
+                continue
             m = RE_SCHEDULE.search(line)
             if m:
                 prompt = int(m.group(3))
@@ -158,6 +170,12 @@ def analyze(log_path: str, json_out: str = "", last_n: int = 200,
         print(f"msgs P50/P95/max        {pct(msgs,50)} / {pct(msgs,95)} / {max(msgs)}")
     if ttfts:
         print(f"首 token 延迟 P50/P95   {pct(ttfts,50):.1f}s / {pct(ttfts,95):.1f}s")
+    if metal_peaks:
+        max_active = max(a for a, _ in metal_peaks)
+        max_peak = max(p for _, p in metal_peaks)
+        print(f"\n── Metal 内存（验收清单 #4，{len(metal_peaks)} 个采样）──")
+        print(f"active 最大 {max_active:.1f}GB | peak 最大 {max_peak:.1f}GB"
+              f"（cap 28.1GB——peak 越限需关注 OOM 余量）")
     if len(recent) >= 10:
         rp = sum(r["prompt"] for r in recent)
         rf = sum(r["prefill"] for r in recent)
@@ -197,6 +215,7 @@ def analyze(log_path: str, json_out: str = "", last_n: int = 200,
 
 # 真实推理事件的日志标记（区别于 GET /v1/models 健康轮询与未匹配路由的 4xx）
 _INFERENCE_MARKERS = ("[schedule]", "[REQUEST] POST", "[cache_fetch]", "prompt_cache_save")
+RE_METAL = re.compile(r"\[Metal memory\] active=([\d.]+)GB peak=([\d.]+)GB")
 
 
 def _last_inference_marker_pos(log_path: str) -> int:
@@ -212,6 +231,55 @@ def _last_inference_marker_pos(log_path: str) -> int:
                 pos = offset + acc
             acc += len(line) + 1
     return pos
+
+
+MARKER_FILE = "/Users/jinsongwang/APP/llama.cpp/logs/phase0_round_marker.json"
+
+
+def mark_round(log_path: str) -> int:
+    """轮启动标记（验收清单 #3）：记录日志字节偏移 + 引擎状态快照。
+
+    在轮次第一个请求发出之前执行；验收时 analyze --from-marker-file
+    以该偏移切窗，保证 Gate B1 归因只含本轮流量。
+    """
+    import datetime
+    engine_pid = ""
+    flag = None
+    try:
+        engine_pid = subprocess.check_output(
+            ["pgrep", "-f", "rapid-mlx serve"], text=True).split()[0]
+    except Exception:
+        pass
+    if engine_pid:
+        try:
+            # macOS 无 /proc——ps -E 读进程环境
+            env_out = subprocess.check_output(
+                ["ps", "-E", "-p", engine_pid, "-o", "command"], text=True,
+                stderr=subprocess.DEVNULL)
+            m = re.search(r"PROXY_CACHE_LCP_SNAPDOWN=(\S+)", env_out)
+            flag = m.group(1) if m else "absent"
+        except Exception:
+            flag = "unknown"
+    marker = {
+        "schema": "phase0-round-marker/v1",
+        "iso": datetime.datetime.now().isoformat(timespec="seconds"),
+        "ts": time.time(),
+        "log": log_path,
+        "offset": os.path.getsize(log_path),
+        "engine_pid": engine_pid,
+        "snapdown_flag": flag,
+        "note": "flag=on/1/true 为启用；absent/unknown 需人工复核 ps -E",
+    }
+    with open(MARKER_FILE, "w") as f:
+        json.dump(marker, f, ensure_ascii=False, indent=2)
+    print(f"轮标记已写入 {MARKER_FILE}")
+    print(f"  offset={marker['offset']} engine_pid={engine_pid or '?'} "
+          f"snapdown_flag={flag}")
+    if not engine_pid:
+        print("  ⚠️ 未找到引擎进程——确认引擎已启动后再标记")
+    elif flag not in ("1", "true", "yes", "on"):
+        print("  ⚠️ PROXY_CACHE_LCP_SNAPDOWN 未生效——验收轮前提不成立！")
+    return 0
 
 
 def _busy_guard(log_path: str, force: bool, quiet_sec: float = 90.0) -> bool:
@@ -375,8 +443,16 @@ def main() -> int:
                    help="只分析该字节偏移之后（Gate B1 验收：轮次起点的日志位置）")
     p.add_argument("--from-marker", default="",
                    help="只分析该子串首次出现行之后（如 --from-marker 'LCP snapdown'）")
+    p.add_argument("--from-marker-file", default="",
+                   help="从 mark 子命令的 JSON 读取 offset 切窗（推荐）")
     p.set_defaults(fn=lambda a: analyze(a.log, a.json, a.last,
-                                        a.from_offset, a.from_marker))
+                                        a.from_offset, a.from_marker,
+                                        a.from_marker_file))
+
+    p = sub.add_parser("mark", help="轮启动标记：记录日志偏移 + 引擎快照（验收清单 #3）")
+    p.add_argument("--log", dest="log",
+                   default="/Users/jinsongwang/APP/llama.cpp/logs/llama-server.log")
+    p.set_defaults(fn=lambda a: mark_round(a.log))
 
     for name, fn in (("probe", probe), ("probe-swa", probe_swa)):
         p = sub.add_parser(name, help=fn.__doc__.split("——")[0])
