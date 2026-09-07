@@ -179,17 +179,53 @@ def analyze(log_path: str, json_out: str = "", last_n: int = 200) -> int:
 
 # ── 主动探针（E2/E3）：批跑运行期禁用 ──────────────────────────────────────
 
+# 真实推理事件的日志标记（区别于 GET /v1/models 健康轮询与未匹配路由的 4xx）
+_INFERENCE_MARKERS = ("[schedule]", "[REQUEST] POST", "[cache_fetch]", "prompt_cache_save")
+
+
+def _last_inference_marker_pos(log_path: str) -> int:
+    """返回日志中最后一条推理标记行的起始字节位置（无则 -1）。"""
+    size = os.path.getsize(log_path)
+    offset = max(0, size - 2_000_000)
+    pos = -1
+    with open(log_path, "rb") as fh:
+        fh.seek(offset)
+        acc = 0
+        for line in fh.read().split(b"\n"):
+            if any(m.encode() in line for m in _INFERENCE_MARKERS):
+                pos = offset + acc
+            acc += len(line) + 1
+    return pos
+
+
 def _busy_guard(log_path: str, force: bool, quiet_sec: float = 90.0) -> bool:
-    """日志最近有活动 → 拒跑主动探针（探针会驱逐在跑会话的 KV 缓存条目）。"""
+    """双采样静默检查：采样间隔内无新增推理事件 → 视为空闲。
+
+    不能用日志 mtime 判断——健康轮询（GET /v1/models）与未匹配路由的 4xx
+    轰炸都会持续刷新 mtime，令守卫永远关闭（2026-09-06 实测）。
+    探针会在 Metal 压力下驱逐在跑会话的 KV 缓存条目，因此只在确认
+    「quiet_sec 窗口内零推理事件」后放行。
+    """
     if force:
         print("⚠️ --force：跳过活跃守卫（请确认批跑/实验未在运行）")
         return True
-    age = time.time() - os.path.getmtime(log_path)
-    if age < quiet_sec:
-        print(f"拒绝：引擎日志 {age:.0f}s 前仍有活动（<{quiet_sec:.0f}s 静默要求）。"
-              f"批跑运行期间探针会驱逐在跑会话的 KV 缓存条目（拖慢其下一轮全量重算）。"
-              f"确认空闲后用 --force。")
+    if not os.path.exists(log_path):
+        print(f"拒绝：引擎日志不存在 {log_path}")
         return False
+    size0 = os.path.getsize(log_path)
+    pos0 = _last_inference_marker_pos(log_path)
+    print(f"静默采样 {quiet_sec:.0f}s×2（确认窗口内零推理事件）…")
+    for _ in range(2):
+        time.sleep(quiet_sec)
+        size1 = os.path.getsize(log_path)
+        pos1 = _last_inference_marker_pos(log_path)
+        # 窗口内出现新推理事件（标记位置推进超过采样前文件大小）→ 不空闲
+        if pos1 >= size0 and pos1 > pos0:
+            print(f"拒绝：采样窗口内检测到新推理事件（标记 @ {pos1}，采样前大小 {size0}）。"
+                  f"探针会驱逐在跑会话的 KV 缓存条目。确认空闲后重试或 --force。")
+            return False
+        size0 = size1
+    print("✅ 静默确认（窗口内零推理事件）")
     return True
 
 
@@ -288,17 +324,24 @@ def probe_swa(args) -> int:
     lines = _parse_new_cache_lines(args.log, offset)
     scheds = [l for l in lines if l["kind"] == "schedule"]
     print("\n引擎侧缓存行为：")
-    abnormal = 0
+    misses = partials = snaps = 0
     for s in scheds:
         ratio = s["prefill"] / s["prompt"] if s["prompt"] else 0
+        tag = "FULL-MISS" if ratio > 0.9 else "PARTIAL" if ratio > 0.1 else "HIT"
         print(f"  {s['req']}: prompt={s['prompt']} prefill={s['prefill']} "
-              f"cached={s['cached']} ratio={ratio:.4f}")
-        if 0.3 < ratio <= 1.0:
-            abnormal += 1  # 部分前缀被重算 = 语义异常信号
-    if len(scheds) > 1:
-        print(f"\n判定：{abnormal}/{len(scheds)} 轮出现部分前缀重算 → "
-              + ("前缀缓存语义正常 ✅" if abnormal == 0
-                 else "存在前缀部分重算（SWA/架构缓存异常信号，需人工复核）⚠️"))
+              f"cached={s['cached']} ratio={ratio:.4f} [{tag}]")
+        if ratio > 0.9:
+            misses += 1
+        elif ratio > 0.1:
+            partials += 1
+        else:
+            snaps += 1
+    print(f"\n判定：全量 MISS {misses} / 部分重算 {partials} / 高复用 {snaps} → "
+          + ("前缀缓存语义正常 ✅（部分重算=SWA 异常信号，未出现）" if partials == 0
+             else "存在部分前缀重算（SWA/架构缓存异常信号，需人工复核）⚠️"))
+    if misses:
+        print("  注：FULL-MISS 轮为候选选择落在无检查点条目（多探针混合条目"
+              "边缘形态，P1b 段链去重的系统性解法范畴），非缓存语义异常。")
     return 0
 
 
