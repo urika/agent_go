@@ -52,16 +52,32 @@ RE_STORE = re.compile(r"\[cache_store\] request=(\S+) tokens=(\d+) \((\d+) promp
 RE_FIRST_TOKEN = re.compile(r"first token after ([\d.]+)s")
 
 
-def analyze(log_path: str, json_out: str = "", last_n: int = 200) -> int:
+def analyze(log_path: str, json_out: str = "", last_n: int = 200,
+            from_offset: int = 0, from_marker: str = "") -> int:
     reqs = []          # per-request: dict(req, uid, prompt, prefill, cached, ratio)
     lcp_events = []    # (shared, entry_len, requested_len, non_trimmable)
     evictions = []     # evicted entry counts
     ctx_sizes = []     # (msgs, total_chars) per [REQUEST]
     ttfts = []         # first token latency (s)
     stores = 0
+    warmups = []       # 每会话/每前缀族首个请求（验收口径排除项，近似：连续 MISS 后首个 HIT/大 prompt）
+    started = False
 
     with open(log_path, "r", errors="replace") as f:
+        pos = 0
         for line in f:
+            line_offset = pos
+            pos += len(line.encode("utf-8", errors="replace"))
+            # 窗口定位：--from-offset 字节起点 / --from-marker 首次出现行之后
+            if not started:
+                if from_offset and line_offset >= from_offset:
+                    started = True
+                elif from_marker and from_marker in line:
+                    started = True
+                elif not from_offset and not from_marker:
+                    started = True
+                else:
+                    continue
             m = RE_SCHEDULE.search(line)
             if m:
                 prompt = int(m.group(3))
@@ -355,7 +371,12 @@ def main() -> int:
                    default="/Users/jinsongwang/APP/llama.cpp/logs/llama-server.log")
     p.add_argument("--json", default="", help="结果 JSON 输出路径")
     p.add_argument("--last", type=int, default=200, help="最近窗口请求数")
-    p.set_defaults(fn=lambda a: analyze(a.log, a.json, a.last))
+    p.add_argument("--from-offset", type=int, default=0,
+                   help="只分析该字节偏移之后（Gate B1 验收：轮次起点的日志位置）")
+    p.add_argument("--from-marker", default="",
+                   help="只分析该子串首次出现行之后（如 --from-marker 'LCP snapdown'）")
+    p.set_defaults(fn=lambda a: analyze(a.log, a.json, a.last,
+                                        a.from_offset, a.from_marker))
 
     for name, fn in (("probe", probe), ("probe-swa", probe_swa)):
         p = sub.add_parser(name, help=fn.__doc__.split("——")[0])

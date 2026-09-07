@@ -489,7 +489,22 @@ E1 第二击穿源：5,207 次压力驱逐 / 8,412 条目（cache_max 7.7GB，�
 | engine 包为 homebrew Cellar 内第三方（升级被覆盖） | overlay/vendor 补丁 + 上游 PR 双轨；补丁带版本探测（0.12.12 实测） |
 | 混合架构线性层行为随 mlx_lm 版本漂移 | Gate A 纳入回归（升级 mlx_lm 必跑） |
 
-### 11.7 实施顺序
+### 11.7 下一轮定位与 Gate B1 正式验收口径（2026-09-06 拍板）
+
+**下一轮 = 验收轮**：P1a 是唯一新变量，跑完即做 Gate B1 正式归因。不做其他机制的 A/B（避免混杂）；P1b 开发可并行但不上线（单变量原则）。
+
+**正式验收口径**（`phase0_cache_diag.py analyze` 已支持窗口切分）：
+1. **窗口**：轮次起点的日志字节偏移（`--from-offset`，轮启动时记录 `stat -c%s`/`os.path.getsize`）或首个 `--from-marker "LCP snapdown"` 之后
+2. **排除**：批跑会话首个请求（cold warmup）、诊断/探针流量
+3. **指标**：token 加权增量占比 **< 0.15**；>30K 大请求子集单列（目标走向 <0.10，属 Gate B2/P1b 后）
+4. **记录**：轮次 manifest 必须含 `PROXY_CACHE_LCP_SNAPDOWN=1`（环境快照口径；swe-eval 侧 controls 字段，需协调）
+
+**附带决议**：
+- 引擎重启协调协议已设立（llama.cpp `docs/05-operations-changelog/engine-restart-coordination-20260906.md` + CLAUDE.md 硬规则块）：批跑/实验运行期间引擎冻结，重启前三查并公告，紧急 OOM 先斩后奏须登记。起因是 Gate A 期间 4 次强制重启 + 8,056 次 404 重试残骸（归属未查明，**下轮前需查明**）
+- 遗留观察项：Metal 峰值 29.2GB > cap 28.1GB（越限运行）——下轮留意 OOM 余量，P1b 驱逐治理的输入
+- epoch 压缩区跨 epoch 渲染的**字节级确定性**仍待实际翻转验证（§11.4 依赖；与 ctx_engine 演进方联合检查）
+
+### 11.8 实施顺序与状态
 
 ```text
 P1a   fetch 侧消费基础（memory_cache.py）        ✅ 2026-09-06（llama.cpp 9ae90c8，flag 默认关）
