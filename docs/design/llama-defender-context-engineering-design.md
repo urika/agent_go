@@ -500,7 +500,7 @@ E1 第二击穿源：5,207 次压力驱逐 / 8,412 条目（cache_max 7.7GB，�
 4. **记录**：轮次 manifest 必须含 `PROXY_CACHE_LCP_SNAPDOWN=1`（环境快照口径；swe-eval 侧 controls 字段，需协调）
 
 **附带决议**：
-- 引擎重启协调协议已设立（llama.cpp `docs/05-operations-changelog/engine-restart-coordination-20260906.md` + CLAUDE.md 硬规则块）：批跑/实验运行期间引擎冻结，重启前三查并公告，紧急 OOM 先斩后奏须登记。起因是 Gate A 期间 4 次强制重启 + 8,056 次 404 重试残骸（归属未查明，**下轮前需查明**）
+- 引擎重启协调协议已设立（llama.cpp `docs/05-operations-changelog/engine-restart-coordination-20260906.md` + CLAUDE.md 硬规则块）：批跑/实验运行期间引擎冻结，重启前三查并公告，紧急 OOM 先斩后奏须登记。**404 风暴已归因闭环**（llama.cpp `58d503a`）：重启加载窗口的客户端重试风暴（日志内 205 次重启累积 8,452 个 404，非流氓客户端）；`_wait_for_ready` 已改功能性探针（真实模型名 1-token 请求）修复
 - 遗留观察项：Metal 峰值 29.2GB > cap 28.1GB（越限运行）——下轮留意 OOM 余量，P1b 驱逐治理的输入
 - epoch 压缩区跨 epoch 渲染的**字节级确定性**仍待实际翻转验证（§11.4 依赖；与 ctx_engine 演进方联合检查）
 
