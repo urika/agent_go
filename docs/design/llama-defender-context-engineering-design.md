@@ -406,7 +406,7 @@ L0 内容（system prompt + 工具定义）由客户端决定，代理只能「�
 
 ## 11. Phase 1 详细设计：LCP 边界检查点复用 + 驱逐治理
 
-> 状态：**P1a 全链路已上线**（2026-09-06，llama.cpp `9ae90c8` + `d87b3f7` + `b77f643`；开关 `PROXY_CACHE_LCP_SNAPDOWN=1` 已进生产 conf）。**Gate A PASS**：模型级逐 token 一致，snap 9.4s vs cold 279.0s（**29.7×**），单请求复用 97.1%。剩余：真实负载 phase0 复测（Gate B1）、P1b 段链去重、E2/E3 探针（静默窗口被并行实验流量占用，活跃守卫正确拦截推迟）
+> 状态：**P1a 全链路已上线**（2026-09-06，llama.cpp `9ae90c8` + `d87b3f7` + `b77f643`；开关 `PROXY_CACHE_LCP_SNAPDOWN=1` 已进生产 conf）。**Gate A PASS**：模型级逐 token 一致，snap 9.4s vs cold 279.0s（**29.7×**），单请求复用 97.1%。**Gate B1 生产窗口读数（2026-09-20，EXP-9 批期）**：3.28 万请求窗口增量占比 **0.1189**（对照全史 0.3689 = 3.1×），snapdown 行使 7,332 次，稳定达标（<0.15）；正式 off 臂对照搭 EXP-8 换模重启（联合协调文档 J2）。剩余：P1b 段链去重、epoch×snapdown 确定性验证（待真实翻转）
 > 实现位置：`vllm_mlx/memory_cache.py`（引擎侧；homebrew Cellar venv 内，补丁副本归档 llama.cpp 仓库）
 > 验收工具：`tools/phase0_cache_diag.py`（before/after 同口径）
 
@@ -527,20 +527,24 @@ P1a.3 Gate A 模型级验证 + 开 flag                ✅ 2026-09-06（llama.cp
       下带检查点条目未必是 bisect 紧邻）/ 边界条目挂载
       Gate A PASS：B=13848 reused 97.1%，snap 9.4s vs
       cold 279.0s（29.7×），输出逐字一致
-P1b   段链去重 + 链感知驱逐（Gate B2）            ~1 天
-P1c   phase0 复测（Gate B1）+ E2/E3 探针          ✅ 2026-09-06（初步）
+P1b   段链去重 + 链感知驱逐（Gate B2）            ⏳ ~1 天（动工前与 sweep 侧
+                                                  驱逐调优对齐：引擎现
+                                                  --cache-memory-mb 12288
+                                                  --hybrid-cache-entries 32）
+P1c   phase0 复测（Gate B1）+ E2/E3 探针          ✅ 2026-09-06 初测 / 2026-09-20 生产验证
       E2 ✅ append-only 增量占比中位 0.0048（引擎缓存能力最终坐实）
-      E3 ✅ 缓存语义正常（无部分重算）；交替 MISS =
-          ±4 扫描窗在多探针混合条目间的候选选择边缘
-          形态（P1b 系统性解法范畴），snap-down 本身
-          反复行使（B=4666 99% 复用）
-      Gate B1 初步 ✅：flag 生效后窗口（124 请求）增量
-          占比 0.1371 < 0.15 达标；>30K 大请求 71 个
-          命中率 90%、增量占比 0.1100；正式验收待下个
-          批跑周期干净归因
-      工具修复：活跃守卫改双采样推理标记检查（mtime
-          被健康轮询/4xx 轰炸持续刷新导致守卫永不开启）；
-          E3 判定区分 FULL-MISS / PARTIAL / HIT
+      E3 ✅ 缓存语义正常（无部分重算）；交替 MISS = ±4 扫描窗在
+          多探针混合条目间的候选选择边缘形态（P1b 范畴），
+          snap-down 本身反复行使（B=4666 99% 复用）
+      Gate B1 初测 ✅（09-06，124 请求窗口）：0.1371 < 0.15；
+          >30K 大请求 71 个命中率 90%、增量占比 0.1100
+      Gate B1 生产验证 ✅（09-20，EXP-9 批期 3.28 万请求窗口）：
+          增量占比 0.1189（3.1× vs 全史 0.3689）/ snapdown 7,332 次
+          ——规模与稳定性双证据；正式 off 臂对照排入 EXP-8（J2 排程）
+      工具修复：活跃守卫改双采样推理标记检查（mtime 被健康轮询/
+          4xx 轰炸持续刷新导致守卫永不开启）；E3 判定区分
+          FULL-MISS / PARTIAL / HIT；analyze 增 --from-marker-file
+          切窗 + Metal peak 报告；新增 mark 子命令（轮启动标记）
 ```
 
 前置协调：已解除（llama.cpp 并行会话改动已各自提交；pre-commit 四层门禁全过：1634 单测 / 签名 / 行为快照 / Promptfoo shadow 5/5）。
