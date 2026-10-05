@@ -139,7 +139,7 @@ tests/              # 116 test files, 3225 tests; fixtures in conftest.py
 eval_suite/         # eval bench suite: golden_tasks/ m3_tasks/ phaseD_tasks/ fixtures/ baselines/, results_*.jsonl
 docs/design/        # Design docs + reference docs split out of AGENTS.md (see top table); adr/ for ADRs
 docs/archive/       # Historical code review records
-tools/              # Dev scripts (bench split/recompute, contract drift checks, markdown link check, spec smoke)
+tools/              # Dev scripts (bench split/recompute, contract drift checks, markdown link check, spec smoke, spec-to-test smoke)
 agent_go.py         # Root-level convenience entry (python3 agent_go.py run ...)
 config.example.json # Example config — keep in sync with DEFAULT_CONFIG
 ```

@@ -739,9 +739,11 @@ def draft_files_for_display(draft: dict[str, Any], preview_lines: int = 20) -> s
 def meta_block(manifest: Optional[dict[str, Any]]) -> dict[str, Any]:
     """写入 meta.json 的 acceptance 段（冻结事实，不含运行态）。"""
     if not manifest:
-        return {"enabled": False}
+        return {"enabled": False, "frozen": False}
     return {
         "enabled": True,
+        # frozen 是消费方（web 列表标识 / eval acceptance 队列归类）的判定键：有 manifest 即 True
+        "frozen": True,
         "source": manifest.get("source", ""),
         "reviewed": bool(manifest.get("reviewed")),
         "review_edits": int(manifest.get("review_edits") or 0),

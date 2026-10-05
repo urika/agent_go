@@ -1069,7 +1069,7 @@ def compute_acceptance_metrics(
         cohort["tasks"] += 1
         if acc.get("frozen"):
             cohort["frozen"] += 1
-        if acc.get("source") == "provided":
+        if acc.get("source") in ("task", "provided"):
             cohort["provided"] += 1
         else:
             cohort["drafted"] += 1

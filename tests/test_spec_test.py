@@ -300,7 +300,15 @@ class TestMetaBlock:
         assert block["sha256"]["test_acceptance_foo.py"]
 
     def test_meta_block_empty(self):
-        assert spec_test.meta_block(None) == {"enabled": False}
+        assert spec_test.meta_block(None) == {"enabled": False, "frozen": False}
+
+    def test_meta_block_frozen_flag(self, tmp_path, logger):
+        """frozen 键是列表标识/聚合队列归类的判定键（冒烟抓到的回归）。"""
+        task_dir = tmp_path / "task"
+        manifest = spec_test.freeze(task_dir, _draft(), reviewed=True, logger=logger,
+                                    frozen_dir="tests/acceptance")
+        block = spec_test.meta_block(manifest)
+        assert block["frozen"] is True and block["enabled"] is True
 
 
 @pytest.mark.parametrize("preview_lines", [3, 20])
@@ -467,3 +475,14 @@ class TestCliHelpers:
         assert block["enabled"] is True and block["frozen"] is False
         assert block["review_decision"] == "skipped" and block["degraded"] is True
         assert cli_mod._spec_test_meta_block(None, {}, _cfg(enabled=False)) == {"enabled": False, "frozen": False}
+
+
+class TestResumeAcceptsFlag:
+    """resume 缺口：CLI flag 开启的一次性运行，resume 需能显式保留/关闭 oracle。"""
+
+    def test_resume_parser_has_accept_flags(self):
+        from agent_go.cli import _build_parser
+        args = _build_parser().parse_args(["resume", "task-1", "--accept-tests"])
+        assert args.accept_tests is True and args.no_accept_tests is False
+        args2 = _build_parser().parse_args(["resume", "task-1", "--no-accept-tests"])
+        assert args2.no_accept_tests is True

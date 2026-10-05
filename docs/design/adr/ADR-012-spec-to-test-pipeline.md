@@ -117,4 +117,24 @@ tdd 臂（验收契约 test_patch 预置可见）对 plain 臂的配对差异（
 
 未接入（登记为后续）：e2e 模式起草（无 Plan 确认门）；验收指标的自动采集（采纳率/编辑距离需人审数据积累；web 面已提供人审回执字段 `edits` 可先行采集）。
 
+### 端到端冒烟（真链路）
+
+`tools/spec_test_smoke.py`：真 CLI + 真 worker + 真 verify 重放（与 `tests/` 的离线集成互补）。
+
+| 口径 | 说明 | 本地引擎占用 |
+|---|---|---|
+| `--mode provided` | 评测口径：provided_dir 冻结件；零 planner/draft LLM 调用 | 不占（worker 走 claude CLI 自身端点） |
+| `--mode draft-web` | 全链路：真 LLM 起草 + web 确认门人审（脚本代人工提交回执，可附编辑验证回执链路） | 占（plan+draft 两次调用） |
+| `--mode draft-unreviewed` | 真起草 + `require_review=false` | 占（同上） |
+
+安全闸：draft* 模式检测外部批次锁（swe-eval 等 `.batch.lock`）并**默认拒绝**（`--allow-engine-share` 放行），
+避免与他人评测批次争用同一本地引擎。结果落档 `eval_suite/spec_test_smoke/results.jsonl`。
+断言=四护栏 + 追溯：冻结件在交付 commit 内且 sha256 一致、验收命令来自冻结件、首次尝试即通过、
+worker 未动测试（commit 只含实现文件）、聚合命令能数到本任务、人审编辑随冻结件入 commit（draft-web）。
+
+**首轮实录（2026-10-05，provided）**：PASS 12/12，1.21 min，`DELIVERY_READY`；独立复核交付 commit
+（`a59795f`：只改 `calc/__init__.py`，冻结件哈希一致，实现 `return a + b`）。该轮抓到两个真 bug 并已修：
+① `meta.acceptance` 缺 `frozen` 键（web 列表标识与 `eval acceptance` 队列归类失真）；
+② 聚合把评测口径 `source=task` 误归 `drafted`。`draft-web` 口径待批期窗口执行（会占本地引擎）。
+
 跨仓对齐：swe-eval 评测侧孪生（受控信息供给/任务定义冻结纪律）；EXP-12 轮 2 H2 判读件为验收口径的终稿证据源。

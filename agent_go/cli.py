@@ -154,6 +154,10 @@ def _build_parser():
                                help="保留全部 worktree 不清除")
     resume_parser.add_argument("--no-preserve", action="store_true", dest="no_preserve",
                                help="强制清理所有 worktree")
+    resume_parser.add_argument("--accept-tests", action="store_true", dest="accept_tests",
+                               help="恢复时继续使用冻结验收 oracle（等价 run；未在 config 开启时用此开关）")
+    resume_parser.add_argument("--no-accept-tests", action="store_true", dest="no_accept_tests",
+                               help="恢复时禁用冻结验收 oracle")
     resume_parser.add_argument("--no-verify-block", action="store_true", dest="no_verify_block",
                                help="验证失败不阻断下游依赖（默认阻断）")
     resume_parser.add_argument("--artifact-dir", default=None,
@@ -1772,6 +1776,12 @@ def cmd_resume(args=None):
     # CLI 覆盖：--max-retries / --no-verify-block / --artifact-dir（args 模式）
     if args and getattr(args, 'max_retries', None) is not None:
         config.setdefault("verification", {})["max_retries"] = args.max_retries
+    # spec-to-test（ADR-012）：resume 需显式保留 oracle 开关（CLI flag 开启过的一次性运行，
+    # config 未必开启；任务目录里的冻结 manifest 自动被发现，只需 enabled=True）
+    if args and getattr(args, 'accept_tests', False):
+        config.setdefault("spec_test", {})["enabled"] = True
+    if args and getattr(args, 'no_accept_tests', False):
+        config.setdefault("spec_test", {})["enabled"] = False
     if args and getattr(args, 'no_verify_block', False):
         config.setdefault("verification", {})["block_on_failure"] = False
     if args and getattr(args, 'artifact_dir', None):
