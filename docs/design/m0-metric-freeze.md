@@ -1,7 +1,7 @@
 # M0-6 指标公式冻结
 
-> 状态：冻结（M0-6）
-> 更新日期：2026-08-08
+> 状态：冻结（M0-6）；2026-10-05 增补"诊断字段口径登记"（**不改主指标公式**）
+> 更新日期：2026-08-08（诊断字段口径登记：2026-10-05）
 
 ## 任务集合
 
@@ -52,3 +52,20 @@ dollar_per_pass_diagnostic = valid_cost / sum(pass_rate)
 它只能在相同 `suite`、相同 `source_batch` 内比较，不能作为产品主 KPI、交付成功率或跨批次排名依据。
 
 实现入口为 `agent_go.metrics.compute_frozen_metrics()`，结果中同时输出有效分母、排除原因和 failure class 分布，保证重复计算得到相同结果。
+
+## 诊断字段口径登记：`plan_acceptance_coverage`（2026-10-05）
+
+`plan_acceptance_coverage`（`agent_go/planning.py` `validate_plan_quality`，经 `cli.py`/`bench.py` 透传）**不进主指标分母**，但其口径在 2026-10-05 发生过变更，按冻结纪律在此登记：
+
+| 记录形态 | 口径 |
+|---|---|
+| **无** `plan_coverage_basis` 键（旧批） | 仅在计划含 spec REQ/AC ID 时给出 ID 级验收覆盖率，否则 `null`；`null`＝"未产出"，**不等于 0** |
+| `plan_coverage_basis="acceptance_ids"` | ID 级覆盖率（与旧口径一致） |
+| `plan_coverage_basis="structural"` | 结构性验收覆盖：带验证命令的子任务里"未锚定到核心文件、或验证非 suite 级"的占比（S-1 前瞻可测面） |
+| `plan_coverage_basis=null` | 无任何带验证命令的子任务 ⇒ 覆盖率 `null` |
+
+使用规则：
+
+- **跨记录比较前先按 `plan_coverage_basis` 是否存在分段**——变更跨批生效，一批 `results_*.jsonl` 可能同时含两种口径，混算即错。生效边界以**记录是否携带该键**机械判定，不按日期假设。
+- 该字段与 `plan_requirement_coverage` 同属规划质量**诊断**面：不得单独用作发布门（发布门仍为 `eval gate`），也不得进入跨批排名。
+- 治理状态：口径变更已登记，**待 P-1 追认**（见 [three-project-architecture-review-20260819.md](three-project-architecture-review-20260819.md) §4）。

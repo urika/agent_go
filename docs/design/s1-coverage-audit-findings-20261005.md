@@ -124,7 +124,7 @@
 1. ~~同批同模型配对~~ ✅（v0.2→v0.3：配对先行，**同批同模型对照推翻了缺口效应**；warning 区分度保留）——**下一步＝S-1 A/B**（覆盖驱动 vs 均匀生成 TDD 输入，同测试预算）验证**方法本身**；靶已改用 **warning 群体**；
 2. ~~lint 伪迹分层复核~~ ✅（v0.2 G 段：伪迹成立，字段弃用）；
 3. ~~warnings 3+ 回落查明~~ ✅（v0.2 H 段：地板批次混合效应，剔除后恢复严格单调）；
-4. ~~验收覆盖靶~~ ✅（2026-10-05）：`planning.validate_plan_quality` 增**结构性验收覆盖回退口径**（无 spec ID 时按"验收面是否锚定"计算）＋`plan_coverage_basis` 口径字段，`plan_acceptance_coverage` 不再恒空；扫描器 `tools/s1_spec_scan.py`（7 例）输出缺口清单，作 S-1 A/B 的 A 臂输入；
+4. ~~验收覆盖靶~~ ✅（2026-10-05）：`planning.validate_plan_quality` 增**结构性验收覆盖回退口径**（无 spec ID 时按"验收面是否锚定"计算）＋`plan_coverage_basis` 口径字段，`plan_acceptance_coverage` 不再恒空；扫描器 `tools/s1_spec_scan.py`（7 例）输出缺口清单，作 S-1 A/B 的 A 臂输入；**口径变更已登记**（[m0-metric-freeze.md](m0-metric-freeze.md) §诊断字段口径登记；待 P-1 追认——跨记录比较须先按 `plan_coverage_basis` 是否存在分段）；
 5. **靶定义修正落地**：把"None"从风险口径改为**仪表缺口**报告（缺 telemetry 的批次单独列），S-1 的靶改用 **warning 群体**；在 warning 群体内做"规则归纳可行性"离线研究（现有数据可做：找覆盖 ≥20%、同批同模型 lift ≥1.5 的子规则）；
 6. 试点数据到位后做 **rules+jev 版**（覆盖/风险矩阵＋来源分区，见需求文档 §18）——jev 的弃权集用于把 warning 二分成"补特征"vs"补规则"。
 
@@ -142,6 +142,7 @@ pytest tests/test_s1_coverage_audit.py -q      # 9 例
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.4 | 2026-10-05 | 靶缺口修复落地：`plan_acceptance_coverage` 结构性回退口径＋`plan_coverage_basis`（`planning.py`，`cli.py`/`bench.py` 透传）；新增 S-1 扫描器 `tools/s1_spec_scan.py`（7 例）；findings §4 第 4 项结项。 |
+| v0.5 | 2026-10-05 | 口径变更登记：`plan_acceptance_coverage` 两种 basis 的语义与分段规则落入 [m0-metric-freeze.md](m0-metric-freeze.md)（待 P-1 追认）；§4 第 4 项补登记指针。 |
 | v0.3 | 2026-10-05 | **修正**：新增 **§F2 同批同模型对照**——缺口效应不成立（`results.jsonl`×sonnet：29% vs 29%，OR=0.99，p=0.87；缺口样本 98% 来自旧批缺 telemetry）⇒ §0 结论改写（缺口＝仪表缺口，非风险信号；**成立的是 warning vs passed 的区分度**）；§F 表加警示注、§D 降级为参考、§2/§3/§4 同步改写。 |
 | v0.2 | 2026-10-05 | 增 **F 模型内 MH 分层配对**（缺口 OR=2.51／warning OR=2.22，p<1e-4）、**G lint 伪迹定案**（92.2% 从未 completed，字段弃用）、**H warnings 3+ 中介检验**（剔除地板批次后恢复严格单调）；§0 结论升级为"稳健关联"，§3 局限同步改写。仪器扩展：`mantel_haenszel`／`stratified_contrast`／`lint_hypothesis`／`warning_mediation`（测试 13 例）。 |
 | v0.1 | 2026-10-05 | 首跑 findings：1701 条记录；覆盖缺口 30.0% vs 22.5%（retry 3.5×）；难度分层后缺口组逐层更差；批内 3/3 一致；两伪迹＋一靶缺口；仪器 `tools/s1_coverage_audit.py`（9 例测试）。 |
