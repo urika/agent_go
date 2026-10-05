@@ -645,16 +645,18 @@ load_rules(path) / save_rules(rules, path)
                                          → JSONL 读写（save 原子替换、按 rule_id+version 排序）
 make_rule(...) / upsert_rule(rules, rule)
                                          → 构造（自动 frozen_sha256）/ 合并（同条件去重、换条件升版回 candidate）
-promote_rule(rules, rule_id, to) / retire_rule(rules, rule_id, reason)
-                                         → 状态流转；→ active 强制验证闸②（holdout_n≥100 ∧ holdout_sha ∧ regression_ok）
+promote_rule(rules, rule_id, to, *, report=None, regression_ok=False) / retire_rule(rules, rule_id, reason)
+                                         → 状态流转；→ active 强制验证闸②（holdout_n≥100 ∧ holdout_sha ∧ regression_ok）；传 report（replay 产物）则先复算校验再盖章 metrics，regression_ok 仅由人显式背书
 candidate_to_rule(cand) / import_candidates(path, rules)
                                          → rule_candidates.jsonl（condition 或 feature/op/threshold）导入
 generate_candidates(labeled, *, min_cover, min_precision, max_candidates)
-                                         → 单特征阈值扫描；签名只收 (state, 人工标签)＝标签源闸①
+                                         → 单特征阈值扫描（数值阈值每字段上限 NUMERIC_THRESHOLD_CAP=20，超限取等距分位点）；签名只收 (state, 人工标签)＝标签源闸①
 load_labeled_states(states_dir, labels_path)
                                          → 读取 state/*.json + labels.jsonl（只收 origin=human）
 replay_report(rules, labeled, *, statuses)
                                          → 离线复算：逐规则 tp/fp/fn/tn、precision/recall、fire_rate、联合覆盖、未知字段
+holdout_sha_of(report)
+                                         → 复算报告的 holdout 摘要（样本 ref 集/标签分布/规则身份/统计；剔时间戳）——promote 盖章依据
 shadow_evaluate(rules, state, stage) / append_decisions(task_dir, decisions)
                                          → 影子执行纯函数 + rule_decisions.jsonl 追加（P1 接入点；失败 fail-open）
 ```
@@ -663,6 +665,7 @@ CLI（P0 形态；`agent_go rules` 子命令随 P1 接入 cli.py）：
 
 ```
 python3 -m agent_go.rule_set [--rules PATH] list|show|validate|import-candidates|generate|replay|promote|retire
+       promote <rule_id> --to active [--report REPORT.json] [--regression-ok]   # 报告盖章校验；无报告＝声明值检查
 ```
 
 边界：零网络、零 runtime 接入；规则只读 state；promote→active 无 force 逃逸；影子记录失败不阻断主链路。

@@ -5,12 +5,15 @@ from pathlib import Path
 import pytest
 
 from agent_go.rule_set import (
+    NUMERIC_THRESHOLD_CAP,
     RuleSyntaxError,
+    _threshold_points,
     append_decisions,
     candidate_to_rule,
     check_fields,
     eval_condition,
     generate_candidates,
+    holdout_sha_of,
     import_candidates,
     load_labeled_states,
     load_rules,
@@ -366,3 +369,84 @@ def test_cli_generate_and_replay(tmp_path):
                  "--labels", str(lpath), "--out", str(report_out)]) == 0
     report = json.loads(report_out.read_text(encoding="utf-8"))
     assert report["samples"] == 4 and report["rules"]
+
+
+def test_cli_promote_with_report_stamps_and_gates(tmp_path, capsys):
+    states = {f"s{i}": {"x": i % 2} for i in range(100)}
+    labels = {f"s{i}": ("content_fix" if i % 2 == 0 else "infra_or_process") for i in range(100)}
+    sdir, lpath = _write_dataset(tmp_path, states, labels)
+    rules_path = tmp_path / "rules.jsonl"
+    save_rules([make_rule(rule_id="r-report", condition="x == 0")], rules_path)
+    report_out = tmp_path / "report.json"
+    assert main(["--rules", str(rules_path), "replay", "--states-dir", str(sdir),
+                 "--labels", str(lpath), "--out", str(report_out)]) == 0
+
+    # 不给 --regression-ok：盖章后 regression_ok=false，闸门拦住
+    assert main(["--rules", str(rules_path), "promote", "r-report", "--to", "active",
+                 "--report", str(report_out)]) == 1
+    # 人工背书回归 + 报告盖章 → active，metrics 由报告派生
+    assert main(["--rules", str(rules_path), "promote", "r-report", "--to", "active",
+                 "--report", str(report_out), "--regression-ok"]) == 0
+    rule = load_rules(rules_path)[0]
+    report = json.loads(report_out.read_text(encoding="utf-8"))
+    assert rule["status"] == "active"
+    assert rule["metrics"]["holdout_n"] == 100 and rule["metrics"]["holdout_sha"] == report["holdout_sha"]
+    assert rule["metrics"]["precision"] == report["rules"][0]["precision"]
+    assert rule["metrics"]["regression_ok"] is True
+    assert "盖章" in capsys.readouterr().out
+
+
+def test_promote_rejects_tampered_report(tmp_path):
+    states = {f"s{i}": {"x": 0} for i in range(100)}
+    labels = {f"s{i}": "content_fix" for i in range(100)}
+    sdir, lpath = _write_dataset(tmp_path, states, labels)
+    report = replay_report([make_rule(rule_id="r-tamper", condition="x == 0")],
+                           load_labeled_states(sdir, lpath))
+    rule = make_rule(rule_id="r-tamper", condition="x == 0")
+    bad = json.loads(json.dumps(report))
+    bad["rules"][0]["tp"] = 999                      # 改统计不改 sha
+    ok, msg = promote_rule([rule], "r-tamper", "active", report=bad, regression_ok=True)
+    assert ok is False and "复算不一致" in msg
+    # 报告里没有该规则 → 拒
+    ok, msg = promote_rule([rule], "r-tamper", "active",
+                           report=replay_report([], load_labeled_states(sdir, lpath)),
+                           regression_ok=True)
+    assert ok is False and "缺 holdout_sha" in msg or "不含该 rule_id" in msg
+    # 正常报告 → 过闸
+    ok, msg = promote_rule([rule], "r-tamper", "active", report=report, regression_ok=True)
+    assert ok is True and rule["metrics"]["holdout_n"] == 100
+    assert rule["metrics"]["holdout_sha"] == report["holdout_sha"] == holdout_sha_of(report)
+
+
+def test_holdout_sha_commits_to_samples_and_stats(tmp_path):
+    states = {"a": {"x": 0}, "b": {"x": 0}, "c": {"x": 9}}
+    labels = {"a": "content_fix", "b": "content_fix", "c": "infra_or_process"}
+    sdir, lpath = _write_dataset(tmp_path, states, labels)
+    rule = make_rule(rule_id="r-sha", condition="x == 0")
+    report = replay_report([rule], load_labeled_states(sdir, lpath))
+    assert report["holdout_sha"] == holdout_sha_of(report)
+    assert report["sample_refs"] == ["a", "b", "c"]
+    for mutate in (lambda r: r.update({"samples": 99}),
+                   lambda r: r.update({"sample_refs": ["a", "b"]}),
+                   lambda r: r["rules"][0].update({"fp": 1}),
+                   lambda r: r["union"].update({"fired": 0})):
+        tampered = json.loads(json.dumps(report))
+        mutate(tampered)
+        assert holdout_sha_of(tampered) != report["holdout_sha"]
+    # 时间戳不参与摘要：重建（新 generated_at）后同一数据集 sha 不变
+    again = replay_report([rule], load_labeled_states(sdir, lpath))
+    assert again["holdout_sha"] == report["holdout_sha"]
+
+
+def test_generate_candidates_caps_numeric_thresholds():
+    states = {f"s{i}": {"x": i} for i in range(60)}
+    labels = {f"s{i}": ("content_fix" if i % 2 == 0 else "infra_or_process") for i in range(60)}
+    labeled = [(ref, states[ref], labels[ref]) for ref in states]
+    cands = generate_candidates(labeled, min_cover=1, min_precision=0.0, max_candidates=10 ** 6)
+    thresholds = sorted({float(c["condition"].split(" >= ")[1]) for c in cands if " >= " in c["condition"]})
+    assert 0 < len(thresholds) <= NUMERIC_THRESHOLD_CAP  # 60 个取值被压到上限内
+    assert thresholds[-1] >= 50  # 高位仍被覆盖（59 那条因标签为负被统计门剔除）
+    # 阈值点本身：去重、两端保留、上限生效
+    assert _threshold_points([1, 1, 2, 2, 3]) == [1, 2, 3]
+    points = _threshold_points(range(1000))
+    assert len(points) == NUMERIC_THRESHOLD_CAP and points[0] == 0 and points[-1] == 999

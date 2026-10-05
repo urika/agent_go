@@ -21,7 +21,7 @@
 3. **配置与默认值**：`rule_set.enabled=false` 默认关；`rule_set.shadow_stages` 默认空（空＝不接入任何后置点）；开启与否**不改变默认行为**（ADR-012 同款纪律）。
 4. **fail-open**：规则求值、记录、读取任一异常⇒跳过并静默降级，**绝不阻断主链路**（与 `append_decisions` 的既有语义一致）。
 5. **只读与无副作用**：规则只读白名单 state 字段；P1 期间不得产生 verdict、不得写 runtime 其它状态、不得触发任何动作。**规则的 verdict 能力（P2）须另开 ADR**。
-6. **冻结与验证闸（P0 已实现，P1 沿用）**：执行前校验 `frozen_sha256`（不匹配⇒跳过该规则并记告警）；`active` 前置＝`holdout_n≥100 ∧ holdout_sha ∧ regression_ok`。
+6. **冻结与验证闸（P0 已实现，P1 沿用）**：执行前校验 `frozen_sha256`（不匹配⇒跳过该规则并记告警）；`active` 前置＝`holdout_n≥100 ∧ holdout_sha ∧ regression_ok`。**口径（2026-10-05 明确）**：`holdout_sha` 是 `replay` 报告的可复算摘要（`holdout_sha_of()` 纯函数：样本 ref 集＋标签分布＋规则身份＋逐规则/联合统计，剔时间戳）；`promote --report` 先复算校验再盖章 `metrics`，`regression_ok` 仅由人 `--regression-ok` 显式背书；不带 `report` 时闸门退化为"声明值检查"（值可被独立复算，复算责任在调用方）。
 7. **角色分离**：候选生成者 ≠ 验证者 ≠ 审批者；晋升记录 `reviewed_by`。
 8. **可观测与回滚**：`rule_decisions.jsonl` 为唯一行为证据面；回滚＝`rule_set.enabled=false`（立即回到现状）或 `retire <rule_id>`；删除数据面不影响 runtime。
 

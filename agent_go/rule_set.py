@@ -456,13 +456,24 @@ def upsert_rule(rules: List[Dict[str, Any]], rule: Dict[str, Any]) -> str:
     return "added"
 
 
-def promote_rule(rules: List[Dict[str, Any]], rule_id: str, to_status: str) -> Tuple[bool, str]:
-    """状态流转；``→ active`` 强制过验证闸（②），无 force 逃逸。"""
+def promote_rule(rules: List[Dict[str, Any]], rule_id: str, to_status: str,
+                 *, report: Optional[Dict[str, Any]] = None,
+                 regression_ok: bool = False) -> Tuple[bool, str]:
+    """状态流转；``→ active`` 强制过验证闸（②），无 force 逃逸。
+
+    传 ``report``（``replay_report()`` 的产物）时先把 ``metrics`` 从报告**盖章**——复算
+    ``holdout_sha``、对齐 rule_id/version/frozen_ok——闸门检查的声明值由此可被独立复算；
+    ``regression_ok`` 只能由人显式背书（盖章时按传值重置，不继承旧值）。
+    """
     if to_status not in ("shadow", "active"):
         return False, "promote 只支持 → shadow / active"
     for rule in rules:
         if rule.get("rule_id") != rule_id:
             continue
+        if to_status == "active" and report is not None:
+            ok, message = _stamp_metrics_from_report(rule, report, regression_ok=regression_ok)
+            if not ok:
+                return False, "验证闸未过：%s" % message
         if to_status == "active":
             metrics = rule.get("metrics") or {}
             n = metrics.get("holdout_n") or 0
@@ -477,6 +488,32 @@ def promote_rule(rules: List[Dict[str, Any]], rule_id: str, to_status: str) -> T
         rule["frozen_sha256"] = rule_sha(rule)
         return True, "ok"
     return False, "rule_id 不存在：%s" % rule_id
+
+
+def _stamp_metrics_from_report(rule: Dict[str, Any], report: Dict[str, Any],
+                               *, regression_ok: bool) -> Tuple[bool, str]:
+    """把 replay 报告盖进 ``rule.metrics``；任一自洽性检查不过即拒（不写）。"""
+    if not isinstance(report, dict) or not report.get("holdout_sha"):
+        return False, "报告缺 holdout_sha（先 `replay --out` 产出报告）"
+    if holdout_sha_of(report) != report["holdout_sha"]:
+        return False, "报告 holdout_sha 复算不一致（报告可能被改动）"
+    row = next((r for r in report.get("rules") or [] if r.get("rule_id") == rule.get("rule_id")), None)
+    if row is None:
+        return False, "报告不含该 rule_id：%s" % rule.get("rule_id")
+    if row.get("version") != rule.get("version"):
+        return False, "报告与清单版本不符：报告 %s / 清单 %s" % (row.get("version"), rule.get("version"))
+    if not row.get("frozen_ok"):
+        return False, "该规则冻结哈希未过（frozen_ok=false）"
+    metrics = rule.setdefault("metrics", {})
+    refs = report.get("sample_refs")
+    metrics.update({
+        "holdout_n": len(refs) if refs is not None else int(report.get("samples") or 0),
+        "holdout_sha": report["holdout_sha"],
+        "regression_ok": bool(regression_ok),
+        "precision": row.get("precision"),
+        "recall": row.get("recall"),
+    })
+    return True, "ok"
 
 
 def retire_rule(rules: List[Dict[str, Any]], rule_id: str, reason: str = "") -> Tuple[bool, str]:
@@ -625,6 +662,7 @@ def replay_report(rules: Sequence[Dict[str, Any]],
             "rule_id": rule.get("rule_id"),
             "version": rule.get("version"),
             "status": rule.get("status"),
+            "condition": rule.get("condition"),
             "frozen_ok": verify_frozen(rule),
             "fired": sum(1 for f in fired if f),
             "fire_rate": (sum(1 for f in fired if f) / total) if total else None,
@@ -641,20 +679,55 @@ def replay_report(rules: Sequence[Dict[str, Any]],
                        "fire_rate": (sum(1 for f in union_fired if f) / total) if total else None,
                        **_binary_stats(labeled_union, labeled_labels)}
 
-    return {
+    report: Dict[str, Any] = {
         "schema": 1,
         "generated_at": _now(),
         "samples": total,
+        "sample_refs": sorted(ref for ref, _s, _lb in labeled),
         "labels": dist,
         "rules": per_rule,
         "union": union_stats,
         "unknown_field_hits": dict(sorted(unknown_reasons.items())),
     }
+    # 留出验证用的可复算摘要：promote 时按其盖章（见 _stamp_metrics_from_report）
+    report["holdout_sha"] = holdout_sha_of(report)
+    return report
+
+
+def holdout_sha_of(report: Dict[str, Any]) -> str:
+    """复算 replay 报告的 holdout 摘要（纯函数，剔除 ``generated_at`` 等时间戳）。
+
+    参与摘要：样本 ref 集合、标签分布、被选规则身份（rule_id/version/condition）、
+    逐规则统计与联合覆盖——即"验证是在哪些样本、哪版规则、什么结果上做的"。
+    """
+    payload = {
+        "schema": report.get("schema"),
+        "samples": report.get("samples"),
+        "sample_refs": sorted(report.get("sample_refs") or []),
+        "labels": report.get("labels") or {},
+        "rules": [{k: r.get(k) for k in ("rule_id", "version", "condition",
+                                         "fired", "tp", "fp", "fn", "tn")}
+                  for r in (report.get("rules") or [])],
+        "union": {k: (report.get("union") or {}).get(k) for k in ("fired", "tp", "fp", "fn", "tn")},
+    }
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
 # 候选生成（P0 最小版：单特征阈值扫描；签名只收 states＋人工标签＝标签源闸①）
 # ---------------------------------------------------------------------------
+
+NUMERIC_THRESHOLD_CAP = 20
+
+
+def _threshold_points(values: Sequence[float], cap: int = NUMERIC_THRESHOLD_CAP) -> List[float]:
+    """阈值候选：去重排序后全取；超 ``cap`` 时取等距分位点（含 min/max）。"""
+    uniq = sorted(set(values))
+    if len(uniq) <= cap:
+        return uniq
+    idx = sorted({round(i * (len(uniq) - 1) / (cap - 1)) for i in range(cap)})
+    return [uniq[i] for i in idx]
 
 def generate_candidates(labeled: Sequence[Tuple[str, Dict[str, Any], str]],
                         *, min_cover: int = 3, min_precision: float = 0.7,
@@ -662,6 +735,8 @@ def generate_candidates(labeled: Sequence[Tuple[str, Dict[str, Any], str]],
     """从"state＋人工标签"生成候选（正类＝content_fix）。
 
     只读 states 与人工标签——**结构上不接触 jev 输出**（标签源闸①）。
+    数值阈值候选每个字段最多 ``NUMERIC_THRESHOLD_CAP`` 个（超限取等距分位点，含两端）：
+    既避免 O(字段×取值数×样本数) 爆炸，也抑制多重比较对候选池的稀释。
     """
     rows = [(st, lb) for _ref, st, lb in labeled if lb in (LABEL_POSITIVE, LABEL_NEGATIVE)]
     if not rows:
@@ -683,7 +758,7 @@ def generate_candidates(labeled: Sequence[Tuple[str, Dict[str, Any], str]],
 
     conditions: List[str] = []
     for num_path in sorted(numeric_paths):
-        for threshold in sorted(numeric_paths[num_path]):
+        for threshold in _threshold_points(numeric_paths[num_path]):
             conditions.append("%s >= %s" % (num_path, _literal_text(threshold)))
             conditions.append("%s <= %s" % (num_path, _literal_text(threshold)))
             conditions.append("%s == %s" % (num_path, _literal_text(threshold)))
@@ -838,12 +913,20 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 def _cmd_promote(args: argparse.Namespace) -> int:
     rules = load_rules(args.rules)
-    ok, message = promote_rule(rules, args.rule_id, args.to)
+    report = None
+    if args.report:
+        report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+    ok, message = promote_rule(rules, args.rule_id, args.to,
+                               report=report, regression_ok=bool(args.regression_ok))
     if not ok:
         print("[promote][FAIL] %s" % message, file=sys.stderr)
         return 1
     save_rules(rules, args.rules)
-    print("[promote] %s → %s" % (args.rule_id, args.to))
+    stamped = ""
+    if report is not None:
+        stamped = "（已按报告盖章：holdout_n=%s sha=%s…）" % (
+            report.get("samples"), str(report.get("holdout_sha"))[:12])
+    print("[promote] %s → %s%s" % (args.rule_id, args.to, stamped))
     return 0
 
 
@@ -898,6 +981,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("promote", help="状态流转（→ active 强制验证闸②）")
     sp.add_argument("rule_id")
     sp.add_argument("--to", choices=["shadow", "active"], required=True)
+    sp.add_argument("--report", help="replay 报告 JSON（给了则按其盖章 metrics：holdout_n/sha/precision/recall）")
+    sp.add_argument("--regression-ok", action="store_true", help="人工背书回归集通过（盖章时写入）")
     sp.set_defaults(func=_cmd_promote)
 
     sp = sub.add_parser("retire", help="退役规则")

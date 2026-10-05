@@ -80,7 +80,7 @@ CLI             agent_go rules list|show|validate|promote|retire
 | 闸 | 实现点 |
 |---|---|
 | ① 标签源闸 | 候选生成器只读 `labels.jsonl`/`probe.jsonl`；**代码层断言不读 jev 输出** |
-| ② 验证闸 | `promote` 前要求留出 ≥100 条带标签、跨批；回归集钉住"旧样本不得回退" |
+| ② 验证闸 | `promote` 前要求留出 ≥100 条带标签、跨批；回归集钉住"旧样本不得回退"。**实现（2026-10-05）**：`replay` 报告自带可复算 `holdout_sha`（覆盖样本 ref 集／标签分布／规则身份／逐规则与联合统计，剔时间戳），`promote --report` 时先复算校验再盖章 `metrics`，`regression_ok` 只由人 `--regression-ok` 背书——声明值由此可独立复算，不再依赖手填 |
 | ③ 落地闸 | 规则＝DSL＋测试＋`rules.jsonl`（可解释/审计/回滚）；P2 走信任门＋边界 ADR |
 | ④ 反哺计量闸 | 每次规则扩张后按同一预注册判据重度量（jev 增量区应收缩） |
 
@@ -88,7 +88,7 @@ CLI             agent_go rules list|show|validate|promote|retire
 
 | 阶段 | 内容 | 工作量 | 验收 | 边界 |
 |---|---|---|---|---|
-| **P0 离线** ✅ **已落地（2026-10-05）** | `agent_go/rule_set.py`（受限 DSL／清单／候选导入＋生成／离线复算／影子纯函数）＋`tests/test_rule_set.py` **37 例**；CLI＝`python3 -m agent_go.rule_set …`（`agent_go rules` 子命令随 P1 接入）；文档同步＝module-catalog／spec.md | ~1–1.5 人日 | 同一规则在同一 state 上逐位可复算；零 runtime 接入；CI 全量回归绿（含仓库自带 lint 门） | 不触边界（纯本地文件；实现即验证：CLI 生成→导入→复算全链冒烟通过） |
+| **P0 离线** ✅ **已落地（2026-10-05；2026-10-05 补强）** | `agent_go/rule_set.py`（受限 DSL／清单／候选导入＋生成／离线复算／影子纯函数）＋`tests/test_rule_set.py` **41 例**；CLI＝`python3 -m agent_go.rule_set …`（`agent_go rules` 子命令随 P1 接入）；补强＝`replay` 产 `holdout_sha`＋`promote --report` 盖章校验、数值阈值候选每字段上限 20（超限取等距分位点）；文档同步＝module-catalog／spec.md | ~1–1.5 人日 | 同一规则在同一 state 上逐位可复算；零 runtime 接入；CI 全量回归绿（含仓库自带 lint 门） | 不触边界（纯本地文件；实现即验证：CLI 生成→导入→复算全链冒烟通过） |
 | **P1 影子** | 在 review triage（或 plan 预检）后置影子评估，只写 `rule_decisions.jsonl`，输出"规则 vs 人标/jev"对照 | ~1–2 人日 | fail-open；不改变任何既有行为 | 接 runtime 后置点＝边界，**ADR 草案已出：[ADR-014](adr/ADR-014-rule-set-execution-plane.md)（Proposed，P1 前须 Accepted）** |
 | **P2 生效** | 验证过的规则 opt-in 生效；若参与 verdict（如 plan gate）单独评审 | 另评 | 信任门达成 | 独立 ADR |
 
@@ -174,6 +174,7 @@ CLI             agent_go rules list|show|validate|promote|retire
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.6 | 2026-10-05 | **P0 补强（离线；不接 runtime）**：①验证闸可复算化——`replay_report` 增 `sample_refs`／`holdout_sha`（纯函数 `holdout_sha_of` 可独立复算，剔除时间戳），`promote_rule(..., report=…)` 与 CLI `promote --report [--regression-ok]` 先校验报告自洽（sha 复算、rule_id/version/frozen_ok 对齐）再盖章 `metrics{holdout_n,holdout_sha,precision,recall,regression_ok}`；②候选生成规模化——数值阈值候选改为分位点采样（`NUMERIC_THRESHOLD_CAP=20`，含两端），消除 O(字段×取值数×样本数)；③§6 闸②、§7 P0 行同步（41 例）。 |
 | v0.5 | 2026-10-05 | P1 门就绪：**新增 [ADR-014](adr/ADR-014-rule-set-execution-plane.md)（Proposed）**——规则执行面＋全局规则数据面（`~/.agent_go/rules/`、`<task_dir>/rule_decisions.jsonl`）＋shadow→active 两态＋fail-open/只读无副作用＋回滚；§7 P1 行与 §9 R-1 更新为"ADR 草案已出"；S-1 前置行更新为"P0 已完成"；状态行同步。 |
 | v0.4 | 2026-10-05 | S-1 P0 仪器落地：`tools/s1_spec_scan.py`（计划/验收面覆盖扫描，缺口清单输出，7 例测试）；`planning.validate_plan_quality` 增**结构性验收覆盖回退口径**＋`plan_coverage_basis` 字段（修复 `plan_acceptance_coverage` 恒空——S-1 缺口映射的依赖项；`cli.py`/`bench.py` 同步透传）；§10.1 增 **S-1 A/B 预注册**（臂/设计/指标/预算/kill/前置；唯一硬阻塞＝环境占用）。 |
 | v0.3 | 2026-10-05 | **P0 落地（离线，授权执行）**：`agent_go/rule_set.py`（受限 DSL／AST 三值求值／清单 frozen_sha256／promote 验证闸 holdout≥100／候选导入＋单特征生成／离线复算报告／影子纯函数）＋`tests/test_rule_set.py` 37 例；CLI `python3 -m agent_go.rule_set`；§7 P0 行标注已落地；同步 module-catalog／spec.md。仍零 runtime 接入。 |

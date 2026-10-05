@@ -78,7 +78,7 @@
 | `task_report.py` | 任务统计报表生成器：只读聚合任务 JSONL（total/completed/tags_distribution，多形态+归一+容错） | stats report |
 | `goal_policy.py` | Goal Loop 最终执行策略 resolver（goal-mechanism-design §3.3/§4） | goal policy |
 | `spec_test.py` | spec-to-test 验收测试管线（ADR-012）：起草→清洗→冻结（sha256 manifest）→注入 worktree（先于 worker 提交）→verify 重放恢复；全链 fail-open，默认关 | 冻结验收 oracle |
-| `rule_set.py` | 规则集管线 P0（概念设计 rule-set-pipeline-design §7）：受限 DSL（AST 解析、禁 eval、三值 fail-open）＋清单 `~/.agent_go/rules/rules.jsonl`（frozen_sha256 校验＋promote 验证闸 holdout≥100）＋候选导入/生成（签名只收人工标签＝标签源闸①）＋历史样本离线复算报告；**零 runtime 接入**（影子执行 `shadow_evaluate` 为 P1 接入点） | 规则清单/复算报告 |
+| `rule_set.py` | 规则集管线 P0（概念设计 rule-set-pipeline-design §7）：受限 DSL（AST 解析、禁 eval、三值 fail-open）＋清单 `~/.agent_go/rules/rules.jsonl`（frozen_sha256 校验＋promote 验证闸 holdout≥100）＋候选导入/生成（签名只收人工标签＝标签源闸①）＋历史样本离线复算报告（`holdout_sha` 可复算；`promote --report` 盖章验证）；**零 runtime 接入**（影子执行 `shadow_evaluate` 为 P1 接入点） | 规则清单/复算报告 |
 
 ## 模块变更规则
 
