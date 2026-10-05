@@ -450,6 +450,25 @@ def validate_plan_quality(
     acceptance_coverage = (
         None if not _ac_ids else round(len(_ac_ids & covered_ac) / len(_ac_ids), 6)
     )
+    # 结构性验收覆盖（S-1 依赖；无 spec 验收 ID 时的回退口径，避免该列恒为空）：
+    # 分母＝带验证命令的子任务数；分子＝验收面"锚定"者——无核心文件改动时整仓/目录级
+    # 测试可接受，有核心文件改动时须文件/函数级锚定（与下方 verification_not_anchored
+    # warning 同源，保证语义一致）。口径随 plan_coverage_basis 一并上报。
+    _sub_with_cmd = [st for st in subtasks if str(st.get("verification", "") or "").strip()]
+    structural_coverage = None
+    if _sub_with_cmd:
+        _anchored = 0
+        for _st in _sub_with_cmd:
+            _scope = _subtask_file_scope(_st)
+            if not any(_is_core_file(f) for f in _scope):
+                _anchored += 1
+            elif classify_verification_scope(str(_st.get("verification", ""))) != "suite":
+                _anchored += 1
+        structural_coverage = round(_anchored / len(_sub_with_cmd), 6)
+    coverage_basis = "acceptance_ids" if _ac_ids else (
+        "structural" if structural_coverage is not None else None)
+    if acceptance_coverage is None:
+        acceptance_coverage = structural_coverage
 
     # G8: 独立可验证性检查（Split Design Benchmark 实证：claude/opencode 均以
     # 「能否独立验证」作为拆分/合并判据，如 storage 新方法脱离 cmd_done 无法验证 → 必合）
@@ -614,6 +633,7 @@ def validate_plan_quality(
         "plan_repairable_issue_count": len(repairable_issues),
         "plan_requirement_coverage": requirement_coverage,
         "plan_acceptance_coverage": acceptance_coverage,
+        "plan_coverage_basis": coverage_basis,
     }
 
 

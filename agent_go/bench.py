@@ -1434,6 +1434,7 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         "plan_quality_status": meta.get("plan_quality_status"),
         "plan_requirement_coverage": meta.get("plan_requirement_coverage"),
         "plan_acceptance_coverage": meta.get("plan_acceptance_coverage"),
+        "plan_coverage_basis": meta.get("plan_coverage_basis"),
         "plan_conflict_count": meta.get("plan_conflict_count", 0),
         "plan_warning_count": meta.get("plan_warning_count", 0),
         # S10-P2：代码质量维度（§4.1，从保留 worktree 聚合）

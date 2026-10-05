@@ -1479,6 +1479,7 @@ def cmd_run(args=None):
         "plan_quality_status": plan_quality["status"],
         "plan_requirement_coverage": plan_quality["plan_requirement_coverage"],
         "plan_acceptance_coverage": plan_quality["plan_acceptance_coverage"],
+        "plan_coverage_basis": plan_quality.get("plan_coverage_basis"),
         "plan_conflict_count": plan_quality["plan_conflict_count"],
         "plan_warning_count": plan_quality["plan_warning_count"],
         "plan_repair_count": len(preflight_repair_history),

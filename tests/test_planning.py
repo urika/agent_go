@@ -804,4 +804,24 @@ def test_requirement_acceptance_coverage_split():
     full = validate_plan_quality(subtasks, requirements=["REQ-1", "AC-1"])
     assert full["plan_requirement_coverage"] == 1.0
     assert full["plan_acceptance_coverage"] == 0.0
+    assert full["plan_coverage_basis"] == "acceptance_ids"
     assert any(i["type"] == "requirement_coverage_incomplete" for i in full["blocking_issues"])
+
+
+def test_acceptance_coverage_structural_fallback():
+    """S-1：无 spec 验收 ID 时回退为结构性验收覆盖（锚定比），并标注口径 basis。"""
+    subtasks = [
+        {"id": "sub-1", "files": ["src/a.py"], "verification": "pytest tests/test_a.py"},
+        {"id": "sub-2", "files": ["src/b.py"], "verification": "pytest tests/"},
+    ]
+    full = validate_plan_quality(subtasks)  # 无 requirements → 无 AC ID
+    assert full["plan_coverage_basis"] == "structural"
+    assert full["plan_acceptance_coverage"] == 0.5  # sub-1 锚定（file），sub-2 整目录不锚定
+
+
+def test_acceptance_coverage_none_without_verification():
+    """既无 spec 验收 ID、也无验证命令 → 覆盖率与口径均为 None（不臆造）。"""
+    subtasks = [{"id": "sub-1", "files": ["src/a.py"]}]
+    full = validate_plan_quality(subtasks)
+    assert full["plan_acceptance_coverage"] is None
+    assert full["plan_coverage_basis"] is None
