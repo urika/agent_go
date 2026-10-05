@@ -4,12 +4,20 @@
 （对应需求文档 §6.2/§17：改题面＝重开一轮）。
 """
 import json
+import subprocess
+import sys
+import time
 from pathlib import Path
+
+import pytest
 
 from tools.jev_triage import (
     FROZEN_QUESTIONS,
     WHITELIST_TOP_KEYS,
+    _control_hit_ratio,
     _extract_answers,
+    _rpc,
+    _terminate,
     build_state,
     cluster_bootstrap,
     coarse_hit,
@@ -349,3 +357,214 @@ def test_analyze_refuses_incomplete_calls(tmp_path):
                      encoding="utf-8")
     assert main(["--build", "--out", str(out), "--results", str(bench), "--stage", "pilot"]) == 0
     assert main(["--analyze", "--out", str(out), "--stage", "pilot"]) == 3  # 调用 0/1 → 拒绝出判据
+
+
+# ---------------------------------------------------------------------------
+# IPC 健壮性：存根 stdio MCP server 端到端（P1-1）
+# ---------------------------------------------------------------------------
+
+_STUB_TEMPLATE = '''\
+import json, sys, time
+
+MODE = "__MODE__"
+
+if MODE == "flood":
+    sys.stderr.write("x" * 200000)  # 超过管道缓冲：父进程不落盘即会把 server 顶死
+    sys.stderr.flush()
+
+if MODE == "hang_all":
+    time.sleep(600)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("method") == "initialize":
+        resp = {"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2024-11-05"}}
+    elif MODE == "hang_after_init":
+        time.sleep(600)
+        continue
+    else:
+        state = msg["params"]["arguments"]["state"]
+        nonempty = bool((state.get("control") or {}).get("change_nonempty"))
+        p = 0.8 if nonempty else 0.2
+        resp = {"jsonrpc": "2.0", "id": msg["id"], "result": {"structuredContent": {"answers": {
+            "review_class": {"type": "choice", "choice": "content_fix", "confidence": 0.8,
+                             "probabilities": {"content_fix": p, "infra_or_process": round(0.9 - p, 2),
+                                               "insufficient_evidence": 0.1}},
+            "control_change_nonempty": {"type": "noul", "noul": 0.9 if nonempty else 0.1},
+            "ranking_noul": {"type": "noul", "noul": p}}}}}
+    sys.stdout.write(json.dumps(resp) + "\\n")
+    sys.stdout.flush()
+'''
+
+
+def _write_stub_server(tmp: Path, mode: str) -> Path:
+    path = tmp / f"stub_server_{mode}.py"
+    path.write_text(_STUB_TEMPLATE.replace("__MODE__", mode), encoding="utf-8")
+    return path
+
+
+def _pilot_pool(tmp: Path, files_changed: list) -> tuple:
+    """合成批 → --build 出池；返回 (pilot 目录, run_refs)。"""
+    out = tmp / "pilot"
+    bench = tmp / "results_batch.jsonl"
+    lines = []
+    for i, fc in enumerate(files_changed, start=1):
+        td = _write_task(tmp, i, fc)
+        lines.append(json.dumps({"task_dir": str(td), "task_id": td.name, "binary_pass": False}))
+    bench.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert main(["--build", "--out", str(out), "--results", str(bench), "--stage", "pilot"]) == 0
+    pool = [json.loads(x) for x in (out / "pool.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    return out, [e["run_ref"] for e in pool]
+
+
+def test_rpc_timeout_is_real_and_terminate_reaps(tmp_path):
+    server = _write_stub_server(tmp_path, "hang_all")
+    proc = subprocess.Popen([sys.executable, str(server)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}, timeout=0.8)
+        assert time.monotonic() - started < 5  # 旧实现是阻塞 readline：这里会挂到天荒地老
+    finally:
+        _terminate(proc)
+    assert proc.poll() is not None
+
+
+def test_call_with_stub_server_flooding_stderr(tmp_path):
+    out, refs = _pilot_pool(tmp_path, [3, 0])
+    server = _write_stub_server(tmp_path, "flood")
+    assert main(["--call", "--out", str(out), "--server", str(server), "--confirmed",
+                 "--rpc-timeout", "15"]) == 0
+    results = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    assert [r["run_ref"] for r in results] == refs
+    assert all(r["error"] == "" for r in results)
+    # stderr 落文件而非 PIPE：旧实现 200KB 灌满管道即死锁
+    assert (out / "caller-server.err.log").stat().st_size >= 200000
+    assert len((out / "caller-audit.log").read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_call_timeout_records_error_then_resumes(tmp_path):
+    out, refs = _pilot_pool(tmp_path, [1, 0])
+    hang = _write_stub_server(tmp_path, "hang_after_init")
+    assert main(["--call", "--out", str(out), "--server", str(hang), "--confirmed",
+                 "--rpc-timeout", "0.8"]) == 3
+    results = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    assert len(results) == 1 and refs[0] == results[0]["run_ref"] and results[0]["error"]
+
+    ok = _write_stub_server(tmp_path, "reply")
+    assert main(["--call", "--out", str(out), "--server", str(ok), "--confirmed",
+                 "--rpc-timeout", "15"]) == 0
+    results = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    assert sorted(r["run_ref"] for r in results) == sorted(refs)  # 无重复、错误条目被替换
+    assert all(r["error"] == "" for r in results)
+    assert len((out / "caller-audit.log").read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_analyze_refuses_duplicate_or_errored_calls(tmp_path):
+    out, refs = _pilot_pool(tmp_path, [1, 0])
+    resp = _mcp_response(0.8, 0.9)
+    # 计数相等但集合不符（同一 ref 重复、另一 ref 缺失）
+    (out / "results.json").write_text(json.dumps([
+        {"run_ref": refs[0], "response": resp, "error": ""},
+        {"run_ref": refs[0], "response": resp, "error": ""},
+    ], ensure_ascii=False), encoding="utf-8")
+    assert main(["--analyze", "--out", str(out), "--stage", "pilot"]) == 3
+    # 集合齐但一条是错误回包
+    (out / "results.json").write_text(json.dumps([
+        {"run_ref": refs[0], "response": resp, "error": ""},
+        {"run_ref": refs[1], "response": {}, "error": "MCP server 无响应"},
+    ], ensure_ascii=False), encoding="utf-8")
+    assert main(["--analyze", "--out", str(out), "--stage", "pilot"]) == 3
+
+
+def test_control_hit_ratio_missing_noul_counts_as_miss():
+    states = {"a": {"control": {"change_nonempty": True}},
+              "b": {"control": {"change_nonempty": False}}}
+    results = [
+        {"run_ref": "a", "response": _mcp_response(0.8, 0.9)},
+        {"run_ref": "b", "response": {"result": {"structuredContent": {"answers": {}}}}},
+    ]
+    ratio, hits, total = _control_hit_ratio(results, states)
+    assert (hits, total) == (1, 2) and ratio == 0.5  # 缺项按未命中计，不静默缩分母
+
+
+# ---------------------------------------------------------------------------
+# 人工标注（P1-2）：--label 盲标 + --import-labels 批量导入
+# ---------------------------------------------------------------------------
+
+def test_label_interactive_writes_and_rerun_skips(tmp_path, monkeypatch, capsys):
+    out, refs = _pilot_pool(tmp_path, [2, 0])
+    answers = iter(["c", "7", "u", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert main(["--label", "--out", str(out)]) == 0
+    rows = [json.loads(x) for x in (out / "labels.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert [r["run_ref"] for r in rows] == refs
+    assert rows[0]["label"] == "content_fix" and rows[0]["minutes"] == 7.0
+    assert rows[1]["label"] == "undecidable" and rows[1]["minutes"] is None
+    assert all(r["origin"] == "human" for r in rows)
+    assert rows[0]["questions_sha256"] == questions_sha256()
+    # 重跑：全部已标 → 不再提问（input 迭代器已耗尽，若仍提问会 StopIteration 炸掉）
+    assert main(["--label", "--out", str(out)]) == 0
+    assert "全部" in capsys.readouterr().out
+    rows2 = (out / "labels.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(rows2) == 2
+
+
+def test_label_quit_and_invalid_input(tmp_path, monkeypatch, capsys):
+    out, refs = _pilot_pool(tmp_path, [1, 0])
+    answers = iter(["x", "i", "3"])  # 第一条无效输入跳过；第二条正常标注
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert main(["--label", "--out", str(out)]) == 0
+    rows = [json.loads(x) for x in (out / "labels.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert [r["run_ref"] for r in rows] == [refs[1]]
+    assert rows[0]["label"] == "infra_or_process"
+
+
+def test_import_labels_merges_and_rejects_bad_batch(tmp_path, capsys):
+    out, refs = _pilot_pool(tmp_path, [1, 0])
+    src = tmp_path / "labels_in.jsonl"
+    src.write_text("\n".join([
+        "# 注释行",
+        json.dumps({"run_ref": refs[0], "label": "content_fix", "minutes": 5}),
+        json.dumps({"run_ref": refs[1], "label": "infra_or_process"}),
+    ]) + "\n", encoding="utf-8")
+    assert main(["--import-labels", str(src), "--out", str(out)]) == 0
+    rows = [json.loads(x) for x in (out / "labels.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert len(rows) == 2 and all(r["source"].startswith("import:") for r in rows)
+    # 重复导入：全部跳过，不新增
+    assert main(["--import-labels", str(src), "--out", str(out)]) == 0
+    assert len((out / "labels.jsonl").read_text(encoding="utf-8").strip().splitlines()) == 2
+    # 非法标签 → 整批拒收，不改动既有标签
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text(json.dumps({"run_ref": refs[0], "label": "whatever"}) + "\n", encoding="utf-8")
+    assert main(["--import-labels", str(bad), "--out", str(out)]) == 2
+    # 池外 run_ref → 拒收
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(json.dumps({"run_ref": "no-such-ref", "label": "content_fix"}) + "\n", encoding="utf-8")
+    assert main(["--import-labels", str(outside), "--out", str(out)]) == 2
+    # 非 JSON 行 → 拒收
+    broken = tmp_path / "broken.jsonl"
+    broken.write_text("{not json}\n", encoding="utf-8")
+    assert main(["--import-labels", str(broken), "--out", str(out)]) == 2
+    assert len((out / "labels.jsonl").read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_analyze_refuses_stale_rubric_labels(tmp_path):
+    out, refs = _pilot_pool(tmp_path, [1, 0])
+    resp = _mcp_response(0.8, 0.9)
+    (out / "results.json").write_text(json.dumps(
+        [{"run_ref": r, "response": resp, "error": ""} for r in refs], ensure_ascii=False), encoding="utf-8")
+    (out / "labels.jsonl").write_text("\n".join([
+        json.dumps({"run_ref": refs[0], "label": "content_fix", "origin": "human",
+                    "questions_sha256": "deadbeef"}),
+        json.dumps({"run_ref": refs[1], "label": "infra_or_process", "origin": "human",
+                    "questions_sha256": questions_sha256()}),
+    ]) + "\n", encoding="utf-8")
+    assert main(["--analyze", "--out", str(out), "--stage", "pilot"]) == 3  # 跨 rubric 标签不得混轮
+
+
+def test_label_and_import_are_single_action(tmp_path):
+    out, _ = _pilot_pool(tmp_path, [1])
+    assert main(["--label", "--analyze", "--out", str(out)]) == 2
+    assert main(["--import-labels", str(tmp_path / "x.jsonl"), "--label", "--out", str(out)]) == 2

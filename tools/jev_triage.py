@@ -3,7 +3,8 @@
 
 零网络：本模块不含任何 provider API 实现；`--call` 仅 spawn 既有 MCP server（stdio JSON-RPC）。
 零 runtime 写入：只读任务产物，只写 `--out` 目录。
-真值仍是人：`--probe`/`--import-labels` 的产物永不覆盖人工标签（labels.jsonl 只收人工终审）。
+真值仍是人：`--label`/`--import-labels` 只收人工标签（labels.jsonl append-only，带 questions_sha256）；
+v0.8 的预标注/探针（prelabels.jsonl/probe.jsonl）本薄版未实现，实现后也永不覆盖人工标签。
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import re
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -504,20 +506,57 @@ def cmd_packets(args: argparse.Namespace) -> int:
 
 
 def _rpc(proc: subprocess.Popen, msg: Dict[str, Any], timeout: float = 90.0) -> Dict[str, Any]:
-    proc.stdin.write(json.dumps(msg) + "\n")
-    proc.stdin.flush()
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            break
+    """发一条 JSON-RPC 并等同 id 回包；超时真生效（后台读线程 + join）。
+
+    读线程是 daemon：超时后本连接即视为不可用，调用方须销毁进程——否则残留线程
+    会继续吞掉 stdout，后续调用将永远等不到回包。
+    """
+    if proc.stdin is None or proc.stdout is None:
+        raise TimeoutError("MCP server 管道不可用")
+    try:
+        proc.stdin.write(json.dumps(msg) + "\n")
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError) as exc:
+        raise TimeoutError(f"MCP server 已退出：{exc}") from exc
+    holder: Dict[str, Any] = {}
+
+    def _reader() -> None:
+        while True:
+            try:
+                line = proc.stdout.readline()
+            except (ValueError, OSError):
+                return
+            if not line:
+                return
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("id") == msg.get("id"):
+                holder["resp"] = obj
+                return
+
+    thread = threading.Thread(target=_reader, name="jev-rpc-reader", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if "resp" in holder:
+        return holder["resp"]
+    raise TimeoutError(f"MCP server 无响应（{timeout:.0f}s 超时）")
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """terminate → wait(5s) → kill 兜底，避免僵尸/孤儿进程。"""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
         try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("id") == msg.get("id"):
-            return obj
-    raise TimeoutError("MCP server 无响应")
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def cmd_call(args: argparse.Namespace) -> int:
@@ -532,34 +571,61 @@ def cmd_call(args: argparse.Namespace) -> int:
     pool = [json.loads(line) for line in (out / "pool.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     results_path = out / "results.json"
     results: List[Dict[str, Any]] = json.loads(results_path.read_text(encoding="utf-8")) if results_path.is_file() else []
-    done = {r.get("run_ref") for r in results}
+    done = {r.get("run_ref") for r in results
+            if not r.get("error") and _extract_answers(r.get("response") or {})}
     todo = [e for e in pool if e["run_ref"] not in done]
     if not todo:
         print("[call] 无待调用样本")
         return EXIT_OK
-    print(f"[call] 串行调用 {len(todo)} 条（H6 不过即整轮作废）")
+    rpc_timeout = float(args.rpc_timeout) if args.rpc_timeout is not None else 90.0
+    print(f"[call] 串行调用 {len(todo)} 条（单次超时 {rpc_timeout:.0f}s；H6 不过即整轮作废）")
+    # stderr 落文件而非 PIPE：server 的报错输出无人读时会写满管道把 server 顶死
+    err_log = (out / "caller-server.err.log").open("a", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, server], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True)
+                            stderr=err_log, text=True)
     audit = out / "caller-audit.log"
+    code = EXIT_OK
     try:
-        _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                               "clientInfo": {"name": "jev_triage", "version": "0.1"}}})
+        try:
+            _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                                   "clientInfo": {"name": "jev_triage", "version": "0.1"}}},
+                 timeout=rpc_timeout)
+        except TimeoutError as exc:
+            print(f"[call] initialize 失败：{exc}（详见 caller-server.err.log）", file=sys.stderr)
+            return EXIT_INCOMPLETE
         for i, entry in enumerate(todo):
             ref = entry["run_ref"]
             state = _load_json(out / "state" / f"{ref}.json")
-            resp = _rpc(proc, {"jsonrpc": "2.0", "id": 100 + i, "method": "tools/call",
-                               "params": {"name": "jev_decide",
-                                          "arguments": {"state": state, "questions": FROZEN_QUESTIONS}}})
-            results.append({"run_ref": ref, "response": resp, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+            try:
+                resp = _rpc(proc, {"jsonrpc": "2.0", "id": 100 + i, "method": "tools/call",
+                                   "params": {"name": "jev_decide",
+                                              "arguments": {"state": state, "questions": FROZEN_QUESTIONS}}},
+                            timeout=rpc_timeout)
+                item = {"run_ref": ref, "response": resp, "error": "",
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            except TimeoutError as exc:
+                # 连接已不可信：落盘一条带 error 的记录（--analyze 完整性门会挡住），人工决定续跑
+                item = {"run_ref": ref, "response": {}, "error": str(exc),
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                results[:] = [r for r in results if r.get("run_ref") != ref]
+                results.append(item)
+                results_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"[call] {i + 1}/{len(todo)} {ref} 失败：{exc}——已落盘 {len(results)} 条，"
+                      f"修复后重跑可续（成功条目不会重复调用）", file=sys.stderr)
+                code = EXIT_INCOMPLETE
+                break
+            results[:] = [r for r in results if r.get("run_ref") != ref]
+            results.append(item)
             results_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
             with audit.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "run_ref": ref,
                                      "state_keys": sorted(state.keys())}, ensure_ascii=False) + "\n")
             print(f"[call] {i + 1}/{len(todo)} {ref} ok")
     finally:
-        proc.terminate()
-    return EXIT_OK
+        _terminate(proc)
+        err_log.close()
+    return code
 
 
 def _extract_answers(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -585,9 +651,138 @@ def cmd_record(args: argparse.Namespace) -> int:
     results_path = out / "results.json"
     results: List[Dict[str, Any]] = json.loads(results_path.read_text(encoding="utf-8")) if results_path.is_file() else []
     results = [r for r in results if r.get("run_ref") != args.record]
-    results.append({"run_ref": args.record, "response": response, "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    error = ""
+    if response.get("error") or not _extract_answers(response):
+        error = "回包错误或无可解析 answers"
+    results.append({"run_ref": args.record, "response": response, "error": error,
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
     results_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    if error:
+        print(f"[record] {args.record} 已记录但标记为不完整（{error}）——--analyze 完整性门将拦截",
+              file=sys.stderr)
+        return EXIT_INCOMPLETE
     print(f"[record] {args.record} 已记录（共 {len(results)} 条）")
+    return EXIT_OK
+
+
+def _load_labels(out: Path) -> Dict[str, Dict[str, Any]]:
+    """读 labels.jsonl（append-only 跨轮标签库；后写覆盖前写，便于人工改判）。"""
+    path = out / "labels.jsonl"
+    rows: Dict[str, Dict[str, Any]] = {}
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("run_ref"):
+                rows[row["run_ref"]] = row
+    return rows
+
+
+def _append_labels(out: Path, rows: Sequence[Dict[str, Any]]) -> int:
+    if not rows:
+        return 0
+    with (out / "labels.jsonl").open("a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return len(rows)
+
+
+_LABEL_KEYS = {"c": "content_fix", "i": "infra_or_process", "u": "undecidable"}
+LABELS = tuple(_LABEL_KEYS.values())
+
+
+def _label_summary(state: Dict[str, Any]) -> str:
+    stats = state.get("change_stats") or {}
+    ver = (state.get("verification") or [{}])[0]
+    return (f"status={state.get('status')} verify_ok={state.get('verify_ok')} "
+            f"retry={state.get('retry_count')} kill={state.get('kill_reason')} "
+            f"files_changed={stats.get('files_changed')} "
+            f"failure_reason={(state.get('failure_reason') or '')[:160]!r} "
+            f"command={(ver.get('command') or '')[:160]!r}")
+
+
+def cmd_label(args: argparse.Namespace) -> int:
+    """人工盲标（先于查看 results.json，流程纪律）+ 记录单条耗时。"""
+    out = Path(args.out).expanduser()
+    pool = [json.loads(line) for line in (out / "pool.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    if (out / "results.json").is_file():
+        print("[label] 提示：results.json 已存在。盲标纪律要求先写标签后看结果——请自证顺序（§7）")
+    existing = _load_labels(out)
+    todo = [e for e in pool if e["run_ref"] not in existing]
+    if not todo:
+        print(f"[label] 全部 {len(pool)} 条已有标签（labels.jsonl，重跑自动跳过）")
+        return EXIT_OK
+    print(f"[label] 待标 {len(todo)}/{len(pool)} 条；c=content_fix / i=infra_or_process / "
+          f"u=undecidable / s=跳过 / q=退出（跳过项可重跑补标）")
+    rows: List[Dict[str, Any]] = []
+    for idx, entry in enumerate(todo, start=1):
+        ref = entry["run_ref"]
+        state = _load_json(out / "state" / f"{ref}.json")
+        print(f"\n[{idx}/{len(todo)}] {ref}（{entry.get('task_id')}/{entry.get('subtask_id')}）")
+        print(f"  {_label_summary(state)}")
+        raw = input("  标签[c/i/u/s/q]：").strip().lower()
+        if raw in ("q", "quit"):
+            break
+        if raw in ("", "s"):
+            continue
+        if raw not in _LABEL_KEYS:
+            print("  无效输入——本条跳过（可重跑补标）")
+            continue
+        minutes_raw = input("  本条目耗时(分钟，可空)：").strip()
+        try:
+            minutes: Optional[float] = float(minutes_raw) if minutes_raw else None
+        except ValueError:
+            minutes = None
+        rows.append({"run_ref": ref, "label": _LABEL_KEYS[raw], "origin": "human",
+                     "minutes": minutes, "questions_sha256": questions_sha256(),
+                     "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    written = _append_labels(out, rows)
+    print(f"\n[label] 已写 {written} 条 → labels.jsonl（累计 {len(existing) + written} 条）")
+    return EXIT_OK
+
+
+def cmd_import_labels(args: argparse.Namespace) -> int:
+    """批量导入人工标签（跨轮合并/离线补录）；整批校验，一处不合规即拒收（fail-closed）。"""
+    out = Path(args.out).expanduser()
+    pool_refs = {e["run_ref"] for e in
+                 (json.loads(line) for line in (out / "pool.jsonl").read_text(encoding="utf-8").splitlines() if line.strip())}
+    src = Path(args.import_labels).expanduser()
+    if not src.is_file():
+        print(f"[import-labels] 文件不存在：{src}", file=sys.stderr)
+        return EXIT_USAGE
+    existing = _load_labels(out)
+    rows: List[Dict[str, Any]] = []
+    skipped: List[str] = []
+    seen: set = set()
+    for lineno, line in enumerate(src.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"[import-labels] L{lineno} 非 JSON（{exc}）——整批拒收", file=sys.stderr)
+            return EXIT_USAGE
+        ref, label = row.get("run_ref"), row.get("label")
+        if ref not in pool_refs:
+            print(f"[import-labels] L{lineno} run_ref 不在本轮池中：{ref!r}——整批拒收", file=sys.stderr)
+            return EXIT_USAGE
+        if label not in LABELS:
+            print(f"[import-labels] L{lineno} 非法标签 {label!r}（允许：{'/'.join(LABELS)}）——整批拒收",
+                  file=sys.stderr)
+            return EXIT_USAGE
+        if ref in existing or ref in seen:
+            skipped.append(ref)
+            continue
+        seen.add(ref)
+        rows.append({"run_ref": ref, "label": label, "origin": "human",
+                     "minutes": row.get("minutes"), "questions_sha256": questions_sha256(),
+                     "source": f"import:{src.name}", "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    written = _append_labels(out, rows)
+    print(f"[import-labels] 新增 {written} 条、跳过已标/重复 {len(skipped)} 条 → labels.jsonl")
     return EXIT_OK
 
 
@@ -632,10 +827,11 @@ def _control_hit_ratio(results: Sequence[Dict[str, Any]], states: Dict[str, Dict
             continue
         answers = _extract_answers(item.get("response") or {})
         noul = ((answers.get("answers") or {}).get("control_change_nonempty") or {}).get("noul")
-        if not isinstance(noul, (int, float)):
-            continue
         truth = bool((state.get("control") or {}).get("change_nonempty"))
         total += 1
+        if not isinstance(noul, (int, float)):
+            # 回包缺该问项＝仪器失效样本，按未命中计——不得静默缩小分母（H6 是"整轮作废"闸门）
+            continue
         if (float(noul) >= 0.5) == truth:
             hits += 1
     return (hits / total if total else None), hits, total
@@ -727,20 +923,37 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     results_path = out / "results.json"
     results: List[Dict[str, Any]] = json.loads(results_path.read_text(encoding="utf-8")) if results_path.is_file() else []
 
-    # 完整性门（fail-closed）
-    if len(results) != len(pool):
-        print(f"[analyze] 完整性门不过：调用 {len(results)}/{len(pool)}——拒绝出判据（exit 3）")
+    # 完整性门（fail-closed）：按 run_ref 集合比对而非计数——重复/串入样本同样不放行；
+    # 错误回包（超时、isError、无 answers）按不完整计，宁可重跑也不出判据
+    pool_refs = {e["run_ref"] for e in pool}
+    result_refs = {r.get("run_ref") for r in results}
+    if result_refs != pool_refs:
+        missing = sorted(pool_refs - result_refs)
+        extra = sorted(str(x) for x in result_refs - pool_refs)
+        print(f"[analyze] 完整性门不过：缺 {missing}；多/串入 {extra}——拒绝出判据（exit 3）")
+        return EXIT_INCOMPLETE
+    errored = sorted(str(r.get("run_ref")) for r in results
+                     if r.get("error") or not _extract_answers(r.get("response") or {}))
+    if errored:
+        print(f"[analyze] 完整性门不过：{len(errored)} 条错误/空回包 {errored}——"
+              f"重跑补齐后（已完成条目不会重复调用）再分析（exit 3）")
         return EXIT_INCOMPLETE
 
     labels: Dict[str, str] = {}
-    labels_path = out / "labels.jsonl"
-    if labels_path.is_file():
-        for line in labels_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if row.get("origin", "human") == "human":
-                labels[row["run_ref"]] = row["label"]
+    stale: List[str] = []
+    for ref, row in _load_labels(out).items():
+        if row.get("origin", "human") != "human" or row.get("label") not in LABELS:
+            continue
+        sha = row.get("questions_sha256")
+        if sha and sha != questions_sha256():
+            # 题面变过＝靶定义变过：跨 rubric 标签不得混入同一轮判据
+            stale.append(ref)
+            continue
+        labels[ref] = row["label"]
+    if stale:
+        print(f"[analyze] 完整性门不过：{len(stale)} 条标签的 questions_sha256 与本轮冻结题面不一致 "
+              f"{sorted(stale)[:5]}——按 §7 改题面即重开一轮（exit 3）")
+        return EXIT_INCOMPLETE
 
     h6, hits, total = _control_hit_ratio(results, states)
     ranked = rank_entries(results, states, tau)
@@ -915,8 +1128,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--call", action="store_true", help="串行调用既有 MCP server（需 --server 与 --confirmed）")
     p.add_argument("--server", help="既有 jev MCP server 路径（跨仓锚点）")
     p.add_argument("--confirmed", action="store_true", help="人工确认（B 情境人闸门）")
+    p.add_argument("--rpc-timeout", type=float, default=None, help="单次 JSON-RPC 超时秒数（默认 90）")
     p.add_argument("--record", metavar="RUN_REF", help="记录一次手工调用回包")
     p.add_argument("--response", help="--record 的回包 JSON 文件")
+    p.add_argument("--label", action="store_true", help="人工盲标（先于查看 results）+ 单条耗时 → labels.jsonl")
+    p.add_argument("--import-labels", metavar="FILE",
+                   help="批量导入人工标签 JSONL（跨轮合并；一处不合规整批拒收）")
     p.add_argument("--analyze", action="store_true", help="分析（pilot=四件事；full=指标＋四态）")
     p.add_argument("--queue", action="store_true", help="生成 review-queue.md")
     return p
@@ -924,12 +1141,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    actions = [a for a in ("build", "check", "packets", "call", "analyze", "queue") if getattr(args, a)]
+    actions = [a for a in ("build", "check", "packets", "call", "analyze", "queue", "label") if getattr(args, a)]
     if args.record:
         actions.append("record")
+    if args.import_labels:
+        actions.append("import_labels")
     if len(actions) != 1:
-        print("[usage] 需要且仅需要一个动作（--build/--check/--packets/--call/--record/--analyze/--queue）",
-              file=sys.stderr)
+        print("[usage] 需要且仅需要一个动作（--build/--check/--packets/--call/--record/--label/"
+              "--import-labels/--analyze/--queue）", file=sys.stderr)
         return EXIT_USAGE
     action = actions[0]
     if action == "build":
@@ -948,6 +1167,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("[usage] --record 需要 --response", file=sys.stderr)
             return EXIT_USAGE
         return cmd_record(args)
+    if action == "label":
+        return cmd_label(args)
+    if action == "import_labels":
+        return cmd_import_labels(args)
     if action == "analyze":
         return cmd_analyze(args)
     return cmd_queue(args)

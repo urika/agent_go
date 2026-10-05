@@ -1,6 +1,6 @@
 # jev 失败子任务复核排序试点需求（agent_go）
 
-> 状态：**已冻结 v1.1；v1.2–v1.6 为登记更新（H3 回路／规则集管线／S-1／O-14 P0／S-1 P0 结论，2026-10-05）**——冻结测量面（题面／判据／阈值／规模／哈希）**未变**，不构成重开一轮。冻结后按 §17.5 推进。
+> 状态：**已冻结 v1.1；v1.2–v1.7 为登记更新（H3 回路／规则集管线／S-1／O-14 P0／S-1 P0 结论／仪器补齐与命名统一，2026-10-05）**——冻结测量面（题面／判据／阈值／规模／哈希）**未变**，不构成重开一轮。冻结后按 §17.5 推进。
 > 日期：2026-10-05 ｜ 适用仓：agent_go ｜ v0.2＝PM 评审修订，v0.3＝增 §15 架构落位与降级，v0.4＝协议修订（靶根因口径／rank 预注册／规模口径），v0.5＝题面工程（英文结构化 criteria）＋阈值弃权通道，v0.6＝增 §16 M0 冻结清单与签署，v0.7＝增 §9.4 数据闭环与规则收敛登记，v0.8＝增 §7 预标注与辅助真值协议，v0.9＝增 §17 初步设计与推进计划＋ADR-013 提案，**v1.0＝M0 五项签署完成＋冻结（F10 数据纠正：批配置对齐 `delivery-20260820`）**（见文末变更记录）
 > 上位依据（冲突时以其为准）：
 > - swe-eval `docs/jev-paradigm-20260926.md`（用法权威 v0.3：三型契约/边界/纪律）
@@ -101,7 +101,7 @@
 2. `--check`：机械门 R-J1a–d／R-J2a–c（禁入项、白名单、三型 lint、阳性对照声明、三类指纹）＋**粗规则选择性检查**（§6.3），**exit 1 即禁调用**；
 3. `--packets`：输出人审阅包（含逐条外发类别自评模板）；
 4. **B 会话调用**：默认在 ZCode 会话内用既有 `mcp__jev__jev_decide` 逐条调用（复用 llama.cpp `tools/jev_mcp_server.py` 的客户端级注册，不新写调用器）；可选串行 caller（显式人工确认触发，密钥仅从 env 读；实现须 spawn 既有 MCP server——本工具**零网络能力**，见 §15.4.3）；
-5. `--label`：人工盲标靶（`labels.json`）＋**记录单条耗时**（§7）；
+5. `--label`：人工盲标靶（`labels.jsonl`，append-only）＋**记录单条耗时**（§7）；`--import-labels`：批量导入人工标签（跨轮合并/离线补录；整批校验，一处不合规即拒收）；
 6. `--queue`：生成**本地复核队列** `review-queue.md`（rank→task/subtask/worktree 映射；仅本地，不外发）——这是排序的消费面，采纳率的计量载体；
 7. `--analyze`：H6、双基线对比、四态结论、弃权集画像、人时换算（零外发）。
 
@@ -126,8 +126,9 @@
 落盘：~/.agent_go/jev/<pilot-id>/      # pilot-id = jev-review-<冻结批号>
   pool.jsonl / state/*.json / questions.json / manifest.json
   packets.json|md / human-review.md / caller-audit.log
-  results.json / labels.json / analysis.json / review-queue.md / README.md（记账）
-  labels.jsonl（跨轮标签库，v0.7）/ outcomes.jsonl（复核结果回写，v0.7）
+  results.json / labels.jsonl / analysis.json / review-queue.md / README.md（记账）
+  labels.jsonl（本轮＝跨轮同文件，append-only；跨轮以 --import-labels 合并，v0.7）
+  outcomes.jsonl（复核结果回写，v0.7）
   prelabels.jsonl（LLM 预标注初稿，v0.8）/ probe.jsonl（程序化探针结果，v0.8）
 ```
 
@@ -297,8 +298,8 @@
 
 - **rubric**（人标，三值同 Q1；v0.4 改根因口径）：内容型／环境流程型／**不可判（单列，不计入主指标分子分母）**。主导类规则：**根因在交付内容本身（错改/漏改/定位错/部分实现）⇒ 内容型；根因在验证器/沙箱/超时/依赖/harness/流程 ⇒ 环境流程型；代码正确而验证器判错 ⇒ 一律环境流程型**。混合按根因主导裁决；裁不动 ⇒ 不可判。人标 rubric 与 §6.1 Q1 criteria **共用同一根因定义**（题面英文冻结、人标可中文操作）。
 - **代理效度说明（v0.2）**：内容型是"值得人工深判"的**代理**而非等同——内容型不必然可行动。预试阶段用锚点＋小样显式检查该代理的效度（≥6/8 锚点与直觉一致才继续）。
-- **盲标**：标注者先写 `labels.json`，之后才可查看 `results.json`；流程上 `--label` 必须先于 `--analyze` 完成。
-- **预标注与辅助真值协议（v0.8）**：**真值来源仍是人**——LLM 与探针只能降低人的单位成本，不能替代人的确权；人工对每一条**确认或推翻**后才写入 `labels.json(l)`。
+- **盲标**：标注者先写 `labels.jsonl`，之后才可查看 `results.json`；流程上 `--label` 必须先于 `--analyze` 完成（仪器只提示不阻断，顺序由标注者自证）。
+- **预标注与辅助真值协议（v0.8）**：**真值来源仍是人**——LLM 与探针只能降低人的单位成本，不能替代人的确权；人工对每一条**确认或推翻**后才写入 `labels.jsonl`。
   1. **程序化探针（优先）**：对保留 worktree 的失败样本，在**干净环境复跑记录的验证命令**（本地、零外发）。判读：原判失败而 probe 通过 ⇒ **环境/harness 型证据**；probe 也失败 ⇒ 按形态分——命令级错误（语法/未找到/被拒）⇒ 环境流程型；断言/测试失败 ⇒ 内容型；非确定性或超时 ⇒ 不可判。约束：执行前仍过 `utils._is_safe_verification_command` 安全前缀检查（**不绕过**）；probe 结果**不进 state**（不制造机械耦合）；可能产生构建副作用的命令记 README 或跳过。
   2. **LLM 预标注**：优先**本地模型**（零外部外发）；若用云端 ⇒ 按**第二条外发通道**登记（逐次自评＋记账，见 §10.3）。须与 jev **不同家族**；**不得查看 jev 结果**；只出初稿。
   3. **不覆盖原则**：预标注与探针结果分别落 `prelabels.jsonl` / `probe.jsonl`（含模型/命令与版本）；**永不覆盖**人工标签；`labels.jsonl`（跨轮）只收人工终审标签。
@@ -318,35 +319,43 @@
 > 命令面为实现建议；§6.1/§9 的协议与判据不随实现变。
 
 ```bash
+# 统一 pilot 目录（--out 为必填；下同）
+PILOT=~/.agent_go/jev/jev-review-<batch-id>
+
 # M0.5 薄预试（小批；零外发建池 + 手工/半自动 packet）
 agent_go eval bench --suite <small-suite> --repeat 1 --output eval_suite/results_<pre-batch>.jsonl \
   --source-batch <pre-batch-id> --yes
-python3 tools/jev_triage.py --build --batch <pre-batch-id> --n 10 --stage pilot
-python3 tools/jev_triage.py --check            # exit 1 ⇒ 停（含粗规则选择性门）
-python3 tools/jev_triage.py --packets          # 人审阅 + 逐条外发类别自评
-python3 tools/jev_triage.py --label            # 盲标 + 单条耗时
+python3 tools/jev_triage.py --build --out "$PILOT" --results eval_suite/results_<pre-batch>.jsonl \
+  --limit 10 --stage pilot                     # --limit 0＝全部
+python3 tools/jev_triage.py --check --out "$PILOT"     # exit 1 ⇒ 停（含粗规则选择性门）
+python3 tools/jev_triage.py --packets --out "$PILOT"   # 人审阅 + 逐条外发类别自评
+python3 tools/jev_triage.py --label --out "$PILOT"     # 盲标 + 单条耗时（先于查看 results）
 # B 会话逐条调用（≤10 次；H6 不过即停，不进入 M1 仪器建设）
-python3 tools/jev_triage.py --analyze --stage pilot   # 只出 4 件事的结论（不判 Go）
+#   会话内 mcp__jev__jev_decide 逐条调用后，把每次回包落盘并回填：
+#   python3 tools/jev_triage.py --out "$PILOT" --record <run_ref> --response <回包.json>
+python3 tools/jev_triage.py --analyze --out "$PILOT" --stage pilot   # 只出 4 件事的结论（不判 Go）
 
 # M1 正式轮（预试 4 件事全过后）
 agent_go eval bench --suite <suite> --repeat 1 --output eval_suite/results_<batch>.jsonl \
   --source-batch <batch-id> --yes
-python3 tools/jev_triage.py --build --batch <batch-id> --n 30
-python3 tools/jev_triage.py --check            # R-J1/R-J2 + 粗规则选择性门
+python3 tools/jev_triage.py --build --out "$PILOT" --results eval_suite/results_<batch>.jsonl
+python3 tools/jev_triage.py --check --out "$PILOT"     # R-J1/R-J2 + 粗规则选择性门
 pytest tests/test_jev_triage.py -q
 
 # M2（零外发）
-python3 tools/jev_triage.py --packets
-python3 tools/jev_triage.py --label            # 盲标（先于查看 results）+ 耗时
+python3 tools/jev_triage.py --packets --out "$PILOT"
+python3 tools/jev_triage.py --label --out "$PILOT"     # 盲标（先于查看 results）+ 耗时
+#   跨轮复用/离线补录（可选）：--import-labels <labels.jsonl>（整批校验，已标自动跳过）
 
 # M3（B 情境，人闸门，串行）
-# 默认：ZCode 会话内逐条 mcp__jev__jev_decide（state/questions 取自 state/*.json）
-# 可选：python3 tools/jev_triage.py --call --confirmed   # 串行＋显式人工确认；密钥仅从 env 读
-python3 tools/jev_triage.py --usage            # 调前额度探测（元数据 GET，不计次不计费）
+# 默认：ZCode 会话内逐条 mcp__jev__jev_decide（state/questions 取自 state/*.json）→ --record 回填
+# 可选串行 caller：python3 tools/jev_triage.py --call --out "$PILOT" \
+#   --server <既有 MCP server 路径> --confirmed [--rpc-timeout 90]   # 密钥仅从 env 读；stderr 落 caller-server.err.log
+# 额度探测（元数据 GET，不计次不计费）：复用 llama.cpp tools/jev_quota.py 或 MCP jev_usage（本薄版不内置 --usage）
 
 # M4（零外发）
-python3 tools/jev_triage.py --analyze          # H6 + 双基线 + 人时换算 + 四态 + 弃权集画像
-python3 tools/jev_triage.py --queue            # 本地 review-queue.md（消费面）
+python3 tools/jev_triage.py --analyze --out "$PILOT"   # H6 + 双基线 + 人时换算 + 四态 + 弃权集画像
+python3 tools/jev_triage.py --queue --out "$PILOT"     # 本地 review-queue.md（消费面）
 ```
 
 **人闸门清单**（每次调用前人工勾选）：①packet 已审（禁入项 0 命中）②外发类别自评已写 ③额度已探（可调）④串行、无并发。
@@ -359,7 +368,7 @@ python3 tools/jev_triage.py --queue            # 本地 review-queue.md（消费
 
 | 维度 | 指标 | 说明 |
 |---|---|---|
-| 有效性（主） | `effort@recall(0.5)` | 条数口径；**真目标＝`labels.json` 中 content_fix（=1），infra=0，undecidable 剔除，分母＝内容型条数**；按任务聚类 bootstrap 报 CI（v0.4） |
+| 有效性（主） | `effort@recall(0.5)` | 条数口径；**真目标＝`labels.jsonl` 中 content_fix（=1），infra=0，undecidable 剔除，分母＝内容型条数**；按任务聚类 bootstrap 报 CI（v0.4） |
 | 有效性（辅） | `precision@4`、Spearman（**均值秩**，按任务聚类 bootstrap，CI 不含 0） | — |
 | **人时（v0.2 新增，探索性辅证）** | **`人时@recall(0.5)`** | 用标注阶段记录的单条耗时加权换算（代理，含局限声明）；Go 报告必须给出条数→人时换算与不确定度 |
 | 辅助真值（探索性，v0.8） | LLM 预标注-人一致率、probe-人一致率 | **不进判据**；用于度量靶的主观性与探针覆盖（§7） |
@@ -410,7 +419,7 @@ python3 tools/jev_triage.py --queue            # 本地 review-queue.md（消费
 |---|---|---|---|
 | G1 | 回包 `model` 版本未记录 | 托管模型别名会漂，中途换版不可察觉 | `results.json` 记录版本；版本变化＝改件重开轮（§6.2） |
 | G2 | 人审结果未结构化回写 | 只记"按队列复核"（采纳），不记每条结论 | `outcome` 枚举回写（§6.2） |
-| G3 | 跨轮标签库未设计 | `labels.json` 每轮独立，下一轮需重标 | `labels.jsonl` append-only（key=`run_ref`，带 rubric/框架版本，§7） |
+| G3 | 跨轮标签库未设计 | 每轮标签文件独立，下一轮需重标 | `labels.jsonl` append-only（key=`run_ref`，带 rubric/框架版本，§7） |
 | G4 | 无特征/规则挖掘步骤 | `--analyze` 只出判据与画像 | 第二阶段：单特征 CV／规则候选枚举＋留出验证（复用 swe-eval 通道核验思路，参照 §15.5 V4） |
 | G5 | 样本量差一个量级 | n=20–30 只出方向性 | 多轮累积至 **≥100 条带标签**再开挖掘轮 |
 | G6 | 合法流程未写清 | 只有禁令（§2.1：不得用 jev 输出训规则） | 挖掘**只许人工标签**输入；jev 仅作"规则不够用"的指针；新规则须留出验证后再生效 |
@@ -671,7 +680,7 @@ python3 tools/jev_triage.py --queue            # 本地 review-queue.md（消费
 |---|---|---|
 | Owner（accountable） | 对本件冻结与最终结论负责；裁决 κ/靶争议与是否再跑 | 可与执行同人，但须在报告披露 |
 | 执行（仪器与流程） | build/check/queue 与全部落证、记账 | — |
-| 主标注者 | 盲标 `labels.json`＋记录单条耗时 | **不得先看 `results.json`** |
+| 主标注者 | 盲标 `labels.jsonl`＋记录单条耗时 | **不得先看 `results.json`** |
 | 第二标注者 | 双标 ≥10 条（M2） | 独立于主标注者 |
 | 分析者 | `--analyze` 与 M4 报告 | **≠ 主标注者**；若同人必须在报告披露 |
 | 消费方（操作者） | 按 `review-queue.md` 实际复核并留痕（采纳与采纳质量计量） | 必须具名 |
@@ -720,7 +729,7 @@ python3 tools/jev_triage.py --queue            # 本地 review-queue.md（消费
 | `questions.json` | 英文题面全文 | sha 与 manifest 一致；测试钉死 |
 | `manifest.json` | 三个指纹＋批次/池组成 | 篡改必被 `--check` 拒 |
 | `results.json` | 每调用：run_ref／model（回包版本）／choice／probabilities／usage／ts | 完整性＝调用数==样本数 |
-| `labels.jsonl` | 人工终审标签（append-only，跨轮） | 只收人工；预标/探针不写入 |
+| `labels.jsonl` | 人工终审标签（append-only，本轮＝跨轮同文件；每条带 `questions_sha256`） | 只收人工（`--label`／`--import-labels`）；预标/探针不写入；`--analyze` 拒收 sha 不一致的历史标签 |
 | `prelabels.jsonl`／`probe.jsonl` | 预标注初稿／探针结果 | 含模型/命令版本；永不覆盖 |
 | `review-queue.md` | rank→task/subtask 映射 | 本地物料，禁止外发 |
 | `caller-audit.log`／`README.md` | 审计三项与记账 | 逐次自评 |
@@ -791,6 +800,7 @@ agent_go eval bench --tasks eval_suite --suite decision --repeat 1 \
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v1.7 | 2026-10-05 | **薄版仪器补齐实现（不触碰冻结测量面）**：①`--label`（盲标＋单条耗时）与 `--import-labels`（批量导入人工标签：整批校验、一处不合规即拒收、已标自动跳过）落地，每条标签带 `questions_sha256`，`--analyze` 拒收跨 rubric 标签；②落盘命名统一为 `labels.jsonl`（本轮＝跨轮同文件，跨轮以 `--import-labels` 合并）；③`--call` IPC 健壮性修复——单次 JSON-RPC 真超时（后台读线程）、server stderr 落 `caller-server.err.log`（不再用 PIPE 顶死 server）、`terminate→wait→kill` 回收、超时条目带 `error` 落盘且重跑只补未完成项；④完整性门改按 `run_ref` **集合**比对并拦截错误/空回包，H6 分母不再因缺 `control` 问项而静默缩小；⑤v0.8 预标注/探针（`prelabels.jsonl`/`probe.jsonl`）与本薄版不内置的 `--usage`（复用 llama.cpp `tools/jev_quota.py`／MCP `jev_usage`）**仍未实现**，登记为剩余缺口；⑥§17.5 开跑手册的命令同步到实现形态（`--out` 必填、`--results/--limit`、`--record` 回填、`--import-labels`、`--server/--rpc-timeout`）。 |
 | v1.6 | 2026-10-05 | **状态同步（不触碰冻结测量面）**：①O-15 更新为 **S-1 P0 已完成**——缺口效应经同批同模型对照不成立（29% vs 29%，OR=0.99）、靶改用 `warning` 群体、下一步＝A/B（预注册 §10.1）；②O-14 的 P1 门 **ADR-014 已起草（Proposed）**（`docs/design/adr/ADR-014-rule-set-execution-plane.md`）；③删除与 `s1-coverage-audit-findings` 重复的临时分析件（本会话去重）。 |
 | v1.5 | 2026-10-05 | **状态更新（不触碰冻结测量面）**：O-14 标注 **P0 已落地**（`agent_go/rule_set.py`＋37 例测试；CLI `python3 -m agent_go.rule_set`；零 runtime 接入）；P1 影子仍待立项＋新 ADR；概念设计升 v0.3、roadmap §H3 同步。 |
 | v1.4 | 2026-10-05 | **登记更新（不触碰冻结测量面）**：§18 增延伸落点 **S-1：spec 覆盖扫描 → TDD 输入**（两分法：覆盖/证据前瞻可测、有效性事后回填、格位风险借留出表；缺口→TDD 靶映射；A/B 自证；四条边界）；新增 **O-15** 立项；概念设计升 v0.2（§10 详版＋R-6）。 |
