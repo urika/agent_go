@@ -1,7 +1,7 @@
 # agent_go Roadmap：可靠地产出可合并交付物
 
 > 版本：v4.6
-> 更新日期：2026-10-05（未完成事项核账：外部窗口/样本/触发线实测＋B2 复测前置 3 件、jev 探针、S-1 起草端接入落状态）
+> 更新日期：2026-10-05（未完成事项核账＋落地：Issue 联动（默认关，ADR-015）／看板串行批跑／merge 策略可配置化（D2 半程）／阶段 D 放行门读数入口）
 > 当前阶段：M0-M4、M4.5（模型池化，hard 94.4%）已 `accepted`；本地模型管理 P0（只读管理面）已落地（2026-10-05）；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1-W4 已交付；阶段 C C1/C2/C3 + C4 KnowledgeStore A/B smoke 与葬礼回写链路已落地；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立；阶段十三「多 Backend 架构」已 `accepted（有条件）`（B1-B8 全部落地，Go 套餐评估待额度重置）
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
@@ -471,7 +471,7 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 | M | 内容 | 状态 |
 |---|------|------|
 | **M5 问题跟踪** | 全局 `~/.agent_go/problems.jsonl`，跨任务累积 Problem 实体：三态 + 复发重开、半衰期（stale_after_days→dormant）、葬礼（resolution_summary）；`agent_go problems` CLI（列表/聚合/详情/JSON） | `implemented`（2026-08-16：d0335ff 数据层 + d7150a3 CLI 收尾）；**待验收数据**（`measured`→`accepted` 的前置）＝真实任务窗口的复发可见率/根因聚合读数（与 §7.7 阶段 D「#49 信任指标」放行门同源）；**核账（2026-10-05）**：窗口内真实任务 n=0（见 §11 等外部窗口），当前读数均为空 ⇒ 只能随真实使用推进，不刷样本 |
-| **Issue 联动**（原 M6） | `--track-issues` 显式开启（默认关，避免 issue 洪水，见 A6 决策）；Problem 状态机 + GitHub issue 联动 | `deferred`（未启动；「M6」编号自 2026-08-17 起由决策辅助系列使用，见 §7.12，故改称 Issue 联动避免歧义） |
+| **Issue 联动**（原 M6） | `--track-issues` 显式开启（默认关，避免 issue 洪水，见 A6 决策）；Problem 状态机 + GitHub issue 联动 | ✅ **`implemented`（2026-10-05，默认关）**：`agent_go/issue_link.py`＋`agent_go issues sync`（默认 dry-run，`--yes` 才外发）＋`run --track-issues`（只同步本次任务触达的 Problem）；幂等三动作 create/comment/close（`issue_synced` 漂移判定）、正文默认不含 evidence 且路径脱敏、gh 失败/超时 fail-open；ADR＝[ADR-015](design/adr/ADR-015-problem-issue-linkage.md)（Accepted）；10 例测试（全 mock gh）。**待验收数据**＝真实开启后的 issue 生命周期读数（同 §7.7 样本口径）。「M6」编号自 2026-08-17 起由决策辅助系列使用（§7.12），故本项称 Issue 联动避免歧义 |
 
 ## 7.7 阶段六：智能闭环与自治（决策门后）
 
@@ -507,8 +507,8 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 - C4 KnowledgeStore A/B：历史经验注入 vs 无，仅 ADR↑ + 成本不劣化 + 可淘汰才产品化。🔨 实现+smoke 链路验证完成（2026-08-21）：`knowledge.py` 三源提取（Problem/deviation/verify_state）注入 repair prompt，`--with-knowledge` 注入臂 + `knowledge_arm` 臂标记 + `knowledge_injected` 埋点 + 可淘汰（suppressed_ids/dormant 排除）；smoke 7×2×2 臂注入链路真实生效，但参与度仅 2/28（problems.jsonl 全 opened 无 resolution_summary），两臂指标差异为噪声级。✅ 同日补葬礼回写链路（`record_resolution`：重试后成功自动回写「失败模式+解法」，problem_resolution_written 埋点），知识库从此能攒「解法」级经验。全量 decision A/B 待知识库积累后重约。
 
 **阶段 D — 自治决策（谨慎）**
-- D1 Reviewer 灰度（高风险任务，review cost ≤ 主任务 20% 门禁）。
-- D2 自动 merge 策略落地（B1 决策后）。
+- D1 Reviewer 灰度（高风险任务，review cost ≤ 主任务 20% 门禁）。**状态（2026-10-05）**：仍暂缓——放行门即下图 #49 四指标（`agent_go trust` 现直接打印"阶段 D 放行门"逐项判定，数据不足一律不放行=fail-closed）；当前窗口真实任务 n=0 ⇒ 门未动。
+- D2 自动 merge 策略落地（B1 决策后）。**已完成一半（2026-10-05）**：策略**可配置化**——`delivery.merge_strategy`（`no-ff`＝现状默认 / `ff-only`＝不可快进即中止）＋`agent_go merge --strategy` 单次覆盖；**B1 的选择从此是配置项而非代码改动**。**自动触发（成功后无需人工敲 merge）仍待 B1 拍板**——它会改变 M1 交付语义（自动推进 target），需独立决策与回归。
 - D3 目标态：人只在「例外点」介入（Plan 确认 + merge 决策 + 失败审查），其余全自动。
 - **放行门（#49 信任指标）**：审查后修改率下降 + 盲区命中率高 + 复发可见率上升——交底可信，才允许自动化升级。D-0 现状报告（2026-08-21，[trust-metrics-baseline](../docs/design/trust-metrics-baseline-2026-08-21.md)）：~~不可判定~~ → 三指标已有两路自动读数：交付后返工率 1.6%（2/128，行动项 1 ✅）、盲区命中率 0/15（行动项 2 ✅，`agent_go trust`）；复发可见率真实样本仍不足（problem 录制上线后 n=5），剩余前置 = 攒 ≥30 真实任务窗口。**D-1 放行评估（2026-08-28，[trust-metrics-eval-d1](../docs/design/trust-metrics-eval-d1-2026-08-28.md)）：不放行**——返工率 3.8% 达标（成熟期线），复发可见率方向对但 n=1，审查后修改率 n=3 < 10 不可判定，盲区命中率 0/37 低于 50% 下限（口径失灵，阻塞项 A1）；行动项 A1 口径修复 + A2 攒 ≥10 review 决策 + A3 攒失败样本。**A1 已修复（2026-08-29，ISSUE-54 ✅）**：两级证据口径（即时终局 + 交付后 14d 返工），观察期未满标注计 pending 不进分母——根因是旧口径把「观察期未满」当未命中（谦逊层 08-15 才落地，全部标注不足 14d），非标注过保守；重算 37 条全 pending，指标转为「样本不足」待观察期成熟（D-1 报告附录）。
 
@@ -654,7 +654,7 @@ e2e + K3 planner + GLM evaluator   17/18 (94.4%，3 次重跑)  ← 方案 B
 
 ### 后续（未排期）
 
-- 本地后台队列批量执行（implementation 列零边际成本异步跑批）。
+- ~~本地后台队列批量执行（implementation 列零边际成本异步跑批）~~ ✅ **已落地（2026-10-05）**：`agent_go kanban batch`＋`agent_go/batch_runner.py`——把看板当队列（不新增持久化队列文件），取 implementation/periodic 卡片**串行**跑（`--parallel 1`；并发会互相饿死本地后端/共享代理，见 jev 预试批教训）；默认 dry-run、`--yes` 才启动；失败即停（`--keep-going` 可继续）；成功回流 operations，流转失败不回滚任务；6 例测试。
 
 ## 7.14 阶段十三：多 Backend 架构
 
@@ -818,7 +818,7 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 
 ### 局部重规划与策略重置
 
-执行前的 Plan preflight repair 已作为 M2 可靠性能力落地：只修复确定性 Plan 缺陷，最多自动修订一次，不能删除需求或放宽验收约束。执行中的局部重规划仍属于后续实验能力：当出现无进展、错误模式重复或变更规模异常但验证持续失败时，可以提出一次局部重规划建议，默认先请求人工确认，不自动改变全局 Plan；自动策略重置属于后续实验能力。
+执行前的 Plan preflight repair 已作为 M2 可靠性能力落地：只修复确定性 Plan 缺陷，最多自动修订一次，不能删除需求或放宽验收约束。执行中的局部重规划已落地为 C3（无进展/错误模式重复/变更规模异常时提出一次拆分修复建议，默认先请求人工确认）；**"自动策略重置"（headless 免确认自动执行拆分修复）已具备且默认关**——`verification.replan.auto_apply=false`（显式置 true 才自动执行，且仍受"最多一次、继承父预算、不扩大任务图"三条契约约束，tests/test_replan.py 覆盖默认关与 auto 执行两条路径）。是否对真实任务默认开启属阶段 D 决策（待放行门）。
 
 ### MCP/Office/IDE/CI 扩展
 

@@ -1162,3 +1162,67 @@ def test_pricing_tables_agree_for_glm_flash():
         assert model in MODEL_PRICES, model
         ref = MODEL_PRICES[model]
         assert DEFAULT_PRICING[(provider, model)] == (ref["prompt"], ref["completion"])
+
+
+# ═══════════════════════════════════════════════════════════════
+# 阶段 D 放行门（#49；D-1 阈值，数据不足一律不放行）
+# ═══════════════════════════════════════════════════════════════
+
+def _passing_trust():
+    return {"review_modification_rate": 0.10, "reviewed_tasks": 12,
+            "recurrence_visibility_rate": 0.85, "failed_subtasks": 8,
+            "blind_spot_hit_rate": 0.70, "blind_spot_judged": 25}
+
+
+def _passing_rework():
+    return {"post_delivery_rework_rate": 0.05, "rework_eligible_tasks": 40}
+
+
+def test_phase_d_gate_allows_when_all_thresholds_and_samples_ok():
+    from agent_go.metrics import phase_d_release_gate
+    gate = phase_d_release_gate(_passing_trust(), _passing_rework())
+    assert gate["allowed"] is True and gate["blockers"] == []
+    assert len(gate["checks"]) == 4 and all(c["ok"] for c in gate["checks"])
+
+
+def test_phase_d_gate_blocks_on_insufficient_samples():
+    from agent_go.metrics import phase_d_release_gate
+    trust = _passing_trust()
+    trust["reviewed_tasks"] = 3            # D-1：n=3 < 10 不可判定
+    gate = phase_d_release_gate(trust, _passing_rework())
+    assert gate["allowed"] is False
+    assert any("review_modification_rate" in b and "样本不足" in b for b in gate["blockers"])
+
+
+def test_phase_d_gate_blocks_on_threshold_violations():
+    from agent_go.metrics import phase_d_release_gate
+    trust = _passing_trust()
+    trust["blind_spot_hit_rate"] = 0.30    # 低于 50% 下限（狼来了）
+    trust["recurrence_visibility_rate"] = 0.5   # 低于 80%（漏录）
+    gate = phase_d_release_gate(trust, _passing_rework())
+    assert gate["allowed"] is False
+    assert any("blind_spot_hit_rate" in b for b in gate["blockers"])
+    assert any("recurrence_visibility_rate" in b for b in gate["blockers"])
+
+
+def test_phase_d_gate_blocks_when_blind_spot_too_high():
+    from agent_go.metrics import phase_d_release_gate
+    trust = _passing_trust()
+    trust["blind_spot_hit_rate"] = 0.95    # 高于 90% 上限（过保守标注）
+    assert phase_d_release_gate(trust, _passing_rework())["allowed"] is False
+
+
+def test_phase_d_gate_blocks_without_any_data():
+    from agent_go.metrics import phase_d_release_gate
+    gate = phase_d_release_gate({}, {})
+    assert gate["allowed"] is False and len(gate["blockers"]) == 4
+    assert all(c["note"] == "无数据" for c in gate["checks"])
+
+
+def test_phase_d_gate_merges_rework_metrics():
+    from agent_go.metrics import phase_d_release_gate
+    trust = _passing_trust()
+    rework = {"post_delivery_rework_rate": 0.30, "rework_eligible_tasks": 40}
+    gate = phase_d_release_gate(trust, rework)
+    row = next(c for c in gate["checks"] if c["metric"] == "post_delivery_rework_rate")
+    assert row["ok"] is False and "超阈值" in row["note"]

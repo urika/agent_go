@@ -102,6 +102,8 @@ def _build_parser():
                             help="禁用 LLM 语义评估")
     run_parser.add_argument("--accept-tests", action="store_true", dest="accept_tests",
                             help="启用 spec-to-test：起草验收测试→Plan 门内人审冻结→verify 重放（默认跟随 config）")
+    run_parser.add_argument("--track-issues", dest="track_issues", action="store_true",
+                            help="M5 后续：把本次任务触达的 Problem 同步到 GitHub issue（创建/复发评论/修复关闭；默认关，需 gh CLI 已登录）")
     run_parser.add_argument("--spec-gaps", dest="spec_gaps", default="",
                             help="S-1：规则覆盖缺口清单（tools/s1_spec_scan.py 产物）——作为注意力输入注入验收测试起草 prompt")
     run_parser.add_argument("--no-accept-tests", action="store_true", dest="no_accept_tests",
@@ -272,6 +274,9 @@ def _build_parser():
     merge_parser.add_argument("task_id", help="Task ID whose delivery branch to merge")
     merge_parser.add_argument("--push", action="store_true", help="Push target branch to remote after merge")
     merge_parser.add_argument("--remote", default="origin", help="Remote name to push to (default: origin)")
+    merge_parser.add_argument("--strategy", choices=["no-ff", "ff-only"], default="",
+                              help="合并策略（默认取 config.delivery.merge_strategy，兜底 no-ff＝现状；"
+                                   "ff-only 不可快进即中止，不产生 merge commit）")
 
     # ci 子命令
     ci_parser = subparsers.add_parser("ci", help="Generate GitHub Actions workflow")
@@ -356,6 +361,9 @@ def _build_parser():
                              help="bench 子命令：B5 双臂统一 Anthropic 兼容端点（如 https://api.kimi.com/coding）。设置后临时 config 的 plan_api/evaluator/worker_base_url 均指向该端点，两臂共享规划与评估口径，只剩 backend 一个变量")
     eval_parser.add_argument("--bench-key-env", dest="bench_key_env", default="",
                              help="bench 子命令：--bench-endpoint 的 API key 环境变量名（写成 ${VAR} 模板由运行时解析，不落明文）")
+    eval_parser.add_argument("--timeout-margin", dest="timeout_margin", type=float, default=1.0,
+                             help="bench 子命令：动态 timeout 余量倍数（默认 1.0＝现状；慢速臂复测可放宽，如 1.5）。"
+                                  "该值写入每条 record，不同余量的批次禁止直接混比")
     eval_parser.add_argument("--yes", "-y", dest="yes", action="store_true",
                              help="跳过 bench 预检等交互确认（headless/后台运行；bench.py _preflight_model_pricing 读取）")
     eval_parser.add_argument("--results", dest="results", default="eval_suite/results.jsonl",
@@ -366,9 +374,6 @@ def _build_parser():
                              help="Metric Freeze 报告输出路径（metric-freeze 子命令）")
     eval_parser.add_argument("--analysis-goal", dest="analysis_goal", default="",
                              help="insight 子命令：分析目标（人类可读，如 'hard 通过率>=95%% 且 $/pass<=$0.1'）")
-    eval_parser.add_argument("--timeout-margin", dest="timeout_margin", type=float, default=1.0,
-                             help="bench 子命令：动态 timeout 余量倍数（默认 1.0＝现状；慢速臂复测可放宽，如 1.5）。"
-                                  "该值写入每条 record，不同余量的批次禁止直接混比")
     eval_parser.add_argument("--analysis-plan", dest="analysis_plan", default="",
                              help="insight 子命令：预设计划/行动候选（可省略）")
     eval_parser.add_argument("--catalog", dest="catalog", default="",
@@ -459,6 +464,21 @@ def _build_parser():
     problems_parser.add_argument("--json", action="store_true", dest="json_mode",
                                  help="Output as JSON")
 
+    # issues 子命令（M5 后续：Problem ↔ GitHub Issue 联动；默认 dry-run，--yes 才外发）
+    issues_parser = subparsers.add_parser("issues", help="Problem ↔ GitHub issue 联动（默认 dry-run；--yes 才创建/评论/关闭）")
+    issues_parser.add_argument("action", nargs="?", choices=["sync"], default="sync",
+                               help="动作（当前仅 sync：无 issue→创建；复发→评论；resolved→关闭）")
+    issues_parser.add_argument("--dry-run", action="store_true", dest="dry_run",
+                               help="只打印将要执行的动作（未给 --yes 时的默认行为）")
+    issues_parser.add_argument("--yes", "-y", dest="issues_yes", action="store_true",
+                               help="确认执行外发动作（创建/评论/关闭 GitHub issue）")
+    issues_parser.add_argument("--task", default="", help="只处理该任务触达的 Problem（默认全量扫描）")
+    issues_parser.add_argument("--limit", type=int, default=20, help="单次最多处理多少条（默认 20）")
+    issues_parser.add_argument("--repo", default="", help="GitHub 仓库（owner/name；默认 gh 依当前目录推断）")
+    issues_parser.add_argument("--include-evidence", action="store_true",
+                               help="issue 正文包含本地 evidence（默认不含，避免外发原始失败输出）")
+    issues_parser.add_argument("--json", action="store_true", dest="json_mode", help="输出 JSON")
+
     # trust 子命令（#49 信任指标：阶段 D 自治决策放行门的查看入口）
     trust_parser = subparsers.add_parser("trust", help="Show trust metrics (review-modification / recurrence-visibility / blind-spot-hit rates)")
     trust_parser.add_argument("--json", action="store_true", dest="json_mode",
@@ -489,6 +509,22 @@ def _build_parser():
     # kanban 子命令（看板任务编排）
     kanban_parser = subparsers.add_parser("kanban", help="看板任务编排（卡片管理/Spec 导入）")
     kanban_sub = kanban_parser.add_subparsers(dest="kanban_subcommand", help="Kanban operation")
+    kanban_batch_parser = kanban_sub.add_parser(
+        "batch", help="本地后台队列批量执行：串行跑 implementation 列卡片（默认 dry-run，--yes 才启动）")
+    kanban_batch_parser.add_argument("--stage", default="implementation",
+                                     help="取卡列（默认 implementation）")
+    kanban_batch_parser.add_argument("--cards", default="",
+                                     help="显式卡片 ID 列表（逗号分隔；给了就忽略 --stage 过滤）")
+    kanban_batch_parser.add_argument("--limit", type=int, default=5, help="本批最多跑几张（默认 5）")
+    kanban_batch_parser.add_argument("--automation", default="", choices=["", "auto", "manual", "review"],
+                                     help="只取该 automation 分类的卡片（默认不限）")
+    kanban_batch_parser.add_argument("--yes", "-y", dest="batch_yes", action="store_true",
+                                     help="确认执行（真正启动任务；默认只 dry-run 列计划）")
+    kanban_batch_parser.add_argument("--keep-going", dest="keep_going", action="store_true",
+                                     help="一条失败后继续跑后面的（默认失败即停）")
+    kanban_batch_parser.add_argument("--timeout", type=int, default=3600,
+                                     help="单任务超时秒数（默认 3600）")
+    kanban_batch_parser.add_argument("--json", action="store_true", dest="json_mode", help="输出 JSON")
     kanban_import_parser = kanban_sub.add_parser("import-spec", help="从 Task Spec 需求文档生成看板卡片")
     kanban_import_parser.add_argument("spec_path", help="Task Spec 文件路径（.md）")
     kanban_import_parser.add_argument("--stage", default="brainstorm",
@@ -1044,6 +1080,10 @@ def cmd_run(args=None):
         config.setdefault("evaluator", {})["enabled"] = True
     if no_semantic_eval:
         config.setdefault("evaluator", {})["enabled"] = False
+    if getattr(args, "track_issues", False):
+        config.setdefault("issues", {})["enabled"] = True
+    if getattr(args, "spec_gaps", ""):
+        config.setdefault("spec_test", {})["gaps_file"] = str(args.spec_gaps)
     if getattr(args, "accept_tests", False):
         config.setdefault("spec_test", {})["enabled"] = True
     if getattr(args, "no_accept_tests", False):
@@ -1054,8 +1094,6 @@ def cmd_run(args=None):
     _goal_mode_flag = getattr(args, "goal_mode", None)
     if getattr(args, "goal", False) and not _goal_mode_flag:
         _goal_mode_flag = "force"
-    if getattr(args, "spec_gaps", ""):
-        config.setdefault("spec_test", {})["gaps_file"] = str(args.spec_gaps)
     if no_goal and not _goal_mode_flag:
         _goal_mode_flag = "off"
     if getattr(args, "goal_hook", False) and not _goal_mode_flag:
@@ -1868,6 +1906,18 @@ def cmd_resume(args=None):
                   worktree_map, results_map, completed_ids, remote_url=remote_url,
                   preserve_worktrees=preserve_worktrees,
                   step_confirm=getattr(args, 'step_confirm', False) if args else False)
+    # M5 后续（ADR-015）：--track-issues 时把本次任务触达的 Problem 同步到 GitHub issue。
+    # 默认关；fail-open（gh 缺失/未登录只警告，不影响任务结果）
+    if config.get("issues", {}).get("enabled"):
+        try:
+            from .issue_link import sync_problems
+            _iss = sync_problems(AGENT_GO_DIR / "problems.jsonl", config=config,
+                                 task_id=meta.get("task_id", ""), repo=str(repo or ""))
+            if _iss.get("considered"):
+                logger.info(f"[issues] 同步 {_iss['considered']} 条：创建 {_iss['created']}、"
+                            f"评论 {_iss['commented']}、关闭 {_iss['closed']}、失败 {_iss['failed']}")
+        except Exception:
+            logger.debug("[issues] Problem→issue 同步失败（非关键）", exc_info=True)
     try:
         final_meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
         if final_meta.get("status") in {"VERIFICATION_FAILED", "BLOCKED", "DELIVERY_FAILED", "CANCELLED"}:
@@ -2988,6 +3038,16 @@ def cmd_merge(args=None):
         sys.exit(EX_SYSTEM)
     delivery_branch = meta.get("delivery_branch") or ""
     target = meta.get("target_branch") or meta.get("base_branch") or "main"
+    # D2（B1 决策可配置化）：merge 策略 —— no-ff（默认，现状）| ff-only（保守：不可快进即失败）
+    _strategy = str(getattr(args, "strategy", "") or "").strip().lower()
+    if not _strategy:
+        try:
+            _strategy = str((load_config().get("delivery", {}) or {}).get("merge_strategy", "no-ff") or "no-ff")
+        except Exception:
+            _strategy = "no-ff"
+    if _strategy not in ("no-ff", "ff-only"):
+        console.error(f"未知 merge 策略: {_strategy}（支持 no-ff / ff-only）")
+        sys.exit(EX_USAGE)
 
     # P1 互斥：任务已走 PR 交付路径时，禁止重复本地 merge。
     # 若对应 PR 已在 GitHub 合并，直接同步其 merge commit 完成交付（避免双 merge commit 不一致）。
@@ -3055,11 +3115,22 @@ def cmd_merge(args=None):
         if add.returncode != 0:
             console.error(f"无法创建 merge worktree: {add.stderr.strip()[:200]}")
             sys.exit(EX_SYSTEM)
-        merge = subprocess.run(
-            ["git", "merge", "--no-ff", "-m", f"agent_go: merge delivery of {task_id}", delivery_branch],
-            cwd=str(tmp), capture_output=True, text=True, timeout=60,
-        )
+        merge_cmd = (["git", "merge", "--ff-only", delivery_branch] if _strategy == "ff-only"
+                     else ["git", "merge", "--no-ff", "-m", f"agent_go: merge delivery of {task_id}",
+                           delivery_branch])
+        merge = subprocess.run(merge_cmd, cwd=str(tmp), capture_output=True, text=True, timeout=60)
         if merge.returncode != 0:
+            if _strategy == "ff-only":
+                console.error(
+                    f"ff-only 策略下无法快进合并（target 有 delivery 之外的新提交）: "
+                    f"{merge.stderr.strip()[:200]}")
+                console.print("  选项：先 rebase/合并 target 到 delivery branch，"
+                              "或改用 --strategy no-ff（会产生 merge commit）")
+                meta["delivery_failed"] = True
+                meta["delivery_error"] = "ff-only 不可快进"
+                (task_dir / "meta.json").write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                sys.exit(EX_ERROR)
             console.error(f"merge 冲突，已保留现场: {merge.stderr.strip()[:300]}")
             console.print(f"  冲突 worktree: {tmp}")
             console.print(f"  delivery branch: {delivery_branch}")
@@ -3098,7 +3169,7 @@ def cmd_merge(args=None):
             refresh_goal_adherence(meta)
             (task_dir / "meta.json").write_text(
                 json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-            console.success(f"已合并到 {target}: {merge_commit[:12]}")
+            console.success(f"已合并到 {target}: {merge_commit[:12]}（策略 {_strategy}）")
             # 工作区同步：update-ref 推进 target 分支后，若当前 checkout 恰在 target，
             # 工作区/index 与 HEAD 失配（产物显示 staged deletion）。merge 前工作区
             # 干净 → reset 同步；脏 → 警告用户手动处理，避免误提交删除产物。
@@ -3413,6 +3484,43 @@ def cmd_report(args=None) -> None:
     path = Path(args.output) if args.output else task_dir.parent / f"{task_id}.{args.format}"
     path.write_text(out, encoding="utf-8")
     console.success(f"报告已导出: {path}")
+
+
+def cmd_kanban_batch(args) -> None:
+    """本地后台队列批量执行（§7.13 后续）：串行跑看板卡片；默认 dry-run，--yes 才启动。
+
+    串行是刻意的：本地模型后端与共享代理在并发下会互相饿死（jev 预试批教训），
+    批跑按"一次一个"换取可预期的完成时间。
+    """
+    from .batch_runner import run_batch, select_cards
+    _con = _LazyConsole()
+    card_ids = [c.strip() for c in str(getattr(args, "cards", "") or "").split(",") if c.strip()]
+    items = select_cards(stage=str(getattr(args, "stage", "") or "implementation"),
+                         limit=int(getattr(args, "limit", 5) or 5),
+                         card_ids=card_ids or None,
+                         automation=str(getattr(args, "automation", "") or ""))
+    dry_run = not bool(getattr(args, "batch_yes", False))
+    result = run_batch(items, dry_run=dry_run, keep_going=bool(getattr(args, "keep_going", False)),
+                       timeout=int(getattr(args, "timeout", 3600) or 3600))
+    if bool(getattr(args, "json_mode", False)):
+        _con.force(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+        return
+    if not items:
+        _con.print("批跑候选为空（检查卡片列/automation/repo 是否存在）")
+        return
+    mode = "dry-run（未启动）" if dry_run else "已执行"
+    _con.print(f"\n🗂️ 本地批跑 {mode}：{len(items)} 张卡（串行，--parallel 1）")
+    for item in result.items:
+        head = f"  - {item['card_id']} {item['title'][:48]}"
+        if dry_run:
+            _con.print(head)
+        else:
+            _con.print(f"{head} → {item.get('status')}（task {item.get('task_id') or '-'}）")
+    if dry_run:
+        _con.print("  确认执行请加 --yes（每张卡会真实启动一次 agent_go run）")
+    else:
+        _con.print(f"  完成 {result.succeeded}｜失败 {result.failed}｜"
+                   f"{'已继续' if getattr(args, 'keep_going', False) else '失败即停'}")
 
 
 def cmd_kanban_import_spec(args) -> None:
@@ -4096,6 +4204,50 @@ def cmd_deviation(args) -> None:
     _con.sep("─", 60)
 
 
+def cmd_issues(args=None) -> None:
+    """M5 后续：Problem → GitHub issue 联动（默认 dry-run；--yes 才外发）。
+
+    外发口径（ADR-015）：创建/评论/关闭 GitHub issue 是外向行为——必须显式 `--yes`；
+    `run --track-issues` 是单次运行的等价人闸门。默认正文不含本地 evidence。
+    """
+    from .console import _LazyConsole
+    from .config import AGENT_GO_DIR, load_config
+    from .issue_link import sync_problems
+    _con = _LazyConsole()
+    config = load_config()
+    if getattr(args, "include_evidence", False):
+        config.setdefault("issues", {})["include_evidence"] = True
+    dry_run = bool(getattr(args, "dry_run", False)) or not bool(getattr(args, "issues_yes", False))
+    if not dry_run:
+        # 显式 `issues sync --yes` 本身即人闸门（ADR-015）：不要求先改配置
+        config.setdefault("issues", {})["enabled"] = True
+    result = sync_problems(
+        AGENT_GO_DIR / "problems.jsonl",
+        config=config,
+        task_id=str(getattr(args, "task", "") or ""),
+        dry_run=dry_run,
+        repo=str(getattr(args, "repo", "") or ""),
+        limit=int(getattr(args, "limit", 20) or 20),
+    )
+    if bool(getattr(args, "json_mode", False)):
+        _con.force(json.dumps({**result, "dry_run": dry_run}, ensure_ascii=False, indent=2))
+        return
+    if not result.get("enabled"):
+        _con.print(result.get("note") or "issues 联动未启用（issues.enabled=false）")
+        _con.print("提示：加 --yes 执行一次性同步，或用 `agent_go run --track-issues` 对单次运行开启。")
+        return
+    mode = "dry-run（未外发）" if dry_run else "已执行"
+    _con.print(f"\n🔗 Issue 联动 {mode}：候选 {result['considered']} 条")
+    for item in result.get("details") or []:
+        mark = "✓" if item["ok"] else "✗"
+        _con.print(f"  {mark} {item['problem_id']} [{item['action'] or '-'}] "
+                   f"{str(item['detail'])[:120]}")
+    if not result.get("details"):
+        _con.print("  （无漂移：所有 Problem 的 issue 状态都是最新的）")
+    if result["failed"]:
+        _con.print(f"  ⚠️ 失败 {result['failed']} 条（fail-open；未写同步标记，下次自动重试）")
+
+
 def cmd_problems(args=None) -> None:
     """M5 收尾：展示全局 Problem 实体（B4/H3——跨任务失败记忆的查看入口）。
 
@@ -4322,7 +4474,7 @@ def cmd_trust(args=None) -> None:
     默认只统计真实任务（repo 非 eval_suite/fixture）；--all 包含 bench 任务。
     """
     from .console import _LazyConsole
-    from .metrics import compute_post_delivery_rework, compute_trust_metrics
+    from .metrics import compute_post_delivery_rework, compute_trust_metrics, phase_d_release_gate
 
     _con = _LazyConsole()
     watch_repo = str(getattr(args, "watch_repo", "") or "").strip()
@@ -4362,12 +4514,14 @@ def cmd_trust(args=None) -> None:
                               judgment_window_days=_judgment_window)
     rework = compute_post_delivery_rework(task_dirs, recent_window=window,
                                           judgment_window_days=_judgment_window)
+    gate = phase_d_release_gate(r, rework)
     if bool(getattr(args, "json_mode", False)):
         _con.force(json.dumps({"scope": "all" if include_bench else "real",
                                "task_count": len(task_dirs),
                                "recent_window": window,
                                **r,
-                               "post_delivery_rework": rework},
+                               "post_delivery_rework": rework,
+                               "release_gate": gate},
                               indent=2, ensure_ascii=False))
         return
 
@@ -4397,6 +4551,14 @@ def cmd_trust(args=None) -> None:
                f"{('，' + str(r['blind_spot_pending']) + ' 条挂起（观察期未满）') if r.get('blind_spot_pending') else ''}"
                f"{('，' + str(r['blind_spot_na']) + ' 条不可观察（repo 已删/无关联文件，已排除）') if r.get('blind_spot_na') else ''}"
                f"；目标区间 50%~90%）")
+    # 阶段 D 放行门判定（D-1 口径；数据不足一律不放行——fail-closed，不拿"还没坏"当"可以放行"）
+    _gate_mark = "🚦 可放行" if gate["allowed"] else "⛔ 暂不放行"
+    _con.print(f"  阶段 D 放行门: {_gate_mark}")
+    for _chk in gate["checks"]:
+        _mk = "✓" if _chk["ok"] else "✗"
+        _val = _pct(_chk["value"]) if _chk["value"] is not None else "无数据"
+        _con.print(f"    {_mk} {_chk['label']}：{_val}（n={_chk['n']}）"
+                   + (f" —— {_chk['note']}" if _chk["note"] else ""))
     by_signal = r.get("blind_spot_by_signal") or {}
     for sig, v in by_signal.items():
         if v.get("items") or v.get("na"):
@@ -4869,8 +5031,10 @@ def main() -> None:
             sub = getattr(args, "kanban_subcommand", None)
             if sub == "import-spec":
                 cmd_kanban_import_spec(args)
+            elif sub == "batch":
+                cmd_kanban_batch(args)
             else:
-                console.print("Usage: agent_go kanban <import-spec> [args]")
+                console.print("Usage: agent_go kanban <import-spec|batch> [args]")
         elif args.command == "spec":
             cmd_spec(args)
         elif args.command == "clean":
@@ -4929,6 +5093,8 @@ def main() -> None:
             cmd_decision(args)
         elif args.command == "problems":
             cmd_problems(args)
+        elif args.command == "issues":
+            cmd_issues(args)
         elif args.command == "trust":
             cmd_trust(args)
         elif args.command == "attribution":

@@ -140,6 +140,17 @@ DEFAULT_CONFIG = {
     },
     # spec-to-test（ADR-012）：需求 → AI 起草验收测试 → Plan 门内人审 → 冻结 → verify 重放。
     # 默认关（新能力 + 成本可控）；开启后冻结测试作为可执行验收 oracle 优先于语义评估。
+    # M5 后续：Problem ↔ GitHub Issue 联动（A6 决策：默认关，显式 --track-issues 才开；
+    # 创建/评论/关闭 GitHub issue 是外向动作，必须有人闸门；见 ADR-015）
+    # D2（B1 决策可配置化）：交付 merge 策略。no-ff＝现状（产生 merge commit）；
+    # ff-only＝保守（不可快进即中止，要求 delivery 基于最新 target）。默认不改行为。
+    "delivery": {
+        "merge_strategy": "no-ff",
+    },
+    "issues": {
+        "enabled": False,          # 总开关（run --track-issues 可对单次运行开启）
+        "include_evidence": False,  # issue 正文是否带本地 evidence（默认不 외发原始输出）
+    },
     "spec_test": {
         "enabled": False,               # 总开关（--accept-tests / --no-accept-tests 可覆盖）
         "frozen_dir": "tests/acceptance",  # 冻结测试注入 worktree 的仓库内相对目录

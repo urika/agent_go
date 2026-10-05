@@ -100,6 +100,15 @@
     "api_key": "",
     "prompt_template": "default"
   },
+  "delivery": {
+    "_comment": "交付 merge 策略（D2/B1）：no-ff＝产生 merge commit（默认、现状）；ff-only＝不可快进即中止",
+    "merge_strategy": "no-ff"
+  },
+  "issues": {
+    "_comment": "Problem ↔ GitHub Issue 联动（A6 默认关；run --track-issues 或 agent_go issues sync --yes 才外发）",
+    "enabled": false,
+    "include_evidence": false
+  },
   "spec_test": {
     "_comment": "spec-to-test（ADR-012）：需求→AI 起草验收测试→Plan 门内人审→冻结→verify 重放。冻结测试为可执行验收 oracle，优先于 LLM 语义评估",
     "enabled": false,

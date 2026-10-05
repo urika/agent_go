@@ -108,6 +108,10 @@ agent_go eval bench --with-delivery                # 本地交付 merge 闭合 a
 agent_go eval bench --source-batch results_v2      # 批次标识（跨批次追溯）
 agent_go eval bench --worker-backend opencode --fork-retry   # ADR-010 阶段3 fork-retry A/B 注入臂（修复重试续跑 backend 会话；对照臂不加）
 agent_go eval bench --timeout-margin 1.5            # B2 复测前置②：动态 timeout 余量倍数（默认 1.0＝现状；写入每条 record，不同余量批次禁止混比）
+agent_go merge <task-id> --strategy ff-only          # D2：交付 merge 策略（默认取 config.delivery.merge_strategy，兜底 no-ff＝现状；ff-only 不可快进即中止）
+agent_go issues sync                                 # M5 后续：Problem→GitHub issue 同步（默认 dry-run 预览；--yes 才创建/评论/关闭；--limit/--task/--include-evidence）
+agent_go run <repo> '<task>' --track-issues          # 单次运行开启 issue 联动（只同步本次任务触达的 Problem；默认关）
+agent_go kanban batch --limit 3                      # §7.13：本地后台队列串行批跑 implementation 列卡片（默认 dry-run；--yes 启动；--cards/--automation/--keep-going）
 agent_go eval baseline --candidate-models M1,M2    # 对照基线：claude -p 裸跑（不走 harness）
 agent_go eval models --results eval_suite/results.jsonl
 agent_go eval cost-baseline --results eval_suite/results_v3.jsonl,eval_suite/results_v4_calib.jsonl

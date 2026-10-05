@@ -18,3 +18,4 @@
 - [ADR-012 Spec-to-Test 验收测试管线（Accepted，默认关 opt-in）](ADR-012-spec-to-test-pipeline.md)
 - [ADR-013 jev 离线复核排序试点的外发边界与本地数据面（Accepted，2026-10-05）](ADR-013-jev-offline-triage-egress.md)
 - [ADR-014 规则集执行面与全局规则数据面（Proposed，P1 前须 Accepted）](ADR-014-rule-set-execution-plane.md)
+- [ADR-015 Problem ↔ GitHub Issue 联动（Accepted，默认关的对外写入面）](ADR-015-problem-issue-linkage.md)

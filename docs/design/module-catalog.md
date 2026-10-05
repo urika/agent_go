@@ -1,7 +1,7 @@
 # agent_go 模块职责目录
 
 > 状态：As-Built 模块映射
-> 更新日期：2026-10-05（新增 local_model.py：本地模型生命周期 P0 只读管理面；前次：rule_set.py：规则集管线 P0（概念设计 rule-set-pipeline-design §7，零 runtime 接入）；前次：B16 spec_test.py：spec-to-test 验收测试管线（ADR-012）；再前次：2026-09-05 ISSUE-55 web_server.py 拆分为 web_data/web_ops/web_kanban/web_handler/web_frontend + 组合层；B8 dsh_backend + ADR-010 阶段 1 harvest_trajectory 钩子；B7 zcode_backend + B6 opencode_backend + B4 声明式 backend 路由 + B3 pi_backend + B2 AgentLoop 加固）
+> 更新日期：2026-10-05（新增 issue_link.py：Problem↔issue 联动（ADR-015，默认关）＋batch_runner.py：看板串行批跑；前次：local_model.py：本地模型生命周期 P0 只读管理面；前次：rule_set.py：规则集管线 P0（概念设计 rule-set-pipeline-design §7，零 runtime 接入）；前次：B16 spec_test.py：spec-to-test 验收测试管线（ADR-012）；再前次：2026-09-05 ISSUE-55 web_server.py 拆分为 web_data/web_ops/web_kanban/web_handler/web_frontend + 组合层；B8 dsh_backend + ADR-010 阶段 1 harvest_trajectory 钩子；B7 zcode_backend + B6 opencode_backend + B4 声明式 backend 路由 + B3 pi_backend + B2 AgentLoop 加固）
 
 | 模块 | 主要职责 | 关键输出 |
 |---|---|---|
@@ -79,6 +79,8 @@
 | `goal_policy.py` | Goal Loop 最终执行策略 resolver（goal-mechanism-design §3.3/§4） | goal policy |
 | `spec_test.py` | spec-to-test 验收测试管线（ADR-012）：起草→清洗→冻结（sha256 manifest）→注入 worktree（先于 worker 提交）→verify 重放恢复；全链 fail-open，默认关 | 冻结验收 oracle |
 | `local_model.py` | 本地模型生命周期管理 **P0 只读管理面**（设计 local-model-management-design §3/§4）：`agent_go model status/list/current/diagnose`——读 /api/status（契约 api_version=2）、/metrics、/v1/models 与 configs/*.conf，输出六级别诊断（healthy/starting/backend_down/proxy_down/model_drift/down）＋建议命令；**只读**（不 import subprocess、不写任何文件）、默认关（enabled=false 时命令报错）、fail-open；P1（start/stop/switch）/P2（repair＋pipeline 集成）/P3（web 监控）未落地 | 本地模型状态/诊断 |
+| `issue_link.py` | Problem ↔ GitHub Issue 联动（ADR-015；M5 后续 A6 决策）：`issues.enabled` **默认关**，只有 `run --track-issues`／`issues sync --yes` 才外发；幂等三动作（create/comment/close，靠 `issue_synced` 漂移判定）；默认不外发本地 evidence 且对家目录/`.agent_go` 脱敏；gh 缺失/失败/超时一律 fail-open | Problem↔issue 同步 |
+| `batch_runner.py` | 本地后台队列批量执行（roadmap §7.13 后续）：把看板当队列，按序**串行**跑 implementation/periodic 卡片（`--parallel 1`，避免本地后端/共享代理争用）；默认 dry-run，`--yes` 才启动；失败即停（`--keep-going` 可继续）；成功后卡片回流 operations；流转失败不回滚已跑任务 | 看板串行批跑 |
 | `rule_set.py` | 规则集管线 P0（概念设计 rule-set-pipeline-design §7）：受限 DSL（AST 解析、禁 eval、三值 fail-open）＋清单 `~/.agent_go/rules/rules.jsonl`（frozen_sha256 校验＋promote 验证闸 holdout≥100）＋候选导入/生成（签名只收人工标签＝标签源闸①）＋历史样本离线复算报告（`holdout_sha` 可复算；`promote --report` 盖章验证）；**零 runtime 接入**（影子执行 `shadow_evaluate` 为 P1 接入点） | 规则清单/复算报告 |
 
 ## 模块变更规则
@@ -105,6 +107,8 @@
 | `goal_policy.py` | Goal Loop final execution policy resolver (goal-mechanism-design §3.3/§4) |
 | `spec_test.py` | Spec-to-test acceptance pipeline (ADR-012): draft → sanitize → freeze (sha256 manifest) → inject into worktree (committed before worker) → restore/replay before verify; fail-open, default off |
 | `local_model.py` | Local model lifecycle **P0 read-only surface** (design §3/§4): `agent_go model status/list/current/diagnose` — reads /api/status (contract api_version=2), /metrics, /v1/models, configs/*.conf; six-level diagnosis + advice; **read-only** (no subprocess import, writes nothing), default off, fail-open; P1/P2/P3 not landed | local model status/diagnosis |
+| `issue_link.py` | Problem ↔ GitHub issue linkage (ADR-015): **default off**; only `run --track-issues` or `issues sync --yes` writes out; idempotent create/comment/close via `issue_synced` drift; evidence omitted and home paths scrubbedby default; fail-open on gh errors | problem↔issue sync |
+| `batch_runner.py` | Local background batch queue (roadmap §7.13): drains kanban implementation/periodic cards **serially** (`--parallel 1`); dry-run by default, `--yes` to start; stop-on-failure (`--keep-going`); on success the card moves to operations; flow failures never roll back a finished task | serial kanban batch |
 | `rule_set.py` | Rule-set pipeline P0 (concept design §7): restricted DSL (AST parse, no `eval`, three-valued fail-open) + manifest `~/.agent_go/rules/rules.jsonl` (frozen_sha256 verify, promote gate holdout≥100) + candidate import/generation (human labels only = gate ①) + offline replay report; **zero runtime integration** (`shadow_evaluate` is the P1 hook) |
 | `git_utils.py` | Project analysis, worktree create/remove/prune, gc.auto control |
 | `skills.py` | Skill loading, discovery, rendering (YAML frontmatter + Markdown), symlink resolution |

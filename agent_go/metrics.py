@@ -1179,3 +1179,54 @@ def compute_acceptance_metrics(
                 if base_cohort["accepted"] else None), cost_usd=round(base_cohort["cost_usd"], 4)),
         },
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 阶段 D（自治）放行门判定（#49；阈值来源＝D-0/D-1 报告，2026-08-21/08-28）
+# ═══════════════════════════════════════════════════════════════
+
+#: 四项阈值与样本量门槛（D-1 对照表 + 放行条件更新；**数据不足一律不放行**＝fail-closed）
+PHASE_D_GATE_CRITERIA: "dict[str, dict[str, Any]]" = {
+    "review_modification_rate": {"max": 0.20, "min_n": 10, "n_key": "reviewed_tasks",
+                                 "label": "审查后修改率（≤20%，需 ≥10 个 review 决策）"},
+    "recurrence_visibility_rate": {"min": 0.80, "min_n": 5, "n_key": "failed_subtasks",
+                                   "label": "复发可见率（≥80%，需 ≥5 个窗口内失败子任务）"},
+    "post_delivery_rework_rate": {"max": 0.10, "min_n": 30, "n_key": "rework_eligible_tasks",
+                                  "label": "交付后返工率（≤10% 成熟期线，需 ≥30 真实任务窗口）"},
+    "blind_spot_hit_rate": {"min": 0.50, "max": 0.90, "min_n": 20, "n_key": "blind_spot_judged",
+                            "label": "盲区命中率（50%~90%，需 ≥20 条已判定标注）"},
+}
+
+
+def phase_d_release_gate(trust: dict[str, Any],
+                         rework: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """阶段 D（自治决策）放行门判定：四指标阈值 + 样本量门槛（D-1 口径）。
+
+    - **无数据/样本不足 ⇒ 不放行**（fail-closed；不用"还没坏"当"可以放行"）。
+    - 返回 ``{"allowed", "checks": [...], "blockers": [...]}``；``checks`` 逐项给
+      读数/门槛/样本量/判定，供 `agent_go trust` 展示与报告引用。
+    """
+    merged = dict(trust or {})
+    if rework:
+        merged.update({k: v for k, v in rework.items() if k.startswith("post_delivery") or k == "rework_eligible_tasks"})
+    checks: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    for metric, spec in PHASE_D_GATE_CRITERIA.items():
+        value = merged.get(metric)
+        n = int(merged.get(spec["n_key"]) or 0)
+        ok = True
+        note = ""
+        if value is None:
+            ok, note = False, "无数据"
+        elif n < int(spec["min_n"]):
+            ok, note = False, f"样本不足（{n} < {spec['min_n']}）"
+        elif "max" in spec and float(value) > float(spec["max"]):
+            ok, note = False, f"超阈值（{value} > {spec['max']}）"
+        elif "min" in spec and float(value) < float(spec["min"]):
+            ok, note = False, f"低于阈值（{value} < {spec['min']}）"
+        checks.append({"metric": metric, "label": spec["label"], "value": value, "n": n,
+                       "min_n": spec["min_n"], "ok": ok, "note": note})
+        if not ok:
+            blockers.append(f"{metric}: {note}")
+    return {"allowed": not blockers, "checks": checks, "blockers": blockers,
+            "source": "trust-metrics-eval-d1-2026-08-28（D-1 阈值＋放行条件；数据不足不放行）"}

@@ -34,6 +34,8 @@ API key 解析优先级：环境变量 `AGENT_GO_API_KEY` > `config.json` `plan_
 | 16a | `worker_backend` / `worker_backend_by_difficulty` / `worker_backend_by_type` | `""` | B3/B4 worker backend 显式选择与声明式路由（见 13–16 末节） |
 | 17 | `local_model_names` | — | 路由名→本地真实模型名映射 |
 | 17a | `local_model_manager` | `enabled: false` | 本地模型生命周期管理（P0 只读面：`agent_go model status/list/current/diagnose`；设计 local-model-management-design） |
+| 17d | `delivery` | `merge_strategy: no-ff` | 交付 merge 策略（D2/B1 可配置化；ff-only＝不可快进即中止） |
+| 17e | `issues` | `enabled: false` | Problem ↔ GitHub issue 联动（ADR-015；默认关，只有 `--track-issues`／`issues sync --yes` 才外发） |
 | 18 | `cache` | `enabled: true` | Plan 缓存 |
 | 19 | `router` | `enabled: false` | 角色（planner/worker/reviewer）→ provider/model 路由 |
 | 20 | `mcp_servers` | — | 外部 MCP server 配置 |
@@ -381,6 +383,23 @@ Pipeline 调度行为（T09 本地模型自动限流，并发调度原则 2026-0
 | `explore` | str | `""` | 探索/分析类子任务模型（便宜模型） |
 | `implement` | str | `""` | 实现类子任务模型（强模型） |
 | `review` | str | `""` | 审查类子任务模型（独立模型） |
+
+---
+
+## 17d. `delivery`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `merge_strategy` | str | `"no-ff"` | 交付 merge 策略：`no-ff`＝产生 merge commit（默认、现状）；`ff-only`＝不可快进即中止（D2/B1 决策点，改配置即可切换，无需改代码）。`agent_go merge --strategy` 可单次覆盖 |
+
+## 17e. `issues`
+
+Problem ↔ GitHub Issue 联动（ADR-015）。**默认关**；外发动作＝创建/评论/关闭 GitHub issue。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 总开关；`run --track-issues` 对单次运行开启，`issues sync --yes` 是等价的人工回填闸门 |
+| `include_evidence` | bool | `false` | issue 正文是否带 `Problem.evidence`（默认不带——不外发本地原始失败输出） |
 
 ---
 

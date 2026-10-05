@@ -664,6 +664,33 @@ P1（start/stop/switch）/P2（repair＋pipeline 集成）/P3（web 监控）不
 
 ---
 
+## issue_link.py — Problem ↔ GitHub Issue 联动（ADR-015；默认关）
+
+```
+tracking_enabled(config)                 → issues.enabled（默认 false；--track-issues 对单次运行开启）
+needs_sync(problem)                      → ""（已同步）/ create / comment（复发）/ close（已 resolved）
+sync_problem(problem, *, config, dry_run, repo)
+                                         → (ok, action, detail)；gh 缺失/失败/超时 → (False, ...)（fail-open）
+sync_problems(problems_path, *, config, task_id, dry_run, repo, limit)
+                                         → 批量幂等同步；task_id 非空只处理该任务触达的 Problem；返回汇总 dict
+```
+
+CLI：`agent_go issues sync [--yes] [--task ID] [--limit N] [--repo R] [--include-evidence] [--json]`（默认 dry-run）；
+`agent_go run … --track-issues` 在流水线结束后同步本次任务触达的 Problem。外发正文对家目录/`.agent_go` 脱敏，
+默认不含 `evidence`；失败项不写 `issue_synced`（下次自动重试）。
+
+## batch_runner.py — 本地后台队列批量执行（roadmap §7.13 后续）
+
+```
+select_cards(*, stage="implementation", limit=5, card_ids=None, automation="")
+                                         → 从看板取可批跑卡片（implementation/periodic；repo 必须存在）
+run_batch(items, *, dry_run=True, keep_going=False, timeout=3600, parallel=1)
+                                         → 串行执行（`agent_go --json run … --yes --parallel 1`）；成功 → 卡片流转 operations；
+                                           失败默认即停（--keep-going 继续）；流转失败不回滚已跑任务
+```
+
+CLI：`agent_go kanban batch [--stage C] [--cards c1,c2] [--limit N] [--automation auto|manual|review] [--yes] [--keep-going] [--timeout S] [--json]`（默认 dry-run）。
+
 ## rule_set.py — 规则集管线 P0（离线；概念设计 rule-set-pipeline-design §7）
 
 ```

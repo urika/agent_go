@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -63,6 +63,8 @@ class Problem:
       生命周期：  status（opened|analyzed|resolved）/ root_cause / resolved_by / github_issue
       H3 半衰期：stale_after_days（未复发超期 → dormant 派生状态，不新增状态机节点）
       H3 葬礼：  resolution_summary（resolved 时记录「为何曾重要、如何被修」）
+      Issue 联动（ADR-015）：github_issue（远端 URL）/ issue_synced（上次同步时的
+                 occurrence_count/status/number——判定 create/comment/close 漂移，幂等）
     """
 
     id: str
@@ -82,6 +84,7 @@ class Problem:
     github_issue: str = ""
     stale_after_days: int = DEFAULT_STALE_AFTER_DAYS
     resolution_summary: str = ""
+    issue_synced: dict[str, Any] = field(default_factory=dict)
     schema_version: int = 1
 
     def __post_init__(self):
@@ -147,6 +150,7 @@ def load(problems_path: Path | str) -> list[Problem]:
                 github_issue=data.get("github_issue", ""),
                 stale_after_days=int(data.get("stale_after_days", DEFAULT_STALE_AFTER_DAYS)),
                 resolution_summary=data.get("resolution_summary", ""),
+                issue_synced=dict(data.get("issue_synced") or {}),
             ))
         except (json.JSONDecodeError, KeyError, ValueError):
             continue

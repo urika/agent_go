@@ -42,11 +42,12 @@ def _make_task(tmp_path, repo):
 
 
 class Args:
-    def __init__(self, task_id, offline=False, push=False, remote="origin"):
+    def __init__(self, task_id, offline=False, push=False, remote="origin", strategy=""):
         self.task_id = task_id
         self.offline = offline
         self.push = push
         self.remote = remote
+        self.strategy = strategy
 
 
 def test_cmd_pr_offline_writes_pr_md(tmp_path):
@@ -171,6 +172,79 @@ def test_cmd_merge_success_advances_target_branch(tmp_path):
     # main 分支应包含 delivery 内容
     check = subprocess.run(["git", "show", "main:delivery.txt"], cwd=str(repo), capture_output=True, text=True)
     assert check.returncode == 0 and check.stdout.strip() == "delivery content"
+
+
+def test_cmd_merge_ff_only_fast_forwards_without_merge_commit(tmp_path):
+    """D2：--strategy ff-only 在可快进时直接推进 target（不产生 merge commit），meta 记录合并点。"""
+    repo = _init_repo(tmp_path / "repo")
+    task_dir, _meta = _make_task(tmp_path, repo)
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+    delivery_head = subprocess.run(["git", "rev-parse", "agent_go/task-t1/delivery"],
+                                   cwd=str(repo), capture_output=True, text=True).stdout.strip()
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"):
+        cmd_merge(Args("task-t1", strategy="ff-only"))
+    updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    assert updated["explicit_merge_commit"] == delivery_head            # fast-forward：target == delivery head
+    assert updated["status"] == "ACCEPTED_DELIVERY" and updated["delivery_failed"] is False
+    target_head = subprocess.run(["git", "rev-parse", "main"],
+                                 cwd=str(repo), capture_output=True, text=True).stdout.strip()
+    assert target_head == delivery_head
+    # 无 merge commit：main 的历史里 delivery commit 只有一个父提交链（线性）
+    parents = subprocess.run(["git", "rev-list", "--parents", "-1", "main"],
+                             cwd=str(repo), capture_output=True, text=True).stdout.split()
+    assert len(parents) == 2                                            # commit + 1 parent
+
+
+def test_cmd_merge_ff_only_aborts_when_not_fast_forwardable(tmp_path):
+    """D2：ff-only 在 target 有新提交（不可快进）时中止并留痕，不推进 target。"""
+    repo = _init_repo(tmp_path / "repo")
+    task_dir, _meta = _make_task(tmp_path, repo)
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+    # target 前进一格 → delivery 不再可快进
+    (repo / "main-only.txt").write_text("later", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "main moves on"], cwd=str(repo), capture_output=True)
+    main_head = subprocess.run(["git", "rev-parse", "main"],
+                               cwd=str(repo), capture_output=True, text=True).stdout.strip()
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"), \
+         patch("agent_go.cli.sys.exit", side_effect=SystemExit):
+        try:
+            cmd_merge(Args("task-t1", strategy="ff-only"))
+        except SystemExit:
+            pass
+    updated = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    assert updated["delivery_failed"] is True
+    assert "ff-only" in updated["delivery_error"]
+    assert not updated.get("explicit_merge_commit")
+    assert subprocess.run(["git", "rev-parse", "main"],
+                          cwd=str(repo), capture_output=True, text=True).stdout.strip() == main_head
+
+
+def test_cmd_merge_reads_strategy_from_config(tmp_path):
+    """D2：未给 --strategy 时取 config.delivery.merge_strategy。"""
+    repo = _init_repo(tmp_path / "repo")
+    _make_task(tmp_path, repo)
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"), \
+         patch("agent_go.cli.load_config", return_value={"delivery": {"merge_strategy": "ff-only"}}):
+        cmd_merge(Args("task-t1"))
+    main_head = subprocess.run(["git", "rev-parse", "main"],
+                               cwd=str(repo), capture_output=True, text=True).stdout.strip()
+    delivery_head = subprocess.run(["git", "rev-parse", "agent_go/task-t1/delivery"],
+                                   cwd=str(repo), capture_output=True, text=True).stdout.strip()
+    assert main_head == delivery_head      # 走了 ff-only（线性推进）
+
+
+def test_cmd_merge_rejects_unknown_strategy(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    _make_task(tmp_path, repo)
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+    with patch("agent_go.cli.AGENT_GO_DIR", tmp_path / ".agent_go"), \
+         patch("agent_go.cli.sys.exit", side_effect=SystemExit):
+        try:
+            cmd_merge(Args("task-t1", strategy="octopus"))
+        except SystemExit:
+            pass
 
 
 def test_cmd_merge_missing_delivery_branch(tmp_path):
