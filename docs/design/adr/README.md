@@ -16,3 +16,5 @@
 - [ADR-010 轨迹平台化三层切分（代理层不做 LLM 会话管理）](ADR-010-trajectory-layering.md)
 - [ADR-011 Pipeline 本地模型自动限流（云端并行、本地串行）](ADR-011-local-model-serialize.md)
 - [ADR-012 Spec-to-Test 验收测试管线（Accepted，默认关 opt-in）](ADR-012-spec-to-test-pipeline.md)
+- [ADR-013 jev 离线复核排序试点的外发边界与本地数据面（Accepted，2026-10-05）](ADR-013-jev-offline-triage-egress.md)
+- [ADR-014 规则集执行面与全局规则数据面（Proposed，P1 前须 Accepted）](ADR-014-rule-set-execution-plane.md)

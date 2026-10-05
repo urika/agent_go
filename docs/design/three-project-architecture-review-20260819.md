@@ -96,3 +96,18 @@
 | ~~P3~~ | agent_go | ~~A-2 `/status` HTML 解析切换 `/api/status` JSON~~ **✅ 已落地（2026-08-19）**；A-3 agent_go 侧契约版本标注同步完成 |
 | P3 | swe-eval | S-4 per-run timeout/重试；~~S-5 requirements.txt~~（✅ 已落地）；S-6 防泄漏清单（✅ 已落地） |
 | P3 | llama-defender | L-3 截断不对称修复；L-2 观测端点快照化（中期） |
+
+## 4. 新增件落位（2026-10-05，登记）
+
+> 背景：jev 复核排序／规则收敛线落地了一批新件；层域归属已登记于 swe-eval《能力域四层结构模型》§九（v1.6，映射到 D7/D8/D9＝L0 测试与治理层，无新增能力域）。本节只补**三仓分层**视角的落位与契约影响。
+
+| 新件 | 三仓分层落位 | 说明（距 runtime 的距离） |
+|---|---|---|
+| `tools/jev_triage.py`（jev 离线复核排序） | agent_go **L3 决策/治理面**（离线 dev 工具） | 只读任务产物；ADR-013 明文禁止运行时调用；外发走既有 MCP 且人工闸门 |
+| `tools/s1_coverage_audit.py`（规则覆盖审计） | agent_go **L3**（度量/诊断） | 只读 bench 结果 JSONL；零外发 |
+| `tools/s1_spec_scan.py`（spec 覆盖扫描） | agent_go **L3**（判定支撑） | 只读计划的验收面；零外发 |
+| `agent_go/rule_set.py`（规则集管线 P0） | agent_go **L3**（规则/知识） | 离线清单＋影子/生效两态；opt-in，未接 runtime |
+| `planning.py` 覆盖率口径（`plan_coverage_basis`） | agent_go **L2 编排层**（规划质量） | **本批唯一进入产线链路的改动**：只增字段（契约兼容，"字段只增不改名"）；口径变更登记 P-1 待治理追认 |
+| ADR-013 / 需求 v1.6 / 概念设计 | 跨仓 **治理面** | 边界、判据、冻结清单与 kill 判据 |
+
+**检查结论**：①**无 L0/L1（后端层/代理层）改动**；②L2 的改动为契约兼容的只增字段；③L3 新件全部离线、零 runtime 依赖、可复算——符合层间"单向依赖＋L0 不影响生产"的既有原则。

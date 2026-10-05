@@ -630,3 +630,39 @@ executor 侧消费：`run_subtask` 启动前注入（先于 `pre_work_head` 捕�
 CLI/交互：`--accept-tests` / `--no-accept-tests` 覆盖开关；草稿随 Plan 确认门一并人审
 （CLI：`[T]` 审阅/编辑、`[K]` 跳过；web：确认卡片内逐文件编辑 + 跳过勾选）。
 `require_review=true` 时无人审路径（headless 且非 web 确认）自动降级为现状验证行为并留档草稿。
+
+## rule_set.py — 规则集管线 P0（离线；概念设计 rule-set-pipeline-design §7）
+
+```
+parse_condition(text)                    → 受限 DSL 解析为 AST（and/or/not + == != >= <= > <；字段点路径；字面量 int/float/str/bool/null）
+eval_condition(condition, state)         → 三值求值 (True|False|None, reason)；缺失字段/类型不匹配 → None；任何异常 fail-open
+rule_fires(rule, state)                  → (bool, reason)：仅当结果恰为 True 记命中
+default_rules_path()                     → ~/.agent_go/rules/rules.jsonl
+rule_sha(rule) / verify_frozen(rule)     → 冻结哈希（rule_id/version/stage/condition/cover）与执行前校验
+validate_rule(rule) / check_fields(rule, states)
+                                         → 清单 schema+DSL 校验 / 规则引用字段在样本中的可达性
+load_rules(path) / save_rules(rules, path)
+                                         → JSONL 读写（save 原子替换、按 rule_id+version 排序）
+make_rule(...) / upsert_rule(rules, rule)
+                                         → 构造（自动 frozen_sha256）/ 合并（同条件去重、换条件升版回 candidate）
+promote_rule(rules, rule_id, to) / retire_rule(rules, rule_id, reason)
+                                         → 状态流转；→ active 强制验证闸②（holdout_n≥100 ∧ holdout_sha ∧ regression_ok）
+candidate_to_rule(cand) / import_candidates(path, rules)
+                                         → rule_candidates.jsonl（condition 或 feature/op/threshold）导入
+generate_candidates(labeled, *, min_cover, min_precision, max_candidates)
+                                         → 单特征阈值扫描；签名只收 (state, 人工标签)＝标签源闸①
+load_labeled_states(states_dir, labels_path)
+                                         → 读取 state/*.json + labels.jsonl（只收 origin=human）
+replay_report(rules, labeled, *, statuses)
+                                         → 离线复算：逐规则 tp/fp/fn/tn、precision/recall、fire_rate、联合覆盖、未知字段
+shadow_evaluate(rules, state, stage) / append_decisions(task_dir, decisions)
+                                         → 影子执行纯函数 + rule_decisions.jsonl 追加（P1 接入点；失败 fail-open）
+```
+
+CLI（P0 形态；`agent_go rules` 子命令随 P1 接入 cli.py）：
+
+```
+python3 -m agent_go.rule_set [--rules PATH] list|show|validate|import-candidates|generate|replay|promote|retire
+```
+
+边界：零网络、零 runtime 接入；规则只读 state；promote→active 无 force 逃逸；影子记录失败不阻断主链路。

@@ -752,6 +752,8 @@ dsh headless 0.1.2-rc.1 无 resume 原语不做）。
 
 诚实声明：swe-eval tdd 证据为 gold test 上界，产线草稿测试效应打折；对照基线是"验证误判"而非"无测试"。
 
+**延伸候选（2026-10-05 登记，S-1）：覆盖驱动的 TDD 输入生成**——用"规则+jev"覆盖扫描（覆盖/证据完整度**前瞻可测**；有效性**事后回填**；格位风险待留出表）定位 spec 的欠覆盖维度，作为起草阶段的**注意力分配器**（J-only⇒必须显式可执行测试；双缺⇒补证据/人工裁决、**不进开发**；R-only⇒回归测试钉住）；自身有效性用 A/B 自证（覆盖驱动 vs 均匀生成；**同测试预算**下比 resolved/首过/返工/缺陷逃逸，配对＋McNemar）。前置＝留出表 ≥100 标签＋新 ADR（spec 全文外发面）；概念设计＝[rule-set-pipeline-design-20261005.md](design/rule-set-pipeline-design-20261005.md) §10；需求登记＝O-15。**P0 完成（2026-10-05，v0.3 修正）**：`tools/s1_coverage_audit.py`（13 例）＋[findings](design/s1-coverage-audit-findings-20261005.md)——**缺口效应经同批同模型对照后不成立**（29% vs 29%，OR=0.99，p=0.87；缺口 98% 来自旧批缺 telemetry ⇒ **仪表缺口**）；**成立的是 warning vs passed 的区分度**（同批同模型 +12~37pp）⇒ **S-1 的靶改用 warning 群体**；两伪迹定案、验收覆盖字段从未产出。**下一步＝S-1 A/B**（方法本身验证）。**P0 仪器落地（2026-10-05）**：`tools/s1_spec_scan.py`（缺口清单，7 例）＋`plan_acceptance_coverage` 结构性回退口径（含 `plan_coverage_basis`）；A/B 预注册＝概念设计 §10.1（含 kill 判据）。
+
 ## 8. 扩展能力决策门
 
 以下能力暂不排入固定实施日期，只在 M3 完成后按实验结果决定。
@@ -837,6 +839,8 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 
 在 KnowledgeStore、失败分类和指标冻结之前不启动。没有可信历史数据，自进化只会放大测量错误和错误经验。
 
+**第一条具体回路已登记（2026-10-05，规则迭代回路）**：jev 复核排序试点第二阶段（[需求文档 §9.4／O-12](design/jev-review-triage-pilot-requirements-20261005.md)）提供"可信历史数据"一项的实现路径——人工真值标签＋弃权探针（规则覆盖边界）＋冻结指纹可复算；产物为**规则候选**，四道闸：①标签源只许人工/程序化真值（禁止用 jev 输出标注，jev 仅作"规则不够用"的指针）；②留出验证（≥100 条带标签、跨批）且旧样本不得回退；③以代码＋测试落地并走信任指标门＋边界 ADR；④每次扩张后按同一预注册判据重度量（jev 增量区应收缩）。KnowledgeStore 仍是 H3 的独立前置（C4 已 ROLLBACK）。**实现方案已出（2026-10-05）**：规则集管线概念设计 [rule-set-pipeline-design-20261005.md](design/rule-set-pipeline-design-20261005.md)（受限 DSL／清单／影子→生效两态／四闸／P0–P2；范式＝运行中 tdd 臂实测 tdd 7/10 vs nudge 2/10 vs plain 1/10、配对零负）；立项＝O-14（Go/Conditional 后与 O-12 同批；P1 起需新 ADR）。**✅ P0 已落地（2026-10-05，离线）**：`agent_go/rule_set.py`＋`tests/test_rule_set.py` **37 例**；CLI `python3 -m agent_go.rule_set`（生成→导入→复算全链冒烟通过）；零 runtime 接入（`shadow_evaluate` 为 P1 接入点）；module-catalog／spec.md 已同步。**下一步（P1）**：影子接入 review triage 后置点，只记 `rule_decisions.jsonl`——**门已就绪：[ADR-014](design/adr/ADR-014-rule-set-execution-plane.md)（Proposed，Accepted 后方可接入）**。
+
 ## 9. 暂缓清单
 
 在 M0-M3 通过前，以下事项不进入关键路径：
@@ -904,6 +908,7 @@ M0 产品契约与指标冻结  ✅ accepted
 5. ~~**随手项**：`zai/glm-5.3-flash` 定价覆盖~~ ✅（2026-09-05 T10）：pricing.py $0.15/$0.50（z.ai 标准价）+ MODEL_TIER value 档。
 6. ~~**opencode harvester：ADR-010 阶段 1 钩子扩展至第二臂**~~ ✅（2026-09-06）：run() 落盘原始 NDJSON 事件流（worktree 同级 `opencode_events.ndjson`，executor 新实例调钩子故实例状态不可靠），`harvest_trajectory` 防腐翻译为平台事件（合成 turn 边界 + step/tool/usage 词汇，与 dsh 同 schema）；真实冒烟通过（Zen 免费模型，25s $0，10 事件含 cacheReadTokens，第二步 cache 命中 20736 可见）；tests +4 例。claude 黑盒无解、不做。
 7. ~~**ADR-010 阶段 2 启动评估**~~ ✅（2026-09-06，[value-check](design/adr010-phase2-value-check.md)）：opencode/Zen 臂 golden 6×1（$0）产出 3 失败 + 1 重试恢复案例；轨迹在 worker 级失败中提供决定性因果信息（直接促成 ISSUE-58 PWD 泄漏 P1 根因确认与修复），dsh plan_gate_blocked 边界案例证明规划级归因需 TaskEvent 补位——**阶段 2 背书启动，切入面收窄为 TaskEvent 骨架事件**；meta.json 投影化维持双写节奏；新待办：per-attempt 轨迹命名（重试覆盖失败 attempt 轨迹）、bench 目录复用异常待查（两条结果指向 0905 旧任务目录，pass 真实性存疑）。
+8. **jev 失败子任务复核排序试点（已批准·M0 签署完成 2026-10-05）**（2026-10-05）：离线／B 情境／软排序——对冻结批 failed 子任务产出"内容型根因"复核优先级队列＋双通道弃权探针清单，用预注册判据量出能否**超出粗规则**地省人审；需求与冻结清单见 [jev-review-triage-pilot-requirements-20261005](design/jev-review-triage-pilot-requirements-20261005.md)（**v1.1 已冻结**，§16 签署表／§17 开跑手册）。**题面重冻 v1.1（2026-10-05）**：按官方 cookbook batching 落地 **Q3 `ranking_noul` 第二排序器**（同调用发送、同 state 一次发送；仅探索对照不进判据）——①+③ 形态；因 v1.0 无任何 jev 调用发生，重冻不废弃数据；测试 21 例全绿。**M0 签署（2026-10-05）**：owner／消费方＝jinsongwang；PM 确认 τ=0.60、H1、ROI 门槛、时间盒；**suite＝`decision` × `delivery-20260820` 口径**（29 个互异任务；该口径实测 0.34 failed 子任务/次、$0.0094/次——预试 29 次≈$0.3、正式 ~87 次≈$0.9；**排除低失败臂** c4-kv-inj 2%／arm_cloud 0%）；[ADR-013](design/adr/ADR-013-jev-offline-triage-egress.md) 已 **Accepted**。**✅ 薄版工具已落地（2026-10-05）**：`tools/jev_triage.py`（build/check/packets/call/record/analyze/queue；零网络、零 runtime 写入）＋`tests/test_jev_triage.py` **20 例全绿**；真实产物冒烟通过（存活 task_dir 批：正确识别 2 条 failed、2 个 task_dir 已清，`--check` 按设计拒绝退化样本）。**预试批首跑中止（2026-10-05，根因＝共享代理争用）**：16:49 启动（decision × repeat 1、`claude-sonnet-4-6`＋`--with-delivery`、parallel 2），至 17:05 仅完成 2/29 且**两条均 timeout（0 条可入池 failed 子任务）**；诊断＝代理（llama.cpp `anthropic_proxy.py` :4000）被并发占用（swe-eval 会话自 14:47 起运行，17 点后代理请求**全部 499**、单请求 **253–297s**），计划调用被拖至超时。本批产出：2 条结果记录（1 通过但计费 $0.22、1 计划期超时）、成本 ≈$0.22、**池零样本**。**重跑条件**：代理空闲（单请求延迟恢复到秒级）后重跑同一命令；批间注意与 swe-eval 不共享代理时段。**下一步**：重跑预试批 → M0.5 四件事门（H6／靶方差／对齐／粗规则选择性）。**标注**＝程序化探针（干净环境复跑验证命令）＋LLM 预标注（本地模型优先）＋人工终审三层，真值仍是人，人工 4.5–10 人时。**边界**：不进 runtime／verdict／AC，不新增运行时依赖。**第二阶段（O-12，Go/Conditional 后议）**：①数据闭环三件——回包 `model` 版本记录、复核 `outcome` 回写、跨轮 `labels.jsonl`（需求文档 §6.2/§7）；②规则收敛——非机械耦合子集上的特征/规则挖掘（只许人工标签输入，jev 仅作"规则不够用"的指针；多轮累积 ≥100 条带标签后开轮；留出验证）；③落地出口 ADR（新规则若进 review/信号面属边界变更，须单开）。
 
 **等外部窗口（到点触发，不占当前排期）**：
 
