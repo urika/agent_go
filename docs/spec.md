@@ -634,6 +634,36 @@ CLI/交互：`--accept-tests` / `--no-accept-tests` 覆盖开关；草稿随 Pla
 （CLI：`[T]` 审阅/编辑、`[K]` 跳过；web：确认卡片内逐文件编辑 + 跳过勾选）。
 `require_review=true` 时无人审路径（headless 且非 web 确认）自动降级为现状验证行为并留档草稿。
 
+## local_model.py — 本地模型生命周期管理 P0（只读管理面）
+
+```
+LocalModelManager(config, *, console=None, proxy_url=None, manage_script=None)
+                                         → 读 config.local_model_manager 段；不做任何探测
+availability()                           → (ok, reason)：未启用/缺 manage_script/proxy_url 时的明确原因（fail-open 前置）
+_api_status() / _metrics() / _models_ok()
+                                         → 只读探测 /api/status（契约 api_version=2）、/metrics、/v1/models（diag.fetch_json，2s）
+proxy_pid() / proxy_process_alive()      → pidfile（defender 根 /anthropic_proxy.pid）读取与存活判定
+current_profile()                        → configs/active.conf 软链目标 stem（坏链也返回目标，缺失 → ""）
+list_profiles()                          → configs/*.conf 清单：profile/name/desc/memory/model/port/backend/active
+status()                                 → 只读状态汇总（代理/后端/模型/档位/engines/metrics 摘要；全失败只降级字段）
+diagnose()                               → {level, reasons, advice}；level ∈ healthy/starting/backend_down/
+                                           proxy_down/model_drift/down（设计 §3.4）
+format_status_text(status)               → CLI 人读行（纯格式化，无副作用）
+```
+
+CLI：
+
+```
+agent_go model status|list|current|diagnose [--json]     # 需 config.local_model_manager.enabled=true
+```
+
+边界（硬性）：**只读**——本模块不 import subprocess、不执行 manage.sh、不写任何文件（AST 级测试断言）；
+默认关且未启用时命令 exit 1 并给出开启指引；fail-open——探测失败只降级字段/诊断级别。
+诊断 exit code：`healthy` → 0，其余级别 → 1（供脚本判健康）。
+P1（start/stop/switch）/P2（repair＋pipeline 集成）/P3（web 监控）不在 P0 范围。
+
+---
+
 ## rule_set.py — 规则集管线 P0（离线；概念设计 rule-set-pipeline-design §7）
 
 ```

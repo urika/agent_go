@@ -33,6 +33,7 @@ API key 解析优先级：环境变量 `AGENT_GO_API_KEY` > `config.json` `plan_
 | 16 | `worker_models_by_type` | — | Agent type→模型映射 |
 | 16a | `worker_backend` / `worker_backend_by_difficulty` / `worker_backend_by_type` | `""` | B3/B4 worker backend 显式选择与声明式路由（见 13–16 末节） |
 | 17 | `local_model_names` | — | 路由名→本地真实模型名映射 |
+| 17a | `local_model_manager` | `enabled: false` | 本地模型生命周期管理（P0 只读面：`agent_go model status/list/current/diagnose`；设计 local-model-management-design） |
 | 18 | `cache` | `enabled: true` | Plan 缓存 |
 | 19 | `router` | `enabled: false` | 角色（planner/worker/reviewer）→ provider/model 路由 |
 | 20 | `mcp_servers` | — | 外部 MCP server 配置 |
@@ -161,9 +162,9 @@ Claude Code `/goal` Stop Hook 机制。启用后在 worktree 中注入 `.claude/
 | `max_turns` | int | `20` | 最大对话轮次 |
 | `max_duration` | int | `600` | 最大运行时间（秒） |
 | `api_timeout` | int | `120` | 每次 API 调用超时（秒） |
-
 | `api_max_retries` | int | `3` | 网络/限流类错误的最大尝试次数（含首次）；4xx 配置类错误（除 408/409/425/429）不重试 |
 | `api_retry_max_wait` | float | `30` | 单次退避上限（秒）；服务端 `Retry-After` 同样受此封顶 |
+
 ---
 
 ## 7. `evaluator`
@@ -194,9 +195,9 @@ LLM 语义评估器。验证命令通过后，调用 LLM 对 Claude 输出做语
 | `require_review` | bool | `true` | `true` = 未经人审不冻结为 oracle（非交互运行自动降级为现状验证行为并留档草稿） |
 | `draft_role` | str | `"planner"` | 起草调用的模型角色（经 `router.resolve_role`，不按 difficulty 细分） |
 | `provided_dir` | str | `""` | 评测口径：任务定义提供的冻结测试目录（含命令清单 `commands.json`/`commands.txt`）；设置后不调 LLM |
-| `max_files` | int | `8` | 草稿文件数上限（安全面） |
 | `gaps_file` | str | `""` | S-1：规则覆盖缺口清单路径（`tools/s1_spec_scan.py` 产物）；非空时作为注意力输入注入起草 prompt（`--spec-gaps` 可覆盖）。仅建议性输入，不改安全门/人审门 |
 | `gaps_max_items` | int | `12` | 注入起草 prompt 的缺口条目上限（体量控制） |
+| `max_files` | int | `8` | 草稿文件数上限（安全面） |
 | `max_file_bytes` | int | `20000` | 单文件体量上限（安全面） |
 | `max_commands` | int | `5` | 验收命令条数上限 |
 | `oracle_priority` | bool | `true` | 护栏③：oracle 通过时语义评估失败降级 advisory（不阻断） |
@@ -380,6 +381,21 @@ Pipeline 调度行为（T09 本地模型自动限流，并发调度原则 2026-0
 | `explore` | str | `""` | 探索/分析类子任务模型（便宜模型） |
 | `implement` | str | `""` | 实现类子任务模型（强模型） |
 | `review` | str | `""` | 审查类子任务模型（独立模型） |
+
+---
+
+## 17a. `local_model_manager`
+
+本地模型（llama-defender）生命周期管理——**P0 只读管理面**（设计：[local-model-management-design.md](local-model-management-design.md) §3/§4）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 默认关；false 时 `agent_go model` 全部子命令明确报错，run 流程零影响 |
+| `manage_script` | str | `""` | llama-defender 的 `manage.sh` 路径；其父目录即 defender 根（含 `configs/`、`anthropic_proxy.pid`） |
+| `proxy_url` | str | `"http://127.0.0.1:4000"` | 本地代理地址（只读探测 /api/status、/metrics、/v1/models） |
+| `wait_ready_timeout` | int | `120` | 就绪等待上限（秒）；P0 用于 `starting` 诊断说明，P1/P2 用于轮询 |
+
+P1（`start/stop/switch`）/P2（`repair`＋pipeline 集成）/P3（web 监控）落地时再增 `auto_start`/`auto_repair`/`default_profile`/`plan_time_probe` 等键。
 
 ---
 

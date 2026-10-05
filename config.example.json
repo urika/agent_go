@@ -213,6 +213,13 @@
   "local_model_names": {
     "_comment": "路由名→本地真实模型名映射。如 {\"claude-haiku-4-5\": \"Qwen3.6-27B-4bit\"}。/status 探测失败时 fallback"
   },
+  "local_model_manager": {
+    "_comment": "本地模型生命周期管理（P0 只读管理面：agent_go model status/list/current/diagnose）。默认关；P1（start/stop/switch）/P2（repair＋pipeline 集成）落地后再增 auto_start 等键",
+    "enabled": false,
+    "manage_script": "",
+    "proxy_url": "http://127.0.0.1:4000",
+    "wait_ready_timeout": 120
+  },
   "cache": {
     "enabled": true,
     "plan_ttl": 86400,

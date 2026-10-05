@@ -2,7 +2,7 @@
 
 > 版本：v4.5
 > 更新日期：2026-09-03
-> 当前阶段：M0-M4、M4.5（模型池化，hard 94.4%）已 `accepted`；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1-W4 已交付；阶段 C C1/C2/C3 + C4 KnowledgeStore A/B smoke 与葬礼回写链路已落地；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立；阶段十三「多 Backend 架构」已 `accepted（有条件）`（B1-B8 全部落地，Go 套餐评估待额度重置）
+> 当前阶段：M0-M4、M4.5（模型池化，hard 94.4%）已 `accepted`；本地模型管理 P0（只读管理面）已落地（2026-10-05）；阶段八（诊断数据面）、谦逊层 H1-H4、Web 操作台全功能、决策辅助 M6.1-M6.5、看板编排 W1-W4 已交付；阶段 C C1/C2/C3 + C4 KnowledgeStore A/B smoke 与葬礼回写链路已落地；bench 交付闭环基线 `delivery-20260820`（ADR=0.7045）已建立；阶段十三「多 Backend 架构」已 `accepted（有条件）`（B1-B8 全部落地，Go 套餐评估待额度重置）
 > 产品主线：用户输入一次开发任务，agent_go 最终交付一个可审查、可合并的 PR。
 > 北极星目标：**全自主交付（渐进自治）**——把人工介入从每个环节降到只剩「例外点」，而非追求人类完全不参与。
 > Goal/Loop 调研输入：[archive/reference/research-goal-loop-mechanism-2026-08-08.md](archive/reference/research-goal-loop-mechanism-2026-08-08.md)
@@ -470,7 +470,7 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 
 | M | 内容 | 状态 |
 |---|------|------|
-| **M5 问题跟踪** | 全局 `~/.agent_go/problems.jsonl`，跨任务累积 Problem 实体：三态 + 复发重开、半衰期（stale_after_days→dormant）、葬礼（resolution_summary）；`agent_go problems` CLI（列表/聚合/详情/JSON） | ✅ `implemented`（2026-08-16：d0335ff 数据层 + d7150a3 CLI 收尾；同时支撑谦逊层 H3 与信任指标「复发可见率」） |
+| **M5 问题跟踪** | 全局 `~/.agent_go/problems.jsonl`，跨任务累积 Problem 实体：三态 + 复发重开、半衰期（stale_after_days→dormant）、葬礼（resolution_summary）；`agent_go problems` CLI（列表/聚合/详情/JSON） | `implemented`（2026-08-16：d0335ff 数据层 + d7150a3 CLI 收尾）；**待验收数据**（`measured`→`accepted` 的前置）＝真实任务窗口的复发可见率/根因聚合读数（与 §7.7 阶段 D「#49 信任指标」放行门同源，当前样本仍在积累：复发可见率 n=1、审查后修改率 n=3） |
 | **Issue 联动**（原 M6） | `--track-issues` 显式开启（默认关，避免 issue 洪水，见 A6 决策）；Problem 状态机 + GitHub issue 联动 | `deferred`（未启动；「M6」编号自 2026-08-17 起由决策辅助系列使用，见 §7.12，故改称 Issue 联动避免歧义） |
 
 ## 7.7 阶段六：智能闭环与自治（决策门后）
@@ -497,7 +497,7 @@ M3 不预先承诺绝对 KPI，先建立可信基线。至少需要：
 
 **阶段 B — spec 闭环验证（✅ 冒烟完成，弱正 ROI 留轻量）**
 - B1 spec 持久化 + 闭环实施。✅ 已实现（d5cc175：ID 链条/锚定门禁/spec 快照/后段注入/traceability 自动触发/do-not-touch fail-close；b01c644 冒烟实证修复：预算头寸口径 + AC 硬映射兜底 + e2e 路径）。
-- B2 AST 冲突检测器（P9，97% 精度零 LLM 成本）加进 Spec Gate。未启动（轻量形态下优先级下调）。
+- ~~B2 AST 冲突检测器（P9，97% 精度零 LLM 成本）加进 Spec Gate~~ ✅ **已落地（2026-10-05 核账纠正）**：`spec.detect_step_conflicts`（符号级「两 step 改同一函数」）已接入 Plan 确认链（`cli.py`）+ 确定性门 L1.5（`planning.py`，ISSUE-45），tests/test_spec_l15.py 覆盖；原「未启动」为过时状态。
 - B3 5+ 真实任务冒烟。✅ 已完成（2026-08-15，结论见 B3 决策行）。
 
 **阶段 C — 智能闭环（B5=b 已拍板）**
@@ -732,7 +732,7 @@ dsh headless 0.1.2-rc.1 无 resume 原语不做）。
 
 ## 7.15 阶段十四：Spec-to-Test 验收测试管线
 
-状态：`implemented`（2026-10-05 落地，默认关，opt-in；ADR=[ADR-012](design/adr/ADR-012-spec-to-test-pipeline.md)）。按 §2.2 变更门禁逐问自答，见下（门禁自答已过，落地为默认关能力：`spec_test.enabled=false`）。
+状态：`implemented`（2026-10-05 落地，默认关，opt-in；ADR=[ADR-012](design/adr/ADR-012-spec-to-test-pipeline.md)）；**待验收数据**（`measured`→`accepted` 的前置）＝落地验收四项的实测读数（首次验证通过率提升／ISSUE-29·31 类误判率下降／Cost per AD 不升／人审介入分钟数不增，见本节末「落地验收」），现无读数（默认关、需真实任务数据）。按 §2.2 变更门禁逐问自答，见下（门禁自答已过，落地为默认关能力：`spec_test.enabled=false`）。
 
 落地形态（2026-10-05）：`spec_test.py` 模块 + `--accept-tests/--no-accept-tests` + `spec_test` 配置段。起草（复用 planner 角色）→ **Plan 确认门内人审**（CLI：[T] 编辑/[K] 跳过；**web 操作台：确认卡片内逐文件编辑 + 跳过勾选，回执随确认提交**；未启用时不改变既有交互）→ 冻结到 `<task_dir>/acceptance/`（sha256 manifest）→ 子任务启动前注入 worktree 并**先行提交进 base**（worker 只读契约，TASK.md 注明）→ verify 每轮重放前恢复冻结版（剥除 worker 改动）+ 冻结提交不参与"worker 自提交"判定（防空转误判 completed）→ 验收命令随冻结件预生成进入验证链（`type=acceptance`）→ 可执行 oracle 通过时语义评估降级 advisory（护栏③）。评测口径：`spec_test.provided_dir` 从任务定义取冻结件（出题人≠解题人，不调 LLM——护栏④）。**web 只读面**：任务详情页「验收测试」区（冻结状态/命令/文件全文/人审留痕（渠道/采纳率/起草→冻结耗时/起草成本/逐文件编辑事实）/运行结果含护栏①拦截与 advisory）+ 列表冻结/降级标识 + `GET /api/tasks/<id>/acceptance`（viewer 可用）。**agent 面（MCP）**：不新增工具（工具面封闭 7 件）——`run_task` 扩 `accept_tests`/`confirm_mode=web`、`review_task` 扩 `acceptance`（读）/`acceptance_review`（在 Plan 确认门代宿主提交人审回执，留痕 channel=mcp）、Resource `agent_go://tasks/{task_id}/acceptance`（与 web 同一数据组装）。**事后分析追溯**：`DRAFT.json`（原始草稿）+ manifest（`review_channel`/`review_edits`/`drafted_at`/`draft_cost_usd`）+ `verification_results`（acceptance/acceptance_restore/semantic_advisory）——四项预注册口径的数据面已完整，并落地聚合命令 `agent_go eval acceptance [--window-days N] [--json]`（`metrics.compute_acceptance_metrics`：首次验证通过率/误判信号/人审干预分钟数/Cost per AD 队列对比）。默认关；`require_review=true` 时无人审路径自动降级为现状验证行为并留档草稿。
 
@@ -833,13 +833,13 @@ Goal 分为 Goal Contract、Goal Recommendation、Goal Policy 和 Goal Evidence 
 3. **P2 服务保活 + Pipeline 集成**：诊断→修复阶梯（reload→start-backend→restart，逐级幂等升级）；pre-flight readiness；`auto_start`/`auto_repair`；**Plan 前模型感知快照注入 planner**（本地不可达时按云端路由，fail-open）；执行中不打断在途任务。不可达且修复失败时明确归因 `infrastructure_failure`。
 4. **P3 监控**：status 面板 + web 页面展示后端健康与 ttft 指标。
 
-默认 `local_model_manager.enabled=false`，不改变现有 difficulty→worker_models→worker_backends 路由语义。
+默认 `local_model_manager.enabled=false`，不改变现有 difficulty→worker_models→worker_backends 路由语义。**P0 已落地（2026-10-05，只读管理面）**：`agent_go/local_model.py`＋`agent_go model status/list/current/diagnose`（六级别诊断＋建议命令；只读、默认关、fail-open；tests 23 例；真机只读冒烟 healthy）；**P1（start/stop/switch）** 落地前需真机验收＋活跃任务并发保护；**P2（repair＋pre-flight＋plan 快照注入）属 runtime 边界变更，需独立 ADR**；P3 待排。
 
 ### H3 自进化
 
 在 KnowledgeStore、失败分类和指标冻结之前不启动。没有可信历史数据，自进化只会放大测量错误和错误经验。
 
-**第一条具体回路已登记（2026-10-05，规则迭代回路）**：jev 复核排序试点第二阶段（[需求文档 §9.4／O-12](design/jev-review-triage-pilot-requirements-20261005.md)）提供"可信历史数据"一项的实现路径——人工真值标签＋弃权探针（规则覆盖边界）＋冻结指纹可复算；产物为**规则候选**，四道闸：①标签源只许人工/程序化真值（禁止用 jev 输出标注，jev 仅作"规则不够用"的指针）；②留出验证（≥100 条带标签、跨批）且旧样本不得回退；③以代码＋测试落地并走信任指标门＋边界 ADR；④每次扩张后按同一预注册判据重度量（jev 增量区应收缩）。KnowledgeStore 仍是 H3 的独立前置（C4 已 ROLLBACK）。**实现方案已出（2026-10-05）**：规则集管线概念设计 [rule-set-pipeline-design-20261005.md](design/rule-set-pipeline-design-20261005.md)（受限 DSL／清单／影子→生效两态／四闸／P0–P2；范式＝运行中 tdd 臂实测 tdd 7/10 vs nudge 2/10 vs plain 1/10、配对零负）；立项＝O-14（Go/Conditional 后与 O-12 同批；P1 起需新 ADR）。**✅ P0 已落地（2026-10-05，离线）**：`agent_go/rule_set.py`＋`tests/test_rule_set.py` **37 例**；CLI `python3 -m agent_go.rule_set`（生成→导入→复算全链冒烟通过）；零 runtime 接入（`shadow_evaluate` 为 P1 接入点）；module-catalog／spec.md 已同步。**下一步（P1）**：影子接入 review triage 后置点，只记 `rule_decisions.jsonl`——**门已就绪：[ADR-014](design/adr/ADR-014-rule-set-execution-plane.md)（Proposed，Accepted 后方可接入）**。
+**第一条具体回路已登记（2026-10-05，规则迭代回路）**：jev 复核排序试点第二阶段（[需求文档 §9.4／O-12](design/jev-review-triage-pilot-requirements-20261005.md)）提供"可信历史数据"一项的实现路径——人工真值标签＋弃权探针（规则覆盖边界）＋冻结指纹可复算；产物为**规则候选**，四道闸：①标签源只许人工/程序化真值（禁止用 jev 输出标注，jev 仅作"规则不够用"的指针）；②留出验证（≥100 条带标签、跨批）且旧样本不得回退；③以代码＋测试落地并走信任指标门＋边界 ADR；④每次扩张后按同一预注册判据重度量（jev 增量区应收缩）。KnowledgeStore 仍是 H3 的独立前置（C4 已 ROLLBACK）。**实现方案已出（2026-10-05）**：规则集管线概念设计 [rule-set-pipeline-design-20261005.md](design/rule-set-pipeline-design-20261005.md)（受限 DSL／清单／影子→生效两态／四闸／P0–P2；范式＝运行中 tdd 臂实测 tdd 7/10 vs nudge 2/10 vs plain 1/10、配对零负）；立项＝O-14（Go/Conditional 后与 O-12 同批；P1 起需新 ADR）。**✅ P0 已落地（2026-10-05，离线；同日补强）**：`agent_go/rule_set.py`＋`tests/test_rule_set.py` **41 例**；CLI `python3 -m agent_go.rule_set`（生成→导入→复算全链冒烟通过）；补强＝`replay` 产可复算 `holdout_sha`＋`promote --report` 盖章校验、候选数值阈值分位点上限 20；零 runtime 接入（`shadow_evaluate` 为 P1 接入点）；module-catalog／spec.md 已同步。**下一步（P1）**：影子接入 review triage 后置点，只记 `rule_decisions.jsonl`——**门已就绪：[ADR-014](design/adr/ADR-014-rule-set-execution-plane.md)（Proposed，Accepted 后方可接入）**。
 
 ## 9. 暂缓清单
 
@@ -917,6 +917,6 @@ M0 产品契约与指标冻结  ✅ accepted
 - zcode 官方独立 CLI 发布后迁移（zai-org/feedback#444）。
 - ~~ISSUE-55 巨型模块拆分（web_server 4838 / executor 3103 行）：web_server 拆分等下一个 Web 需求触发~~ web_server 侧 ✅（2026-09-05 T12）：4903 行拆为 web_frontend/web_data/web_ops/web_kanban/web_handler 5 模块 + 238 行组合层，公共 API 行为等价（AST 级验证，tests 225 过）；executor.py 半侧仍登记，触发线不变。
 
-**长期候选**：pi-subagents 式确定性 workflow 脚本（plan 模板固化）；代理层压缩参照 context-mode「工具结果外置 + FTS5/BM25 按需检索」路线（理念借鉴，ELv2 不引入代码）；ADR-010 阶段 3（fork-retry / 轨迹归因 / 三层关联，按需）。
+**长期候选**：pi-subagents 式确定性 workflow 脚本（plan 模板固化）；代理层压缩参照 context-mode「工具结果外置 + FTS5/BM25 按需检索」路线（理念借鉴，ELv2 不引入代码）。**ADR-010 阶段 3 已闭合（2026-10-05 核账）**：三项均有落地记录——轨迹归因（`trajectory_signals.py`，2026-09-06）、fork-retry（opencode 臂 `--session` 续跑，2026-09-06；dsh 无 resume 原语明确不做）、三层关联 join 键（平台事件 `session_key`＋子任务详情代理诊断，`5695325`）。
 
 在可信 Accepted Delivery 基线建立前，不对「年度 K1 ≥97%」「$/pass ≤$0.03」等绝对目标做硬承诺。当前实测基线：真实仓库通过率 91.7%（11/12）、$/任务 $0.017；**首个有效 ADR 基线 `delivery-20260820`**（2026-08-20，`--with-delivery` 本地交付闭环）：ADR=0.7045（31/44 valid）、Cost per AD=$0.0171、pass_rate_diagnostic=0.75、first_pass_rate=0.727、timeout_rate=9.1%、delivery_failure=0、human_intervention=0、eval gate 通过（$/pass=$0.0156）。口径：decision suite 29 任务 × repeat 2、worker 经本地代理（Qwen3.8-27B），与 decision-20260812 云端基线禁止直接混比。

@@ -253,6 +253,15 @@ DEFAULT_CONFIG = {
     "local_model_names": {},        # 本地后端真实模型名映射（routed → 实际名，如
                                     # {"claude-haiku-4-5": "Qwen3.6-27B-4bit"}）；
                                     # 探测本地代理 /status 失败时的兜底
+    # 本地模型生命周期管理（设计 docs/design/local-model-management-design.md；P0 只读管理面已落地）
+    # enabled=false 默认关：所有 `agent_go model` 命令明确报错，run 流程零影响（fail-open）。
+    # P1（start/stop/switch）/P2（repair＋pipeline 集成）落地时再增配置键（auto_start 等）。
+    "local_model_manager": {
+        "enabled": False,
+        "manage_script": "",        # llama-defender 的 manage.sh 路径（父目录即 defender 根：含 configs/、pidfile）
+        "proxy_url": "http://127.0.0.1:4000",
+        "wait_ready_timeout": 120,  # 就绪等待上限（秒）；P0 用于 starting 诊断说明，P1/P2 用于轮询
+    },
     "cache": {
         "enabled": True,
         "plan_ttl": 86400,          # Plan 缓存有效期（秒），默认 24h

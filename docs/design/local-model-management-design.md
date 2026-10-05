@@ -1,6 +1,7 @@
 # 本地模型生命周期管理设计
 
-> 状态：设计稿，待评审（2026-08-12）
+> 状态：**P0 已落地（2026-10-05）**；P1/P2/P3 待排期（2026-08-12 设计稿）
+> P0 实现：`agent_go/local_model.py`＋`agent_go model status/list/current/diagnose`（只读、默认关、fail-open；tests/test_local_model.py 23 例；真机只读冒烟通过）
 > 关联：[goal-mechanism-design.md](goal-mechanism-design.md) · [config-schema.md](config-schema.md) · [llama-defender-integration-requirements.md](llama-defender-integration-requirements.md)（服务方接口需求） · llama-defender（`/Users/jinsongwang/APP/llama.cpp`）
 > 触发背景：弱模型 worker 实验证明本地模型已可作为生产 worker 后端（goal_ab 弱模型实验），但 agent_go 只能「读」本地代理状态，无法管理其生命周期。启停、切换、监控完全依赖人工操作 manage.sh。
 
@@ -216,10 +217,10 @@ agent_go model repair [--level N]      # 阶梯修复（默认自动逐级升级
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **P0 只读管理面** | `local_model.py` + `model status/list/current/diagnose`；解析 /status 真实模型名；配置项落地 | 对运行中 llama-defender 输出正确分级诊断；单元测试覆盖解析 |
-| **P1 启停 + 切换** | `model start/stop/switch`；切换四步原子序列 + 失败回滚；并发活跃任务检查 | 真实切换 27B→35B 成功且失败可回滚；活跃任务时拒绝切换 |
-| **P2 保活 + Pipeline 集成** | 修复阶梯 `repair()`（reload→start-backend→restart）；pre-flight diagnose+repair；`auto_start`/`auto_repair`；**Plan 前模型感知快照注入** | 后端停止状态下跑任务：repair 拉起成功 or 明确失败指引；本地不可达时 plan 按云端路由 |
-| **P3 监控** | `agent_go status` 面板 + web 页面展示后端健康/模型/ttft 指标 | web 只读展示 /metrics 数据 |
+| **P0 只读管理面** ✅ **已落地（2026-10-05）** | `local_model.py` + `model status/list/current/diagnose`；读 /api/status（契约 api_version=2）/metrics//v1/models 与 configs/*.conf；配置段 `local_model_manager`（默认关） | ✅ 对运行中 llama-defender 输出正确分级诊断（真机只读冒烟 healthy；单元测试 23 例覆盖六级别/解析/降级/只读断言） |
+| **P1 启停 + 切换**（未落地；落地前需真机验收＋活跃任务并发保护） | `model start/stop/switch`；切换四步原子序列 + 失败回滚；并发活跃任务检查 | 真实切换 27B→35B 成功且失败可回滚；活跃任务时拒绝切换 |
+| **P2 保活 + Pipeline 集成**（未落地；**属 runtime 边界变更，落地前需独立 ADR**） | 修复阶梯 `repair()`（reload→start-backend→restart）；pre-flight diagnose+repair；`auto_start`/`auto_repair`；**Plan 前模型感知快照注入** | 后端停止状态下跑任务：repair 拉起成功 or 明确失败指引；本地不可达时 plan 按云端路由 |
+| **P3 监控**（未落地；只读展示，可复用 P0 的 status() 输出） | `agent_go status` 面板 + web 页面展示后端健康/模型/ttft 指标 | web 只读展示 /metrics 数据 |
 
 ## 5. 非目标
 
@@ -244,3 +245,17 @@ agent_go model repair [--level N]      # 阶梯修复（默认自动逐级升级
 ## 7. 与 Goal 机制的关系
 
 无功能耦合。弱模型 worker 实验（goal_ab）已证明本地模型可作为 worker 后端；本地模型管理是把「实验态手工操作」转为「产品态可管理」的基础设施。Goal 实验期间人工执行的 `manage.sh switch` 序列正是本设计要编排的能力。
+
+## 8. P0 落地记录（2026-10-05）
+
+| 项 | 内容 |
+|---|---|
+| 实现 | `agent_go/local_model.py`（`LocalModelManager`：availability / _api_status / _metrics / _models_ok / proxy_pid / current_profile / list_profiles / status / diagnose）＋`format_status_text` |
+| CLI | `agent_go model status\|list\|current\|diagnose [--json]`（`cli.cmd_model`）；未启用 → exit 1 并给开启指引；`diagnose` 非 healthy → exit 1（供脚本判健康） |
+| 配置 | `local_model_manager{enabled=false, manage_script, proxy_url, wait_ready_timeout}`（config.py DEFAULT_CONFIG＋config.example.json＋config-schema.md 同步） |
+| 边界断言 | 只读：AST 级测试断言"不 import subprocess、不调 system/popen/remove/unlink/write_text/mkdir、不 open()"；四命令执行前后 defender 目录快照逐位不变；fail-open：探测全失败只降级字段/级别 |
+| 诊断级别 | healthy / starting（进程存活但接口不可达）/ backend_down / proxy_down / model_drift（配置档≠运行档）/ down（含 manage.sh 缺失）；每级给建议命令（reload / start-backend / start / 人工） |
+| 冒烟（真机只读） | 对运行中的 llama-defender：`status` 正确读出代理 pid/uptime、后端 pid/type/uptime、真实模型名、运行档、api_state=healthy、metrics（ttft p50/p95、状态码）、双引擎存活；`list` 解析 14 个档位（CONFIG_NAME/DESC/MEMORY/模型/端口/激活标记）；`current` 两视角一致；`diagnose` = healthy（exit 0）；enabled=false → exit 1 |
+| 测试 | `tests/test_local_model.py` 23 例（解析/六级别/聚合降级/只读断言/CLI 直调/解析器注册/config 默认值） |
+| 未落地 | P1（start/stop/switch：四步原子序列＋回滚＋活跃任务并发保护）、P2（repair 阶梯＋pre-flight＋plan 快照注入，**需独立 ADR**）、P3（`agent_go status` 面板＋web 只读页） |
+| 兼容路径说明 | 旧代理无 `/api/status`（契约 <2）时回退 `/v1/models` 判定：可达但探不到模型名 → `backend_down`，探到 → `healthy`（与 executor 的 HTML /status 兼容探测共用） |

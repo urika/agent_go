@@ -250,6 +250,16 @@ def _build_parser():
     models_add_parser.add_argument("--tco", type=float, default=0.0, help="本地模型 TCO/次（USD）")
     models_add_parser.add_argument("--tags", default="", help="能力标签（逗号分隔，如 plan_strong,code_strong）")
 
+    # model 子命令（本地模型生命周期管理 P0：只读管理面）
+    model_parser = subparsers.add_parser("model", help="本地模型生命周期管理（P0 只读：status/list/current/diagnose）")
+    model_sub = model_parser.add_subparsers(dest="model_subcommand", help="Model operation")
+    for _name, _help in (("status", "代理/后端/模型/metrics 状态摘要"),
+                         ("list", "档位清单（configs/*.conf，含当前激活标记）"),
+                         ("current", "当前配置档 vs 运行档"),
+                         ("diagnose", "分级诊断（healthy/starting/backend_down/proxy_down/model_drift/down）")):
+        _sp = model_sub.add_parser(_name, help=_help)
+        _sp.add_argument("--json", action="store_true", help="输出 JSON")
+
     # pr 子命令
     pr_parser = subparsers.add_parser("pr", help="Generate and create PR")
     pr_parser.add_argument("task_id", help="Task ID to create PR from")
@@ -4676,6 +4686,80 @@ def cmd_models(args) -> None:
     console.print("Usage: agent_go models <list|add>")
 
 
+def cmd_model(args) -> int:
+    """model 子命令：本地模型生命周期管理 P0（只读管理面）。
+
+    设计：docs/design/local-model-management-design.md §3/§4。
+    只读命令 status/list/current/diagnose；未启用（enabled=false）时明确报错并返回 1。
+    """
+    from .config import load_config
+    from .local_model import format_status_text, manager_from_config
+
+    sub = getattr(args, "model_subcommand", None) or "status"
+    as_json = bool(getattr(args, "json", False) or getattr(args, "json_mode", False))
+    mgr = manager_from_config(load_config(getattr(args, "config", None)), console=console)
+    ok, reason = mgr.availability()
+    if not ok:
+        console.error(reason)
+        return 1
+
+    if sub == "list":
+        rows = mgr.list_profiles()
+        if as_json:
+            console.print(json.dumps(rows, ensure_ascii=False, indent=2))
+            return 0
+        if not rows:
+            console.print(f"未发现档位文件：{mgr.profiles_dir}/*.conf")
+            return 0
+        console.print(f"\n🧩 本地模型档位（{len(rows)} 个，{mgr.profiles_dir}）")
+        console.sep("─", 100)
+        for row in rows:
+            mark = "▶" if row.get("active") else " "
+            console.print(f"{mark} {row['profile']:<28} port={row.get('port') or '-':<6} "
+                          f"model={row.get('model') or '-'}")
+            if row.get("desc"):
+                console.print(f"{'':2} {row['desc']}")
+        console.sep("─", 100)
+        return 0
+
+    if sub == "current":
+        status = mgr.status()
+        configured = mgr.current_profile()
+        running = status.get("active_profile") or ""
+        if as_json:
+            console.print(json.dumps({"configured_profile": configured, "running_profile": running},
+                                     ensure_ascii=False, indent=2))
+            return 0
+        console.print(f"配置档（configs/active.conf）: {configured or '（未设置）'}")
+        console.print(f"运行档（代理 active_profile）: {running or '（不可达/未知）'}")
+        if configured and running and configured != running:
+            console.warning("配置档与运行档不一致——见 `agent_go model diagnose`")
+        return 0
+
+    if sub == "diagnose":
+        result = mgr.diagnose()
+        if as_json:
+            console.print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            console.print(f"诊断级别: {result['level']}")
+            for line in result.get("reasons") or []:
+                console.print(f"  · {line}")
+            for line in result.get("advice") or []:
+                console.print(f"  建议: {line}")
+        return 0 if result["level"] == "healthy" else 1
+
+    status = mgr.status()
+    if as_json:
+        console.print(json.dumps(status, ensure_ascii=False, indent=2))
+        return 0
+    console.print("")
+    console.title("本地模型状态（只读）")
+    for line in format_status_text(status):
+        console.print("  " + line)
+    console.print("")
+    return 0
+
+
 def _install_sigterm_handler() -> None:
     """P0 Layer 2：注册 SIGTERM/SIGINT handler 优雅退出。
 
@@ -4801,6 +4885,8 @@ def main() -> None:
             cmd_agents()
         elif args.command == "models":
             cmd_models(args)
+        elif args.command == "model":
+            sys.exit(cmd_model(args))
         elif args.command == "cache":
             cmd_cache(args)
         elif args.command == "ci":

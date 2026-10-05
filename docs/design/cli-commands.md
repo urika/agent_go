@@ -130,6 +130,11 @@ agent_go router set-role <role> --provider <p> --model <m> --base-url <url>
 agent_go router recommend [--results FILE] [--apply] [--force]   # 基于 bench 结果推荐 router.roles + worker_models
 agent_go models list                          # 列出模型池（models.json registry）
 agent_go models add <id> --provider <p> --base-url <url> [--thinking] [--json-loose] [--tco $] [--tags ...]  # 注册新模型（零代码接入）
+agent_go model status                         # 本地模型状态（只读：代理/后端/模型/metrics；设计 local-model-management-design）
+agent_go model list                           # 本地档位清单（configs/*.conf，含当前激活标记）
+agent_go model current                        # 配置档（active.conf）vs 运行档（代理 active_profile）
+agent_go model diagnose [--json]              # 六级别诊断 + 建议命令（exit 0=healthy，1=其余级别）
+# 以上需 config.local_model_manager.enabled=true；未启用时明确报错，run 流程零影响
 agent_go skills list
 agent_go skills show <name> [--json]
 agent_go skills resolve <name>                 # trace a Skill's symlink resolution chain
