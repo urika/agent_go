@@ -2791,9 +2791,14 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
     logger.info(f"─── {sub_id} START: {subtask['title']} ───")
     log_event(logger, "subtask_start", {"id": sub_id, "title": subtask["title"],
                 "depends_on": subtask.get("depends_on", []), "headless": headless, "issue": issue_ref})
+    # ADR-010 阶段 3 三层关联：平台事件带 join 键（确定性 key，与 worker 请求头
+    # X-Claude-Code-Session-Id / metering.session_key / 代理台账 key8 同一身份）。
+    from . import diag as _diag
+    _sess_key = _diag.session_key(task_id, sub_id)
     emit_event(str(task_dir), "subtask_start", sub_id=sub_id, title=subtask["title"],
                difficulty=subtask.get("difficulty", ""),
-               depends_on=subtask.get("depends_on", []))
+               depends_on=subtask.get("depends_on", []),
+               session_key=_sess_key)
 
     clone_start = time.time()
 

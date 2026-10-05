@@ -254,6 +254,28 @@ def api_subtask_detail(task_id: str, sub_id: str) -> Optional[dict]:
         return None
     st = subtasks[idx]
     r = results_by_id.get(sub_id) or {}
+    # ADR-010 阶段 3 三层关联：确定性重算会话 key（与 worker 请求头/metering/
+    # 代理台账同一身份），并按 subtask_id 从 metering 提取代理层 worker_diag
+    # 记录（模型级：turns/hit_ratio/canonical_mismatch/loop_detected）。
+    from . import diag as _diag
+    session_key = _diag.session_key(task_id, sub_id)
+    proxy_diag = []
+    try:
+        for rec in _read_jsonl(td / "metering.jsonl"):
+            if rec.get("role") != "worker_diag" or rec.get("subtask_id") != sub_id:
+                continue
+            proxy_diag.append({
+                "session_key": rec.get("session_key", ""),
+                "proxy_turns": rec.get("proxy_turns"),
+                "hit_ratio_p50": rec.get("hit_ratio_p50"),
+                "hit_ratio_p90": rec.get("hit_ratio_p90"),
+                "injection_counts": rec.get("injection_counts") or {},
+                "canonical_mismatch_count": rec.get("canonical_mismatch_count", 0),
+                "loop_detected": bool(rec.get("loop_detected")),
+                "result": rec.get("result", ""),
+            })
+    except Exception:
+        proxy_diag = []  # fail-open：metering 缺失不影响详情页
     return {
         "id": sub_id,
         "title": st.get("title", ""),
@@ -267,6 +289,10 @@ def api_subtask_detail(task_id: str, sub_id: str) -> Optional[dict]:
         "agent_type": st.get("agent_type", ""),
         "verification": st.get("verification", []) or [],
         "agent_prompt": (st.get("agent_prompt") or "")[:2000],
+        # 三层关联 join 键（编排级事件 subtask_start.session_key 同源）
+        "session_key": session_key,
+        "session_key8": _diag.session_key8(session_key),
+        "proxy_diag": proxy_diag,
         "result": {
             "status": r.get("status"),
             "duration_sec": r.get("duration_sec"),
@@ -282,6 +308,8 @@ def api_subtask_detail(task_id: str, sub_id: str) -> Optional[dict]:
             "sandbox_type": r.get("sandbox_type", ""),
             "agent_type_source": r.get("agent_type_source", ""),
             "skills_unresolved": r.get("skills_unresolved", []) or [],
+            # ADR-010 阶段 3：轨迹归因信号（无轨迹源 backend 为 None）
+            "trajectory_signals": r.get("trajectory_signals"),
         },
     }
 
