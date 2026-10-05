@@ -34,7 +34,8 @@ mcp(args)                → MCP server (stdio / --http HTTP+SSE)
 `run`/`resume` 支持 `--preserve-worktrees`（保留全部）/ `--no-preserve`（强制清理），
 默认仅保留 failed/blocked 子任务的 worktree 供人工审查。
 `run` 另支持 `--max-retries` / `--no-verify-block` / `--goal` / `--goal-hook` / `--semantic-eval` /
-`--agent-loop` / `--interactive` / `--step-confirm` / `--auto-init` / `--parallel N` / `--remote`。
+`--accept-tests` / `--no-accept-tests` / `--agent-loop` / `--interactive` / `--step-confirm` /
+`--auto-init` / `--parallel N` / `--remote`。
 
 ## spec.py — Task Spec 解析与 L1 准入门禁 (S11-P0)
 
@@ -574,3 +575,37 @@ format_price_for_report   → 报告用定价串，缺价标注 ⚠️
 ```
 
 ## workflow_gen.py — CI 生成
+
+## spec_test.py — Spec-to-Test 验收测试管线（ADR-012，默认关）
+
+```
+is_enabled(config)                       → 总开关（spec_test.enabled；--accept-tests 覆盖）
+cfg(config)                              → spec_test 配置段（缺省值对齐 DEFAULT_CONFIG）
+draft_acceptance(task, config, logger, *, spec_context, docs_context, repo_hint)
+                                         → LLM 起草验收测试 {files, commands, notes, model}；任何失败 → None（fail-open）
+sanitize_draft(raw, config, logger)      → 清洗：路径白名单（禁绝对/`..`）+ 命令安全门禁（_is_safe_verification_command）
+freeze(task_dir, draft, *, reviewed, source, logger, review_edits, frozen_dir)
+                                         → 冻结到 <task_dir>/acceptance/（files/ + manifest.json 含逐文件 sha256）
+load_manifest(task_dir) / usable_manifest(task_dir, config)
+                                         → 读取/可用性判定（require_review 时未审阅件不可作 oracle）
+freeze_from_provided(task_dir, config, logger)
+                                         → 护栏④评测口径：从 spec_test.provided_dir 取任务定义冻结件（source="task"，不调 LLM）
+acceptance_commands(task_dir, config)    → 冻结件中的验收命令（未启用/不可用 → []）
+inject_into_worktree(worktree, manifest, task_dir, logger, config)
+                                         → 注入冻结测试并先行提交进子任务 base（worker 只读契约）
+restore_frozen(worktree, manifest, task_dir, logger)
+                                         → 按 manifest 恢复冻结版（剥除 worker 改动；幂等）——护栏①
+restore_for_verify(worktree, task_dir, config, logger) / runtime_manifest(task_dir, config)
+                                         → executor 侧统一入口（未启用时零开销 no-op）
+save_draft(task_dir, draft, logger, reason)
+                                         → 未冻结草稿留档（DRAFT.json：跳过/未人审场景）
+meta_block(manifest)                     → meta.json 的 acceptance 段（source/reviewed/sha256/commands）
+```
+
+executor 侧消费：`run_subtask` 启动前注入（先于 `pre_work_head` 捕获）；`_verify_changes` 在提交前/
+每轮重放前/修复提交前恢复冻结版，验收命令合入 `cmds`（结果 `type=acceptance`），oracle 通过时语义
+评估失败降级 `semantic_advisory`（`spec_test.oracle_priority`，护栏③）；冻结件注入提交不参与
+"worker 自提交"判定（防空转误判 completed）。
+
+CLI/交互：`--accept-tests` / `--no-accept-tests` 覆盖开关；草稿随 Plan 确认门一并人审
+（`[T]` 审阅/编辑、`[K]` 跳过；`require_review=true` 时非交互运行自动降级为现状验证行为并留档草稿）。

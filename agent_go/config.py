@@ -136,6 +136,19 @@ DEFAULT_CONFIG = {
         "api_key": "",                  # 空字符串 = 复用 AGENT_GO_API_KEY
         "prompt_template": "default",   # 可扩展 prompt 模板名
     },
+    # spec-to-test（ADR-012）：需求 → AI 起草验收测试 → Plan 门内人审 → 冻结 → verify 重放。
+    # 默认关（新能力 + 成本可控）；开启后冻结测试作为可执行验收 oracle 优先于语义评估。
+    "spec_test": {
+        "enabled": False,               # 总开关（--accept-tests / --no-accept-tests 可覆盖）
+        "frozen_dir": "tests/acceptance",  # 冻结测试注入 worktree 的仓库内相对目录
+        "require_review": True,         # 未经人审不冻结为 oracle（人审门不可省，见 ADR-012）
+        "draft_role": "planner",        # 起草调用的模型角色（默认复用 planner 档位）
+        "provided_dir": "",             # 评测口径：任务定义提供的冻结测试目录（出题人≠解题人）
+        "max_files": 8,                 # 草稿文件数上限（安全面）
+        "max_file_bytes": 20000,        # 单文件体量上限（安全面）
+        "max_commands": 5,              # 验收命令条数上限
+        "oracle_priority": True,        # 可执行 oracle 优先于语义评估（护栏③）
+    },
     "fallback": {
         "local_model_url": "http://localhost:4000/v1/chat/completions",
         "local_model_name": "claude-sonnet-4-6",

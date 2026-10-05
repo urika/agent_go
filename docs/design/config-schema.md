@@ -180,6 +180,25 @@ LLM 语义评估器。验证命令通过后，调用 LLM 对 Claude 输出做语
 
 ---
 
+## 7a. `spec_test`（ADR-012：spec-to-test 验收测试管线，默认关）
+
+需求 → AI 起草验收测试 → Plan 确认门内人审 → 冻结 → worker 实现 → verify 重放。
+启用后冻结测试为**可执行验收 oracle**，失败即阻断；oracle 通过时语义评估降级为补充。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 总开关（`--accept-tests` / `--no-accept-tests` 覆盖） |
+| `frozen_dir` | str | `"tests/acceptance"` | 冻结测试注入 worktree 的仓库内相对目录（随 base 先行提交） |
+| `require_review` | bool | `true` | `true` = 未经人审不冻结为 oracle（非交互运行自动降级为现状验证行为并留档草稿） |
+| `draft_role` | str | `"planner"` | 起草调用的模型角色（经 `router.resolve_role`，不按 difficulty 细分） |
+| `provided_dir` | str | `""` | 评测口径：任务定义提供的冻结测试目录（含命令清单 `commands.json`/`commands.txt`）；设置后不调 LLM |
+| `max_files` | int | `8` | 草稿文件数上限（安全面） |
+| `max_file_bytes` | int | `20000` | 单文件体量上限（安全面） |
+| `max_commands` | int | `5` | 验收命令条数上限 |
+| `oracle_priority` | bool | `true` | 护栏③：oracle 通过时语义评估失败降级 advisory（不阻断） |
+
+---
+
 ## 8. `fallback`
 
 三级降级链。

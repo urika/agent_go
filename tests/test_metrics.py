@@ -1001,13 +1001,18 @@ def test_blind_spot_by_evidence_breakdown(tmp_path):
 
 def test_blind_spot_judgment_window_filters_old(tmp_path):
     """判定时间窗：创建超窗的老任务被筛除（目录名时间戳），解析失败保留。"""
+    from datetime import datetime, timedelta
+
     from agent_go.metrics import compute_blind_spot_hit_rate
-    td_old = _mk_task(tmp_path, "task-20260701-000000-001-old1", {
+    # 相对当前时间构造（原实现写死 2026-08 日期，35 天窗于 2026-10-03 过期）
+    _old_ts = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d-%H%M%S")
+    _recent_ts = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d-%H%M%S")
+    td_old = _mk_task(tmp_path, f"task-{_old_ts}-001-old1", {
         "status": "VERIFICATION_FAILED",
         "results": [{"subtask_id": "s1", "status": "failed"}],
         "blind_spots": {"weakly_anchored_subtasks": ["s1"]},
     })
-    td_recent = _mk_task(tmp_path, "task-20260829-000000-002-new2", {
+    td_recent = _mk_task(tmp_path, f"task-{_recent_ts}-002-new2", {
         "status": "VERIFICATION_FAILED",
         "results": [{"subtask_id": "s1", "status": "failed"}],
         "blind_spots": {"weakly_anchored_subtasks": ["s1"]},

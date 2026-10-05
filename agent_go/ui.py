@@ -441,12 +441,89 @@ def _prompt_fallback(logger: logging.Logger) -> str:
             sys.exit(0)
         console.print("无效输入（F=降级, R=重试, N=取消）")
 
-def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "", plan_dir: Optional[Path] = None) -> tuple[Optional[dict[str, Any]], Optional[list[str]]]:
+def _render_acceptance_draft(draft: dict[str, Any], preview_lines: int = 15) -> None:
+    """Plan 确认门内的验收测试草稿展示（ADR-012 人审面）。"""
+    from . import spec_test as _st
+    console.force("\n── 验收测试草稿（spec-to-test；冻结后作为可执行验收 oracle）──")
+    cmds = draft.get("commands") or []
+    console.force(f"  验收命令: {'; '.join(cmds) if cmds else '(无)'}")
+    notes = str(draft.get("notes") or "").strip()
+    if notes:
+        console.force(f"  说明: {notes[:200]}")
+    console.force(_st.draft_files_for_display(draft, preview_lines=preview_lines))
+
+
+def _edit_text_in_editor(name: str, content: str, logger: logging.Logger) -> Optional[str]:
+    """把内容写入临时文件 → $EDITOR 打开 → 读回；失败返回 None。"""
+    import shutil
+    import tempfile
+    from . import spec_test as _st
+    tmpdir = Path(tempfile.mkdtemp(prefix="agent_go_acceptance_"))
+    try:
+        tmp = tmpdir / Path(name).name
+        tmp.write_text(content, encoding="utf-8")
+        if not _st.open_in_editor(tmp, logger):
+            return None
+        return tmp.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"[spec_test] 编辑器审阅失败: {e}")
+        return None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _review_acceptance_draft_interactive(
+    draft: dict[str, Any], state: dict[str, Any], logger: logging.Logger
+) -> None:
+    """[T] 子菜单：逐个编辑 / 跳过 oracle / 返回（决定写入 state["decision"]）。"""
+    files = draft.get("files") or []
+    while True:
+        console.force("\n验收测试草稿审阅:")
+        for i, item in enumerate(files, 1):
+            console.force(f"  [{i}] {item.get('path')}")
+        console.force("  [E] 逐个编辑（$EDITOR）")
+        console.force("  [K] 跳过（本次不用验收测试做 oracle，仅保留草稿）")
+        console.force("  [B] 返回（Y 确认 = 按当前草稿冻结）")
+        c = safe_input("\n> ").strip().upper()
+        if c in ("B", ""):
+            return
+        if c == "K":
+            state["decision"] = "skipped"
+            logger.info("用户跳过验收测试 oracle")
+            console.force("⚠️ 已跳过：本次运行不冻结验收 oracle")
+            return
+        if c == "E":
+            edits = 0
+            for item in files:
+                new_content = _edit_text_in_editor(str(item.get("path", "test")), str(item.get("content", "")), logger)
+                if new_content is not None and new_content != item.get("content"):
+                    item["content"] = new_content
+                    edits += 1
+            state["edits"] = int(state.get("edits") or 0) + edits
+            state["decision"] = "approved"
+            console.force(f"✅ 已编辑 {edits} 个文件（将按编辑后版本冻结）")
+            _render_acceptance_draft(draft)
+            continue
+        if c.isdigit() and 1 <= int(c) <= len(files):
+            item = files[int(c) - 1]
+            new_content = _edit_text_in_editor(str(item.get("path", "test")), str(item.get("content", "")), logger)
+            if new_content is not None and new_content != item.get("content"):
+                item["content"] = new_content
+                state["edits"] = int(state.get("edits") or 0) + 1
+                state["decision"] = "approved"
+                console.force(f"✅ {item.get('path')} 已更新")
+                _render_acceptance_draft(draft)
+            continue
+
+
+def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logger: logging.Logger, iteration: int = 1, task: str = "", plan_dir: Optional[Path] = None, acceptance: Optional[dict[str, Any]] = None, acceptance_state: Optional[dict[str, Any]] = None) -> tuple[Optional[dict[str, Any]], Optional[list[str]]]:
     """
     用户确认 Plan。支持默认同意模式。
     返回: (plan, doc_paths) 或 (None, doc_paths)（R 重新生成）或 ("__FALLBACK__", None)
 
     plan_dir: 任务目录（可选）。提供时支持 [V] 内联查看 Plan 版本历史（R-4）。
+    acceptance: spec-to-test 验收测试草稿（ADR-012）。提供时在**同一确认门内**一并人审，
+      不新增人工停点；acceptance_state 回填 {"decision": "approved|skipped", "edits": n}。
     """
     behavior = config.get("behavior", {})
     auto_confirm = behavior.get("auto_confirm_plan", False)
@@ -462,8 +539,12 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
     while True:
         print_plan(plan, config, force=console.quiet)
 
-        # 默认同意模式
-        if auto_confirm and iteration == 1:
+        # spec-to-test（ADR-012）：验收测试草稿在同一确认门内展示
+        if acceptance:
+            _render_acceptance_draft(acceptance)
+
+        # 默认同意模式（验收草稿在场时不走快捷确认——人审是该管线的护栏）
+        if auto_confirm and iteration == 1 and not acceptance:
             if not sys.stdin.isatty() or console.json_mode:
                 logger.info("默认同意模式：自动确认 Plan")
                 log_event(logger, "plan_auto_confirmed", {"iteration": iteration})
@@ -483,6 +564,7 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
         console.force("  [S] 补充输入/修正需求（重新生成）")
         console.force("  [D] 挂载参考文档（重新生成）")
         console.force("  [E] 编辑某个步骤")
+        console.force("  [T] 审阅/编辑验收测试草稿") if acceptance else None
         console.force("  [M] 用 $EDITOR 编辑完整方案")
         console.force("  [R] 重新生成方案")
         console.force("  [V] 查看 Plan 版本历史") if plan_dir else None
@@ -493,7 +575,13 @@ def confirm_plan(plan: dict[str, Any], config: dict[str, Any], repo: Path, logge
 
         if choice == "Y" or (choice == "" and auto_confirm):
             logger.info("用户确认 Plan")
+            if acceptance and acceptance_state is not None and not acceptance_state.get("decision"):
+                # Y（或默认同意）即批准当前验收测试草稿 → 冻结为 reviewed 真值锚
+                acceptance_state["decision"] = "approved"
             return plan, reference_doc_paths
+        elif choice == "T" and acceptance:
+            _review_acceptance_draft_interactive(
+                acceptance, acceptance_state if acceptance_state is not None else {}, logger)
         elif choice == "N":
             logger.info("用户取消")
             console.force("❌ 已取消")

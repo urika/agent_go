@@ -100,6 +100,10 @@ def _build_parser():
                             help="启用 LLM 语义评估（覆盖 config）")
     run_parser.add_argument("--no-semantic-eval", action="store_true",
                             help="禁用 LLM 语义评估")
+    run_parser.add_argument("--accept-tests", action="store_true", dest="accept_tests",
+                            help="启用 spec-to-test：起草验收测试→Plan 门内人审冻结→verify 重放（默认跟随 config）")
+    run_parser.add_argument("--no-accept-tests", action="store_true", dest="no_accept_tests",
+                            help="禁用 spec-to-test 验收测试管线")
     run_parser.add_argument("--preserve-worktrees", action="store_true", dest="preserve_worktrees",
                             help="保留全部 worktree 不清除（默认仅保留 failed/blocked）")
     run_parser.add_argument("--no-preserve", action="store_true", dest="no_preserve",
@@ -670,7 +674,83 @@ def _preflight_repair_plan(
     return current, current_iteration, repair_history, quality
 
 
-def _confirm_plan_channel(plan, config, repo, logger, iteration, task, plan_dir):
+# ── spec-to-test（ADR-012）：起草 → Plan 门内人审 → 冻结 ──────────────────
+
+def _acceptance_review_possible(config, headless: bool) -> bool:
+    """本次运行是否可以发生人审（headless / web 确认通道下不可以）。"""
+    if headless:
+        return False
+    if config.get("behavior", {}).get("web_confirm_plan"):
+        return False
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _prepare_acceptance_draft(task, config, logger, *, spec_context="", docs_context="", repo=None,
+                              headless: bool = False):
+    """起草验收测试草稿（spec-to-test）。任何不可用情形 → None（fail-open）。"""
+    from . import spec_test as _st
+    if not _st.is_enabled(config):
+        return None
+    conf = _st.cfg(config)
+    # 护栏④（评测口径）：provided_dir 由任务定义提供冻结件，不自行起草（出题人≠解题人）
+    if str(conf.get("provided_dir") or "").strip():
+        logger.info("[spec_test] provided_dir 已配置：跳过起草（评测口径）")
+        return None
+    if conf.get("require_review") and not _acceptance_review_possible(config, headless):
+        logger.warning(
+            "[spec_test] 非交互/无 CLI 确认门运行且 require_review=true ⇒ 本次不启用冻结验收 oracle"
+            "（草稿需人审；如需无审阅启用请显式设 spec_test.require_review=false）")
+        return None
+    repo_hint = f"repo={Path(repo).name}" if repo is not None else ""
+    return _st.draft_acceptance(task, config, logger, spec_context=spec_context,
+                                docs_context=docs_context, repo_hint=repo_hint)
+
+
+def _freeze_acceptance_after_review(task_dir, draft, state, config, logger):
+    """按人审结果冻结（approved→reviewed=True；skipped/未人审→不冻结，草稿留档）。
+
+    返回冻结 manifest（未冻结为 None）。
+    """
+    from . import spec_test as _st
+    if not draft:
+        return None
+    conf = _st.cfg(config)
+    decision = (state or {}).get("decision")
+    if decision == "skipped":
+        logger.info("[spec_test] 用户跳过验收测试 oracle（草稿留档，不冻结）")
+        _st.save_draft(task_dir, draft, logger, reason="user_skipped")
+        return None
+    reviewed = decision == "approved"
+    if not reviewed and conf.get("require_review"):
+        logger.warning("[spec_test] 草稿未经人审（require_review=true）⇒ 不冻结为 oracle（草稿留档）")
+        _st.save_draft(task_dir, draft, logger, reason="unreviewed")
+        return None
+    return _st.freeze(
+        task_dir, draft, reviewed=reviewed, source="drafted", logger=logger,
+        review_edits=int((state or {}).get("edits") or 0),
+        frozen_dir=str(conf.get("frozen_dir") or ""))
+
+
+def _spec_test_meta_block(manifest, state, config=None) -> dict:
+    """meta.json 的 acceptance 段：冻结事实；启用但未冻结时如实记 degraded。"""
+    from . import spec_test as _st
+    if manifest:
+        return _st.meta_block(manifest)
+    enabled = _st.is_enabled(config) if config is not None else False
+    block: dict = {"enabled": bool(enabled), "frozen": False}
+    decision = (state or {}).get("decision")
+    if decision:
+        block["review_decision"] = decision
+    if enabled:
+        block["degraded"] = True  # 启用但无冻结 oracle（无审阅/无草稿/用户跳过）
+    return block
+
+
+def _confirm_plan_channel(plan, config, repo, logger, iteration, task, plan_dir,
+                          acceptance=None, acceptance_state=None):
     """Plan 确认通道分发（R5b）：web_confirm_plan 时走 web 文件协议，否则 CLI 交互。
 
     与 confirm_plan 同返回契约：(plan, doc_paths) 确认 / (None, doc_paths) 重新生成 /
@@ -687,7 +767,8 @@ def _confirm_plan_channel(plan, config, repo, logger, iteration, task, plan_dir)
             return None, []
         console.force("❌ 已取消（web 确认或超时）")
         sys.exit(0)
-    return confirm_plan(plan, config, repo, logger, iteration=iteration, task=task, plan_dir=plan_dir)
+    return confirm_plan(plan, config, repo, logger, iteration=iteration, task=task, plan_dir=plan_dir,
+                        acceptance=acceptance, acceptance_state=acceptance_state)
 
 
 def _confirm_subtasks_channel(subtasks, config, logger, task_dir=None):
@@ -904,6 +985,10 @@ def cmd_run(args=None):
         config.setdefault("evaluator", {})["enabled"] = True
     if no_semantic_eval:
         config.setdefault("evaluator", {})["enabled"] = False
+    if getattr(args, "accept_tests", False):
+        config.setdefault("spec_test", {})["enabled"] = True
+    if getattr(args, "no_accept_tests", False):
+        config.setdefault("spec_test", {})["enabled"] = False
     if getattr(args, "no_verify_block", False):
         config.setdefault("verification", {})["block_on_failure"] = False
     # Goal Policy：--goal-mode 归一化用户覆盖（--goal=force、--no-goal=off、--goal-hook=hook）
@@ -1103,6 +1188,9 @@ def cmd_run(args=None):
 
     plan = None
     confirmed_plan = None
+    # spec-to-test（ADR-012）：验收测试草稿/人审状态（在本函数后半段冻结）
+    acceptance_draft = None
+    acceptance_state: dict = {}
 
     # ── hard 端到端模式（e2e）：跳过 Plan 拆分，单子任务保留全局上下文 ──
     # 依据"拆分 vs 端到端"判定框架：hard / 架构级 / 强耦合任务拆分时代价
@@ -1155,8 +1243,13 @@ def cmd_run(args=None):
             # --yes must remain non-interactive even when preflight produced Plan v2;
             # the repair version is still shown/persisted separately in plan snapshots.
             _confirm_iteration = 1 if auto_yes else iteration
+            # spec-to-test（ADR-012）：起草验收测试，随 Plan 确认门一并人审（不新增人工停点）
+            acceptance_draft = _prepare_acceptance_draft(
+                task, config, logger, spec_context=spec_context,
+                docs_context=initial_docs, repo=repo, headless=headless)
             confirmed_plan, final_doc_paths = _confirm_plan_channel(
-                plan, config, repo, logger, iteration=_confirm_iteration, task=task, plan_dir=task_dir)
+                plan, config, repo, logger, iteration=_confirm_iteration, task=task, plan_dir=task_dir,
+                acceptance=acceptance_draft, acceptance_state=acceptance_state)
             # 检查降级信号
             if confirmed_plan == "__FALLBACK__":
                 console.print("\n⚠️ 降级到本地规则拆解...")
@@ -1187,7 +1280,8 @@ def cmd_run(args=None):
                         # R-4: 实时 diff——用户知道重新生成改了什么
                         from .ui import show_plan_diff
                         show_plan_diff(_prev_plan, plan)
-                    confirmed_plan, final_doc_paths = _confirm_plan_channel(plan, config, repo, logger, iteration, task=task, plan_dir=task_dir)
+                    confirmed_plan, final_doc_paths = _confirm_plan_channel(plan, config, repo, logger, iteration, task=task, plan_dir=task_dir,
+                                                                           acceptance=acceptance_draft, acceptance_state=acceptance_state)
                     if confirmed_plan == "__FALLBACK__":
                         console.print("\n⚠️ 降级到本地规则拆解...")
                         subtasks = decompose_fallback(task, repo, config, logger)
@@ -1306,6 +1400,23 @@ def cmd_run(args=None):
     except Exception as _ae:
         logger.debug(f"[governance] 架构审查接入失败（忽略）: {_ae}")
 
+    # spec-to-test（ADR-012）：冻结验收测试（先于 worker 启动；executor 侧注入+重放）
+    # 护栏④：provided_dir（评测口径，出题人≠解题人）优先；否则用 Plan 门内人审的草稿。
+    acceptance_manifest = None
+    try:
+        from . import spec_test as _spec_test_cli
+        if _spec_test_cli.is_enabled(config):
+            if str(_spec_test_cli.cfg(config).get("provided_dir") or "").strip():
+                acceptance_manifest = _spec_test_cli.freeze_from_provided(task_dir, config, logger)
+            if acceptance_manifest is None and acceptance_draft:
+                acceptance_manifest = _freeze_acceptance_after_review(
+                    task_dir, acceptance_draft, acceptance_state, config, logger)
+            if acceptance_manifest is None and acceptance_draft is None and acceptance_state.get("decision") != "skipped":
+                logger.warning("[spec_test] 已启用但本次无可用冻结验收 oracle（降级为现状验证行为）")
+    except Exception as _acc_freeze_err:
+        logger.warning(f"[spec_test] 冻结接入异常（降级为现状验证行为）: {_acc_freeze_err}")
+        acceptance_manifest = None
+
     meta = {
         "task_id": task_id, "task": task, "repo": str(repo),
         "created": ts, "status": "EXECUTING",
@@ -1337,6 +1448,8 @@ def cmd_run(args=None):
         # spec 级稳定 ID 持久化（traceability 的 spec 侧输入；空列表 = 无 spec 任务）
         "requirement_ids": spec_req_ids,
         "acceptance_criteria_ids": spec_ac_ids,
+        # spec-to-test（ADR-012）：冻结验收测试事实（含 source/reviewed/sha256/命令）
+        "acceptance": _spec_test_meta_block(acceptance_manifest, acceptance_state, config),
     }
     # Goal Contract: 从 Task + Plan + Subtask 提取完成契约（确定性，不调 LLM）
     try:

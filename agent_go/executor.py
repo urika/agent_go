@@ -911,6 +911,26 @@ def _build_task_md(subtask, repo, task_dir, worktree, logger, headless, merge_co
     if step_requirements:
         task_md_parts.extend(step_requirements)
 
+    # spec-to-test（ADR-012）：冻结验收测试 = worker 只读契约
+    # （先于 worker 启动已注入 worktree 并提交进 base；verify 前会剥除 worker 改动）
+    if config is not None and task_dir is not None:
+        try:
+            from . import spec_test as _spec_test_mod
+            _acc_manifest_md = _spec_test_mod.runtime_manifest(task_dir, config)
+            if _acc_manifest_md:
+                _acc_dir = str(_acc_manifest_md.get("frozen_dir") or "")
+                _acc_cmds_md = "; ".join(f"`{c}`" for c in (_acc_manifest_md.get("commands") or []))
+                task_md_parts.extend([
+                    "",
+                    "## 验收测试（冻结·只读契约）",
+                    f"- 验收测试已冻结在 `{_acc_dir}/`（随 base 提交，属于本子任务的验收契约）。",
+                    "- **只读**：不得修改/删除/重命名这些测试文件——改动会在验证前被自动恢复。",
+                    f"- 验收命令（必须通过）: {_acc_cmds_md}",
+                    "- 以测试为准完成实现；不得为了让测试通过而改动测试本身。",
+                ])
+        except Exception as _acc_md_err:
+            logger.debug(f"[spec_test] TASK.md 注入跳过: {_acc_md_err}")
+
     # S9-B 产物导出约定：--artifact-dir 开启时注入 __artifacts__/ 目录约定
     # 声明制——只有写入 __artifacts__/ 的文件才视为交付物，随 worktree 清理不丢失
     if _effective_config(config).get("artifact_dir"):
@@ -1473,7 +1493,7 @@ def _diff_stat_hash(worktree: Path, base_ref: str = "HEAD") -> Optional[str]:
 def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, tag_name,
                     active_pids, active_pids_lock, logger, issue_ref="", allowed_tools=None,
                     task_dir=None, config=None, interrupt_event=None, initial_kill_reason=None,
-                    pre_work_head="", backend_ctx=None):
+                    pre_work_head="", backend_ctx=None, acceptance_commit=""):
     """Verify changes, commit if needed, run verification commands. Returns verification dict.
 
     pre_work_head: 上游 merge 完成后、claude 启动前的 HEAD（ISSUE-51），作为语义评估
@@ -1507,6 +1527,26 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
     interrupt_event = interrupt_event or threading.Event()
 
     git_ok = True
+
+    # spec-to-test（ADR-012）：冻结验收测试运行时接入（未启用时全程零开销 no-op）
+    try:
+        from . import spec_test as _spec_test
+    except Exception:  # noqa: BLE001 - 可选能力，导入失败即禁用
+        _spec_test = None
+    _acceptance_manifest = None
+    if _spec_test and task_dir:
+        try:
+            _acceptance_manifest = _spec_test.runtime_manifest(task_dir, config)
+            if _acceptance_manifest:
+                # 护栏①（提交前重放）：剥除 worker 对冻结测试的改动，保证完成边界提交的是冻结版
+                _restore_pre = _spec_test.restore_for_verify(worktree, task_dir, config, logger)
+                if _restore_pre.get("restored"):
+                    logger.warning(
+                        f"[spec_test] worker 改动了冻结验收测试，提交前已恢复 "
+                        f"{len(_restore_pre['restored'])} 个文件")
+        except Exception as _acc_err:  # noqa: BLE001 - fail-open
+            logger.debug(f"[spec_test] 运行时接入跳过: {_acc_err}")
+            _acceptance_manifest = None
 
     # 按 difficulty 缩减重试预算：easy → 2, medium → 3, hard → 5
     difficulty = subtask.get("difficulty", "medium")
@@ -1551,6 +1591,9 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                     capture_output=True, text=True, timeout=10).stdout.strip()
                 _is_worker_commit = bool(_head_date and _head_date.isdigit()
                                          and time.time() - int(_head_date) < 600)
+            # spec-to-test：冻结件注入提交不是 worker 产出（两条分支统一排除，防空转误判 completed）
+            if _is_worker_commit and acceptance_commit and _head_hash == acceptance_commit:
+                _is_worker_commit = False
             if _is_worker_commit:
                 _self_commit_stat = subprocess.run(
                     ["git", "show", "--stat", "--format=", "HEAD"], cwd=str(worktree),
@@ -1871,8 +1914,16 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             _replan_state["status"] = "error"
             return False
 
-    if verification:
-        cmds = [verification] if isinstance(verification, str) else verification
+    # spec-to-test 护栏②（ADR-012）：验收命令随冻结件一次性预生成，作为验收 oracle 进入验证链
+    _acceptance_cmds = list((_acceptance_manifest or {}).get("commands") or [])
+    _acceptance_cmd_set = set(_acceptance_cmds)
+    if verification or _acceptance_cmds:
+        cmds = []
+        if verification:
+            cmds.extend([verification] if isinstance(verification, str) else list(verification))
+        for _acc_cmd in _acceptance_cmds:
+            if _acc_cmd not in cmds:
+                cmds.append(_acc_cmd)
 
         # Phase 4: 恢复已有验证状态（resume 场景）
         if task_dir:
@@ -1906,6 +1957,18 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 break
             # 1. 执行所有验证命令
             all_pass = True
+            # spec-to-test 护栏①（ADR-012）：本轮重放前恢复冻结版（覆盖上轮修复对测试文件的改动）
+            if _acceptance_manifest and _spec_test:
+                try:
+                    _restore_round = _spec_test.restore_for_verify(worktree, task_dir, config, logger)
+                    if _restore_round.get("restored"):
+                        verification_results.append({
+                            "type": "acceptance_restore",
+                            "attempt": retry_count + 1,
+                            "restored": _restore_round["restored"],
+                        })
+                except Exception as _acc_r_err:  # noqa: BLE001 - fail-open
+                    logger.debug(f"[spec_test] 轮内恢复跳过: {_acc_r_err}")
             failed_cmds: list[str] = []
             failed_outputs: list[str] = []
             # 安全门禁拒绝的验证命令 (command, reason)：触发 G8 短路，跳过修复重试
@@ -1919,6 +1982,8 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                 logger.info(f"执行验证 [{attempt_label}/{max_retries + 1}]: {vcmd}")
                 vr_entry = _run_verification_cmd(
                     vcmd, worktree, attempt_label, env, logger, task_id, sub_id)
+                if vcmd in _acceptance_cmd_set:
+                    vr_entry["type"] = "acceptance"
                 verification_results.append(vr_entry)
                 verification_ms += vr_entry.get("duration_ms", 0)
 
@@ -2036,15 +2101,36 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
                         failed_cmds = ["<semantic_eval>"]
                         failed_outputs = [f"语义评估 API 调用失败（fail_closed）: {semantic_feedback.get('reason', '')}"]
                 elif not semantic_feedback.get("passed", True):
-                    logger.warning(f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')[:100]}")
-                    all_pass = False
-                    failed_cmds = ["<semantic_eval>"]
-                    failed_outputs = [f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')}"]
-                    # 打地鼠检测：记录本次缺陷指纹
-                    _reason = str(semantic_feedback.get("reason", "") or "")
-                    _fp = _defect_fingerprint(_reason)
-                    if _fp:
-                        _semantic_fail_fingerprints.append(_fp)
+                    _acc_entries_round = [
+                        r for r in verification_results
+                        if r.get("type") == "acceptance" and r.get("attempt") == attempt_label
+                    ]
+                    _acceptance_pass = bool(_acc_entries_round) and all(
+                        r.get("exit_code") in (0, 127) for r in _acc_entries_round)
+                    _oracle_priority = bool(
+                        _spec_test and _spec_test.cfg(config).get("oracle_priority", True))
+                    if _acceptance_pass and _oracle_priority:
+                        # spec-to-test 护栏③（ADR-012）：可执行冻结 oracle 已通过 ⇒
+                        # 语义评估降级为补充（advisory，不阻断；覆盖不可执行面）。
+                        logger.warning(
+                            "[spec_test] 冻结 oracle 已通过，语义评估未通过降级为 advisory（不阻断）: "
+                            f"{semantic_feedback.get('reason', '')[:100]}"
+                        )
+                        verification_results.append({
+                            "type": "semantic_advisory",
+                            "passed": False,
+                            "reason": semantic_feedback.get("reason", "")[:200],
+                        })
+                    else:
+                        logger.warning(f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')[:100]}")
+                        all_pass = False
+                        failed_cmds = ["<semantic_eval>"]
+                        failed_outputs = [f"LLM 语义评估未通过: {semantic_feedback.get('reason', '')}"]
+                        # 打地鼠检测：记录本次缺陷指纹
+                        _reason = str(semantic_feedback.get("reason", "") or "")
+                        _fp = _defect_fingerprint(_reason)
+                        if _fp:
+                            _semantic_fail_fingerprints.append(_fp)
 
                 # Phase 4: 持久化语义评估后的状态
                 if task_dir:
@@ -2444,6 +2530,12 @@ def _verify_changes(task_id, sub_id, subtask, worktree, headless, task_md, env, 
             # 场景：语义评估是唯一失败原因且 agent 认为实现已正确（如本地模型
             # 按常识重写映射被 evaluator 质疑）——此时无改动是合理结论，应允许
             # 回到验证循环重新验证，而非误判"Git 提交失败"。
+            # spec-to-test 护栏①（ADR-012）：修复提交前恢复冻结版，避免把测试改动带进历史
+            if _acceptance_manifest and _spec_test:
+                try:
+                    _spec_test.restore_for_verify(worktree, task_dir, config, logger)
+                except Exception as _acc_fx_err:  # noqa: BLE001 - fail-open
+                    logger.debug(f"[spec_test] 修复提交前恢复跳过: {_acc_fx_err}")
             fix_add = subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True)
             fix_commit = subprocess.run(["git", "commit", "-m",
                                          f"{subtask['id']} (fix-{retry_count}): 验证修复"],
@@ -2731,6 +2823,24 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
                     merge_conflicts.get(up_id, "").split("\n") if has_conflict else None))
     console.emit("subtask_activity", {"sub_id": sub_id, "activity": "Merging upstream"})
     clone_time = time.time() - clone_start
+
+    # spec-to-test 护栏①（ADR-012）：冻结验收测试先于 worker 启动注入并先行提交进 base
+    # （worker 只读契约；必须先于 pre_work_head 捕获，使冻结件不属于本子任务 diff）
+    _acceptance_injection = {}
+    try:
+        from . import spec_test as _spec_test_rt
+        _acc_manifest_rt = _spec_test_rt.runtime_manifest(task_dir, config)
+        if _acc_manifest_rt:
+            _acceptance_injection = _spec_test_rt.inject_into_worktree(
+                worktree, _acc_manifest_rt, task_dir, logger, config)
+            if _acceptance_injection.get("injected"):
+                logger.info(
+                    f"[spec_test] 冻结验收测试先于 worker 注入完成: "
+                    f"{len(_acceptance_injection['injected'])} 文件（commit={_acceptance_injection.get('commit', '')[:12]}）")
+            elif _acceptance_injection.get("error"):
+                logger.warning(f"[spec_test] 注入未完成（该子任务无冻结 oracle）: {_acceptance_injection['error']}")
+    except Exception as _acc_inj_err:  # noqa: BLE001 - fail-open
+        logger.warning(f"[spec_test] 注入异常（降级为无冻结 oracle）: {_acc_inj_err}")
 
     # ISSUE-51：记录上游 merge 完成后、claude 启动前的 HEAD 作为语义评估 diff 的 base。
     # 任务级 base_commit 会把上游子任务 merge 进来的改动算进当前子任务的累积 diff，
@@ -3126,6 +3236,7 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
         task_dir=task_dir, config=config, interrupt_event=interrupt_event,
         initial_kill_reason=getattr(result, "kill_reason", None),
         pre_work_head=pre_work_head, backend_ctx=_backend_ctx,
+        acceptance_commit=str(_acceptance_injection.get("commit") or ""),
     )
     summary = verify_results["summary"]
     metrics_changes = verify_results["metrics_changes"]
@@ -3393,4 +3504,6 @@ def run_subtask(task_id, subtask, repo, task_dir, logger, upstream_worktrees=Non
             # S12-P1 G4：budget_mode=degrade 降档模型产出标记
             "degraded": bool(_is_degraded),
             # C4：轮级看门狗 advisory（重复轮检测，仅供参考不干预）
-            "loop_detected": bool(_wd_state.get("loop_detected"))}
+            "loop_detected": bool(_wd_state.get("loop_detected")),
+            # spec-to-test（ADR-012）：冻结验收测试注入事实（未启用为 None）
+            "acceptance": (_acceptance_injection or None)}

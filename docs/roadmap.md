@@ -732,7 +732,9 @@ dsh headless 0.1.2-rc.1 无 resume 原语不做）。
 
 ## 7.15 阶段十四：Spec-to-Test 验收测试管线
 
-状态：`proposed`（2026-10-05 立项草案；ADR 骨架=[ADR-012](design/adr/ADR-012-spec-to-test-pipeline.md)，未拍板）。按 §2.2 变更门禁逐问自答，未过门禁前不进当前实施计划。
+状态：`implemented`（2026-10-05 落地，默认关，opt-in；ADR=[ADR-012](design/adr/ADR-012-spec-to-test-pipeline.md)）。按 §2.2 变更门禁逐问自答，见下（门禁自答已过，落地为默认关能力：`spec_test.enabled=false`）。
+
+落地形态（2026-10-05）：`spec_test.py` 模块 + `--accept-tests/--no-accept-tests` + `spec_test` 配置段。起草（复用 planner 角色）→ **Plan 确认门内人审**（[T] 编辑/[K] 跳过；未启用时不改变既有交互）→ 冻结到 `<task_dir>/acceptance/`（sha256 manifest）→ 子任务启动前注入 worktree 并**先行提交进 base**（worker 只读契约，TASK.md 注明）→ verify 每轮重放前恢复冻结版（剥除 worker 改动）+ 冻结提交不参与"worker 自提交"判定（防空转误判 completed）→ 验收命令随冻结件预生成进入验证链（`type=acceptance`）→ 可执行 oracle 通过时语义评估降级 advisory（护栏③）。评测口径：`spec_test.provided_dir` 从任务定义取冻结件（出题人≠解题人，不调 LLM——护栏④）。默认关；`require_review=true` 时非交互运行自动降级为现状验证行为并留档草稿。
 
 目标：给验证循环提供**可信可执行 oracle**——需求+架构设计 → LLM 起草验收测试（Plan 阶段）→ 人审（并入 Plan 确认门）→ 冻结 → worker 以契约可见条件实现 → verify 重放冻结测试。直接回应 ISSUE-29/31/40 的同根（验证无可信 oracle）。
 
@@ -745,6 +747,8 @@ dsh headless 0.1.2-rc.1 无 resume 原语不做）。
 - 主链路复杂度？可控——无新 runtime 能力；冻结测试执行与 verify 同沙箱（ISSUE-31 约束）；需求文档缺位时管线降级为现状行为。
 
 四条护栏（必须全有）：①冻结先于 worker 启动，worker 对冻结测试只读（重放/剥除同款保护）；②验证命令 per-task 预生成替代 per-subtask 现场生成；③可执行 oracle 优先于 LLM 语义评估（evaluator 分层）；④生产/评测两口径分清（bench 模式出题人≠解题人）。
+
+落地验收（待采集，落地当刻不宣称）：首次验证通过率提升 / ISSUE-29·31 类误判率下降 / Cost per AD 不升 / 人审介入分钟数不增（以"并入 Plan 确认门"为前提）；草稿质量按人审采纳率与编辑距离采集。已知边界：e2e 模式（`--e2e`/hard 判定）暂不接入起草（无 Plan 确认门）；评测模式用 `provided_dir`。
 
 诚实声明：swe-eval tdd 证据为 gold test 上界，产线草稿测试效应打折；对照基线是"验证误判"而非"无测试"。
 

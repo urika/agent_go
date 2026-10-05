@@ -2,7 +2,7 @@
 
 ## 状态
 
-**Proposed（草案骨架）**——2026-10-05 由 swe-eval 侧对齐起草（EXP-12 轮 2 tdd 臂证据迁移）；未拍板。待决项见「开放问题」。
+**Accepted（2026-10-05 落地；默认关，opt-in）**——草案由 swe-eval 侧对齐起草（EXP-12 轮 2 tdd 臂证据迁移），同日按本 ADR 四条护栏实现并测试（40 例新测试）。启用：`spec_test.enabled=true` 或 `agent_go run ... --accept-tests`。落地不改变默认行为。
 
 ## 背景
 
@@ -50,11 +50,27 @@ tdd 臂（验收契约 test_patch 预置可见）对 plain 臂的配对差异（
 
 ## 开放问题（拍板前须答）
 
-1. 冻结测试文件的落点与命名约定（仓库内固定路径？TASK.md 内嵌？独立 spec 目录？）。
-2. 起草调用的模型档位与 difficulty 路由关系（草稿质量 vs 成本）。
-3. bench 模式是否接入（建议：接入但 oracle 独立性规则不同，见护栏④）。
-4. 与 §8 扩展能力决策门其他项的优先序。
+1. 冻结测试文件的落点与命名约定 → **已定**：canonical 冻结件在 `<task_dir>/acceptance/`（`files/` + `manifest.json` 含逐文件 sha256）；注入 worktree 的仓库内相对目录由 `spec_test.frozen_dir` 配置（默认 `tests/acceptance`），注入即先行提交进子任务 base（worker 只读契约）。
+2. 起草调用的模型档位与 difficulty 路由关系 → **已定**：`spec_test.draft_role`（默认 `planner`，经 `router.resolve_role` 走既有角色路由；不按 difficulty 细分——起草质量受模型档位影响，先用 planner 档位采集采纳率/编辑距离再定）。
+3. bench 模式是否接入 → **已定（机制层）**：`spec_test.provided_dir` 从任务定义冻结件（`manifest`/`commands.json`）取 oracle，`source="task"`、不经 LLM ⇒ 出题人≠解题人；bench 自带 verification 仍为权威，本管线不改变其判定。
+4. 与 §8 扩展能力决策门其他项的优先序 → 未决（设计/roadmap 维护者定）；本 ADR 落地不阻塞其他项。
 
 ## 实现
 
-（待拍板后填）预期落点：`design/verification-design.md` Spec Compliance 层（可执行底座）、plan 阶段（起草+确认门展示）、verify 循环（重放消费）；跨仓对齐：swe-eval 评测侧孪生（受控信息供给/任务定义冻结纪律）。
+（2026-10-05 落地，默认关）
+
+| 面 | 位置 | 说明 |
+|---|---|---|
+| 模块 | `agent_go/spec_test.py` | 起草（LLM）→ 清洗（路径/命令安全面）→ 冻结（sha256 manifest）→ 注入 → 重放 → meta 段；全链 fail-open |
+| 起草+人审 | `cli.py` `_prepare_acceptance_draft` / `_freeze_acceptance_after_review`；`ui.py` `confirm_plan(acceptance=...)` + `_review_acceptance_draft_interactive` | 草稿随 Plan 确认门展示（[T] 逐个编辑 [K] 跳过 [B] 返回）；Y=按草稿冻结（reviewed=True）；不新增人工停点 |
+| 护栏① | `executor.py` `run_subtask`（启动前注入+提交）+ `_verify_changes`（提交前/每轮重放前/修复提交前恢复） | 恢复以 canonical 冻结件为准（内容比对，幂等）；注入提交从"worker 自提交"判定中排除（防空转误判 completed） |
+| 护栏② | `executor.py` `_verify_changes`（验收命令合入 `cmds`，`type=acceptance`） | 复用既有安全门禁/沙箱/超时/失败回修链 |
+| 护栏③ | `executor.py` 语义评估分支（`spec_test.oracle_priority`，默认 true） | oracle 通过 ⇒ 语义评估失败降级 `semantic_advisory`（不阻断）；oracle 未跑/未过 ⇒ 原判定不变 |
+| 护栏④ | `spec_test.freeze_from_provided` + `spec_test.provided_dir` | 评测口径：冻结件来自任务定义，不调 LLM |
+| 配置 | `config.py` `spec_test` 段 + `config.example.json` | enabled/frozen_dir/require_review/draft_role/provided_dir/oracle_priority/max_files/max_file_bytes/max_commands |
+| CLI | `--accept-tests` / `--no-accept-tests` | 覆盖 config；`--yes`/headless + `require_review=true` ⇒ 自动降级（留档草稿，不启用 oracle） |
+| 测试 | `tests/test_spec_test.py`（40 例） | 含真实 git + 真实 pytest 子进程的集成用例（注入/重放/验收命令执行/护栏①拦截）、CLI 决策路径、安全清洗 |
+
+未接入（登记为后续）：e2e 模式起草（无 Plan 确认门）；web 确认通道的人审（当前按"无人审"降级）；验收指标的自动采集（采纳率/编辑距离需人审数据积累）。
+
+跨仓对齐：swe-eval 评测侧孪生（受控信息供给/任务定义冻结纪律）；EXP-12 轮 2 H2 判读件为验收口径的终稿证据源。

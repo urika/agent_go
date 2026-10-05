@@ -98,6 +98,18 @@
     "api_key": "",
     "prompt_template": "default"
   },
+  "spec_test": {
+    "_comment": "spec-to-test（ADR-012）：需求→AI 起草验收测试→Plan 门内人审→冻结→verify 重放。冻结测试为可执行验收 oracle，优先于 LLM 语义评估",
+    "enabled": false,
+    "frozen_dir": "tests/acceptance",
+    "require_review": true,
+    "draft_role": "planner",
+    "provided_dir": "",
+    "max_files": 8,
+    "max_file_bytes": 20000,
+    "max_commands": 5,
+    "oracle_priority": true
+  },
   "fallback": {
     "local_model_url": "http://localhost:8000/v1/chat/completions",
     "local_model_name": "qwen",

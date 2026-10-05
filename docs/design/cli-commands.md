@@ -20,6 +20,12 @@ agent_go run <repo-path> '<task>' --skill security-review --agent-type reviewer
 # With verification loop and worktree preservation
 agent_go run <repo-path> '<task>' --max-retries 5 --preserve-worktrees
 
+# spec-to-test acceptance pipeline (ADR-012): draft acceptance tests -> human review inside
+# the Plan confirmation gate -> freeze -> subtasks implement against the frozen oracle
+agent_go run <repo-path> '<task>' --accept-tests                 # enable (config: spec_test.enabled)
+agent_go run <repo-path> '<task>' --accept-tests --spec docs/tasks/task-xxx.md
+agent_go run <repo-path> '<task>' --no-accept-tests              # force disable
+
 # With structured Task Spec (SDD input contract) — recommended for non-trivial tasks
 agent_go spec template <repo-path> --output docs/tasks/task-xxx.md   # generate spec template
 agent_go spec validate docs/tasks/task-xxx.md <repo-path>            # L1 admission gate
