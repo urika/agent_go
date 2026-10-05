@@ -143,6 +143,11 @@ TOOLS = [
                 "preserve_worktrees": {"type": "boolean"},
                 "wait": {"type": "boolean", "default": False},
                 "timeout_sec": {"type": "integer", "default": 3600, "minimum": 60, "maximum": 21600},
+                "accept_tests": {"type": "boolean", "default": False,
+                                 "description": "启用 spec-to-test 验收测试管线（ADR-012；等价 --accept-tests）"},
+                "confirm_mode": {"type": "string", "enum": ["auto", "web"], "default": "auto",
+                                 "description": "web = 停在 Plan 确认门等待人工/宿主确认（可经 web 控制台或 "
+                                                "review_task(acceptance_review) 提交人审回执）"},
             }
         }
     },
@@ -178,16 +183,28 @@ TOOLS = [
     },
     {
         "name": "review_task",
-        "description": "对已完成任务审查：analyze 返回 per-file diff 摘要；approve/reject/changes_requested 记录决策。",
+        "description": "对已完成任务审查：analyze 返回 per-file diff 摘要；approve/reject/changes_requested 记录决策。"
+                       "acceptance 读取验收测试状态；acceptance_review 在 Plan 确认门（confirm_mode=web）代人工提交"
+                       "验收草稿人审回执（approved/skipped，可带编辑后的文件），留痕 review_channel=mcp。",
         "annotations": {"title": "Review task results", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
         "inputSchema": {
             "type": "object",
             "required": ["task_id", "action"],
             "properties": {
                 "task_id": {"type": "string"},
-                "action": {"type": "string", "enum": ["analyze", "approve", "reject", "changes_requested"]},
+                "action": {"type": "string", "enum": ["analyze", "approve", "reject", "changes_requested",
+                                                      "acceptance", "acceptance_review"]},
                 "deep": {"type": "boolean", "default": False},
                 "comment": {"type": "string"},
+                "acceptance_decision": {"type": "string", "enum": ["approved", "skipped"],
+                                        "description": "acceptance_review：批准冻结 / 跳过 oracle（草稿留档）"},
+                "files": {"type": "array", "items": {"type": "object",
+                                                     "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                                                     "required": ["path", "content"]},
+                          "description": "acceptance_review：人审编辑后的文件（仅需上送改动过的；path 须在冻结目录白名单内）"},
+                "edits": {"type": "integer", "minimum": 0, "default": 0},
+                "plan_decision": {"type": "string", "enum": ["Y", "R"], "default": "Y",
+                                  "description": "acceptance_review：同时提交的 Plan 决策（Y 确认 / R 重新生成）"},
             }
         }
     },
@@ -273,6 +290,13 @@ RESOURCES = [
         "uri": "agent_go://tasks/{task_id}/review",
         "name": "Review Status",
         "description": "审查决策状态（approved/rejected/changes_requested）与历史",
+        "mimeType": "application/json",
+    },
+    {
+        "uri": "agent_go://tasks/{task_id}/acceptance",
+        "name": "Acceptance Tests",
+        "description": "验收测试（spec-to-test，ADR-012）：冻结 manifest/人审留痕（渠道/编辑/采纳率）/文件全文/"
+                       "运行结果（验收命令、护栏①拦截恢复、advisory 语义评估）",
         "mimeType": "application/json",
     },
 ]
@@ -830,6 +854,11 @@ class MCPServer:
             cmd += ["--docs", ",".join(args["docs"])]
         if args.get("preserve_worktrees"):
             cmd.append("--preserve-worktrees")
+        # spec-to-test（ADR-012）：启用验收管线 / 停在 Plan 确认门等人工人审
+        if args.get("accept_tests"):
+            cmd.append("--accept-tests")
+        if str(args.get("confirm_mode") or "auto") == "web":
+            cmd += ["--confirm-mode", "web"]
 
         with self._lock:
             if len(self._running) >= self._max_concurrent:
@@ -1086,6 +1115,58 @@ class MCPServer:
         td = self._ensure_task_dir(task_id)
         action = args["action"]
 
+        if action == "acceptance":
+            # spec-to-test（ADR-012）：只读验收测试状态（冻结/人审留痕/采纳率/运行结果）
+            from . import spec_test as _st_acc
+            return _st_acc.task_acceptance_view(td)
+
+        if action == "acceptance_review":
+            # spec-to-test（ADR-012）：在 Plan 确认门代人工提交人审回执（宿主负责征询其用户；
+            # 留痕 review_channel=mcp 供事后审计——出题人≠解题人的独立性由宿主保证）
+            from . import spec_test as _st_rev
+            pending_path = td / "pending_confirmation.json"
+            if not pending_path.exists():
+                raise MCPError(
+                    "AGENT_GO_ACCEPTANCE_NO_PENDING",
+                    "任务当前无待确认项（未停在 Plan 确认门）",
+                    retryable=True,
+                    fix={"description": "以 run_task(confirm_mode=\"web\", accept_tests=true) 启动，"
+                                        "轮询 inspect_task/Resource 直到 pending 出现后再提交人审",
+                         "tool": "inspect_task", "params": {"task_id": task_id}})
+            try:
+                pending = json.loads(pending_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                raise MCPError("AGENT_GO_ACCEPTANCE_PENDING_CORRUPT", "pending_confirmation.json 损坏",
+                               retryable=False)
+            if pending.get("stage") != "plan":
+                raise MCPError("AGENT_GO_ACCEPTANCE_STAGE",
+                               f"当前待确认 stage={pending.get('stage')}；验收人审仅支持 stage=plan",
+                               retryable=False)
+            acc_in: dict = {"decision": str(args.get("acceptance_decision") or "approved"),
+                            "edits": int(args.get("edits") or 0)}
+            files_in = args.get("files")
+            if isinstance(files_in, list) and files_in:
+                acc_in["files"] = files_in
+            review = _st_rev.sanitize_review(acc_in)
+            if review is None:
+                raise MCPError("AGENT_GO_ACCEPTANCE_INVALID",
+                               "acceptance 回执非法（decision=approved|skipped；files 为冻结目录内相对路径且不超体量）",
+                               retryable=False)
+            plan_decision = str(args.get("plan_decision") or "Y").upper()
+            if plan_decision not in ("Y", "R"):
+                raise MCPError("AGENT_GO_ACCEPTANCE_INVALID", "plan_decision 须为 Y/R", retryable=False)
+            recorded_at = datetime.now().isoformat()
+            payload = {"stage": "plan", "decision": plan_decision, "ts": recorded_at,
+                       "acceptance": review}
+            (td / "confirmation_decision.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            logger.info("[mcp] acceptance_review 已提交: task=%s decision=%s edits=%s",
+                        task_id, review["decision"], review["edits"])
+            return {"task_id": task_id, "stage": "plan", "decision": plan_decision,
+                    "acceptance": {"decision": review["decision"], "edits": review["edits"],
+                                   "files": len(review.get("files") or [])},
+                    "recorded_at": recorded_at}
+
         if action == "analyze":
             cmd = self._argv("review", "--task", task_id)
             if args.get("deep"):
@@ -1278,6 +1359,15 @@ class MCPServer:
                         "contents": [{"uri": uri, "mimeType": "application/json",
                                       "text": json.dumps(data, ensure_ascii=False)}]}
 
+            if resource == "acceptance":
+                # spec-to-test（ADR-012）：验收测试只读视图（与 web 控制台同一数据组装）
+                td = self._ensure_task_dir(task_id or "")
+                from . import spec_test as _st
+                view = _st.task_acceptance_view(td)
+                return {"uri": uri, "mimeType": "application/json",
+                        "contents": [{"uri": uri, "mimeType": "application/json",
+                                      "text": json.dumps(view, ensure_ascii=False)[:20000]}]}
+
         except MCPError:
             raise
         except Exception as e:
@@ -1298,7 +1388,7 @@ class MCPServer:
         parts = path.split("/")
         task_id = parts[0]
         resource = "/".join(parts[1:]) if len(parts) > 1 else "summary"
-        if resource not in ("summary", "plan", "metering", "log/recent", "review"):
+        if resource not in ("summary", "plan", "metering", "log/recent", "review", "acceptance"):
             return None
         return (resource, task_id)
 

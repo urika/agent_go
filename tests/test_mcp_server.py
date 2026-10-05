@@ -66,8 +66,25 @@ class TestToolSchemas:
     def test_review_task_action_enum(self):
         t = next(x for x in TOOLS if x["name"] == "review_task")
         assert set(t["inputSchema"]["properties"]["action"]["enum"]) == {
-            "analyze", "approve", "reject", "changes_requested"
+            "analyze", "approve", "reject", "changes_requested",
+            # spec-to-test（ADR-012）：验收测试读 + Plan 门人审回执（不新增工具，扩既有审批工具）
+            "acceptance", "acceptance_review",
         }
+
+    def test_run_task_acceptance_params(self):
+        t = next(x for x in TOOLS if x["name"] == "run_task")
+        props = t["inputSchema"]["properties"]
+        assert props["accept_tests"]["default"] is False
+        assert props["confirm_mode"]["enum"] == ["auto", "web"]
+
+    def test_acceptance_resource_registered(self):
+        from agent_go.mcp_server import RESOURCES
+        uris = [r["uri"] for r in RESOURCES]
+        assert "agent_go://tasks/{task_id}/acceptance" in uris
+        # URI 解析须放行该 resource（否则 resources/read 报 invalid）
+        srv = MCPServer()
+        assert srv._parse_resource_uri("agent_go://tasks/task-20261005-000000-000-abcd/acceptance") == (
+            "acceptance", "task-20261005-000000-000-abcd")
 
     def test_all_tools_have_annotations(self):
         for t in TOOLS:
@@ -149,10 +166,11 @@ class TestErrorModel:
 class TestResourcesPrompts:
     def test_resources_list(self, server):
         r = server._handle_resources_list()
-        assert len(r["resources"]) == 6
+        assert len(r["resources"]) == 7
         uris = [x["uri"] for x in r["resources"]]
         assert "agent_go://tasks/{task_id}/summary" in uris
         assert "agent_go://tasks/{task_id}/log/recent" in uris
+        assert "agent_go://tasks/{task_id}/acceptance" in uris
 
     def test_prompts_list(self, server):
         r = server._handle_prompts_list()
@@ -651,3 +669,118 @@ class TestSubprocess:
     def test_parse_jsonl_last_empty(self, server):
         assert server._parse_jsonl_last("") is None
         assert server._parse_jsonl_last("not-json") is None
+
+
+# ── spec-to-test（ADR-012）：验收测试 MCP 面 ────────────────────────
+
+class TestAcceptanceMcpSurface:
+    """Resource 只读视图 + review_task(acceptance/acceptance_review) + run_task 参数。"""
+
+    @staticmethod
+    def _mk_frozen_task(tmp_path, task_id="task-20261005-000000-000-abcd"):
+        import logging
+
+        from agent_go import spec_test
+        td = tmp_path / task_id
+        td.mkdir()
+        logger = logging.getLogger("mcp-acc-test")
+        draft = {
+            "files": [{"path": "test_acc.py", "content": "def test_ok():\n    assert 0\n"}],
+            "commands": ["pytest tests/acceptance/test_acc.py -q"],
+            "notes": "n", "model": "m",
+        }
+        spec_test.save_draft(td, draft, logger, reason="drafted")
+        reviewed = json.loads(json.dumps(draft))
+        reviewed["files"][0]["content"] = "def test_ok():\n    assert True\n"
+        spec_test.freeze(td, reviewed, reviewed=True, logger=logger,
+                         frozen_dir="tests/acceptance", review_edits=1, review_channel="mcp")
+        (td / "meta.json").write_text(json.dumps({
+            "task_id": task_id, "status": "VERIFICATION_FAILED", "task": "t", "repo": "/tmp/repo",
+            "subtasks": [], "results": [{"subtask_id": "sub-1", "verification_results": [
+                {"type": "acceptance", "command": "pytest tests/acceptance/test_acc.py -q",
+                 "exit_code": 0, "attempt": 1},
+                {"type": "acceptance_restore", "attempt": 2,
+                 "restored": ["tests/acceptance/test_acc.py"]},
+            ]}],
+            "acceptance": {"enabled": True, "frozen": True, "reviewed": True},
+        }), encoding="utf-8")
+        return td, task_id
+
+    def test_resource_read_acceptance(self, server, tmp_path):
+        _td, task_id = self._mk_frozen_task(tmp_path)
+        r = server._handle_resources_read(f"agent_go://tasks/{task_id}/acceptance")
+        data = json.loads(r["contents"][0]["text"])
+        assert data["enabled"] is True
+        assert data["manifest"]["review_channel"] == "mcp"
+        assert data["files"][0]["edited"] is True, "冻结件与原始草稿不同 → 应标人审编辑过"
+        assert data["adoption"] == 0.0
+        assert {x["type"] for x in data["runtime"]} == {"acceptance", "acceptance_restore"}
+
+    def test_review_task_acceptance_read(self, server, tmp_path):
+        _td, task_id = self._mk_frozen_task(tmp_path)
+        r = server._tool_review({"task_id": task_id, "action": "acceptance"})
+        assert r["task_id"] == task_id and r["manifest"]["reviewed"] is True
+
+    def test_acceptance_review_requires_pending(self, server, tmp_path):
+        _td, task_id = self._mk_frozen_task(tmp_path)
+        with pytest.raises(MCPError) as ei:
+            server._tool_review({"task_id": task_id, "action": "acceptance_review",
+                                 "acceptance_decision": "approved"})
+        assert ei.value.code == "AGENT_GO_ACCEPTANCE_NO_PENDING"
+        assert ei.value.retryable is True
+
+    def test_acceptance_review_rejects_bad_stage(self, server, tmp_path):
+        td, task_id = self._mk_frozen_task(tmp_path)
+        (td / "pending_confirmation.json").write_text(
+            json.dumps({"stage": "subtasks", "payload": {}, "ts": "", "timeout_sec": 600}), encoding="utf-8")
+        with pytest.raises(MCPError) as ei:
+            server._tool_review({"task_id": task_id, "action": "acceptance_review"})
+        assert ei.value.code == "AGENT_GO_ACCEPTANCE_STAGE"
+
+    def test_acceptance_review_invalid_files_rejected(self, server, tmp_path):
+        td, task_id = self._mk_frozen_task(tmp_path)
+        (td / "pending_confirmation.json").write_text(
+            json.dumps({"stage": "plan", "payload": {}, "ts": "", "timeout_sec": 600}), encoding="utf-8")
+        with pytest.raises(MCPError) as ei:
+            server._tool_review({"task_id": task_id, "action": "acceptance_review",
+                                 "acceptance_decision": "approved",
+                                 "files": [{"path": "../../evil.py", "content": "x"}]})
+        assert ei.value.code == "AGENT_GO_ACCEPTANCE_INVALID"
+        assert not (td / "confirmation_decision.json").exists(), "非法回执不得落盘"
+
+    def test_acceptance_review_writes_decision(self, server, tmp_path):
+        td, task_id = self._mk_frozen_task(tmp_path)
+        (td / "pending_confirmation.json").write_text(
+            json.dumps({"stage": "plan", "payload": {}, "ts": "", "timeout_sec": 600}), encoding="utf-8")
+        r = server._tool_review({
+            "task_id": task_id, "action": "acceptance_review",
+            "acceptance_decision": "approved", "edits": 1,
+            "files": [{"path": "test_acc.py", "content": "def test_ok():\n    assert True\n"}],
+            "plan_decision": "Y",
+        })
+        assert r["decision"] == "Y" and r["acceptance"]["decision"] == "approved"
+        wt = (td / "confirmation_decision.json").read_text(encoding="utf-8")
+        data = json.loads(wt)
+        assert data["stage"] == "plan" and data["acceptance"]["files"][0]["path"] == "test_acc.py"
+
+    def test_run_task_appends_acceptance_flags(self, server, monkeypatch):
+        from unittest.mock import MagicMock
+        captured = {}
+
+        monkeypatch.setattr(server, "_check_repo_allowed", lambda repo: True)
+
+        def _fake_spawn(cmd):
+            captured["cmd"] = list(cmd)
+            proc = MagicMock()
+            proc.pid = 123
+            return proc
+
+        monkeypatch.setattr(server, "_spawn", _fake_spawn)
+        monkeypatch.setattr(server, "_read_agentgo_start", lambda proc: "task-20261005-000000-000-abcd")
+        monkeypatch.setattr(server, "_start_activity_monitor", lambda proc, tid: None)
+        server._tool_run_task({"repo": "/tmp/repo", "task": "x",
+                               "accept_tests": True, "confirm_mode": "web"}, token="")
+        cmd = captured["cmd"]
+        assert "--accept-tests" in cmd and cmd[cmd.index("--confirm-mode") + 1] == "web"
+        # --yes 仍随 _argv 基座携带（交互确认全跳过）；--json 保持顶层前置
+        assert "--yes" in cmd and cmd[3] == "--json"

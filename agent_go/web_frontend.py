@@ -714,7 +714,17 @@ async function renderAcceptancePanel(id, el) {
     '状态: '+(m.files ? '已冻结' : '未冻结')+
     (srcLabel ? '｜来源: '+esc(srcLabel) : '')+
     (m.reviewed !== undefined ? '｜人审: '+(m.reviewed ? '✅ 已审'+(m.review_edits? '（改动 '+m.review_edits+'）':'') : '⚠️ 未审') : '')+
+    (m.review_channel ? '（渠道 '+esc(m.review_channel)+'）' : '')+
     (m.frozen_at ? '｜冻结于 '+esc(m.frozen_at) : '')+'</div>';
+  // 事后分析追溯：起草→冻结的留痕（耗时/成本/采纳率）
+  const trace = [];
+  if (m.drafted_at && m.frozen_at) trace.push('起草→冻结耗时 ' + esc(m.drafted_at) + ' → ' + esc(m.frozen_at));
+  else if (m.drafted_at) trace.push('起草于 ' + esc(m.drafted_at));
+  if (m.draft_model) trace.push('起草模型 ' + esc(m.draft_model));
+  if (m.draft_cost_usd) trace.push('起草成本 $' + Number(m.draft_cost_usd).toFixed(4));
+  if (d.adoption !== null && d.adoption !== undefined)
+    trace.push('人审采纳率 ' + Math.round(d.adoption*100) + '%（未编辑文件占比）');
+  if (trace.length) head += '<div class="h-line" style="color:var(--dim)">留痕: ' + trace.join('｜') + '</div>';
   if (meta.degraded) head += '<div class="h-line" style="color:var(--yellow)">⚠️ 本次运行未启用验收 oracle（降级为现状验证行为）'+
     (meta.review_decision === 'skipped' ? '：用户跳过' : '')+'</div>';
   if (d.draft) head += '<div class="h-line">草稿留档: '+esc(d.draft.reason||'')+' '+
@@ -723,7 +733,10 @@ async function renderAcceptancePanel(id, el) {
   if (cmds.length) head += '<div class="h-line">验收命令: '+cmds.map(c => '<code>'+esc(c)+'</code>').join(' ')+'</div>';
   const filesHtml = (d.files || []).map(f =>
     '<details style="margin:4px 0"><summary style="cursor:pointer">'+esc(f.path)+
-    ' <span style="color:var(--dim);font-size:11px">'+esc((f.sha256||'').slice(0,12))+' · '+f.bytes+'B</span></summary>'+
+    ' <span style="color:var(--dim);font-size:11px">'+esc((f.sha256||'').slice(0,12))+' · '+f.bytes+'B</span>'+
+    (f.edited === true ? ' <span style="color:var(--yellow);font-size:11px">✏️ 人审编辑过（草稿 '+f.draft_lines+' 行 → 冻结 '+f.frozen_lines+' 行）</span>' : '')+
+    (f.edited === false ? ' <span style="color:var(--green);font-size:11px">人审未改动</span>' : '')+
+    '</summary>'+
     '<pre style="max-height:320px;overflow:auto">'+esc(f.content||'')+'</pre></details>').join('');
   const rt = (d.runtime || []);
   const rtRows = rt.map(r => {

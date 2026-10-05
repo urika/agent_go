@@ -140,73 +140,17 @@ def api_tasks(include_legacy: bool = False) -> list[dict]:
 
 
 def api_task_acceptance(task_id: str) -> Optional[dict]:
-    """验收测试（spec-to-test，ADR-012）只读数据面：冻结件 + 草稿留档 + 运行结果。
+    """验收测试（spec-to-test，ADR-012）只读数据面（web 控制台）。
 
-    数据源：<task_dir>/acceptance/{manifest.json,files/,DRAFT.json} + meta.json
-    （results[].verification_results 中 type∈{acceptance,acceptance_restore,semantic_advisory}
-    的条目）。仅读，不做任何写操作。
+    数据组装下沉在 spec_test.task_acceptance_view（与 MCP Resource 共用）；
+    本函数只做 task_id 校验与 404 语义。
     """
     from . import spec_test
 
     td = _task_dir(task_id)
     if td is None:
         return None
-    meta = _task_meta(td)
-    manifest = spec_test.load_manifest(td)
-    files: list[dict] = []
-    if manifest:
-        root = spec_test.acceptance_root(td) / spec_test.FILES_DIRNAME
-        for item in manifest.get("files") or []:
-            rel = spec_test._safe_rel_path(str(item.get("path") or ""))
-            if not rel:
-                continue
-            content = ""
-            try:
-                content = (root / rel).read_text(encoding="utf-8", errors="replace")[:20000]
-            except OSError:
-                content = ""
-            files.append({"path": rel, "sha256": item.get("sha256", ""),
-                          "bytes": item.get("bytes", 0), "content": content})
-    draft = None
-    draft_path = spec_test.acceptance_root(td) / "DRAFT.json"
-    if draft_path.exists():
-        try:
-            d = json.loads(draft_path.read_text(encoding="utf-8"))
-            draft = {
-                "reason": d.get("_saved_reason", ""),
-                "saved_at": d.get("_saved_at", ""),
-                "commands": d.get("commands") or [],
-                "files": [f.get("path") for f in (d.get("files") or []) if isinstance(f, dict)],
-            }
-        except (json.JSONDecodeError, OSError):
-            draft = None
-    runtime: list[dict] = []
-    for r in meta.get("results") or []:
-        if not isinstance(r, dict):
-            continue
-        for vr in r.get("verification_results") or []:
-            if not isinstance(vr, dict) or vr.get("type") not in (
-                    "acceptance", "acceptance_restore", "semantic_advisory"):
-                continue
-            runtime.append({
-                "subtask_id": r.get("subtask_id", ""),
-                "type": vr.get("type"),
-                "command": vr.get("command", ""),
-                "exit_code": vr.get("exit_code"),
-                "attempt": vr.get("attempt"),
-                "restored": vr.get("restored"),
-                "passed": vr.get("passed"),
-                "reason": (vr.get("reason") or "")[:200],
-            })
-    return {
-        "task_id": td.name,
-        "enabled": bool((meta.get("acceptance") or {}).get("enabled") or manifest),
-        "meta": meta.get("acceptance") or {},
-        "manifest": manifest,
-        "files": files,
-        "draft": draft,
-        "runtime": runtime,
-    }
+    return spec_test.task_acceptance_view(td)
 
 
 def api_task(task_id: str) -> Optional[dict]:

@@ -85,7 +85,7 @@ class TestProtocolOverHTTP:
     def test_resources_and_prompts(self, http_server):
         srv, port = http_server
         _, r = _post(port, {"jsonrpc": "2.0", "id": 3, "method": "resources/list"})
-        assert len(r["result"]["resources"]) == 6
+        assert len(r["result"]["resources"]) == 7  # 含 spec-to-test acceptance（ADR-012）
         _, p = _post(port, {"jsonrpc": "2.0", "id": 4, "method": "prompts/list"})
         assert len(p["result"]["prompts"]) == 3
 

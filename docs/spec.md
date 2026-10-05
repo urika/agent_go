@@ -360,11 +360,14 @@ delete_checkpoint(task_dir, sub_id)         → 删除快照
 
 ## mcp_server.py — MCP server (stdio, JSON-RPC 2.0)
 
-> **状态**：6 工具 + 6 Resources + 3 Prompts 已落地。
+> **状态**：7 工具 + 7 Resources + 3 Prompts 已落地（工具面收敛：spec-to-test 不新增工具，
+> 以 Resource + `review_task` 扩 action 承载，见下）。
 
 ```
-TOOLS = [run_task, resume_task, inspect_task, review_task, list_tasks, cancel_task]
-RESOURCES = [Task List, Task Summary, Latest Plan, Metering Data, Review Status]
+TOOLS = [run_task, resume_task, inspect_task, review_task, governance_task, list_tasks, cancel_task]
+          run_task 可选参数：accept_tests（启用 spec-to-test）/ confirm_mode=web（停在 Plan 确认门等人工）
+          review_task action 扩展：acceptance（读验收状态）/ acceptance_review（提交验收草稿人审回执）
+RESOURCES = [Task List, Task Summary, Latest Plan, Metering Data, Recent Log, Review Status, Acceptance Tests]
 PROMPTS = [diagnose_failure, review_and_decide, resume_or_restart]
   ── spawn agent_go 子进程，解析 stdout JSONL → notifications/progress
   ── repo allowlist (AGENT_GO_MCP_ALLOWED_REPOS) fail-closed
@@ -599,7 +602,8 @@ restore_for_verify(worktree, task_dir, config, logger) / runtime_manifest(task_d
                                          → executor 侧统一入口（未启用时零开销 no-op）
 save_draft(task_dir, draft, logger, reason)
                                          → 未冻结草稿留档（DRAFT.json：跳过/未人审场景）
-sanitize_review(payload, config)         → 人审回执校验（CLI 编辑/web 确认统一入口；decision=approved|skipped，files 白名单+体量）
+task_acceptance_view(task_dir)           → 只读验收视图（web 控制台/MCP Resource 共用）：manifest+文件全文+草稿+采纳率+运行结果
+sanitize_review(payload, config)         → 人审回执校验（CLI 编辑/web 确认/MCP 统一入口；decision=approved|skipped，files 白名单+体量）
 merge_review(draft, review, logger)      → 回执按 path 合并进草稿（未知文件忽略）
 meta_block(manifest)                     → meta.json 的 acceptance 段（source/reviewed/sha256/commands）
 ```

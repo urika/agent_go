@@ -16,7 +16,7 @@
 ## 1. 目标与非目标
 
 **目标**
-- 6 个工具覆盖任务全生命周期：`run_task` / `resume_task` / `inspect_task` / `review_task` / `list_tasks` / `cancel_task`
+- 7 个工具覆盖任务全生命周期：`run_task` / `resume_task` / `inspect_task` / `review_task` / `governance_task` / `list_tasks` / `cancel_task`（工具面封闭：新能力走 Resources 或既有工具扩 action）
 - 长任务（分钟~小时级）的双模语义：异步立即返回 + 同步等待（progress notification 流式推进）
 - 事件流复用 IDS §4.6 的 JSON 事件 taxonomy，单一 schema 三处消费（终端 / MCP / CI）
 - stdio transport，Python stdlib 实现，不引入第三方依赖
@@ -289,7 +289,7 @@
 ```json
 {
   "name": "review_task",
-  "description": "对已完成任务做结果审查：analyze 返回 per-file diff 摘要（deep=true 时附独立模型分析）；approve/reject/changes_requested 记录人工决策到任务目录，供宿主与后续流程消费。",
+  "description": "对已完成任务做结果审查：analyze 返回 per-file diff 摘要（deep=true 时附独立模型分析）；approve/reject/changes_requested 记录人工决策到任务目录；acceptance 读取验收测试状态（spec-to-test，ADR-012）；acceptance_review 在 Plan 确认门（confirm_mode=web）代人工提交验收草稿人审回执（approved/skipped，可带编辑后的文件；宿主负责征询其用户，留痕 review_channel=mcp）。",
   "annotations": {
     "title": "Review task results and record decision",
     "readOnlyHint": false,
@@ -507,6 +507,7 @@ OpenClaw 路径同理（其 plugin SDK / MCP 工具接入等价），渠道渲�
 | **M3** | `current_activity` 进度字段（含子任务中间阶段活动 + inspect 查询） | P1-5（ADR-004） | ✅ M3 已完成 |
 | **M4** | Hermes/OpenClaw 集成指南 + 示例 skill | M1 | ✅ M4 已完成 |
 | **M5** | 增量工具：`list_tasks`（任务发现 + 状态过滤）+ `cancel_task`（SIGINT 优雅暂停）；Resources（Task List/Task Summary/Latest Plan/Metering Data/Recent Log/Review Status）+ Prompts（diagnose_failure/review_and_decide/resume_or_restart） | M1 | ✅ 已实现 |
+| **M6** | spec-to-test 验收测试面（ADR-012）：`run_task` 扩 `accept_tests`/`confirm_mode`；`review_task` 扩 `acceptance`/`acceptance_review`；Resource `agent_go://tasks/{task_id}/acceptance`（冻结件+人审留痕+采纳率+运行结果） | M1 | ✅ 已实现（不新增工具，保持工具面 7） |
 | **M6** | HTTP/SSE transport（`mcp_http.py`：POST /mcp + GET /mcp SSE + GET /health，`AGENT_GO_MCP_HTTP_TOKEN` Bearer 鉴权） | M1 | ✅ 已实现 |
 
 **验收标准**（当前状态）：

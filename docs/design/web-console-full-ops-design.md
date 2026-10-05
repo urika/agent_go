@@ -230,7 +230,7 @@ def confirm_plan(plan, *, mode: str, task_id: str = "") -> str:
 | R14 | Web 配置编辑（白名单 PUT） | 校验错误前端回显；保存后新任务生效 |
 | R15 | config diff 视图 | 字段级差异展示 |
 | R17 | worktree 清单视图 | 路径/branch/状态表格 |
-| R18 | **验收测试（spec-to-test，ADR-012）人审 + 观测**：确认卡片内草稿逐文件编辑/跳过（回执随 `POST /confirm` 提交，非法 400 不落盘）；任务详情页「验收测试」只读区（冻结状态/来源/人审/sha256/命令/文件全文/运行结果：验收通过与否、护栏①拦截恢复、advisory 语义评估）；`GET /api/tasks/<id>/acceptance`；列表冻结/降级标识 | 人审回执能落到冻结件（reviewed=true 且编辑生效）；回执缺失/非法时不冻结（require_review 降级为现状验证行为）；只读面 viewer 角色可见、无写操作；未启用任务该区为空 |
+| R18 | **验收测试（spec-to-test，ADR-012）人审 + 观测 + 事后追溯**：确认卡片内草稿逐文件编辑/跳过（回执随 `POST /confirm` 提交，非法 400 不落盘）；任务详情页「验收测试」只读区（冻结状态/来源/人审渠道/采纳率/起草→冻结耗时/起草成本/逐文件是否被编辑/sha256/命令/文件全文/运行结果：验收通过与否、护栏①拦截恢复、advisory 语义评估）；`GET /api/tasks/<id>/acceptance`；列表冻结/降级标识 | 人审回执能落到冻结件（reviewed=true 且编辑生效）；回执缺失/非法时不冻结（require_review 降级为现状验证行为）；只读面 viewer 角色可见、无写操作；未启用任务该区为空 |
 
 ---
 

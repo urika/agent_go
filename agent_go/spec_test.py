@@ -198,12 +198,14 @@ def draft_acceptance(
 
     role = str(conf.get("draft_role") or "planner")
     t0 = time.time()
+    _cost_before = _metering_cost_total(config)
     try:
         content = _api.call_api(config, messages, logger, role=role)
     except Exception as e:  # noqa: BLE001 - fail-open：起草失败不阻塞主链
         logger.warning(f"[spec_test] 起草调用失败（降级为现状验证行为）: {type(e).__name__}: {e}")
         return None
     latency_ms = (time.time() - t0) * 1000
+    draft_cost = max(0.0, _metering_cost_total(config) - _cost_before)
 
     raw = _extract_json_object(content or "")
     if raw is None:
@@ -215,11 +217,38 @@ def draft_acceptance(
         return None
     draft["model"] = str((config.get("plan_api") or {}).get("model") or role)
     draft["latency_ms"] = latency_ms
+    draft["cost_usd"] = draft_cost
+    draft["drafted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     logger.info(
         f"[spec_test] 验收测试草稿就绪: {len(draft['files'])} 个文件 / "
         f"{len(draft['commands'])} 条命令 / {latency_ms:.0f}ms"
     )
     return draft
+
+
+def _metering_cost_total(config: Optional[dict[str, Any]]) -> float:
+    """当前 metering.jsonl 的累计成本（用于起草调用的增量成本留痕）。
+
+    起草发生在 Plan 阶段（pipeline 未启动、无并发子任务），差分口径安全；
+    文件缺失/坏行一律按 0 计（留痕尽力而为，不影响主链）。
+    """
+    path = (config or {}).get("_metering_path")
+    if not path:
+        return 0.0
+    total = 0.0
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    total += float(json.loads(line).get("cost_usd") or 0.0)
+                except (ValueError, TypeError):
+                    continue
+    except OSError:
+        return 0.0
+    return total
 
 
 def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
@@ -332,8 +361,14 @@ def freeze(
     logger: logging.Logger,
     review_edits: int = 0,
     frozen_dir: str = "",
+    review_channel: str = "",
 ) -> Optional[dict[str, Any]]:
-    """把人审后的草稿冻结到 ``<task_dir>/acceptance/``（files/ + manifest.json）。"""
+    """把人审后的草稿冻结到 ``<task_dir>/acceptance/``（files/ + manifest.json）。
+
+    留痕（事后分析追溯）：review_channel（cli|web|mcp|provided）／drafted_at／
+    draft_model／draft_cost_usd／review_edits；原始草稿另存 DRAFT.json（由调用方
+    在起草后立即留档），冻结件与草稿的差异即"人审编辑"事实，可算采纳率/编辑距离。
+    """
     task_dir = Path(task_dir)
     root = acceptance_root(task_dir)
     files_root = root / FILES_DIRNAME
@@ -342,6 +377,8 @@ def freeze(
         "source": source,
         "reviewed": bool(reviewed),
         "review_edits": int(review_edits),
+        "review_channel": review_channel,
+        "drafted_at": str(draft.get("drafted_at") or ""),
         "frozen_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "frozen_dir": frozen_dir or str(_DEFAULTS["frozen_dir"]),
         "notes": draft.get("notes", ""),
@@ -414,6 +451,94 @@ def acceptance_commands(task_dir: Optional[Path], config: Optional[dict[str, Any
     return list(manifest.get("commands") or []) if manifest else []
 
 
+def task_acceptance_view(task_dir: Path) -> dict[str, Any]:
+    """验收测试只读视图（web 控制台 / MCP Resource / 事后分析共用）。
+
+    返回：meta 段 + 冻结 manifest + 文件全文 + 原始草稿（DRAFT.json）+
+    人审采纳率（adoption）+ 运行结果（acceptance / acceptance_restore /
+    semantic_advisory）。纯读，不做任何写操作。
+    """
+    task_dir = Path(task_dir)
+    meta: dict[str, Any] = {}
+    try:
+        meta = json.loads((task_dir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    manifest = load_manifest(task_dir)
+    files: list[dict[str, Any]] = []
+    if manifest:
+        root = acceptance_root(task_dir) / FILES_DIRNAME
+        for item in manifest.get("files") or []:
+            rel = _safe_rel_path(str(item.get("path") or ""))
+            if not rel:
+                continue
+            try:
+                content = (root / rel).read_text(encoding="utf-8", errors="replace")[:20000]
+            except OSError:
+                content = ""
+            files.append({"path": rel, "sha256": item.get("sha256", ""),
+                          "bytes": item.get("bytes", 0), "content": content})
+    draft = None
+    draft_files: dict[str, str] = {}
+    draft_path = acceptance_root(task_dir) / "DRAFT.json"
+    if draft_path.exists():
+        try:
+            d = json.loads(draft_path.read_text(encoding="utf-8"))
+            draft = {
+                "reason": d.get("_saved_reason", ""),
+                "saved_at": d.get("_saved_at", ""),
+                "drafted_at": d.get("drafted_at", ""),
+                "model": d.get("model", ""),
+                "cost_usd": float(d.get("cost_usd") or 0.0),
+                "commands": d.get("commands") or [],
+                "files": [f.get("path") for f in (d.get("files") or []) if isinstance(f, dict)],
+            }
+            draft_files = {str(f.get("path")): str(f.get("content") or "")
+                           for f in (d.get("files") or []) if isinstance(f, dict)}
+        except (json.JSONDecodeError, OSError):
+            draft = None
+    # 人审编辑事实（事后分析追溯）：冻结件 vs 原始草稿逐文件对比 → 采纳率可算
+    for f in files:
+        d_content = draft_files.get(f["path"])
+        if d_content is None:
+            f["edited"] = None  # 无草稿对照（如评测口径 provided）→ 不可判
+        else:
+            f["edited"] = d_content != f["content"]
+            f["draft_lines"] = len(d_content.splitlines())
+            f["frozen_lines"] = len(f["content"].splitlines())
+    judged = [f for f in files if f.get("edited") is not None]
+    adoption = round(sum(0 if f["edited"] else 1 for f in judged) / len(judged), 3) if judged else None
+
+    runtime: list[dict[str, Any]] = []
+    for r in meta.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        for vr in r.get("verification_results") or []:
+            if not isinstance(vr, dict) or vr.get("type") not in (
+                    "acceptance", "acceptance_restore", "semantic_advisory"):
+                continue
+            runtime.append({
+                "subtask_id": r.get("subtask_id", ""),
+                "type": vr.get("type"),
+                "command": vr.get("command", ""),
+                "exit_code": vr.get("exit_code"),
+                "attempt": vr.get("attempt"),
+                "restored": vr.get("restored"),
+                "passed": vr.get("passed"),
+                "reason": (vr.get("reason") or "")[:200],
+            })
+    return {
+        "task_id": task_dir.name,
+        "enabled": bool((meta.get("acceptance") or {}).get("enabled") or manifest),
+        "meta": meta.get("acceptance") or {},
+        "manifest": manifest,
+        "files": files,
+        "draft": draft,
+        "adoption": adoption,
+        "runtime": runtime,
+    }
+
+
 def freeze_from_provided(
     task_dir: Path, config: Optional[dict[str, Any]], logger: logging.Logger
 ) -> Optional[dict[str, Any]]:
@@ -449,7 +574,7 @@ def freeze_from_provided(
             files.append({"path": rel, "content": p.read_text(encoding="utf-8", errors="replace")})
         draft = {"files": files, "commands": commands, "notes": "provided by task definition", "model": "provided"}
         return freeze(task_dir, draft, reviewed=True, source="task", logger=logger,
-                      frozen_dir=str(conf.get("frozen_dir") or ""))
+                      frozen_dir=str(conf.get("frozen_dir") or ""), review_channel="provided")
     except Exception as e:  # noqa: BLE001 - fail-open
         logger.warning(f"[spec_test] 从 provided_dir 冻结失败: {type(e).__name__}: {e}")
         return None
@@ -620,6 +745,8 @@ def meta_block(manifest: Optional[dict[str, Any]]) -> dict[str, Any]:
         "commands": list(manifest.get("commands") or []),
         "draft_model": manifest.get("draft_model", ""),
         "draft_cost_usd": float(manifest.get("draft_cost_usd") or 0.0),
+        "drafted_at": manifest.get("drafted_at", ""),
+        "review_channel": manifest.get("review_channel", ""),
     }
 
 
@@ -666,5 +793,6 @@ __all__ = [
     "sanitize_draft",
     "sanitize_review",
     "save_draft",
+    "task_acceptance_view",
     "usable_manifest",
 ]

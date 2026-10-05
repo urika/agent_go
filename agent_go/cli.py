@@ -690,8 +690,12 @@ def _acceptance_review_possible(config, headless: bool) -> bool:
 
 
 def _prepare_acceptance_draft(task, config, logger, *, spec_context="", docs_context="", repo=None,
-                              headless: bool = False):
-    """起草验收测试草稿（spec-to-test）。任何不可用情形 → None（fail-open）。"""
+                              headless: bool = False, task_dir=None):
+    """起草验收测试草稿（spec-to-test）。任何不可用情形 → None（fail-open）。
+
+    起草成功后立即把**原始草稿**留档 DRAFT.json（reason="drafted"）：冻结件与它的差异
+    即"人审编辑"事实，供事后计算采纳率/编辑距离（ADR-012 验收口径）。
+    """
     from . import spec_test as _st
     if not _st.is_enabled(config):
         return None
@@ -706,19 +710,24 @@ def _prepare_acceptance_draft(task, config, logger, *, spec_context="", docs_con
             "（草稿需人审；如需无审阅启用请显式设 spec_test.require_review=false）")
         return None
     repo_hint = f"repo={Path(repo).name}" if repo is not None else ""
-    return _st.draft_acceptance(task, config, logger, spec_context=spec_context,
-                                docs_context=docs_context, repo_hint=repo_hint)
+    draft = _st.draft_acceptance(task, config, logger, spec_context=spec_context,
+                                 docs_context=docs_context, repo_hint=repo_hint)
+    if draft and task_dir is not None:
+        _st.save_draft(task_dir, draft, logger, reason="drafted")
+    return draft
 
 
 def _freeze_acceptance_after_review(task_dir, draft, state, config, logger):
     """按人审结果冻结（approved→reviewed=True；skipped/未人审→不冻结，草稿留档）。
 
+    review_channel 留痕：web 确认门 / CLI tty / mcp（agent 代审）——供事后归因。
     返回冻结 manifest（未冻结为 None）。
     """
     from . import spec_test as _st
     if not draft:
         return None
     conf = _st.cfg(config)
+    channel = "web" if config.get("behavior", {}).get("web_confirm_plan") else "cli"
     decision = (state or {}).get("decision")
     if decision == "skipped":
         logger.info("[spec_test] 用户跳过验收测试 oracle（草稿留档，不冻结）")
@@ -737,7 +746,7 @@ def _freeze_acceptance_after_review(task_dir, draft, state, config, logger):
     return _st.freeze(
         task_dir, draft, reviewed=reviewed, source="drafted", logger=logger,
         review_edits=int((state or {}).get("edits") or 0),
-        frozen_dir=str(conf.get("frozen_dir") or ""))
+        frozen_dir=str(conf.get("frozen_dir") or ""), review_channel=channel)
 
 
 def _spec_test_meta_block(manifest, state, config=None) -> dict:
@@ -1273,7 +1282,7 @@ def cmd_run(args=None):
             # spec-to-test（ADR-012）：起草验收测试，随 Plan 确认门一并人审（不新增人工停点）
             acceptance_draft = _prepare_acceptance_draft(
                 task, config, logger, spec_context=spec_context,
-                docs_context=initial_docs, repo=repo, headless=headless)
+                docs_context=initial_docs, repo=repo, headless=headless, task_dir=task_dir)
             confirmed_plan, final_doc_paths = _confirm_plan_channel(
                 plan, config, repo, logger, iteration=_confirm_iteration, task=task, plan_dir=task_dir,
                 acceptance=acceptance_draft, acceptance_state=acceptance_state)

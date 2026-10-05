@@ -48,7 +48,45 @@ tdd 臂（验收契约 test_patch 预置可见）对 plain 臂的配对差异（
 - `Cost per Accepted Delivery` 不升；`Human Intervention Minutes` 不增（以"并入 Plan 确认门"为前提）；
 - 草稿质量度量：人审采纳率 / 编辑距离（作为拍板依据采集）。
 
-## 开放问题（拍板前须答）
+## 整体流程与自动化 / 留痕边界
+
+| # | 阶段 | 执行者 | 自动化 | 留痕件 | 事后可查（追溯） |
+|---|---|---|---|---|---|
+| 0 | 任务输入 | 人 / 上层 agent | — | Task Spec、`tasks.json`、`spec_snapshot.md` | `requirement_ids` / `acceptance_criteria_ids` |
+| 1 | 起草验收测试 | LLM（`draft_role`，默认 planner 档位） | ✅ 自动（enabled 时，一次/任务） | `acceptance/DRAFT.json`（原始草稿 + `model`/`latency`/`cost_usd`/`drafted_at`） | 草稿全文、模型档位、起草成本（metering 差分）、起草时刻 |
+| 2 | **人审**（护栏①前置） | **人**：CLI tty `[T]/[K]`／web 控制台确认卡片（编辑/跳过）／MCP 由宿主代人工 | ❌ **必须人审**（`require_review=true`） | `confirmation_decision.json`（`acceptance` 回执）+ DRAFT.json 保留原文 | 决策（approved/skipped）、编辑文件数、渠道（cli/web/mcp/provided）、采纳率、起草→冻结耗时 |
+| 3 | 冻结 | 自动 | ✅ | `acceptance/manifest.json` + `files/`（逐文件 sha256） | 冻结哈希、`frozen_dir`、`reviewed`、冻结时刻 |
+| 4 | 注入（先于 worker） | 自动（每子任务） | ✅ | worktree `<frozen_dir>/` + 冻结提交 | 注入文件清单 + commit（`result.json.acceptance`） |
+| 5 | worker 实现（契约可见） | claude / 本地 backend | ✅ | TASK.md「验收测试（冻结·只读契约）」章节 | 契约是否随任务下发 |
+| 6 | 重放验证（护栏①②③） | 自动 | ✅ | `verification_results`：`acceptance` / `acceptance_restore` / `semantic_advisory` | 每次尝试的命令与退出码、护栏①拦截次数与被恢复文件、advisory 判定理由 |
+| 7 | 判定 / 修复重试 | 自动 | ✅ | `verify_state.json`、`verification_history` | 首次验证通过率、重试轮次、失败命令、修复后是否收敛 |
+| 8 | 交付 | 自动 | ✅ | `meta.json`（`acceptance` 段 + 交付字段） | Cost per AD、Accepted Delivery 原因码 |
+| 9 | **事后分析 / 校准** | 人 + 工具 | 半自动（数据已全，聚合待补） | 上述全部 + `metering.jsonl` | 四项预注册口径（见下）+ 误判复盘 |
+
+**自动化边界（判据）**
+
+- **可全自动**：内容生成（起草）与状态机推进（冻结→注入→重放→判定→重试）。每步 fail-open + 降级留痕（`degraded`/`DRAFT.json`），失败不阻塞主交付链。
+- **必须人工**：冻结前的**采信决策**——ADR「约束」节：错误需求会被起草成更难纠正的错误测试（40ade 教训），人审是生产口径的真值锚。落地为「不新增人工停点」：审阅并入既有 Plan 确认门。
+- **仅评测口径免人审**：`provided_dir` 用任务定义冻结件（出题人≠解题人），人审由"任务定义已冻结"这一事实替代。
+- **可代理但不自动**：MCP 由宿主（Claude Code 等）征询其用户后代提交人审回执（`review_task(action=acceptance_review)`），留痕 `review_channel=mcp`。
+
+**追溯入口（人 / agent 两用）**
+
+- 人：web 控制台任务详情「验收测试」区（冻结状态、人审渠道与采纳率、起草→冻结留痕、文件全文、护栏①拦截与 advisory 运行结果）；CLI 场景直接看 `<task_dir>/acceptance/`。
+- Agent：MCP Resource `agent_go://tasks/{task_id}/acceptance`（同一数据组装 `spec_test.task_acceptance_view`）；`review_task(action=acceptance)` 返回同视图。
+
+**四项预注册口径 → 数据源**
+
+| 口径 | 数据源 |
+|---|---|
+| 首次验证通过率 | `verification_results` 中 `type=acceptance` 且 `attempt=1` 的通过比例 |
+| ISSUE-29/31 类误判率 | 验证命令 `rejected`/`exit_code=127` 计数（安全门禁拒绝、命令不可执行）+ 冻结 oracle 与语义评估冲突（`semantic_advisory`）复盘 |
+| Cost per Accepted Delivery | `metering.jsonl`（含起草差分 `draft_cost_usd`）+ 既有 `eval` 成本口径 |
+| 人审干预分钟数 | `drafted_at` → `frozen_at` 差值（合并进既有 Plan 确认门，故只计增量） |
+
+> 缺口（登记为后续）：四项口径**尚无自动聚合命令**（数据面已完整）；`draft_cost_usd` 依赖 metering 差分（并发起草场景不存在，口径安全）。
+
+## 开放问题（落地后收敛）
 
 1. 冻结测试文件的落点与命名约定 → **已定**：canonical 冻结件在 `<task_dir>/acceptance/`（`files/` + `manifest.json` 含逐文件 sha256）；注入 worktree 的仓库内相对目录由 `spec_test.frozen_dir` 配置（默认 `tests/acceptance`），注入即先行提交进子任务 base（worker 只读契约）。
 2. 起草调用的模型档位与 difficulty 路由关系 → **已定**：`spec_test.draft_role`（默认 `planner`，经 `router.resolve_role` 走既有角色路由；不按 difficulty 细分——起草质量受模型档位影响，先用 planner 档位采集采纳率/编辑距离再定）。
