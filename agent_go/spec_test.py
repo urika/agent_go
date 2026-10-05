@@ -257,6 +257,58 @@ def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
 
 # ── 冻结 / 读取 ───────────────────────────────────────────────────────
 
+def sanitize_review(payload: Any, config: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+    """校验人审回执（CLI 编辑 / web 确认通道统一入口）。
+
+    形态：``{"decision": "approved"|"skipped", "edits": n, "files": [{"path","content"}]}``。
+    路径走白名单、内容限体量；任一非法 → None（调用方按"未人审"降级）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    decision = str(payload.get("decision") or "").strip().lower()
+    if decision not in ("approved", "skipped"):
+        return None
+    conf = cfg(config)
+    out: dict[str, Any] = {
+        "decision": decision,
+        "edits": max(0, int(payload.get("edits") or 0)),
+    }
+    files_in = payload.get("files")
+    if isinstance(files_in, list):
+        files: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in files_in:
+            if not isinstance(item, dict) or len(files) >= int(conf["max_files"]):
+                continue
+            rel = _safe_rel_path(str(item.get("path") or ""))
+            content = item.get("content")
+            if not rel or rel in seen or not isinstance(content, str) or not content.strip():
+                return None
+            if len(content.encode("utf-8")) > int(conf["max_file_bytes"]):
+                return None
+            seen.add(rel)
+            files.append({"path": rel, "content": content})
+        if files:
+            out["files"] = files
+    return out
+
+
+def merge_review(
+    draft: dict[str, Any], review: Optional[dict[str, Any]], logger: logging.Logger
+) -> dict[str, Any]:
+    """把人审回执合并进草稿（按 path 覆盖内容；回执未含的文件保持原样）。"""
+    if not review or not review.get("files"):
+        return draft
+    by_path = {f.get("path"): f for f in (draft.get("files") or [])}
+    for item in review["files"]:
+        rel, content = item["path"], item["content"]
+        if rel in by_path:
+            by_path[rel]["content"] = content
+        else:
+            logger.warning(f"[spec_test] 人审回执含未知文件（忽略）: {rel}")
+    return draft
+
+
 def save_draft(task_dir: Path, draft: dict[str, Any], logger: logging.Logger, reason: str = "") -> None:
     """未冻结草稿留档（跳过/未人审场景），供后续 `--accept-tests` 复用与人工核查。"""
     try:
@@ -604,6 +656,7 @@ __all__ = [
     "is_enabled",
     "load_manifest",
     "manifest_path",
+    "merge_review",
     "meta_block",
     "open_in_editor",
     "restore_for_verify",
@@ -611,6 +664,7 @@ __all__ = [
     "review_text",
     "runtime_manifest",
     "sanitize_draft",
+    "sanitize_review",
     "save_draft",
     "usable_manifest",
 ]

@@ -63,6 +63,8 @@ tdd 臂（验收契约 test_patch 预置可见）对 plain 臂的配对差异（
 |---|---|---|
 | 模块 | `agent_go/spec_test.py` | 起草（LLM）→ 清洗（路径/命令安全面）→ 冻结（sha256 manifest）→ 注入 → 重放 → meta 段；全链 fail-open |
 | 起草+人审 | `cli.py` `_prepare_acceptance_draft` / `_freeze_acceptance_after_review`；`ui.py` `confirm_plan(acceptance=...)` + `_review_acceptance_draft_interactive` | 草稿随 Plan 确认门展示（[T] 逐个编辑 [K] 跳过 [B] 返回）；Y=按草稿冻结（reviewed=True）；不新增人工停点 |
+| 起草+人审（web） | `web_confirm.py`（payload 带 `_acceptance_draft`；决策回执带 `acceptance`）／`web_ops.py` `_op_confirm`（回执校验，非法 400 不落盘）／`cli.py` `_confirm_plan_channel`（回执合并进草稿）／`web_frontend.py` `renderAcceptanceDraft`（每个文件可展开编辑 + 跳过勾选） | web 确认门与 CLI 门**同审同冻结**：`--confirm-mode web` 不再是"无人审"降级路径；回执非法或不带 → 按未人审处理（require_review 降级） |
+| 只读观察面（web） | `web_data.py` `api_task_acceptance` + `_acceptance_summary`；`web_handler.py` `GET /api/tasks/<id>/acceptance`；`web_frontend.py` `renderAcceptancePanel` | 任务详情页「验收测试」区：冻结状态/来源/人审/sha256/命令 + 文件全文 + 运行结果（验收通过与否、护栏①拦截恢复、advisory 语义评估）；列表加冻结/降级标识。仅读，viewer 角色可用 |
 | 护栏① | `executor.py` `run_subtask`（启动前注入+提交）+ `_verify_changes`（提交前/每轮重放前/修复提交前恢复） | 恢复以 canonical 冻结件为准（内容比对，幂等）；注入提交从"worker 自提交"判定中排除（防空转误判 completed） |
 | 护栏② | `executor.py` `_verify_changes`（验收命令合入 `cmds`，`type=acceptance`） | 复用既有安全门禁/沙箱/超时/失败回修链 |
 | 护栏③ | `executor.py` 语义评估分支（`spec_test.oracle_priority`，默认 true） | oracle 通过 ⇒ 语义评估失败降级 `semantic_advisory`（不阻断）；oracle 未跑/未过 ⇒ 原判定不变 |
@@ -71,6 +73,6 @@ tdd 臂（验收契约 test_patch 预置可见）对 plain 臂的配对差异（
 | CLI | `--accept-tests` / `--no-accept-tests` | 覆盖 config；`--yes`/headless + `require_review=true` ⇒ 自动降级（留档草稿，不启用 oracle） |
 | 测试 | `tests/test_spec_test.py`（40 例） | 含真实 git + 真实 pytest 子进程的集成用例（注入/重放/验收命令执行/护栏①拦截）、CLI 决策路径、安全清洗 |
 
-未接入（登记为后续）：e2e 模式起草（无 Plan 确认门）；web 确认通道的人审（当前按"无人审"降级）；验收指标的自动采集（采纳率/编辑距离需人审数据积累）。
+未接入（登记为后续）：e2e 模式起草（无 Plan 确认门）；验收指标的自动采集（采纳率/编辑距离需人审数据积累；web 面已提供人审回执字段 `edits` 可先行采集）。
 
 跨仓对齐：swe-eval 评测侧孪生（受控信息供给/任务定义冻结纪律）；EXP-12 轮 2 H2 判读件为验收口径的终稿证据源。

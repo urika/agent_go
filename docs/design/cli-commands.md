@@ -143,7 +143,8 @@ agent_go clean                        # 清理全部任务数据
 agent_go clean --older-than 7         # 只清理早于 7 天前的任务（保留期）
 agent_go clean --fixture-worktrees    # 只清理 eval_suite/fixtures/ 下失效 worktree 注册（ISSUE-38）
 
-# Web 操作台（观测 + 处置：任务启动/恢复/取消/清理/审批/合并/PR + 配置中心 local⇄cloud + 健康检查 + 🗂 看板任务管理）
+# Web 操作台（观测 + 处置：任务启动/恢复/取消/清理/审批/合并/PR + 验收测试人审与观测（spec-to-test）
+#            + 配置中心 local⇄cloud + 健康检查 + 🗂 看板任务管理）
 agent_go web --host 127.0.0.1 --port 8091   # 打开 http://127.0.0.1:8091
 agent_go web --token xxx                     # 可选 Bearer token 鉴权
 ```

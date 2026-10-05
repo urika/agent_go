@@ -51,6 +51,7 @@ from .web_data import (
     api_storage,
     api_subtask_detail,
     api_task,
+    api_task_acceptance,
     api_task_file,
     api_task_report,
     api_task_review,
@@ -413,6 +414,13 @@ class WebHandler(WebOpsMixin, BaseHTTPRequestHandler):
                 return
             if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "notes":
                 data = api_notes(parts[2])
+                if data is None:
+                    self._reply_json(404, {"error": "task not found"})
+                else:
+                    self._reply_json(200, data)
+                return
+            if len(parts) == 4 and parts[1] == "tasks" and parts[3] == "acceptance":
+                data = api_task_acceptance(parts[2])
                 if data is None:
                     self._reply_json(404, {"error": "task not found"})
                 else:

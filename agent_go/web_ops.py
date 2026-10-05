@@ -504,11 +504,27 @@ class WebOpsMixin(WebKanbanMixin):
         if decision not in allowed:
             self._reply_json(400, {"error": f"stage={stage} 的 decision 须为 {'/'.join(sorted(allowed))}"})
             return
-        decision_path = td / "confirmation_decision.json"
-        decision_path.write_text(json.dumps({
+        # spec-to-test（ADR-012）：可选人审回执（仅 plan 门；非法载荷 400 拒收，不落盘）
+        acceptance_out = None
+        acceptance_in = body.get("acceptance")
+        if isinstance(acceptance_in, dict) and acceptance_in:
+            if stage != "plan":
+                self._reply_json(400, {"error": "acceptance 回执仅支持 stage=plan"})
+                return
+            from . import spec_test
+            acceptance_out = spec_test.sanitize_review(acceptance_in)
+            if acceptance_out is None:
+                self._reply_json(400, {"error": "acceptance 回执非法（decision 须为 approved/skipped；"
+                                                "files 须为白名单内相对路径且不超体量）"})
+                return
+        decision_payload: dict = {
             "stage": stage, "decision": decision,
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }, ensure_ascii=False), encoding="utf-8")
+        }
+        if acceptance_out is not None:
+            decision_payload["acceptance"] = acceptance_out
+        decision_path = td / "confirmation_decision.json"
+        decision_path.write_text(json.dumps(decision_payload, ensure_ascii=False), encoding="utf-8")
         # W3.1：design 列卡片计划确认后自动流转 implementation（Y 决策时）
         if decision == "Y":
             try:
@@ -519,6 +535,9 @@ class WebOpsMixin(WebKanbanMixin):
             except Exception as _ke:
                 logger.warning("[kanban] 确认后流转失败: %s", _ke)
         result = {"task_id": task_id, "stage": stage, "decision": decision, "status": "accepted"}
+        if acceptance_out is not None:
+            result["acceptance"] = {"decision": acceptance_out["decision"], "edits": acceptance_out["edits"],
+                                    "files": len(acceptance_out.get("files") or [])}
         _audit("tasks.confirm", {"task_id": task_id, "stage": stage, "decision": decision},
                result, True, token)
         self._reply_json(200, result)

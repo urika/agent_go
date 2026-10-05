@@ -43,11 +43,16 @@ def read_pending(task_dir: Path) -> Optional[dict]:
 
 
 def web_confirm(stage: str, payload: Any, task_dir: Path, logger: logging.Logger,
-                timeout: float = DEFAULT_TIMEOUT_SEC) -> str:
+                timeout: float = DEFAULT_TIMEOUT_SEC,
+                acceptance_state: Optional[dict] = None) -> str:
     """写 pending 并阻塞等待 web 决策，返回 "Y"/"R"/"N"（超时按 "N"）。
 
     payload：plan dict（stage=plan）或 {"subtasks": [...]}（stage=subtasks），
-    原样序列化供前端渲染。
+    原样序列化供前端渲染；spec-to-test 草稿随 payload["_acceptance_draft"] 附带
+    （ADR-012：web 确认门内一并人审）。
+
+    acceptance_state：提供时，若决策回执带 ``acceptance`` 段则回填
+    ``{"decision": "approved"|"skipped", "edits": n, "files": [...]}``；未带 = 未人审。
     """
     pending = {
         "stage": stage,
@@ -68,6 +73,17 @@ def web_confirm(stage: str, payload: Any, task_dir: Path, logger: logging.Logger
                 data = None
             if isinstance(data, dict) and data.get("stage") == stage and data.get("decision"):
                 decision = str(data["decision"]).upper()
+                # spec-to-test（ADR-012）：人审回执透传给调用方（未带 = 未人审 → 按 require_review 降级）
+                if acceptance_state is not None and isinstance(data.get("acceptance"), dict):
+                    acc = data["acceptance"]
+                    acceptance_state["decision"] = str(acc.get("decision") or "")
+                    acceptance_state["edits"] = int(acc.get("edits") or 0)
+                    files = acc.get("files")
+                    if isinstance(files, list):
+                        acceptance_state["files"] = [
+                            {"path": str(f.get("path", "")), "content": str(f.get("content", ""))}
+                            for f in files if isinstance(f, dict)
+                        ]
                 for p in (decision_path, pending_path):
                     try:
                         p.unlink()

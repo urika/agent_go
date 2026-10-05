@@ -662,7 +662,7 @@ async function loadExtraPanels(id, td) {
   const anchor = td.querySelector('#reviewPanel');
   if (!anchor) return;
   const box = document.createElement('div');
-  box.innerHTML = '<div id="devPanel"></div><div id="wtPanel"></div>';
+  box.innerHTML = '<div id="devPanel"></div><div id="wtPanel"></div><div id="accPanel"></div>';
   anchor.after(box);
   try {
     const dv = await api('/api/tasks/'+encodeURIComponent(id)+'/deviation');
@@ -696,6 +696,47 @@ async function loadExtraPanels(id, td) {
         '<tbody>'+rows+'</tbody></table>';
     }
   } catch (e) {}
+  await renderAcceptancePanel(id, box.querySelector('#accPanel'));
+}
+
+// spec-to-test（ADR-012）：任务验收测试面板（只读）——冻结件 + 草稿留档 + 运行结果
+async function renderAcceptancePanel(id, el) {
+  if (!el) return;
+  let d;
+  try { d = await api('/api/tasks/'+encodeURIComponent(id)+'/acceptance'); }
+  catch (e) { return; }
+  if (!d || !d.enabled) { el.innerHTML = ''; return; }
+  const m = d.manifest || {};
+  const meta = d.meta || {};
+  const srcLabel = m.source === 'task' ? '评测口径（任务定义提供，出题人≠解题人）'
+                                       : (m.source === 'drafted' ? 'AI 起草 + 人审冻结' : '');
+  let head = '<div class="section-title">🧪 验收测试（spec-to-test）</div><div class="h-line">'+
+    '状态: '+(m.files ? '已冻结' : '未冻结')+
+    (srcLabel ? '｜来源: '+esc(srcLabel) : '')+
+    (m.reviewed !== undefined ? '｜人审: '+(m.reviewed ? '✅ 已审'+(m.review_edits? '（改动 '+m.review_edits+'）':'') : '⚠️ 未审') : '')+
+    (m.frozen_at ? '｜冻结于 '+esc(m.frozen_at) : '')+'</div>';
+  if (meta.degraded) head += '<div class="h-line" style="color:var(--yellow)">⚠️ 本次运行未启用验收 oracle（降级为现状验证行为）'+
+    (meta.review_decision === 'skipped' ? '：用户跳过' : '')+'</div>';
+  if (d.draft) head += '<div class="h-line">草稿留档: '+esc(d.draft.reason||'')+' '+
+    '（'+((d.draft.files||[]).length)+' 文件, '+((d.draft.commands||[]).length)+' 命令, '+esc(d.draft.saved_at||'')+'）</div>';
+  const cmds = (m.commands || []);
+  if (cmds.length) head += '<div class="h-line">验收命令: '+cmds.map(c => '<code>'+esc(c)+'</code>').join(' ')+'</div>';
+  const filesHtml = (d.files || []).map(f =>
+    '<details style="margin:4px 0"><summary style="cursor:pointer">'+esc(f.path)+
+    ' <span style="color:var(--dim);font-size:11px">'+esc((f.sha256||'').slice(0,12))+' · '+f.bytes+'B</span></summary>'+
+    '<pre style="max-height:320px;overflow:auto">'+esc(f.content||'')+'</pre></details>').join('');
+  const rt = (d.runtime || []);
+  const rtRows = rt.map(r => {
+    if (r.type === 'acceptance_restore') return '<tr><td>'+esc(r.subtask_id)+'</td><td>🛡️ 护栏①拦截</td>'+
+      '<td colspan="2">worker 改动了冻结测试 → 已恢复 '+(r.restored||[]).join(', ')+'</td></tr>';
+    if (r.type === 'semantic_advisory') return '<tr><td>'+esc(r.subtask_id)+'</td><td>💬 语义评估(advisory)</td>'+
+      '<td colspan="2">'+esc((r.reason||'').slice(0,120))+'</td></tr>';
+    return '<tr><td>'+esc(r.subtask_id)+'</td><td>🧪 验收命令</td><td>'+(r.exit_code===0?'✅ 通过':'❌ '+esc(String(r.exit_code)))+
+      '</td><td>'+esc((r.command||'').slice(0,80))+'</td></tr>';
+  }).join('');
+  el.innerHTML = head +
+    (filesHtml ? '<div style="margin-top:6px">'+filesHtml+'</div>' : '') +
+    (rtRows ? '<table style="margin-top:8px"><thead><tr><th>子任务</th><th>类型</th><th>结果</th><th>命令/说明</th></tr></thead><tbody>'+rtRows+'</tbody></table>' : '');
 }
 
 async function loadPendingCard(id, td) {
@@ -740,13 +781,16 @@ async function loadPendingCard(id, td) {
       '<button class="btn" data-cf="N">❌ 取消任务</button>'
     : '<button class="btn primary" data-cf="Y">✅ 确认子任务</button>'+
       '<button class="btn" data-cf="N">❌ 取消任务</button>';
+  // spec-to-test（ADR-012）：验收测试草稿在确认门内一并人审（可编辑/跳过；随决策回执提交）
+  const acc = (p.stage === 'plan' && p.payload && p.payload._acceptance_draft) || null;
+  const accHtml = acc ? renderAcceptanceDraft(acc) : '';
   slot.innerHTML =
     '<div class="pending-card">'+
     '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'+
     '<span style="font-size:16px">🔔</span>'+
     '<span style="font-weight:600">等待确认：'+(p.stage === 'plan' ? '执行计划' : '子任务拆解')+'</span>'+
     '<span style="color:var(--yellow);font-size:12px">约 '+left+' 分钟后超时自动取消</span></div>'+
-    body+
+    body+accHtml+
     '<div class="op-bar" style="margin-top:10px">'+btns+'<span class="op-msg" id="cfMsg"></span></div>'+
     '</div>';
   slot.querySelectorAll('[data-cf]').forEach(btn => {
@@ -754,9 +798,21 @@ async function loadPendingCard(id, td) {
       const decision = btn.dataset.cf;
       const msg = slot.querySelector('#cfMsg');
       if (decision === 'N' && !confirm('取消任务 '+id+'？')) return;
+      // 收集验收草稿人审回执（仅编辑过的文件上送；跳过 = skipped）
+      let acceptance = null;
+      if (acc) {
+        const skip = slot.querySelector('#accSkip');
+        const edited = [];
+        slot.querySelectorAll('.acc-edit').forEach(t => {
+          const orig = ((acc.files||[]).find(f => f.path === t.dataset.path) || {}).content || '';
+          if (t.value !== orig) edited.push({path: t.dataset.path, content: t.value});
+        });
+        acceptance = {decision: (skip && skip.checked) ? 'skipped' : 'approved', edits: edited.length, files: edited};
+      }
       btn.disabled = true;
       try {
-        await postJSON('/api/tasks/'+encodeURIComponent(id)+'/confirm', {stage: p.stage, decision});
+        await postJSON('/api/tasks/'+encodeURIComponent(id)+'/confirm',
+                       {stage: p.stage, decision, acceptance});
         msg.textContent = '✅ 已提交决策: '+decision; msg.style.color = 'var(--green)';
         setTimeout(() => loadPendingCard(id, td), 3000);
       } catch (e) {
@@ -765,6 +821,25 @@ async function loadPendingCard(id, td) {
       }
     };
   });
+}
+
+// spec-to-test（ADR-012）：确认门内的验收测试草稿面板（人审：查看/编辑/跳过）
+function renderAcceptanceDraft(acc) {
+  const files = acc.files || [];
+  const rows = files.map(f =>
+    '<details style="margin:4px 0"><summary style="cursor:pointer">'+esc(f.path||'')+
+    ' <span style="color:var(--dim);font-size:11px">（点开可编辑）</span></summary>'+
+    '<textarea class="acc-edit" data-path="'+esc(f.path||'')+'" rows="10" '+
+    'style="width:100%;font-family:Menlo,monospace;font-size:12px;margin-top:4px">'+esc(f.content||'')+'</textarea>'+
+    '</details>').join('');
+  return '<div style="margin-top:10px;border-top:1px dashed var(--dim);padding-top:8px">'+
+    '<div style="font-weight:600;margin-bottom:4px">🧪 验收测试草稿（冻结后作为可执行验收 oracle）</div>'+
+    '<div style="color:var(--dim);font-size:12px">命令: '+esc((acc.commands||[]).join('; '))+'</div>'+
+    (acc.notes ? '<div style="color:var(--dim);font-size:12px">说明: '+esc(acc.notes)+'</div>' : '')+
+    '<div style="margin-top:6px">'+rows+'</div>'+
+    '<label style="display:block;margin-top:6px;font-size:12px">'+
+    '<input type="checkbox" id="accSkip"> 跳过验收 oracle（本次不冻结，仅留档草稿）</label>'+
+    '</div>';
 }
 
 async function delJSON(path, body) {

@@ -677,10 +677,11 @@ def _preflight_repair_plan(
 # ── spec-to-test（ADR-012）：起草 → Plan 门内人审 → 冻结 ──────────────────
 
 def _acceptance_review_possible(config, headless: bool) -> bool:
-    """本次运行是否可以发生人审（headless / web 确认通道下不可以）。"""
-    if headless:
-        return False
+    """本次运行是否可以发生人审：CLI tty 或 web 确认门（两者都能承载审阅回执）。"""
     if config.get("behavior", {}).get("web_confirm_plan"):
+        # web 控制台确认门支持验收测试人审（编辑/跳过随确认回执提交）
+        return True
+    if headless:
         return False
     try:
         return sys.stdin.isatty()
@@ -728,6 +729,11 @@ def _freeze_acceptance_after_review(task_dir, draft, state, config, logger):
         logger.warning("[spec_test] 草稿未经人审（require_review=true）⇒ 不冻结为 oracle（草稿留档）")
         _st.save_draft(task_dir, draft, logger, reason="unreviewed")
         return None
+    # 人审后（可能被编辑）的草稿再过一次安全清洗：路径白名单/命令门禁/体量上限
+    draft = _st.sanitize_draft(draft, config, logger)
+    if not draft:
+        logger.warning("[spec_test] 人审后的草稿未过安全清洗，放弃冻结（降级为现状验证行为）")
+        return None
     return _st.freeze(
         task_dir, draft, reviewed=reviewed, source="drafted", logger=logger,
         review_edits=int((state or {}).get("edits") or 0),
@@ -758,7 +764,28 @@ def _confirm_plan_channel(plan, config, repo, logger, iteration, task, plan_dir,
     """
     if config.get("behavior", {}).get("web_confirm_plan") and plan_dir:
         from .web_confirm import web_confirm
-        decision = web_confirm("plan", plan, plan_dir, logger)
+        # spec-to-test（ADR-012）：草稿随 pending payload 下发，人审回执随决策回传
+        payload: object = plan
+        if acceptance:
+            payload = dict(plan)
+            payload["_acceptance_draft"] = {
+                "files": [dict(f) for f in (acceptance.get("files") or [])],
+                "commands": list(acceptance.get("commands") or []),
+                "notes": str(acceptance.get("notes") or ""),
+            }
+        decision = web_confirm("plan", payload, plan_dir, logger, acceptance_state=acceptance_state)
+        if acceptance and acceptance_state:
+            from . import spec_test as _st_web
+            review = _st_web.sanitize_review(
+                {k: acceptance_state.get(k) for k in ("decision", "edits", "files") if k in acceptance_state})
+            if review:
+                acceptance_state.update(review)
+                _st_web.merge_review(acceptance, review, logger)
+                logger.info(f"[spec_test] web 人审回执: decision={review['decision']} "
+                            f"edits={review['edits']} files={len(review.get('files') or [])}")
+            elif acceptance_state.get("decision"):
+                logger.warning("[spec_test] web 人审回执非法，按未人审处理（不冻结 oracle）")
+                acceptance_state.clear()
         if decision == "Y":
             logger.info("web 确认 Plan：Y")
             return plan, []

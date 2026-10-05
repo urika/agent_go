@@ -599,7 +599,23 @@ restore_for_verify(worktree, task_dir, config, logger) / runtime_manifest(task_d
                                          → executor 侧统一入口（未启用时零开销 no-op）
 save_draft(task_dir, draft, logger, reason)
                                          → 未冻结草稿留档（DRAFT.json：跳过/未人审场景）
+sanitize_review(payload, config)         → 人审回执校验（CLI 编辑/web 确认统一入口；decision=approved|skipped，files 白名单+体量）
+merge_review(draft, review, logger)      → 回执按 path 合并进草稿（未知文件忽略）
 meta_block(manifest)                     → meta.json 的 acceptance 段（source/reviewed/sha256/commands）
+```
+
+web 面（操作台，ADR-012）：
+
+```
+GET  /api/tasks/<id>/acceptance          → 只读验收数据面：冻结 manifest + 文件全文 + 草稿留档 + 运行结果
+                                           （type∈{acceptance,acceptance_restore,semantic_advisory}），viewer 可用
+GET  /api/tasks/<id>                     → 详情含 acceptance 摘要（enabled/frozen/source/reviewed/degraded/commands）
+GET  /api/tasks（列表）                   → 每项 acceptance{frozen,degraded} 标识（不读文件，保持轻量）
+POST /api/tasks/<id>/confirm             → 现支持可选的 acceptance 人审回执（仅 stage=plan）：
+                                           {decision: approved|skipped, edits: n, files:[{path,content}]}
+                                           非法回执 400 拒收、不落盘；合法回执写入 confirmation_decision.json
+                                           由 web_confirm 透传给 CLI（未带 = 未人审 → require_review 降级）
+前端：确认卡片 renderAcceptanceDraft（逐文件展开编辑 + 跳过勾选）；详情页 renderAcceptancePanel（只读）
 ```
 
 executor 侧消费：`run_subtask` 启动前注入（先于 `pre_work_head` 捕获）；`_verify_changes` 在提交前/
@@ -608,4 +624,5 @@ executor 侧消费：`run_subtask` 启动前注入（先于 `pre_work_head` 捕�
 "worker 自提交"判定（防空转误判 completed）。
 
 CLI/交互：`--accept-tests` / `--no-accept-tests` 覆盖开关；草稿随 Plan 确认门一并人审
-（`[T]` 审阅/编辑、`[K]` 跳过；`require_review=true` 时非交互运行自动降级为现状验证行为并留档草稿）。
+（CLI：`[T]` 审阅/编辑、`[K]` 跳过；web：确认卡片内逐文件编辑 + 跳过勾选）。
+`require_review=true` 时无人审路径（headless 且非 web 确认）自动降级为现状验证行为并留档草稿。

@@ -129,8 +129,84 @@ def api_tasks(include_legacy: bool = False) -> list[dict]:
             "mtime": mtime,
             # U1：web 确认模式待确认标记（pending_confirmation.json 存在 → 列表 🔔）
             "pending_confirmation": (td / "pending_confirmation.json").exists(),
+            # spec-to-test（ADR-012）：列表标识（冻结/降级；不做文件读取，保持列表轻量）
+            "acceptance": {
+                "enabled": bool((meta.get("acceptance") or {}).get("enabled")),
+                "frozen": bool((meta.get("acceptance") or {}).get("frozen")),
+                "degraded": bool((meta.get("acceptance") or {}).get("degraded")),
+            },
         })
     return sorted(out, key=lambda x: x["mtime"], reverse=True)
+
+
+def api_task_acceptance(task_id: str) -> Optional[dict]:
+    """验收测试（spec-to-test，ADR-012）只读数据面：冻结件 + 草稿留档 + 运行结果。
+
+    数据源：<task_dir>/acceptance/{manifest.json,files/,DRAFT.json} + meta.json
+    （results[].verification_results 中 type∈{acceptance,acceptance_restore,semantic_advisory}
+    的条目）。仅读，不做任何写操作。
+    """
+    from . import spec_test
+
+    td = _task_dir(task_id)
+    if td is None:
+        return None
+    meta = _task_meta(td)
+    manifest = spec_test.load_manifest(td)
+    files: list[dict] = []
+    if manifest:
+        root = spec_test.acceptance_root(td) / spec_test.FILES_DIRNAME
+        for item in manifest.get("files") or []:
+            rel = spec_test._safe_rel_path(str(item.get("path") or ""))
+            if not rel:
+                continue
+            content = ""
+            try:
+                content = (root / rel).read_text(encoding="utf-8", errors="replace")[:20000]
+            except OSError:
+                content = ""
+            files.append({"path": rel, "sha256": item.get("sha256", ""),
+                          "bytes": item.get("bytes", 0), "content": content})
+    draft = None
+    draft_path = spec_test.acceptance_root(td) / "DRAFT.json"
+    if draft_path.exists():
+        try:
+            d = json.loads(draft_path.read_text(encoding="utf-8"))
+            draft = {
+                "reason": d.get("_saved_reason", ""),
+                "saved_at": d.get("_saved_at", ""),
+                "commands": d.get("commands") or [],
+                "files": [f.get("path") for f in (d.get("files") or []) if isinstance(f, dict)],
+            }
+        except (json.JSONDecodeError, OSError):
+            draft = None
+    runtime: list[dict] = []
+    for r in meta.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        for vr in r.get("verification_results") or []:
+            if not isinstance(vr, dict) or vr.get("type") not in (
+                    "acceptance", "acceptance_restore", "semantic_advisory"):
+                continue
+            runtime.append({
+                "subtask_id": r.get("subtask_id", ""),
+                "type": vr.get("type"),
+                "command": vr.get("command", ""),
+                "exit_code": vr.get("exit_code"),
+                "attempt": vr.get("attempt"),
+                "restored": vr.get("restored"),
+                "passed": vr.get("passed"),
+                "reason": (vr.get("reason") or "")[:200],
+            })
+    return {
+        "task_id": td.name,
+        "enabled": bool((meta.get("acceptance") or {}).get("enabled") or manifest),
+        "meta": meta.get("acceptance") or {},
+        "manifest": manifest,
+        "files": files,
+        "draft": draft,
+        "runtime": runtime,
+    }
 
 
 def api_task(task_id: str) -> Optional[dict]:
@@ -189,6 +265,28 @@ def api_task(task_id: str) -> Optional[dict]:
         # 盲区人工归因注记（P1.5 四按钮状态回显）
         "blind_spot_attributions": _load_attributions(td),        # M4 goal 回溯：合规度正交维度（纯透传，与 status 正交）
         "goal_adherence": meta.get("goal_adherence") or {},
+        # spec-to-test（ADR-012）：验收测试摘要（详情页/列表标识；明细走 /acceptance 端点）
+        "acceptance": _acceptance_summary(td, meta),
+    }
+
+
+def _acceptance_summary(td: Path, meta: dict) -> dict:
+    """meta.json.acceptance + 冻结件存在性 → 列表/详情用轻量摘要。"""
+    block = meta.get("acceptance") or {}
+    frozen = False
+    try:
+        from . import spec_test
+        frozen = spec_test.load_manifest(td) is not None
+    except Exception:  # noqa: BLE001 - 数据面降级：摘要失败不影响详情
+        frozen = False
+    return {
+        "enabled": bool(block.get("enabled")),
+        "frozen": bool(block.get("frozen", frozen)),
+        "source": block.get("source", ""),
+        "reviewed": block.get("reviewed", block.get("review_decision") == "approved"),
+        "degraded": bool(block.get("degraded")),
+        "review_decision": block.get("review_decision", ""),
+        "commands": len(block.get("commands") or []),
     }
 
 
