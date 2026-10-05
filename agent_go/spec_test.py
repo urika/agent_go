@@ -570,7 +570,9 @@ def freeze_from_provided(
             loaded = json.loads(cmd_file.read_text(encoding="utf-8"))
             commands = [str(c) for c in (loaded or [])]
         elif txt_file.exists():
-            commands = [ln.strip() for ln in txt_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            # 注释行（# 开头）是作者书写便利，不进入验收命令集
+            commands = [ln.strip() for ln in txt_file.read_text(encoding="utf-8").splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
         files: list[dict[str, str]] = []
         for p in sorted(src.rglob("*")):
             if not p.is_file() or p.name in ("manifest.json", "commands.json", "commands.txt"):
