@@ -154,3 +154,10 @@ B2 口径的 easy/medium 子集 7/8 vs 8/8）。n=12 样本小，差距集中在
 遗留定价表补 `("anthropic","glm-5.3-flash")`（(0.15, 0.50)，与 T10 pricing.py 条目对齐），
 否则 agent_loop 臂 record `total_cost_usd`=0 且 `_collect_result` 把真实失败误标 `kill_reason=infra`
 （本臂 3 条 verification_failure 被误标）；④ 扩样（n≥20）降低方差。
+
+> **① ② ③ 已落地（2026-10-05）**：①`_call_api` 重试改为可重试判定（408/409/425/429/5xx 重试，
+> 配置类 4xx 立即失败并给出归因）+ 指数退避带抖动 + 尊重 `Retry-After`（均受 `api_retry_max_wait`
+> 封顶），次数经 `agent_loop.api_max_retries` 可调；②`bench --timeout-margin`（默认 1.0）整体
+> 放缩动态 timeout，值写入每条 record 供口径核对；③`DEFAULT_PRICING` 补 `("anthropic","glm-5.3-flash")`
+> 与 `("zhipu","glm-5.3-flash")`，并加"两表同源"测试钉住 `metrics`/`pricing` 一致性。
+> **④ 仍待复测轮执行**（扩样 n≥20）。

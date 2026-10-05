@@ -1136,3 +1136,29 @@ class TestComputeAcceptanceMetrics:
         assert m["cohort"]["tasks"] == 0
         assert m["oracle"]["first_attempt_pass_rate"] is None
         assert m["review"]["adoption_rate"] is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# B2 复测前置③：estimate_cost 定价表覆盖 GLM-5.3-Flash
+# （缺条 ⇒ agent_loop 臂 total_cost_usd=0 ⇒ bench 误标 kill_reason=infra）
+# ═══════════════════════════════════════════════════════════════
+
+def test_estimate_cost_covers_glm_53_flash():
+    from agent_go.metrics import DEFAULT_PRICING, estimate_cost
+    for key in (("anthropic", "glm-5.3-flash"), ("zhipu", "glm-5.3-flash")):
+        assert key in DEFAULT_PRICING, key
+    # 1M prompt + 1M completion = 0.15 + 0.50
+    assert estimate_cost("anthropic", "glm-5.3-flash", 1_000_000, 1_000_000) == pytest.approx(0.65)
+
+
+def test_pricing_tables_agree_for_glm_flash():
+    """两张定价表（metrics.DEFAULT_PRICING / pricing.MODEL_PRICES）对 GLM-5.3-Flash 口径一致。
+
+    该条目曾在两表间漂移，导致 agent_loop 臂成本记 0 并被 bench 误标 infra——本测试钉住同源。
+    """
+    from agent_go.metrics import DEFAULT_PRICING
+    from agent_go.pricing import MODEL_PRICES
+    for model, provider in (("glm-5.3-flash", "anthropic"), ("glm-5.3", "anthropic")):
+        assert model in MODEL_PRICES, model
+        ref = MODEL_PRICES[model]
+        assert DEFAULT_PRICING[(provider, model)] == (ref["prompt"], ref["completion"])

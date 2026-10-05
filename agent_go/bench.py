@@ -515,7 +515,8 @@ def cmd_bench(args=None) -> None:
                              fork_retry=fork_retry,
                              worker_backend=worker_backend,
                              bench_endpoint=bench_endpoint,
-                             bench_key_env=bench_key_env)
+                             bench_key_env=bench_key_env,
+                             timeout_margin=float(getattr(args, "timeout_margin", 1.0) or 1.0))
         # ISSUE-38：任务结束后清理 fixture 源仓库失效 worktree 注册
         # （timeout/SIGKILL 打断时 pipeline 清理不执行，注册项残留）
         _prune_fixture_worktrees(_repo)
@@ -666,7 +667,8 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
                   hard_model: str = "", with_delivery: bool = False,
                   with_knowledge: bool = False, fork_retry: bool = False,
                   worker_backend: str = "",
-                  bench_endpoint: str = "", bench_key_env: str = "") -> list[dict]:
+                  bench_endpoint: str = "", bench_key_env: str = "",
+                  timeout_margin: float = 1.0) -> list[dict]:
     """跑一次任务 → 读产物 → 返回每子任务的结构化结果列表。
 
     hard_model: CR-建议#5——hard 难度子任务使用的更强模型（留空 = 与候选 model 相同）。
@@ -683,6 +685,9 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     bench_endpoint: B5 双臂同口径——Anthropic 兼容端点（如 kimi coding）。设置后
     plan_api / evaluator / worker_base_url 统一指向它，两臂共享规划与评估配置，
     只剩 backend 一个变量；bench_key_env 指定 key 的环境变量名（${VAR} 模板）。
+    timeout_margin: B2 复测前置②——动态 timeout 的整体余量倍数（默认 1.0＝现状）。
+    慢速臂（如 agent_loop 直连 API）复测时放宽余量可避免被 timeout 截断；该值写入
+    record，供批次口径核对（不同余量的批次禁止直接混比）。
     """
     start = time.time()
 
@@ -812,9 +817,10 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
         # grace_sec 后才 SIGKILL（实在不行才硬杀）。
         # 动态 timeout：多子任务任务按「子任务数 × 基准耗时」自动扩展，
         # 避免任务被 timeout 截断（K1 提升）。不低于任务 YAML 配置值。
-        hard_timeout = _dynamic_timeout(task, task_id, results_path)
+        hard_timeout = _dynamic_timeout(task, task_id, results_path, margin=timeout_margin)
         grace_sec = 60
-        console.debug(f"[timeout] {task_id} → {hard_timeout}s ({_estimate_subtasks_from_history(task_id, results_path)} subtasks)")
+        console.debug(f"[timeout] {task_id} → {hard_timeout}s (margin={timeout_margin:g}, "
+                      f"{_estimate_subtasks_from_history(task_id, results_path)} subtasks)")
         proc = subprocess.Popen(
             agent_go_cmd + ["run",
              str(repo), task["task"],
@@ -865,7 +871,7 @@ def _run_one_task(task: dict, repo: Path, model: str, task_id: str,
     # explicit_merge_commit，evaluate_accepted_delivery 才能给出真实读数。
     if with_delivery and _resolved_td is not None:
         _apply_bench_delivery(_resolved_td, repo)
-    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch, exclude_dirs=_before_dirs)  # type: ignore[return-value]
+    return _collect_result(task_id, model, elapsed, exit_code, stderr_tail, _new_dirs, exact_td=_resolved_td, expected_task=_expected, timed_out=_timed_out, source_batch=source_batch, exclude_dirs=_before_dirs, timeout_margin=timeout_margin)  # type: ignore[return-value]
 
 
 def _apply_bench_delivery(td: Path, repo: Path) -> None:
@@ -1015,8 +1021,12 @@ def _measure_elapsed_p95(task_id: str, results_path: Optional[Path]) -> Optional
     return elapsed[idx]
 
 
-def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = None) -> int:
+def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = None,
+                     margin: float = 1.0) -> int:
     """按难度 + 实测耗时动态计算任务 timeout，解决多子任务/高难度任务被 timeout 截断的问题。
+
+    ``margin``（默认 1.0）是整体余量倍数（B2 复测前置②）：慢速臂复测时放宽，
+    只放大动态部分，不低于任务 YAML 显式声明的 timeout。
 
     S12-P2 G6：耗时由难度驱动，不再按子任务数（控制变量指错方向）。
     mult 复用 retry_timeout 难度倍数表 {easy:1, med:1.5, hard:2.5}。
@@ -1046,6 +1056,8 @@ def _dynamic_timeout(task: dict, task_id: str, results_path: Optional[Path] = No
     if _p95:
         _margin = 1.5 if task.get("high_variance") else 1.3
         dynamic = max(dynamic, int(_p95 * _margin))
+    if margin and margin != 1.0:
+        dynamic = int(dynamic * float(margin))
     return int(max(cfg_timeout, dynamic))
 
 
@@ -1178,7 +1190,8 @@ def _collect_result(task_id: str, model: str, elapsed: float,
                     expected_task: str = "",
                     timed_out: bool = False,
                     source_batch: str = "",
-                    exclude_dirs: "Optional[set[Path]]" = None) -> dict:
+                    exclude_dirs: "Optional[set[Path]]" = None,
+                    timeout_margin: float = 1.0) -> dict:
     """从 agent_go 任务目录读 metering + meta，聚合为一条结果。
 
     exact_td: 精确任务目录（从子进程输出解析，优先）。
@@ -1186,6 +1199,7 @@ def _collect_result(task_id: str, model: str, elapsed: float,
     expected_task: 期望任务描述，用于校验目录内容匹配（防止并发/残留错配）。
     timed_out: 任务是否因超时被强制终止（cooperative timeout 触发 SIGTERM/SIGKILL）。
     source_batch: 批次标识（如 baseline / smoke-*），用于跨批次追溯与全量对比。
+    timeout_margin: B2 复测前置②——动态 timeout 余量倍数（写入 record 供口径核对）。
     exclude_dirs: 运行启动前已存在的目录快照——兜底全盘扫描时必须排除，
         否则超时被杀、本次目录无 meta.json 的任务会错配到历史同名任务目录，
         把旧批次结果计为本次通过（2026-09-06 adr010-p2-oczen 批量两条假阳性根因）。
@@ -1405,6 +1419,7 @@ def _collect_result(task_id: str, model: str, elapsed: float,
         "task_id": task_id,
         "model": model,
         "task_dir": str(td) if td else "",
+        "timeout_margin": timeout_margin,
         "elapsed_sec": elapsed,
         "subprocess_exit": exit_code,
         "completed": completed,

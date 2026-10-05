@@ -77,6 +77,8 @@
     "max_turns": 20,
     "max_duration": 600,
     "api_timeout": 120,
+    "api_max_retries": 3,
+    "api_retry_max_wait": 30,
     "stuck_repeat_threshold": 3,
     "no_progress_turns": 8
   },
@@ -105,6 +107,8 @@
     "require_review": true,
     "draft_role": "planner",
     "provided_dir": "",
+    "gaps_file": "",
+    "gaps_max_items": 12,
     "max_files": 8,
     "max_file_bytes": 20000,
     "max_commands": 5,

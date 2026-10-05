@@ -584,8 +584,11 @@ format_price_for_report   → 报告用定价串，缺价标注 ⚠️
 ```
 is_enabled(config)                       → 总开关（spec_test.enabled；--accept-tests 覆盖）
 cfg(config)                              → spec_test 配置段（缺省值对齐 DEFAULT_CONFIG）
-draft_acceptance(task, config, logger, *, spec_context, docs_context, repo_hint)
-                                         → LLM 起草验收测试 {files, commands, notes, model}；任何失败 → None（fail-open）
+draft_acceptance(task, config, logger, *, spec_context, docs_context, repo_hint, coverage_gaps)
+                                         → LLM 起草验收测试 {files, commands, notes, model}；任何失败 → None（fail-open）；
+                                           S-1：coverage_gaps（或配置 spec_test.gaps_file）作为注意力输入注入 prompt，
+                                           草稿记录 coverage_gaps{count,sha256} 作 A/B 臂标记
+load_coverage_gaps(path, *, max_items)   → 读规则覆盖缺口清单（tools/s1_spec_scan.py 产物；缺失/无缺口 → None，fail-open）
 sanitize_draft(raw, config, logger)      → 清洗：路径白名单（禁绝对/`..`）+ 命令安全门禁（_is_safe_verification_command）
 freeze(task_dir, draft, *, reviewed, source, logger, review_edits, frozen_dir)
                                          → 冻结到 <task_dir>/acceptance/（files/ + manifest.json 含逐文件 sha256）

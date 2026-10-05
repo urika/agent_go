@@ -12,6 +12,7 @@
 """
 
 import json
+import random
 import re
 import time
 import subprocess
@@ -19,13 +20,36 @@ import logging
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .tool_executor import ToolRegistry
 from .config import meter_event
 from .metrics import estimate_cost
 
 _logger = logging.getLogger(__name__)
+
+# 可重试的 HTTP 状态：限流/超时/冲突/服务端错误。4xx 其余（401/403/404/422…）
+# 属配置或形态错误——盲目重试只是烧时间，应立刻失败并给出明确归因
+_RETRYABLE_HTTP = frozenset({408, 409, 425, 429})
+
+
+def _retryable_http(code: int) -> bool:
+    return code in _RETRYABLE_HTTP or code >= 500
+
+
+def _retry_wait(attempt: int, *, base: float = 2.0, max_wait: float = 30.0,
+                retry_after: Optional[str] = None, jitter: float = 0.25) -> float:
+    """指数退避 + 抖动，并尊重服务端 ``Retry-After``（秒），统一封顶 ``max_wait``。
+
+    ``attempt`` 从 1 起：base^attempt → 2s／4s／8s…，再上浮至 (1+jitter) 倍以内。
+    """
+    wait = min(max_wait, base ** attempt)
+    if retry_after:
+        try:
+            wait = min(max_wait, max(wait, float(str(retry_after).strip())))
+        except (TypeError, ValueError):
+            pass
+    return wait + random.uniform(0.0, wait * jitter) if wait > 0 else 0.0
 
 
 def _anthropic_messages(messages: list) -> list:
@@ -188,6 +212,9 @@ class AgentLoop:
         max_turns = agent_loop_cfg.get("max_turns", 20)
         max_duration = agent_loop_cfg.get("max_duration", 600)  # 全局超时（秒）
         api_timeout = agent_loop_cfg.get("api_timeout", 120)     # 单次 API 调用超时（秒）
+        # 网络抖动鲁棒性（B2 复测前置①）：尝试次数与单次退避上限可调
+        api_max_retries = int(agent_loop_cfg.get("api_max_retries", 3))
+        api_retry_max_wait = float(agent_loop_cfg.get("api_retry_max_wait", 30))
         metering_path = config.get("_metering_path", "")
 
         tools = ToolRegistry.definitions(readonly=readonly)
@@ -240,6 +267,7 @@ class AgentLoop:
             content, tool_calls, cost, pt, ct = self._call_api(
                 provider, base_url, model, api_key, messages, tools,
                 metering_path, task_id, sub_id, timeout=api_timeout,
+                max_retries=api_max_retries, retry_max_wait=api_retry_max_wait,
             )
             total_cost += cost
             total_prompt_tokens += pt
@@ -391,11 +419,15 @@ class AgentLoop:
         task_id: str,
         sub_id: str,
         timeout: int = 120,
+        max_retries: int = 3,
+        retry_max_wait: float = 30.0,
     ) -> tuple[str, list[dict], float, int, int]:
         """调用 LLM API 并解析响应。
 
         Args:
             timeout: 单次 API 调用超时（秒）
+            max_retries: 网络/限流类错误的最大尝试次数（含首次）
+            retry_max_wait: 单次退避上限（秒）；服务端 Retry-After 也受此封顶
 
         Returns:
             (text_content, tool_calls, cost_usd, prompt_tokens, completion_tokens)
@@ -430,8 +462,8 @@ class AgentLoop:
             method="POST",
         )
 
-        # API 重试逻辑：网络/HTTP 错误时指数退避，最多 3 次
-        max_retries = 3
+        # API 重试：网络/限流类错误指数退避（含抖动与 Retry-After）；配置类 4xx 不重试
+        max_retries = max(1, int(max_retries))
         last_error = None
         response_data = None
         for attempt in range(1, max_retries + 1):
@@ -440,14 +472,38 @@ class AgentLoop:
                     response_data = json.loads(resp.read())
                 last_error = None
                 break
-            except (urllib.error.HTTPError, urllib.error.URLError,
-                    OSError, TimeoutError) as e:
+            except urllib.error.HTTPError as e:
                 last_error = e
+                if not _retryable_http(e.code):
+                    self.logger.error(
+                        f"[AgentLoop] API 返回 HTTP {e.code}（不可重试，检查配置/密钥/模型名）："
+                        f"{_error_summary(e)}"
+                    )
+                    raise RuntimeError(
+                        f"API 调用失败（HTTP {e.code}，不重试）: {_error_summary(e)}"
+                    ) from e
+                retry_after = e.headers.get("Retry-After") if e.headers else None
                 if attempt < max_retries:
-                    wait = 2 ** attempt  # 指数退避：2s, 4s, 8s
+                    wait = _retry_wait(attempt, max_wait=retry_max_wait, retry_after=retry_after)
                     self.logger.warning(
                         f"[AgentLoop] API 调用失败 (attempt={attempt}/{max_retries}): "
-                        f"{_error_summary(e)}，{wait}s 后重试"
+                        f"{_error_summary(e)}，{wait:.1f}s 后重试"
+                    )
+                    time.sleep(wait)
+                else:
+                    self.logger.error(
+                        f"[AgentLoop] API 调用 {max_retries} 次均失败，放弃: {_error_summary(e)}"
+                    )
+                    raise RuntimeError(
+                        f"API 调用失败（已重试 {max_retries} 次）: {_error_summary(e)}"
+                    ) from e
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                last_error = e
+                if attempt < max_retries:
+                    wait = _retry_wait(attempt, max_wait=retry_max_wait)
+                    self.logger.warning(
+                        f"[AgentLoop] API 调用失败 (attempt={attempt}/{max_retries}): "
+                        f"{_error_summary(e)}，{wait:.1f}s 后重试"
                     )
                     time.sleep(wait)
                 else:

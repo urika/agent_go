@@ -302,7 +302,7 @@
 - **预标注与辅助真值协议（v0.8）**：**真值来源仍是人**——LLM 与探针只能降低人的单位成本，不能替代人的确权；人工对每一条**确认或推翻**后才写入 `labels.jsonl`。
   1. **程序化探针（优先）**：对保留 worktree 的失败样本，在**干净环境复跑记录的验证命令**（本地、零外发）。判读：原判失败而 probe 通过 ⇒ **环境/harness 型证据**；probe 也失败 ⇒ 按形态分——命令级错误（语法/未找到/被拒）⇒ 环境流程型；断言/测试失败 ⇒ 内容型；非确定性或超时 ⇒ 不可判。约束：执行前仍过 `utils._is_safe_verification_command` 安全前缀检查（**不绕过**）；probe 结果**不进 state**（不制造机械耦合）；可能产生构建副作用的命令记 README 或跳过。
   2. **LLM 预标注**：优先**本地模型**（零外部外发）；若用云端 ⇒ 按**第二条外发通道**登记（逐次自评＋记账，见 §10.3）。须与 jev **不同家族**；**不得查看 jev 结果**；只出初稿。
-  3. **不覆盖原则**：预标注与探针结果分别落 `prelabels.jsonl` / `probe.jsonl`（含模型/命令与版本）；**永不覆盖**人工标签；`labels.jsonl`（跨轮）只收人工终审标签。
+  3. **不覆盖原则**：预标注与探针结果分别落 `prelabels.jsonl` / `probe.jsonl`（含模型/命令与版本）；**永不覆盖**人工标签；`labels.jsonl`（跨轮）只收人工终审标签。**实现状态（2026-10-05）**：程序化探针 **已落地**——`--probe [--confirmed] [--probe-timeout] [--probe-force]` 复跑最近一轮验证命令：与 runtime 同源的沙箱 env（`_build_sandbox_env`）与资源上限、`shlex.split` 不经 shell、执行前**必须**过 `utils._is_safe_verification_command`（不绕过）、安装/推送/迁移类副作用模式默认跳过、结果只写 `probe.jsonl`（**不进 state、不写 results**）；逐条判读 `env_or_harness`（复跑通过或命令级错误）/`content`（断言类失败）/`undecidable`（超时/非确定性），汇总 `probe_summary.json` 含**探针-人一致率（探索性，不进判据）**。**LLM 预标注（`prelabels.jsonl`）未实现**——选型与边界＝O-13。
   4. **探索性指标**：LLM-人一致率、probe-人一致率（度量靶的主观性与探针覆盖，**不进判据**，见 §9.1）。
 - **耗时记录（v0.2 新增，P0-2）**：标注每条时记录**耗时（分钟）**；该值作为"单条复核耗时"的**代理**（标注≠复核，报告须声明此局限），用于 §9 的人时换算。
 - **锚点校准（gold 校准，先于实标）**：3–5 条已知真值锚点（例：验证命令语法错误而代码正确→环境流程〔ISSUE-29 型〕；沙箱误杀→环境流程〔ISSUE-31 型〕；错改→内容型；空交付假成功→内容型）；锚点全对才开标，否则先改 rubric。
@@ -800,6 +800,7 @@ agent_go eval bench --tasks eval_suite --suite decision --repeat 1 \
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v1.8 | 2026-10-05 | **薄版仪器补齐（不触碰冻结测量面）**：①**程序化探针落地**（`--probe`）——干净环境复跑最近一轮验证命令 → `probe.jsonl`；同源沙箱 env/资源上限、`shlex.split` 不经 shell、执行前过 `_is_safe_verification_command`（不绕过）、副作用模式默认跳过（`--probe-force` 才执行）、`--confirmed` 才执行、结果不进 state；判读 env_or_harness／content／undecidable＋`probe_summary.json`（含探针-人一致率＝探索性）；②§7 标注三层实现状态与 O-13（预标注选型）登记；③`--label`/`--import-labels` 与 `--call` IPC 健壮性、完整性门集合比对见 v1.7（本次一并声明测试 36 例）；④**未实现项**：`prelabels.jsonl`（LLM 预标注）、`outcomes.jsonl` 回写（v0.7 登记）。 |
 | v1.7 | 2026-10-05 | **薄版仪器补齐实现（不触碰冻结测量面）**：①`--label`（盲标＋单条耗时）与 `--import-labels`（批量导入人工标签：整批校验、一处不合规即拒收、已标自动跳过）落地，每条标签带 `questions_sha256`，`--analyze` 拒收跨 rubric 标签；②落盘命名统一为 `labels.jsonl`（本轮＝跨轮同文件，跨轮以 `--import-labels` 合并）；③`--call` IPC 健壮性修复——单次 JSON-RPC 真超时（后台读线程）、server stderr 落 `caller-server.err.log`（不再用 PIPE 顶死 server）、`terminate→wait→kill` 回收、超时条目带 `error` 落盘且重跑只补未完成项；④完整性门改按 `run_ref` **集合**比对并拦截错误/空回包，H6 分母不再因缺 `control` 问项而静默缩小；⑤v0.8 预标注/探针（`prelabels.jsonl`/`probe.jsonl`）与本薄版不内置的 `--usage`（复用 llama.cpp `tools/jev_quota.py`／MCP `jev_usage`）**仍未实现**，登记为剩余缺口；⑥§17.5 开跑手册的命令同步到实现形态（`--out` 必填、`--results/--limit`、`--record` 回填、`--import-labels`、`--server/--rpc-timeout`）。 |
 | v1.6 | 2026-10-05 | **状态同步（不触碰冻结测量面）**：①O-15 更新为 **S-1 P0 已完成**——缺口效应经同批同模型对照不成立（29% vs 29%，OR=0.99）、靶改用 `warning` 群体、下一步＝A/B（预注册 §10.1）；②O-14 的 P1 门 **ADR-014 已起草（Proposed）**（`docs/design/adr/ADR-014-rule-set-execution-plane.md`）；③删除与 `s1-coverage-audit-findings` 重复的临时分析件（本会话去重）。 |
 | v1.5 | 2026-10-05 | **状态更新（不触碰冻结测量面）**：O-14 标注 **P0 已落地**（`agent_go/rule_set.py`＋37 例测试；CLI `python3 -m agent_go.rule_set`；零 runtime 接入）；P1 影子仍待立项＋新 ADR；概念设计升 v0.3、roadmap §H3 同步。 |

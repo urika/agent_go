@@ -294,6 +294,70 @@ class TestCallApi:
         assert list(temp_dir.iterdir()) == []
 
 
+class TestApiRetryPolicy:
+    """B2 复测前置①：网络/限流重试策略（可重试判定、退避、Retry-After、4xx 不重试）"""
+
+    def _loop(self, logger):
+        return AgentLoop(logger)
+
+    @patch("urllib.request.urlopen")
+    def test_retries_transient_then_succeeds(self, mock_urlopen, logger):
+        """瞬时网络错误重试后成功——总调用 3 次、退避被 sleep 记录。"""
+        import urllib.error
+        err = urllib.error.URLError("temporary failure in name resolution")
+        mock_urlopen.side_effect = [err, err, MockResponse(anthropic_response(text="ok"))]
+        with patch("agent_go.agent_loop.time.sleep") as mock_sleep, \
+                patch("agent_go.agent_loop.random.uniform", return_value=0.0):
+            text, _, _, _, _ = self._loop(logger)._call_api(
+                "anthropic", "https://api.test/v1/messages", "m", "key",
+                [{"role": "user", "content": "hi"}], [], "", "t", "s", max_retries=3,
+            )
+        assert text == "ok"
+        assert mock_urlopen.call_count == 3
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [2.0, 4.0]  # 指数退避 2s, 4s
+
+    @patch("urllib.request.urlopen")
+    def test_non_retryable_4xx_fails_fast(self, mock_urlopen, logger):
+        """401/404 等配置类错误立刻失败——不浪费重试。"""
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.test", 401, "Unauthorized", {}, None)
+        with pytest.raises(RuntimeError) as exc, patch("agent_go.agent_loop.time.sleep") as mock_sleep:
+            self._loop(logger)._call_api(
+                "anthropic", "https://api.test/v1/messages", "m", "key",
+                [{"role": "user", "content": "hi"}], [], "", "t", "s", max_retries=3,
+            )
+        assert "401" in str(exc.value) and "不重试" in str(exc.value)
+        assert mock_urlopen.call_count == 1 and mock_sleep.call_count == 0
+
+    @patch("urllib.request.urlopen")
+    def test_rate_limit_retries_and_honors_retry_after(self, mock_urlopen, logger):
+        """429 可重试，且 Retry-After 抬高退避（仍受 max_wait 封顶）。"""
+        import urllib.error
+        headers = {"Retry-After": "12"}
+        mock_urlopen.side_effect = [
+            urllib.error.HTTPError("https://api.test", 429, "Too Many Requests", headers, None),
+            MockResponse(anthropic_response(text="ok")),
+        ]
+        with patch("agent_go.agent_loop.time.sleep") as mock_sleep, \
+                patch("agent_go.agent_loop.random.uniform", return_value=0.0):
+            text, _, _, _, _ = self._loop(logger)._call_api(
+                "anthropic", "https://api.test/v1/messages", "m", "key",
+                [{"role": "user", "content": "hi"}], [], "", "t", "s", max_retries=3,
+            )
+        assert text == "ok"
+        assert mock_sleep.call_args_list[0].args[0] == 12.0  # max(2^1, Retry-After=12)
+
+    def test_retry_wait_bounds_and_jitter(self):
+        from agent_go.agent_loop import _retry_wait, _retryable_http
+        assert _retry_wait(3, max_wait=30) == pytest.approx(8.0, abs=2.0)          # 2^3=8 + 抖动 ≤25%
+        assert _retry_wait(9, max_wait=30) == pytest.approx(30.0, abs=7.5)         # 封顶 30
+        assert _retry_wait(1, retry_after="999", max_wait=30) == pytest.approx(30.0, abs=7.5)
+        assert _retry_wait(1, retry_after="not-a-number", max_wait=30) == pytest.approx(2.0, abs=0.6)
+        assert _retryable_http(429) and _retryable_http(503) and _retryable_http(500)
+        assert not _retryable_http(401) and not _retryable_http(404) and not _retryable_http(422)
+
+
 class TestAgentLoopRun:
     """AgentLoop.run 多轮循环"""
 

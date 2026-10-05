@@ -102,6 +102,8 @@ def _build_parser():
                             help="禁用 LLM 语义评估")
     run_parser.add_argument("--accept-tests", action="store_true", dest="accept_tests",
                             help="启用 spec-to-test：起草验收测试→Plan 门内人审冻结→verify 重放（默认跟随 config）")
+    run_parser.add_argument("--spec-gaps", dest="spec_gaps", default="",
+                            help="S-1：规则覆盖缺口清单（tools/s1_spec_scan.py 产物）——作为注意力输入注入验收测试起草 prompt")
     run_parser.add_argument("--no-accept-tests", action="store_true", dest="no_accept_tests",
                             help="禁用 spec-to-test 验收测试管线")
     run_parser.add_argument("--preserve-worktrees", action="store_true", dest="preserve_worktrees",
@@ -154,6 +156,8 @@ def _build_parser():
                                help="保留全部 worktree 不清除")
     resume_parser.add_argument("--no-preserve", action="store_true", dest="no_preserve",
                                help="强制清理所有 worktree")
+    resume_parser.add_argument("--spec-gaps", dest="spec_gaps", default="",
+                               help="S-1：规则覆盖缺口清单（同 run 子命令）")
     resume_parser.add_argument("--accept-tests", action="store_true", dest="accept_tests",
                                help="恢复时继续使用冻结验收 oracle（等价 run；未在 config 开启时用此开关）")
     resume_parser.add_argument("--no-accept-tests", action="store_true", dest="no_accept_tests",
@@ -352,6 +356,9 @@ def _build_parser():
                              help="Metric Freeze 报告输出路径（metric-freeze 子命令）")
     eval_parser.add_argument("--analysis-goal", dest="analysis_goal", default="",
                              help="insight 子命令：分析目标（人类可读，如 'hard 通过率>=95%% 且 $/pass<=$0.1'）")
+    eval_parser.add_argument("--timeout-margin", dest="timeout_margin", type=float, default=1.0,
+                             help="bench 子命令：动态 timeout 余量倍数（默认 1.0＝现状；慢速臂复测可放宽，如 1.5）。"
+                                  "该值写入每条 record，不同余量的批次禁止直接混比")
     eval_parser.add_argument("--analysis-plan", dest="analysis_plan", default="",
                              help="insight 子命令：预设计划/行动候选（可省略）")
     eval_parser.add_argument("--catalog", dest="catalog", default="",
@@ -1037,6 +1044,8 @@ def cmd_run(args=None):
     _goal_mode_flag = getattr(args, "goal_mode", None)
     if getattr(args, "goal", False) and not _goal_mode_flag:
         _goal_mode_flag = "force"
+    if getattr(args, "spec_gaps", ""):
+        config.setdefault("spec_test", {})["gaps_file"] = str(args.spec_gaps)
     if no_goal and not _goal_mode_flag:
         _goal_mode_flag = "off"
     if getattr(args, "goal_hook", False) and not _goal_mode_flag:

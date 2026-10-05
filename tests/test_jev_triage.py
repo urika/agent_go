@@ -568,3 +568,106 @@ def test_label_and_import_are_single_action(tmp_path):
     out, _ = _pilot_pool(tmp_path, [1])
     assert main(["--label", "--analyze", "--out", str(out)]) == 2
     assert main(["--import-labels", str(tmp_path / "x.jsonl"), "--label", "--out", str(out)]) == 2
+
+
+# ---------------------------------------------------------------------------
+# 程序化探针（§7 v0.8 第一层）：干净环境复跑验证命令
+# ---------------------------------------------------------------------------
+
+def _write_meta_entry(out: Path, ref: str, *, worktree: str, commands: list) -> None:
+    ev = out / "evidence" / ref
+    ev.mkdir(parents=True, exist_ok=True)
+    (ev / "meta_entry.json").write_text(json.dumps({
+        "subtask_id": ref, "status": "failed", "worktree": worktree,
+        "verification_results": commands,
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def test_probe_verdict_matrix():
+    from tools.jev_triage import _probe_verdict
+    assert _probe_verdict(0, False, "") == "env_or_harness"          # 复跑通过 ⇒ 环境/harness
+    assert _probe_verdict(1, False, "pytest: AssertionError: assert 1 == 2") == "content"
+    assert _probe_verdict(127, False, "sh: cmd: command not found") == "env_or_harness"
+    assert _probe_verdict(1, False, "SyntaxError: invalid syntax") == "env_or_harness"
+    assert _probe_verdict(-1, True, "") == "undecidable"             # 超时/非确定性
+    assert _probe_verdict(1, False, "some random failure") == "undecidable"
+
+
+def test_probe_dry_run_then_execute_and_judge(tmp_path):
+    out, refs = _pilot_pool(tmp_path, [1, 0])
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+    # 第一条：复跑通过（原判失败）⇒ env_or_harness 证据；第二条：断言失败 ⇒ content
+    _write_meta_entry(out, refs[0], worktree=str(wt),
+                      commands=[{"command": "python3 -c 'import sys; sys.exit(0)'",
+                                 "exit_code": 1, "attempt": 1}])
+    _write_meta_entry(out, refs[1], worktree=str(wt),
+                      commands=[{"command": "python3 -c \"assert 1 == 2\"",
+                                 "exit_code": 1, "attempt": 1},
+                                {"command": "python3 -c \"assert 1 == 2\"",
+                                 "exit_code": 1, "attempt": 2}])
+
+    # 未 --confirmed：只预演，不执行
+    assert main(["--probe", "--out", str(out)]) == 0
+    assert not (out / "probe.jsonl").exists()
+
+    assert main(["--probe", "--out", str(out), "--confirmed", "--probe-timeout", "30"]) == 0
+    rows = [json.loads(x) for x in (out / "probe.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    by_ref = {r["run_ref"]: r for r in rows}
+    assert by_ref[refs[0]]["outcome"] == "pass" and by_ref[refs[0]]["judgment"] == "env_or_harness"
+    assert by_ref[refs[1]]["outcome"] == "fail" and by_ref[refs[1]]["judgment"] == "content"
+    assert by_ref[refs[1]]["attempt"] == 2  # 只取最近一次尝试
+    assert all(r["questions_sha256"] == questions_sha256() for r in rows)
+    # 探针不得写进 state / results（不制造机械耦合）
+    assert not (out / "results.json").exists()
+    assert "/Users/" not in (out / "probe.jsonl").read_text(encoding="utf-8")
+
+    # 幂等：同命令同尝试不重复探针
+    assert main(["--probe", "--out", str(out), "--confirmed", "--probe-timeout", "30"]) == 0
+    assert len((out / "probe.jsonl").read_text(encoding="utf-8").strip().splitlines()) == 2
+
+    summary = json.loads((out / "probe_summary.json").read_text(encoding="utf-8"))
+    assert summary["probes"] == 2 and summary["by_judgment"] == {"content": 1, "env_or_harness": 1}
+    assert summary["agreement"]["rate"] is None  # 无人工标签 → 不可算
+
+
+def test_probe_safety_gate_and_side_effect_skip(tmp_path):
+    out, refs = _pilot_pool(tmp_path, [1])
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+    _write_meta_entry(out, refs[0], worktree=str(wt), commands=[
+        {"command": "pytest -q && rm -rf /", "exit_code": 1, "attempt": 1},        # 命令链 → unsafe
+        {"command": "pip install requests", "exit_code": 1, "attempt": 1},          # 副作用 → 跳过
+    ])
+    assert main(["--probe", "--out", str(out), "--confirmed", "--probe-timeout", "10"]) == 0
+    rows = [json.loads(x) for x in (out / "probe.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    outcomes = sorted(r["outcome"] for r in rows)
+    assert outcomes == ["skipped_side_effect", "unsafe"]
+    unsafe = [r for r in rows if r["outcome"] == "unsafe"][0]
+    assert "注入" in unsafe["reason"] or "命令链" in unsafe["reason"]
+    # --probe-force 才执行副作用命令（这里只验证门开时不再以 side_effect 跳过）
+    assert main(["--probe", "--out", str(out), "--confirmed", "--probe-force"]) == 0
+
+
+def test_probe_absent_worktree_and_no_command(tmp_path):
+    out, refs = _pilot_pool(tmp_path, [1, 0])
+    _write_meta_entry(out, refs[0], worktree=str(tmp_path / "gone"),
+                      commands=[{"command": "pytest -q", "exit_code": 1, "attempt": 1}])
+    _write_meta_entry(out, refs[1], worktree=str(tmp_path), commands=[])
+    assert main(["--probe", "--out", str(out), "--confirmed"]) == 0
+    rows = [json.loads(x) for x in (out / "probe.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    got = {r["run_ref"]: r["outcome"] for r in rows}
+    assert got == {refs[0]: "worktree_absent", refs[1]: "no_command"}
+
+
+def test_probe_agreement_with_human_labels(tmp_path):
+    out, refs = _pilot_pool(tmp_path, [1])
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+    _write_meta_entry(out, refs[0], worktree=str(wt),
+                      commands=[{"command": "python3 -c \"assert 1 == 2\"", "exit_code": 1, "attempt": 1}])
+    (out / "labels.jsonl").write_text(json.dumps(
+        {"run_ref": refs[0], "label": "content_fix", "origin": "human"}) + "\n", encoding="utf-8")
+    assert main(["--probe", "--out", str(out), "--confirmed"]) == 0
+    summary = json.loads((out / "probe_summary.json").read_text(encoding="utf-8"))
+    assert summary["agreement"] == {"compared": 1, "agree": 1, "rate": 1.0}

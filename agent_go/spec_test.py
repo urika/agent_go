@@ -41,6 +41,8 @@ _DEFAULTS: dict[str, Any] = {
     "require_review": True,
     "draft_role": "planner",
     "provided_dir": "",
+    "gaps_file": "",                 # S-1：规则覆盖缺口清单（tools/s1_spec_scan.py 产物）→ 起草注意力输入
+    "gaps_max_items": 12,            # 注入起草 prompt 的缺口条目上限（体量控制）
     "max_files": 8,
     "max_file_bytes": 20000,
     "max_commands": 5,
@@ -170,6 +172,40 @@ _DRAFT_SYSTEM = (
 )
 
 
+def load_coverage_gaps(path: Any, *, max_items: int = 12) -> Optional[dict[str, Any]]:
+    """读取 S-1 规则覆盖缺口清单（``tools/s1_spec_scan.py`` 产物）——fail-open。
+
+    接受两种形态：扫描报告的 ``{"gap_dimensions": [...]}`` 或裸条目列表。
+    返回 ``{"count", "sha256", "text"}``；文件缺失/不可解析/无缺口 → ``None``
+    （缺失即"无注意力输入"臂，起草照常进行，不阻塞主链）。
+    """
+    if not path:
+        return None
+    try:
+        raw = json.loads(Path(str(path)).expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    items = raw.get("gap_dimensions") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return None
+    lines: list[str] = []
+    for item in items[:max(0, int(max_items))]:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("subtask_id") or "?")
+        reason = str(item.get("reason") or "gap")
+        scope = str(item.get("scope") or "none")
+        files = item.get("core_files") or []
+        command = str(item.get("verification") or "")[:120]
+        lines.append(f"- {sid}：{reason}（scope={scope}，核心文件 {len(files)} 个）"
+                     + (f"；现行验证：{command}" if command else ""))
+    if not lines:
+        return None
+    return {"count": len(lines), "sha256": hashlib.sha256(
+        json.dumps(items, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+        "text": "\n".join(lines)}
+
+
 def draft_acceptance(
     task: str,
     config: dict[str, Any],
@@ -178,11 +214,19 @@ def draft_acceptance(
     spec_context: str = "",
     docs_context: str = "",
     repo_hint: str = "",
+    coverage_gaps: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    """调用 LLM 起草验收测试；解析/清洗失败 → None（fail-open）。"""
+    """调用 LLM 起草验收测试；解析/清洗失败 → None（fail-open）。
+
+    ``coverage_gaps``（S-1）：规则扫描出的覆盖缺口清单，作为**注意力分配器**注入
+    prompt——缺口维度要求给出显式可执行测试。仅建议性输入，不改变安全门与人审门。
+    """
     from . import api as _api
 
     conf = cfg(config)
+    if coverage_gaps is None:
+        coverage_gaps = load_coverage_gaps(conf.get("gaps_file"),
+                                           max_items=int(conf.get("gaps_max_items", 12)))
     prompt = (_DRAFT_SYSTEM
               .replace("{max_files}", str(conf["max_files"]))
               .replace("{max_commands}", str(conf["max_commands"])))
@@ -191,6 +235,12 @@ def draft_acceptance(
         user_parts.append(f"## Task Spec（需求/验收标准）\n{spec_context}")
     if docs_context:
         user_parts.append(f"## 参考文档（架构/设计，节选）\n{docs_context}")
+    if coverage_gaps and coverage_gaps.get("text"):
+        user_parts.append(
+            "## 规则覆盖缺口（S-1 扫描；注意力分配）\n"
+            "下列维度是规则扫描判为「验收面未锚定/缺验证」的地方，请优先为其写出**显式可执行**的"
+            "验收测试；缺口清单只是注意力提示，不替代需求本身：\n"
+            + str(coverage_gaps["text"]))
     if repo_hint:
         user_parts.append(f"## 仓库上下文\n{repo_hint}")
     user_parts.append("请输出 JSON。")
@@ -225,6 +275,10 @@ def draft_acceptance(
     draft["cost_usd"] = draft_cost
     draft["cost_source"] = "metering_delta" if draft_cost is not None else "unavailable"
     draft["drafted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # S-1 A/B 臂标记：本次起草是否带缺口输入（只有存在缺口清单时才非空）
+    draft["coverage_gaps"] = ({"count": int(coverage_gaps.get("count") or 0),
+                               "sha256": str(coverage_gaps.get("sha256") or "")}
+                              if coverage_gaps else None)
     logger.info(
         f"[spec_test] 验收测试草稿就绪: {len(draft['files'])} 个文件 / "
         f"{len(draft['commands'])} 条命令 / {latency_ms:.0f}ms"
@@ -391,6 +445,8 @@ def freeze(
         "draft_model": draft.get("model", ""),
         "draft_cost_usd": (None if draft.get("cost_usd") is None else float(draft["cost_usd"])),
         "draft_cost_source": draft.get("cost_source", ""),
+        # S-1 A/B 臂标记：起草时是否注入了规则覆盖缺口（None＝无缺口输入臂）
+        "coverage_gaps": draft.get("coverage_gaps"),
         "files": [],
         "commands": list(draft.get("commands") or []),
     }

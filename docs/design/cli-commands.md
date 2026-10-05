@@ -23,6 +23,7 @@ agent_go run <repo-path> '<task>' --max-retries 5 --preserve-worktrees
 # spec-to-test acceptance pipeline (ADR-012): draft acceptance tests -> human review inside
 # the Plan confirmation gate -> freeze -> subtasks implement against the frozen oracle
 agent_go run <repo-path> '<task>' --accept-tests                 # enable (config: spec_test.enabled)
+agent_go run <repo-path> '<task>' --accept-tests --spec-gaps g.json   # S-1：规则覆盖缺口清单注入起草 prompt（注意力输入；不改安全门/人审门）
 agent_go run <repo-path> '<task>' --accept-tests --spec docs/tasks/task-xxx.md
 agent_go run <repo-path> '<task>' --no-accept-tests              # force disable
 
@@ -106,6 +107,7 @@ agent_go eval acceptance [--window-days 30] [--json]   # spec-to-test 四项口�
 agent_go eval bench --with-delivery                # 本地交付 merge 闭合 accepted_delivery 判定（不推进 target 引用）
 agent_go eval bench --source-batch results_v2      # 批次标识（跨批次追溯）
 agent_go eval bench --worker-backend opencode --fork-retry   # ADR-010 阶段3 fork-retry A/B 注入臂（修复重试续跑 backend 会话；对照臂不加）
+agent_go eval bench --timeout-margin 1.5            # B2 复测前置②：动态 timeout 余量倍数（默认 1.0＝现状；写入每条 record，不同余量批次禁止混比）
 agent_go eval baseline --candidate-models M1,M2    # 对照基线：claude -p 裸跑（不走 harness）
 agent_go eval models --results eval_suite/results.jsonl
 agent_go eval cost-baseline --results eval_suite/results_v3.jsonl,eval_suite/results_v4_calib.jsonl

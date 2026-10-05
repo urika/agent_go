@@ -108,6 +108,8 @@ DEFAULT_CONFIG = {
         "max_turns": 20,                # 最大对话轮数
         "max_duration": 600,            # 全局超时（秒）
         "api_timeout": 120,             # 单次 API 调用超时（秒）
+        "api_max_retries": 3,           # B2 复测前置①：网络/限流类错误最大尝试次数（含首次）
+        "api_retry_max_wait": 30,       # 单次退避上限（秒）；服务端 Retry-After 同样受此封顶
         "stuck_repeat_threshold": 3,    # B2 stuck 检测：连续相同工具调用达阈值先提醒，再犯终止
         "no_progress_turns": 8,         # B2 no-progress 信号：连续 N 轮无成功写入则记录（不终止）
     },
@@ -144,6 +146,8 @@ DEFAULT_CONFIG = {
         "require_review": True,         # 未经人审不冻结为 oracle（人审门不可省，见 ADR-012）
         "draft_role": "planner",        # 起草调用的模型角色（默认复用 planner 档位）
         "provided_dir": "",             # 评测口径：任务定义提供的冻结测试目录（出题人≠解题人）
+        "gaps_file": "",                # S-1：规则覆盖缺口清单（tools/s1_spec_scan.py 产物，--spec-gaps 可覆盖）
+        "gaps_max_items": 12,           # 注入起草 prompt 的缺口条目上限（体量控制）
         "max_files": 8,                 # 草稿文件数上限（安全面）
         "max_file_bytes": 20000,        # 单文件体量上限（安全面）
         "max_commands": 5,              # 验收命令条数上限

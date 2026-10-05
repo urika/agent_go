@@ -10,6 +10,7 @@
 """
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -623,3 +624,85 @@ class TestAcceptanceMetricsGaps:
         report = compute_acceptance_metrics([task])
         assert report["review"]["minutes_count"] == 0  # 坏时间戳 → 不纳入
         assert report["review"]["files_total"] == 0    # 非 dict/无 path 的 manifest 条目被跳过
+
+
+# ═══════════════════════════════════════════════════════════════
+# S-1：覆盖缺口清单 → 起草注意力输入（起草端接入）
+# ═══════════════════════════════════════════════════════════════
+
+class TestCoverageGapsInput:
+    def _scan_file(self, tmp_path, gaps=None):
+        payload = {"subtasks": 3, "covered": 1, "structural_coverage": 0.33,
+                   "gap_dimensions": gaps if gaps is not None else [
+                       {"subtask_id": "sub-1", "reason": "missing_verification", "scope": "none",
+                        "core_files": ["agent_go/core.py"], "verification": ""},
+                       {"subtask_id": "sub-2", "reason": "not_anchored", "scope": "suite",
+                        "core_files": ["agent_go/a.py", "agent_go/b.py"],
+                        "verification": "pytest tests/ -q"},
+                   ]}
+        path = tmp_path / "gaps.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_load_gaps_shape_and_none_paths(self, tmp_path):
+        from agent_go.spec_test import load_coverage_gaps
+        loaded = load_coverage_gaps(self._scan_file(tmp_path))
+        assert loaded["count"] == 2 and len(loaded["sha256"]) == 64
+        assert "sub-1" in loaded["text"] and "missing_verification" in loaded["text"]
+        assert "现行验证：pytest tests/ -q" in loaded["text"]
+        assert load_coverage_gaps("") is None
+        assert load_coverage_gaps(tmp_path / "nope.json") is None
+        broken = tmp_path / "broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        assert load_coverage_gaps(broken) is None
+        assert load_coverage_gaps(self._scan_file(tmp_path, gaps=[])) is None  # 无缺口＝无输入
+        # 裸列表形态也接受
+        bare = tmp_path / "bare.json"
+        bare.write_text(json.dumps([{"subtask_id": "s", "reason": "not_anchored"}]), encoding="utf-8")
+        assert load_coverage_gaps(bare)["count"] == 1
+
+    def test_gaps_injected_into_draft_prompt_and_recorded(self, tmp_path, monkeypatch):
+        from agent_go import spec_test as st
+        captured = {}
+
+        def fake_call_api(config, messages, logger, role=None):
+            captured["user"] = messages[-1]["content"]
+            return json.dumps({"notes": "n", "files": [{"path": "tests/test_x.py", "content": "def test_x():\n    assert True\n"}],
+                               "commands": ["pytest tests/test_x.py -q"]})
+
+        monkeypatch.setattr("agent_go.api.call_api", fake_call_api)
+        gaps = st.load_coverage_gaps(self._scan_file(tmp_path))
+        config = {"spec_test": {"enabled": True, "gaps_file": str(self._scan_file(tmp_path))}}
+        draft = st.draft_acceptance("实现 X", config, logging.getLogger("t"), coverage_gaps=gaps)
+        assert draft is not None
+        assert "规则覆盖缺口" in captured["user"] and "sub-1" in captured["user"]
+        assert draft["coverage_gaps"] == {"count": 2, "sha256": gaps["sha256"]}
+
+        # 清单存在但外部未显式传入 → 由 gaps_file 自动加载（同一条注入路径）
+        draft2 = st.draft_acceptance("实现 X", config, logging.getLogger("t"))
+        assert "规则覆盖缺口" in captured["user"] and draft2["coverage_gaps"]["count"] == 2
+
+    def test_no_gaps_no_injection_and_arm_marker_none(self, tmp_path, monkeypatch):
+        from agent_go import spec_test as st
+        captured = {}
+
+        def fake_call_api(config, messages, logger, role=None):
+            captured["user"] = messages[-1]["content"]
+            return json.dumps({"notes": "", "files": [
+                {"path": "tests/test_y.py", "content": "def test_y():\n    assert True\n"}],
+                "commands": ["pytest tests/test_y.py -q"]})
+
+        monkeypatch.setattr("agent_go.api.call_api", fake_call_api)
+        draft = st.draft_acceptance("实现 X", {"spec_test": {"enabled": True}}, logging.getLogger("t"))
+        assert "规则覆盖缺口" not in captured["user"]
+        assert draft["coverage_gaps"] is None  # 对照臂标记
+
+    def test_freeze_manifest_carries_gap_arm_marker(self, tmp_path):
+        from agent_go import spec_test as st
+        draft = {"notes": "", "files": [{"path": "tests/test_x.py", "content": "def test_x():\n    pass\n"}],
+                 "commands": ["pytest tests/test_x.py -q"], "model": "m", "cost_usd": None,
+                 "cost_source": "unavailable", "drafted_at": "2026-10-05T00:00:00",
+                 "coverage_gaps": {"count": 2, "sha256": "abc"}}
+        manifest = st.freeze(tmp_path, draft, reviewed=True, logger=logging.getLogger("t"),
+                             review_channel="cli")
+        assert manifest["coverage_gaps"] == {"count": 2, "sha256": "abc"}

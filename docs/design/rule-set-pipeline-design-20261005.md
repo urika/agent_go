@@ -162,11 +162,11 @@ CLI             agent_go rules list|show|validate|promote|retire
 | 预算 | 24 次任务执行（≈$0.3–1，delivery-20260820 口径）＋人审冻结 1–2 人时 |
 | **Kill（预注册）** | A 不优于 B（p>0.05 且点估不优）⇒ **方法死**，S-1 只保留"覆盖扫描作诊断报表"；A 优但成本超 10% ⇒ Conditional |
 
-**执行前置**：① 覆盖扫描器 ✅（`tools/s1_spec_scan.py`，7 例，本日落地）；② 起草端接入"缺口清单"输入（待实现，~0.5 人日）；③ ADR-012 管线 ✅（opt-in 已存在）；④ **环境空闲**（代理/LLM 当前被 swe-eval 占用）——**唯一硬阻塞**。
+**执行前置**：① 覆盖扫描器 ✅（`tools/s1_spec_scan.py`，7 例，本日落地）；② 起草端接入"缺口清单"输入 ✅（**2026-10-05 落地**：`--spec-gaps <缺口清单>`／`spec_test.gaps_file` → `load_coverage_gaps` 注入起草 prompt 的"规则覆盖缺口（注意力分配）"段；`gaps_max_items=12` 控体量；缺失/无缺口/不可解析 → None（fail-open，不阻塞主链）；草稿与冻结 manifest 记 `coverage_gaps{count,sha256}` 作 A/B 臂标记）；③ ADR-012 管线 ✅（opt-in 已存在）；④ **环境空闲**（代理/LLM 当前被 swe-eval 占用）——**唯一硬阻塞**。
 
-**当前状态**：A/B 暂不可跑；可先做②（起草端接入）。
+**当前状态**：A/B 暂不可跑（前置②已完成，剩环境）。
 
-**姊妹 P0（并行会话已落地）**：`agent_go/rule_set.py`（规则清单／受限 DSL／候选生成／离线 replay，37 例）——S-1 的"规则侧"与"草稿侧"由此各有一件离线仪器。
+**姊妹 P0（并行会话已落地）**：`agent_go/rule_set.py`（规则清单／受限 DSL／候选生成／离线 replay＋`holdout_sha` 盖章，41 例）——S-1 的"规则侧"与"草稿侧"由此各有一件离线仪器。
 
 ---
 
@@ -174,6 +174,7 @@ CLI             agent_go rules list|show|validate|promote|retire
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.7 | 2026-10-05 | **S-1 前置②落地（起草端接入缺口清单）**：`spec_test.load_coverage_gaps`（解析扫描报告/裸列表；缺失/无缺口 → None，fail-open）＋`draft_acceptance(coverage_gaps=…)`（或配置 `spec_test.gaps_file` 自动加载）注入"规则覆盖缺口（注意力分配）"提示段；`--spec-gaps PATH`（run/resume）与 `gaps_max_items`（默认 12）接入；草稿与冻结 manifest 增 `coverage_gaps{count,sha256}` 臂标记（A/B 归因用）；**边界不变**：仅建议性输入，安全门（`_is_safe_verification_command`/路径白名单）与人审门（ADR-012 四护栏）均不改；§10.1 前置②标 ✅。 |
 | v0.6 | 2026-10-05 | **P0 补强（离线；不接 runtime）**：①验证闸可复算化——`replay_report` 增 `sample_refs`／`holdout_sha`（纯函数 `holdout_sha_of` 可独立复算，剔除时间戳），`promote_rule(..., report=…)` 与 CLI `promote --report [--regression-ok]` 先校验报告自洽（sha 复算、rule_id/version/frozen_ok 对齐）再盖章 `metrics{holdout_n,holdout_sha,precision,recall,regression_ok}`；②候选生成规模化——数值阈值候选改为分位点采样（`NUMERIC_THRESHOLD_CAP=20`，含两端），消除 O(字段×取值数×样本数)；③§6 闸②、§7 P0 行同步（41 例）。 |
 | v0.5 | 2026-10-05 | P1 门就绪：**新增 [ADR-014](adr/ADR-014-rule-set-execution-plane.md)（Proposed）**——规则执行面＋全局规则数据面（`~/.agent_go/rules/`、`<task_dir>/rule_decisions.jsonl`）＋shadow→active 两态＋fail-open/只读无副作用＋回滚；§7 P1 行与 §9 R-1 更新为"ADR 草案已出"；S-1 前置行更新为"P0 已完成"；状态行同步。 |
 | v0.4 | 2026-10-05 | S-1 P0 仪器落地：`tools/s1_spec_scan.py`（计划/验收面覆盖扫描，缺口清单输出，7 例测试）；`planning.validate_plan_quality` 增**结构性验收覆盖回退口径**＋`plan_coverage_basis` 字段（修复 `plan_acceptance_coverage` 恒空——S-1 缺口映射的依赖项；`cli.py`/`bench.py` 同步透传）；§10.1 增 **S-1 A/B 预注册**（臂/设计/指标/预算/kill/前置；唯一硬阻塞＝环境占用）。 |

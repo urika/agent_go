@@ -282,6 +282,10 @@ DEFAULT_PRICING: dict[tuple[str, str], tuple[float, float]] = {
     # 智谱 GLM-5.3（anthropic 兼容直连，2026-08 官方 ¥4.2/¥16.8 ≈ $0.6/$2.4）
     ("anthropic", "glm-5.3"):                       (0.60, 2.40),
     ("zhipu", "glm-5.3"):                           (0.60, 2.40),
+    # GLM-5.3-Flash（z.ai 标准价，与 pricing.py 对齐）。缺此条会让 agent_loop 臂
+    # total_cost_usd=0，进而命中 bench 的 (total_cost==0) 分支被误标 kill_reason=infra
+    ("anthropic", "glm-5.3-flash"):                 (0.15, 0.50),
+    ("zhipu", "glm-5.3-flash"):                     (0.15, 0.50),
     # 月之暗面 Kimi K3 / kimi-for-coding（anthropic 兼容直连，$3/$15）
     ("anthropic", "kimi-for-coding"):               (3.0, 15.0),
     ("anthropic", "k3"):                            (3.0, 15.0),

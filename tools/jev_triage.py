@@ -4,7 +4,8 @@
 零网络：本模块不含任何 provider API 实现；`--call` 仅 spawn 既有 MCP server（stdio JSON-RPC）。
 零 runtime 写入：只读任务产物，只写 `--out` 目录。
 真值仍是人：`--label`/`--import-labels` 只收人工标签（labels.jsonl append-only，带 questions_sha256）；
-v0.8 的预标注/探针（prelabels.jsonl/probe.jsonl）本薄版未实现，实现后也永不覆盖人工标签。
+`--probe` 是 v0.8 的程序化辅助真值（干净环境复跑验证命令 → probe.jsonl，可降人工单位成本，
+但**永不覆盖**人工标签、结果不进 state）；LLM 预标注（prelabels.jsonl）未实现。
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import math
 import os
 import random
 import re
+import shlex
 import statistics
 import subprocess
 import sys
@@ -1087,6 +1089,226 @@ def _four_state(report: Dict[str, Any], *, stage: str) -> str:
     return "不可判（未超出粗规则——按 §9.3 需 H2 佐证）"
 
 
+# ---------------------------------------------------------------------------
+# 程序化探针（需求文档 §7 v0.8 第一层）：干净环境复跑记录的验证命令
+# ---------------------------------------------------------------------------
+
+# 副作用模式：默认跳过（--probe-force 才执行）——安装/发布/推送/迁移类命令
+# 可能改动宿主状态，探针只做"复现失败"的证据，不做环境变更
+PROBE_SIDE_EFFECT_RE = re.compile(
+    r"(?:^|[\s/])(?:pip3?|npm|yarn|pnpm|poetry|cargo|go)\s+(?:install|add|i)\b"
+    r"|(?:^|\s)git\s+(?:push|commit|reset|checkout|clean)\b"
+    r"|(?:^|\s)(?:docker|kubectl|systemctl|brew)\b"
+    r"|(?:^|\s)make\s+install\b"
+    r"|(?:^|\s)(?:alembic\s+upgrade|migrate)\b",
+    re.IGNORECASE,
+)
+
+# 命令级错误（语法/未找到/被拒）⇒ 环境流程型；断言/测试失败 ⇒ 内容型
+PROBE_COMMAND_LEVEL_RE = re.compile(
+    r"command not found|No such file or directory|not recognized as an internal or external command"
+    r"|SyntaxError|IndentationError|ModuleNotFoundError|ImportError"
+    r"|Permission denied|cannot execute|bad interpreter|invalid syntax"
+    r"|unrecognized arguments|error: unrecognized|No module named",
+    re.IGNORECASE,
+)
+PROBE_TEST_FAIL_RE = re.compile(
+    r"AssertionError|^\s*E\s+assert|FAILED\b|Failing tests|tests? failed|assert\s+.*==",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+PROBE_JUDGMENTS = ("env_or_harness", "content", "undecidable")
+
+
+def _probe_verdict(exit_code: int, timed_out: bool, output: str) -> str:
+    """按失败形态判读一条探针结果（§7 判读表）。"""
+    if exit_code == 0:
+        # 原判失败而 probe 通过 ⇒ 环境/harness 型证据
+        return "env_or_harness"
+    if timed_out:
+        return "undecidable"  # 非确定性/超时
+    if PROBE_COMMAND_LEVEL_RE.search(output or ""):
+        return "env_or_harness"
+    if PROBE_TEST_FAIL_RE.search(output or ""):
+        return "content"
+    return "undecidable"
+
+
+def _probe_targets(meta_entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """取最近一次尝试的验证命令（去重、保持出现顺序）——探针只复现决定失败的那一轮。"""
+    entries = [e for e in (meta_entry.get("verification_results") or []) if isinstance(e, dict)]
+    commands = [(e.get("attempt"), str(e.get("command") or "")) for e in entries]
+    commands = [(a, c) for a, c in commands if c]
+    if not commands:
+        return []
+    latest = max((a for a, _c in commands if isinstance(a, int)), default=None)
+    if latest is not None:
+        commands = [(a, c) for a, c in commands if a == latest]
+    seen: set = set()
+    targets: List[Dict[str, Any]] = []
+    for attempt, command in commands:
+        if command in seen:
+            continue
+        seen.add(command)
+        targets.append({"attempt": attempt, "command": command})
+    return targets
+
+
+def _load_probe_rows(out: Path) -> List[Dict[str, Any]]:
+    path = out / "probe.jsonl"
+    if not path.is_file():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    """干净环境复跑失败样本的验证命令 → probe.jsonl（本地、零外发；不进 state）。"""
+    out = Path(args.out).expanduser()
+    pool = [json.loads(line) for line in (out / "pool.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    probe_timeout = float(args.probe_timeout) if args.probe_timeout is not None else 300.0
+    done = {(r.get("run_ref"), r.get("attempt"), r.get("command_sha256")) for r in _load_probe_rows(out)
+            if r.get("outcome") in ("pass", "fail")}
+    planned: List[Dict[str, Any]] = []
+    for entry in pool:
+        ref = entry["run_ref"]
+        meta_path = out / "evidence" / ref / "meta_entry.json"
+        meta_entry = _load_json(meta_path) if meta_path.is_file() else {}
+        worktree = str((meta_entry or {}).get("worktree") or "")
+        targets = _probe_targets(meta_entry or {})
+        if not targets:
+            planned.append({"run_ref": ref, "outcome": "no_command", "reason": "无验证命令记录"})
+            continue
+        if not worktree or not Path(worktree).is_dir():
+            planned.append({"run_ref": ref, "outcome": "worktree_absent",
+                            "reason": "worktree 未保留（已清理或缺 worktree 字段）"})
+            continue
+        for target in targets:
+            command = target["command"]
+            sha = sha256_text(command)
+            if (ref, target["attempt"], sha) in done:
+                continue
+            planned.append({"run_ref": ref, "attempt": target["attempt"], "command": command,
+                            "command_sha256": sha, "worktree": worktree})
+
+    runnable = [p for p in planned if p.get("command")]
+    skipped = [p for p in planned if not p.get("command")]
+    if not args.confirmed:
+        print(f"[probe] 预演（未执行）：可探针 {len(runnable)} 条、跳过 {len(skipped)} 条；"
+              f"确认执行请加 --confirmed")
+        for item in planned[:20]:
+            label = item.get("outcome") or "command"
+            print(f"  - {item['run_ref']} attempt={item.get('attempt')} {label}："
+                  f"{(item.get('reason') or item.get('command') or '')[:110]}")
+        if len(planned) > 20:
+            print(f"  … 另有 {len(planned) - 20} 条")
+        return EXIT_OK
+
+    # 与 runtime 验证同源：干净环境（剥除敏感 env）+ 资源上限 + shlex argv（不 shell=True）
+    from agent_go.executor import _apply_resource_limits, _build_sandbox_env
+    from agent_go.utils import _is_safe_verification_command
+
+    probe_path = out / "probe.jsonl"
+    rows: List[Dict[str, Any]] = []
+    for item in skipped:
+        rows.append({"run_ref": item["run_ref"], "probe_schema": 1, "outcome": item["outcome"],
+                     "reason": item.get("reason", ""), "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    counts: Dict[str, int] = {}
+    for item in runnable:
+        ref, command = item["run_ref"], item["command"]
+        record: Dict[str, Any] = {
+            "run_ref": ref, "probe_schema": 1, "kind": "verification_replay",
+            "attempt": item.get("attempt"), "command_sha256": item["command_sha256"],
+            "command_excerpt": truncate(command, 200), "command_truncated": len(command) >= 200,
+            "questions_sha256": questions_sha256(), "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        safe, reason = _is_safe_verification_command(command)
+        if not safe:
+            record.update({"outcome": "unsafe", "reason": reason, "judgment": ""})
+        elif PROBE_SIDE_EFFECT_RE.search(command) and not args.probe_force:
+            record.update({"outcome": "skipped_side_effect",
+                           "reason": "副作用模式（安装/推送/迁移类）；确需执行加 --probe-force",
+                           "judgment": ""})
+        else:
+            started = time.time()
+            timed_out = False
+            try:
+                proc = subprocess.run(shlex.split(command), cwd=item["worktree"],
+                                      capture_output=True, text=True, timeout=probe_timeout,
+                                      preexec_fn=_apply_resource_limits, env=_build_sandbox_env())
+                exit_code, stdout, stderr = proc.returncode, proc.stdout or "", proc.stderr or ""
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                exit_code = -1
+                stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+                stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                timed_out = False
+                exit_code = -2
+                stdout, stderr = "", f"{type(exc).__name__}: {exc}"
+            output = (stdout or "") + "\n" + (stderr or "")
+            record.update({
+                "outcome": "pass" if exit_code == 0 else "fail",
+                "exit_code": exit_code, "timed_out": timed_out,
+                "judgment": _probe_verdict(exit_code, timed_out, output),
+                "duration_sec": round(time.time() - started, 2),
+                "output_tail": truncate(sanitize(output, repo_path=None,
+                                                 worktree=item["worktree"],
+                                                 task_id=ref), 600),
+            })
+        rows.append(record)
+        counts[record.get("outcome", "?")] = counts.get(record.get("outcome", "?"), 0) + 1
+        print(f"[probe] {ref} attempt={record.get('attempt')} → {record.get('outcome')} "
+              f"{record.get('judgment', '')}")
+    if rows:
+        with probe_path.open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+    summary = _probe_summary(out)
+    (out / "probe_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"[probe] 本轮 {len(rows)} 条（{counts}）→ probe.jsonl；汇总 → probe_summary.json"
+          f"（探针-人一致率＝{summary['agreement']['rate']}，探索性，不进判据）")
+    return EXIT_OK
+
+
+def _probe_summary(out: Path) -> Dict[str, Any]:
+    """探针画像＋（有标签时）探针-人一致率——探索性指标，不进判据（§9.1）。"""
+    rows = _load_probe_rows(out)
+    by_outcome: Dict[str, int] = {}
+    by_judgment: Dict[str, int] = {}
+    for row in rows:
+        by_outcome[row.get("outcome", "?")] = by_outcome.get(row.get("outcome", "?"), 0) + 1
+        if row.get("judgment"):
+            by_judgment[row["judgment"]] = by_judgment.get(row["judgment"], 0) + 1
+    labels = _load_labels(out)
+    agree = compared = 0
+    for row in rows:
+        ref, judgment = row.get("run_ref"), row.get("judgment")
+        human = labels.get(ref, {}).get("label")
+        if judgment and human in ("content_fix", "infra_or_process"):
+            compared += 1
+            if (judgment == "content") == (human == "content_fix"):
+                agree += 1
+    return {
+        "schema": 1,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "probes": len(rows),
+        "by_outcome": dict(sorted(by_outcome.items())),
+        "by_judgment": dict(sorted(by_judgment.items())),
+        "agreement": {"compared": compared, "agree": agree,
+                      "rate": round(agree / compared, 4) if compared else None},
+        "note": "探针为辅助真值（可降人工单位成本，不替代人的确权）；一致率为探索性指标，不进判据",
+    }
+
+
 def cmd_queue(args: argparse.Namespace) -> int:
     out = Path(args.out).expanduser()
     pool = {e["run_ref"]: e for e in
@@ -1134,6 +1356,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label", action="store_true", help="人工盲标（先于查看 results）+ 单条耗时 → labels.jsonl")
     p.add_argument("--import-labels", metavar="FILE",
                    help="批量导入人工标签 JSONL（跨轮合并；一处不合规整批拒收）")
+    p.add_argument("--probe", action="store_true",
+                   help="程序化探针：干净环境复跑失败样本的验证命令 → probe.jsonl（需 --confirmed 才执行）")
+    p.add_argument("--probe-timeout", type=float, default=None, help="单条探针命令超时秒数（默认 300）")
+    p.add_argument("--probe-force", action="store_true",
+                   help="允许执行副作用模式命令（安装/推送/迁移类默认跳过）")
     p.add_argument("--analyze", action="store_true", help="分析（pilot=四件事；full=指标＋四态）")
     p.add_argument("--queue", action="store_true", help="生成 review-queue.md")
     return p
@@ -1141,14 +1368,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    actions = [a for a in ("build", "check", "packets", "call", "analyze", "queue", "label") if getattr(args, a)]
+    actions = [a for a in ("build", "check", "packets", "call", "analyze", "queue", "label", "probe")
+               if getattr(args, a)]
     if args.record:
         actions.append("record")
     if args.import_labels:
         actions.append("import_labels")
     if len(actions) != 1:
         print("[usage] 需要且仅需要一个动作（--build/--check/--packets/--call/--record/--label/"
-              "--import-labels/--analyze/--queue）", file=sys.stderr)
+              "--import-labels/--probe/--analyze/--queue）", file=sys.stderr)
         return EXIT_USAGE
     action = actions[0]
     if action == "build":
@@ -1169,6 +1397,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_record(args)
     if action == "label":
         return cmd_label(args)
+    if action == "probe":
+        return cmd_probe(args)
     if action == "import_labels":
         return cmd_import_labels(args)
     if action == "analyze":

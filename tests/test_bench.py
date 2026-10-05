@@ -678,6 +678,18 @@ def test_dynamic_timeout_no_history_uses_config(tmp_path):
     assert _dynamic_timeout({"timeout": 900, "difficulty": "easy"}, "task-x", None) == 900
 
 
+def test_dynamic_timeout_margin_scales_dynamic_part(tmp_path):
+    """B2 复测前置②：margin 只放大动态部分，且不缩短 YAML 显式 timeout。"""
+    # easy 无历史 → 270s；margin=1.5 → 405s
+    assert _dynamic_timeout({"timeout": 300, "difficulty": "easy"}, "task-x", None, margin=1.5) == 405
+    # 配置值占优时 margin 不得把结果压到配置以下
+    assert _dynamic_timeout({"timeout": 1200, "difficulty": "easy"}, "task-x", None, margin=1.5) == 1200
+    # 默认 margin=1.0 与既有口径逐位一致
+    assert _dynamic_timeout({"timeout": 300, "difficulty": "hard"}, "task-x", None) == 495
+    assert _dynamic_timeout({"timeout": 300, "difficulty": "hard"}, "task-x", None, margin=1.0) == 495
+
+
+
 # ═══════════════════════════════════════════════════════════════
 # S10-P2：--parallel 1 顺序执行 + 代码质量维度 + 对照基线
 # ═══════════════════════════════════════════════════════════════
