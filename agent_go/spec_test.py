@@ -44,6 +44,9 @@ _DEFAULTS: dict[str, Any] = {
     "max_files": 8,
     "max_file_bytes": 20000,
     "max_commands": 5,
+    # MCP 代审策略（ADR-012）：allow=宿主可代人工提交人审回执（留痕 channel/actor）；
+    # deny=只允许 CLI/web 人工通道（严格独立性场景，如对外交付/评测）
+    "mcp_review": "allow",
 }
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -205,7 +208,8 @@ def draft_acceptance(
         logger.warning(f"[spec_test] 起草调用失败（降级为现状验证行为）: {type(e).__name__}: {e}")
         return None
     latency_ms = (time.time() - t0) * 1000
-    draft_cost = max(0.0, _metering_cost_total(config) - _cost_before)
+    _cost_after = _metering_cost_total(config)
+    draft_cost = None if (_cost_before is None or _cost_after is None) else max(0.0, _cost_after - _cost_before)
 
     raw = _extract_json_object(content or "")
     if raw is None:
@@ -217,7 +221,9 @@ def draft_acceptance(
         return None
     draft["model"] = str((config.get("plan_api") or {}).get("model") or role)
     draft["latency_ms"] = latency_ms
+    # 成本口径：无 metering 通道 → None（不可得），不冒充 0
     draft["cost_usd"] = draft_cost
+    draft["cost_source"] = "metering_delta" if draft_cost is not None else "unavailable"
     draft["drafted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     logger.info(
         f"[spec_test] 验收测试草稿就绪: {len(draft['files'])} 个文件 / "
@@ -226,15 +232,15 @@ def draft_acceptance(
     return draft
 
 
-def _metering_cost_total(config: Optional[dict[str, Any]]) -> float:
+def _metering_cost_total(config: Optional[dict[str, Any]]) -> Optional[float]:
     """当前 metering.jsonl 的累计成本（用于起草调用的增量成本留痕）。
 
-    起草发生在 Plan 阶段（pipeline 未启动、无并发子任务），差分口径安全；
-    文件缺失/坏行一律按 0 计（留痕尽力而为，不影响主链）。
+    起草发生在 Plan 阶段（pipeline 未启动、无并发子任务），差分口径安全。
+    无 metering 通道 → None（"不可得"，不冒充 0）；文件缺失/坏行按 0 计入累计。
     """
     path = (config or {}).get("_metering_path")
     if not path:
-        return 0.0
+        return None
     total = 0.0
     try:
         with open(path, encoding="utf-8") as f:
@@ -383,7 +389,8 @@ def freeze(
         "frozen_dir": frozen_dir or str(_DEFAULTS["frozen_dir"]),
         "notes": draft.get("notes", ""),
         "draft_model": draft.get("model", ""),
-        "draft_cost_usd": float(draft.get("cost_usd") or 0.0),
+        "draft_cost_usd": (None if draft.get("cost_usd") is None else float(draft["cost_usd"])),
+        "draft_cost_source": draft.get("cost_source", ""),
         "files": [],
         "commands": list(draft.get("commands") or []),
     }
@@ -744,7 +751,9 @@ def meta_block(manifest: Optional[dict[str, Any]]) -> dict[str, Any]:
         "sha256": {f.get("path"): f.get("sha256") for f in manifest.get("files") or []},
         "commands": list(manifest.get("commands") or []),
         "draft_model": manifest.get("draft_model", ""),
-        "draft_cost_usd": float(manifest.get("draft_cost_usd") or 0.0),
+        "draft_cost_usd": (None if manifest.get("draft_cost_usd") is None
+                           else float(manifest.get("draft_cost_usd"))),
+        "draft_cost_source": manifest.get("draft_cost_source", ""),
         "drafted_at": manifest.get("drafted_at", ""),
         "review_channel": manifest.get("review_channel", ""),
     }

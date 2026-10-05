@@ -102,6 +102,7 @@ agent_go status --watch
 # Model benchmark / cross-judgment / evaluation / gate
 agent_go eval bench --tasks eval_suite/ --candidate-models M1,M2 --repeat 3   # 启动前探测实际后端+校验定价（S12）
 agent_go eval bench --suite golden                 # 预设套件: smoke/core/decision/stress/golden/phaseD
+agent_go eval acceptance [--window-days 30] [--json]   # spec-to-test 四项口径聚合（ADR-012）
 agent_go eval bench --with-delivery                # 本地交付 merge 闭合 accepted_delivery 判定（不推进 target 引用）
 agent_go eval bench --source-batch results_v2      # 批次标识（跨批次追溯）
 agent_go eval bench --worker-backend opencode --fork-retry   # ADR-010 阶段3 fork-retry A/B 注入臂（修复重试续跑 backend 会话；对照臂不加）

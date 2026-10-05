@@ -10,7 +10,7 @@ __all__ = [
     "compute_frozen_metrics", "is_valid_metric_task",
     "aggregate_failure_classes", "local_tco_usd",
     "compute_trust_metrics", "compute_blind_spot_hit_rate",
-    "compute_post_delivery_rework",
+    "compute_post_delivery_rework", "compute_acceptance_metrics",
 ]
 
 # local_model_cost 配置缓存（local_tco_usd 惰性加载一次）
@@ -989,4 +989,189 @@ def compute_trust_metrics(task_dirs: list[Path],
         "task_miss_attributed": blind["task_miss_attributed"],
         "blind_spot_by_signal": blind["by_signal"],
         "blind_spot_by_evidence": blind["by_evidence"],
+    }
+
+
+def _read_meta_json(td: Path) -> dict:
+    try:
+        data = json.loads((td / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_json_file(path: Path) -> Optional[dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _delivery_accepted(meta: dict) -> bool:
+    """是否 Accepted Delivery：显式字段优先（含显式 False），否则按终态状态近似判定。"""
+    if "accepted_delivery" in meta:
+        return bool(meta.get("accepted_delivery"))
+    return str(meta.get("status") or "") in ("ACCEPTED_DELIVERY", "DELIVERY_READY")
+
+
+def compute_acceptance_metrics(
+    task_dirs: list[Path], window_days: Optional[int] = None
+) -> dict[str, Any]:
+    """spec-to-test 四项预注册口径的聚合（ADR-012，纯读）。
+
+    口径（详见 ADR-012「整体流程与自动化 / 留痕边界」）：
+      1. 首次验证通过率：`verification_results` 中 `type=acceptance` 且 `attempt=1` 的通过比例
+      2. ISSUE-29/31 类误判信号：验收命令被安全门禁拒绝 / 不可执行（exit=127）比例，
+         以及 oracle 与语义评估冲突（semantic_advisory）计数
+      3. Cost per Accepted Delivery：验收启用队列 vs 其余队列（含起草差分成本）
+      4. 人审干预分钟数：`frozen_at - drafted_at`（并入既有 Plan 确认门，只计增量）
+
+    只读 meta.json + acceptance/{manifest.json,DRAFT.json}；不读冻结测试文件内容
+    （编辑事实用 sha256 对比，避免大文件 IO）。
+    """
+    dirs = [Path(td) for td in task_dirs]
+    if window_days:
+        dirs = select_recent_task_dirs(dirs, window=window_days)
+
+    cohort = {"tasks": 0, "frozen": 0, "drafted": 0, "provided": 0, "degraded": 0}
+    oracle = {"first_attempt_total": 0, "first_attempt_passed": 0,
+              "all_attempts_total": 0, "all_attempts_passed": 0,
+              "restore_events": 0, "restored_files": 0}
+    misjudge = {"command_total": 0, "rejected": 0, "not_executable_127": 0,
+                "semantic_advisory": 0}
+    review = {"reviewed_tasks": 0, "channel_counts": {}, "edits_total": 0,
+              "files_total": 0, "files_edited": 0, "minutes": []}
+    draft_cost_usd = 0.0
+    draft_cost_unavailable = 0
+
+    acc_cohort = {"tasks": 0, "cost_usd": 0.0, "accepted": 0}
+    base_cohort = {"tasks": 0, "cost_usd": 0.0, "accepted": 0}
+
+    for td in dirs:
+        meta = _read_meta_json(td)
+        if not meta:
+            continue
+        acc = meta.get("acceptance") or {}
+        enabled = bool(acc.get("enabled"))
+        try:
+            cost = float(aggregate_metering(td / "metering.jsonl").get("cost_usd") or 0.0)
+        except Exception:  # noqa: BLE001 - 聚合失败按 0 计，不阻塞
+            cost = 0.0
+        accepted = _delivery_accepted(meta)
+        bucket = acc_cohort if enabled else base_cohort
+        bucket["tasks"] += 1
+        bucket["cost_usd"] += cost
+        bucket["accepted"] += 1 if accepted else 0
+
+        if not enabled:
+            continue
+        cohort["tasks"] += 1
+        if acc.get("frozen"):
+            cohort["frozen"] += 1
+        if acc.get("source") == "provided":
+            cohort["provided"] += 1
+        else:
+            cohort["drafted"] += 1
+        if acc.get("degraded"):
+            cohort["degraded"] += 1
+        if acc.get("draft_cost_usd") is None:
+            draft_cost_unavailable += 1
+        else:
+            draft_cost_usd += float(acc["draft_cost_usd"])
+
+        # 3) 人审留痕（渠道/编辑/耗时）
+        if acc.get("reviewed") or acc.get("frozen"):
+            review["reviewed_tasks"] += 1
+            ch = str(acc.get("review_channel") or "unknown")
+            review["channel_counts"][ch] = review["channel_counts"].get(ch, 0) + 1
+            review["edits_total"] += int(acc.get("review_edits") or 0)
+        manifest = _load_json_file(td / "acceptance" / "manifest.json")
+        draft = _load_json_file(td / "acceptance" / "DRAFT.json")
+        if manifest and draft:
+            import hashlib as _hl
+            draft_hashes = {}
+            for f in draft.get("files") or []:
+                if isinstance(f, dict) and f.get("path"):
+                    draft_hashes[str(f["path"])] = _hl.sha256(
+                        str(f.get("content") or "").encode("utf-8")).hexdigest()
+            for mf in manifest.get("files") or []:
+                if not isinstance(mf, dict) or not mf.get("path"):
+                    continue
+                review["files_total"] += 1
+                dh = draft_hashes.get(str(mf["path"]))
+                if dh is not None and dh != mf.get("sha256"):
+                    review["files_edited"] += 1
+        drafted_at, frozen_at = acc.get("drafted_at") or "", acc.get("frozen_at") or ""
+        if drafted_at and frozen_at:
+            try:
+                from datetime import datetime as _dt
+                d_t = _dt.fromisoformat(drafted_at)
+                f_t = _dt.fromisoformat(frozen_at)
+                mins = max(0.0, (f_t - d_t).total_seconds() / 60.0)
+                review["minutes"].append(round(mins, 2))
+            except (TypeError, ValueError):
+                pass
+
+        # 1) 首次验证通过率 + 2) 误判信号 + 护栏①拦截
+        for r in meta.get("results") or []:
+            if not isinstance(r, dict):
+                continue
+            for vr in r.get("verification_results") or []:
+                if not isinstance(vr, dict):
+                    continue
+                vtype = vr.get("type")
+                if vtype == "acceptance_restore":
+                    oracle["restore_events"] += 1
+                    oracle["restored_files"] += len(vr.get("restored") or [])
+                    continue
+                if vtype == "semantic_advisory":
+                    misjudge["semantic_advisory"] += 1
+                    continue
+                if vtype != "acceptance":
+                    continue
+                oracle["all_attempts_total"] += 1
+                passed = vr.get("exit_code") in (0, 127)
+                if passed:
+                    oracle["all_attempts_passed"] += 1
+                if vr.get("attempt") == 1:
+                    oracle["first_attempt_total"] += 1
+                    if passed:
+                        oracle["first_attempt_passed"] += 1
+                misjudge["command_total"] += 1
+                if vr.get("rejected"):
+                    misjudge["rejected"] += 1
+                if vr.get("exit_code") == 127:
+                    misjudge["not_executable_127"] += 1
+
+    def _rate(num: int, den: int) -> Optional[float]:
+        return round(num / den, 4) if den else None
+
+    minutes = sorted(review.pop("minutes"))
+    review["minutes_count"] = len(minutes)
+    review["minutes_total"] = round(sum(minutes), 2) if minutes else 0.0
+    review["minutes_mean"] = round(sum(minutes) / len(minutes), 2) if minutes else None
+    review["minutes_median"] = minutes[len(minutes) // 2] if minutes else None
+    review["adoption_rate"] = _rate(
+        review["files_total"] - review["files_edited"], review["files_total"])
+
+    return {
+        "window_days": window_days,
+        "cohort": cohort,
+        "oracle": dict(oracle, first_attempt_pass_rate=_rate(
+            oracle["first_attempt_passed"], oracle["first_attempt_total"]),
+            all_attempts_pass_rate=_rate(oracle["all_attempts_passed"], oracle["all_attempts_total"])),
+        "misjudge": dict(misjudge, reject_rate=_rate(
+            misjudge["rejected"] + misjudge["not_executable_127"], misjudge["command_total"])),
+        "review": review,
+        "cost": {
+            "draft_cost_usd": round(draft_cost_usd, 4),
+            "draft_cost_unavailable_tasks": draft_cost_unavailable,
+            "acceptance_cohort": dict(acc_cohort, cost_per_ad=(
+                round(acc_cohort["cost_usd"] / acc_cohort["accepted"], 4)
+                if acc_cohort["accepted"] else None), cost_usd=round(acc_cohort["cost_usd"], 4)),
+            "baseline_cohort": dict(base_cohort, cost_per_ad=(
+                round(base_cohort["cost_usd"] / base_cohort["accepted"], 4)
+                if base_cohort["accepted"] else None), cost_usd=round(base_cohort["cost_usd"], 4)),
+        },
     }

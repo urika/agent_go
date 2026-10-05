@@ -16,6 +16,7 @@ Environment:
 import sys
 import json
 import os
+import hashlib
 import subprocess
 import time
 import threading
@@ -758,7 +759,7 @@ class MCPServer:
             elif name == "inspect_task":
                 r = self._tool_inspect(args)
             elif name == "review_task":
-                r = self._tool_review(args)
+                r = self._tool_review(args, token)
             elif name == "governance_task":
                 r = self._tool_governance(args)
             elif name == "list_tasks":
@@ -1110,7 +1111,7 @@ class MCPServer:
             "assessment": report["assessment"],
         }
 
-    def _tool_review(self, args: dict) -> dict:
+    def _tool_review(self, args: dict, token: Any = "") -> dict:
         task_id = args["task_id"]
         td = self._ensure_task_dir(task_id)
         action = args["action"]
@@ -1147,6 +1148,20 @@ class MCPServer:
             files_in = args.get("files")
             if isinstance(files_in, list) and files_in:
                 acc_in["files"] = files_in
+            # 独立性闸（ADR-012）：deny 时只允许 CLI/web 人工通道提交人审回执
+            try:
+                from .config import load_config as _load_cfg_policy
+                from . import spec_test as _st_policy_mod
+                _policy = str(_st_policy_mod.cfg(_load_cfg_policy()).get("mcp_review") or "allow").lower()
+            except Exception:  # noqa: BLE001 - 配置读取失败按默认放行（fail-open，与既有写工具一致）
+                _policy = "allow"
+            if _policy == "deny":
+                raise MCPError(
+                    "AGENT_GO_ACCEPTANCE_POLICY",
+                    "当前配置 spec_test.mcp_review=deny：验收测试人审必须由人工在 CLI/web 控制台完成",
+                    retryable=False,
+                    fix={"description": "请人工在 web 控制台确认卡片审阅/跳过，或以 CLI [T]/[K] 完成；"
+                                        "如确需放开，显式设 spec_test.mcp_review=allow"})
             review = _st_rev.sanitize_review(acc_in)
             if review is None:
                 raise MCPError("AGENT_GO_ACCEPTANCE_INVALID",
@@ -1156,8 +1171,10 @@ class MCPServer:
             if plan_decision not in ("Y", "R"):
                 raise MCPError("AGENT_GO_ACCEPTANCE_INVALID", "plan_decision 须为 Y/R", retryable=False)
             recorded_at = datetime.now().isoformat()
+            # 身份留痕（供事后归因"谁批的"）：token 哈希前 8 位，不落明文
+            _actor = "mcp" if not token else "mcp:" + hashlib.sha256(str(token).encode()).hexdigest()[:8]
             payload = {"stage": "plan", "decision": plan_decision, "ts": recorded_at,
-                       "acceptance": review}
+                       "acceptance": review, "review_actor": _actor}
             (td / "confirmation_decision.json").write_text(
                 json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             logger.info("[mcp] acceptance_review 已提交: task=%s decision=%s edits=%s",

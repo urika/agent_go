@@ -108,7 +108,8 @@
     "max_files": 8,
     "max_file_bytes": 20000,
     "max_commands": 5,
-    "oracle_priority": true
+    "oracle_priority": true,
+    "mcp_review": "allow"
   },
   "fallback": {
     "local_model_url": "http://localhost:8000/v1/chat/completions",

@@ -1040,3 +1040,99 @@ def test_recurrence_visibility_denominator_verify_only(tmp_path):
     r = compute_trust_metrics([t])
     assert r["failed_subtasks"] == 2
     assert r["recurrence_visibility_rate"] == 0.5
+
+
+class TestComputeAcceptanceMetrics:
+    """spec-to-test 四项预注册口径聚合（ADR-012）。"""
+
+    @staticmethod
+    def _mk(td, *, enabled=True, frozen=True, source="drafted", reviewed=True,
+            channel="web", edits=1, draft_cost=0.01, drafted="2026-10-05T13:00:00",
+            frozen_at="2026-10-05T13:05:00", accepted=True, results=None,
+            draft_content=None, frozen_content=None, cost_usd=0.5, degraded=False):
+        from agent_go.metrics import _read_meta_json  # noqa: F401  (存在性校验)
+        import hashlib
+        import json
+        td.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "task_id": td.name, "task": "t", "status": "ACCEPTED_DELIVERY",
+            "status_schema_version": 1, "repo": "/tmp/repo", "subtasks": [],
+            "accepted_delivery": accepted, "results": results or [],
+        }
+        if enabled:
+            meta["acceptance"] = {
+                "enabled": True, "frozen": frozen, "source": source, "reviewed": reviewed,
+                "review_channel": channel, "review_edits": edits, "degraded": degraded,
+                "draft_cost_usd": draft_cost, "drafted_at": drafted, "frozen_at": frozen_at,
+                "commands": ["pytest x"],
+            }
+        (td / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        (td / "metering.jsonl").write_text(json.dumps({"role": "worker", "cost_usd": cost_usd}) + "\n",
+                                           encoding="utf-8")
+        if enabled and frozen:
+            acc_dir = td / "acceptance"
+            (acc_dir / "files").mkdir(parents=True, exist_ok=True)
+            if draft_content is not None:
+                (acc_dir / "DRAFT.json").write_text(json.dumps({
+                    "files": [{"path": "t.py", "content": draft_content}],
+                    "_saved_reason": "drafted", "drafted_at": drafted}), encoding="utf-8")
+            if frozen_content is not None:
+                (acc_dir / "manifest.json").write_text(json.dumps({
+                    "files": [{"path": "t.py",
+                               "sha256": hashlib.sha256(frozen_content.encode()).hexdigest(),
+                               "bytes": len(frozen_content)}],
+                    "commands": ["pytest x"]}), encoding="utf-8")
+        return td
+
+    def test_four_metrics(self, tmp_path):
+        from agent_go.metrics import compute_acceptance_metrics
+        self._mk(tmp_path / "task-20261005-130000-001-aaaa",
+                 results=[{"subtask_id": "s1", "verification_results": [
+                     {"type": "acceptance", "exit_code": 0, "attempt": 1},
+                     {"type": "acceptance", "exit_code": 1, "attempt": 2},
+                     {"type": "acceptance_restore", "attempt": 2, "restored": ["t.py"]},
+                     {"type": "semantic_advisory", "passed": False}]}],
+                 draft_content="assert 0", frozen_content="assert 1", cost_usd=0.5)
+        self._mk(tmp_path / "task-20261005-120000-002-bbbb", enabled=False,
+                 accepted=False, cost_usd=0.25)
+        m = compute_acceptance_metrics([tmp_path / "task-20261005-130000-001-aaaa",
+                                        tmp_path / "task-20261005-120000-002-bbbb"])
+        assert m["cohort"] == {"tasks": 1, "frozen": 1, "drafted": 1, "provided": 0, "degraded": 0}
+        # 1) 首次验证通过率
+        assert m["oracle"]["first_attempt_pass_rate"] == 1.0
+        assert m["oracle"]["all_attempts_pass_rate"] == 0.5
+        assert m["oracle"]["restore_events"] == 1 and m["oracle"]["restored_files"] == 1
+        # 2) 误判信号
+        assert m["misjudge"]["semantic_advisory"] == 1
+        assert m["misjudge"]["reject_rate"] == 0.0
+        # 3) 人审留痕 + 采纳率（草稿≠冻结 → 0）
+        assert m["review"]["channel_counts"] == {"web": 1}
+        assert m["review"]["adoption_rate"] == 0.0
+        assert m["review"]["files_edited"] == 1
+        # 4) 干预分钟数（13:00→13:05 = 5min）
+        assert m["review"]["minutes_mean"] == 5.0
+        # 成本队列对比
+        assert m["cost"]["acceptance_cohort"]["cost_per_ad"] == round(0.5, 4)
+        assert m["cost"]["baseline_cohort"]["cost_per_ad"] is None
+        assert m["cost"]["draft_cost_usd"] == 0.01
+
+    def test_adoption_100_when_unchanged(self, tmp_path):
+        from agent_go.metrics import compute_acceptance_metrics
+        self._mk(tmp_path / "task-20261005-130000-003-cccc",
+                 draft_content="same", frozen_content="same", edits=0)
+        m = compute_acceptance_metrics([tmp_path / "task-20261005-130000-003-cccc"])
+        assert m["review"]["adoption_rate"] == 1.0 and m["review"]["files_edited"] == 0
+
+    def test_cost_unavailable_counted_separately(self, tmp_path):
+        from agent_go.metrics import compute_acceptance_metrics
+        self._mk(tmp_path / "task-20261005-130000-004-dddd", draft_cost=None)
+        m = compute_acceptance_metrics([tmp_path / "task-20261005-130000-004-dddd"])
+        assert m["cost"]["draft_cost_unavailable_tasks"] == 1
+        assert m["cost"]["draft_cost_usd"] == 0.0
+
+    def test_empty_input(self):
+        from agent_go.metrics import compute_acceptance_metrics
+        m = compute_acceptance_metrics([])
+        assert m["cohort"]["tasks"] == 0
+        assert m["oracle"]["first_attempt_pass_rate"] is None
+        assert m["review"]["adoption_rate"] is None

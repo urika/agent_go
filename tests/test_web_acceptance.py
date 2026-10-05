@@ -189,6 +189,8 @@ class TestConfirmAcceptanceHttp:
         assert body["acceptance"] == {"decision": "approved", "edits": 2, "files": 1}
         decision = json.loads((td / "confirmation_decision.json").read_text(encoding="utf-8"))
         assert decision["acceptance"]["files"][0]["path"] == "t.py"
+        # 身份留痕（无 token 配置 → web:open）
+        assert decision["review_actor"] == "web:open"
 
     def test_invalid_acceptance_rejected_and_not_written(self, web_env, web_server_url):
         td = _mk_task(web_env, "task-20261005-100000-002-acc2")

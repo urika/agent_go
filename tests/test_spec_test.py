@@ -144,6 +144,34 @@ class TestDraft:
         monkeypatch.setattr("agent_go.api.call_api", lambda *a, **k: "抱歉，我无法输出 JSON")
         assert spec_test.draft_acceptance("任务", _cfg(enabled=True), logger) is None
 
+    def test_draft_cost_none_without_metering(self, logger, monkeypatch):
+        """无 metering 通道 → 成本不可得（None + source=unavailable），不冒充 0。"""
+        payload = json.dumps({"files": [{"path": "t.py", "content": "x"}],
+                              "commands": ["pytest tests/acceptance/t.py"]})
+        monkeypatch.setattr("agent_go.api.call_api", lambda *a, **k: payload)
+        draft = spec_test.draft_acceptance("任务", _cfg(enabled=True), logger)
+        assert draft is not None
+        assert draft["cost_usd"] is None and draft["cost_source"] == "unavailable"
+
+    def test_draft_cost_delta_with_metering(self, logger, monkeypatch, tmp_path):
+        """有 metering 通道 → 用前后差分留痕起草成本。"""
+        mp = tmp_path / "metering.jsonl"
+        mp.write_text(json.dumps({"role": "planner", "cost_usd": 0.5}) + "\n", encoding="utf-8")
+        payload = json.dumps({"files": [{"path": "t.py", "content": "x"}],
+                              "commands": ["pytest tests/acceptance/t.py"]})
+
+        def _fake_call(*a, **k):
+            with mp.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"role": "planner", "cost_usd": 0.02}) + "\n")
+            return payload
+
+        monkeypatch.setattr("agent_go.api.call_api", _fake_call)
+        cfg = _cfg(enabled=True)
+        cfg["_metering_path"] = str(mp)
+        draft = spec_test.draft_acceptance("任务", cfg, logger)
+        assert draft is not None
+        assert draft["cost_usd"] == pytest.approx(0.02) and draft["cost_source"] == "metering_delta"
+
 
 class TestFreezeAndCommands:
     def test_freeze_roundtrip(self, tmp_path, logger):

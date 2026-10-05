@@ -7,6 +7,7 @@ confirm/notes/blind-spot/insight/config put），路由内派发的看板写端�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -522,7 +523,10 @@ class WebOpsMixin(WebKanbanMixin):
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         if acceptance_out is not None:
+            # 身份留痕（供事后归因"谁批的"）：token 哈希前 8 位，不落明文
+            _actor = "web:" + (hashlib.sha256(str(token).encode()).hexdigest()[:8] if token else "open")
             decision_payload["acceptance"] = acceptance_out
+            decision_payload["review_actor"] = _actor
         decision_path = td / "confirmation_decision.json"
         decision_path.write_text(json.dumps(decision_payload, ensure_ascii=False), encoding="utf-8")
         # W3.1：design 列卡片计划确认后自动流转 implementation（Y 决策时）

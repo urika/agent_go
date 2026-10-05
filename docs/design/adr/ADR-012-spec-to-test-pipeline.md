@@ -84,7 +84,11 @@ tdd 臂（验收契约 test_patch 预置可见）对 plain 臂的配对差异（
 | Cost per Accepted Delivery | `metering.jsonl`（含起草差分 `draft_cost_usd`）+ 既有 `eval` 成本口径 |
 | 人审干预分钟数 | `drafted_at` → `frozen_at` 差值（合并进既有 Plan 确认门，故只计增量） |
 
-> 缺口（登记为后续）：四项口径**尚无自动聚合命令**（数据面已完整）；`draft_cost_usd` 依赖 metering 差分（并发起草场景不存在，口径安全）。
+**聚合命令（2026-10-05 落地）**：`agent_go eval acceptance [--window-days N] [--json]`——纯读 `~/.agent_go/task-*/`，一次出四项口径 + 队列对比（启用验收 vs 其余）与支持量（护栏①拦截、adoption、渠道分布）。实现=`metrics.compute_acceptance_metrics`。
+
+**口径诚实性**：`draft_cost_usd` 依赖 metering 差分（起草发生在 Plan 阶段、无并发子任务，差分安全）；无 metering 通道时记 `None` + `draft_cost_source=unavailable`，聚合单列为「成本不可得任务数」，不冒充 0。
+
+**独立性闸（MCP 代审）**：`spec_test.mcp_review`（默认 `allow`｜`deny`）。`deny` 时 `review_task(acceptance_review)` 直接拒收（结构化错误指引人工走 CLI/web），适用于对外交付/评测等要求独立性的场景；无论 allow/deny，回执都留 `review_actor`（`web:<token哈希8>` / `mcp:<token哈希8>` / `cli`），事后可归因「谁批的」——留痕能审计，但拦不住放宽策略下的自审自批，评测口径仍必须用 `provided_dir`。
 
 ## 开放问题（落地后收敛）
 

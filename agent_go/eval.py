@@ -987,6 +987,16 @@ def cmd_eval(args=None) -> None:
                console.print("暂无任务")
     elif sub == "cost":
        _print_cost_report(analyze_cost(AGENT_GO_DIR))
+    elif sub == "acceptance":
+        # spec-to-test 四项预注册口径聚合（ADR-012；纯读）
+        from .metrics import compute_acceptance_metrics
+        _window = getattr(args, "window_days", None) or None
+        _dirs = [d for d in AGENT_GO_DIR.glob("task-*") if d.is_dir()]
+        _data = compute_acceptance_metrics(_dirs, window_days=_window)
+        if getattr(args, "json_mode", False):
+            console.force(json.dumps(_data, ensure_ascii=False, indent=2))
+        else:
+            _print_acceptance_report(_data)
     elif sub == "bench":
         # 模型对照评估编排器（S8，subprocess 隔离核心）
         from .bench import cmd_bench
@@ -1255,6 +1265,43 @@ def _print_ux_report(u: dict[str, Any]) -> None:
        console.print(f"  Agent 分布:          {u['agent_distribution']}")
     console.print(f"  Skill 使用率:        {u['skill_usage_pct']}%")
     console.print("─" * 50)
+
+
+def _print_acceptance_report(m: dict[str, Any]) -> None:
+    """spec-to-test 四项预注册口径报告（ADR-012）。"""
+    def _pct(v: Any) -> str:
+        return "—" if v is None else f"{v * 100:.1f}%"
+
+    c, o, mj, rv, cost = m["cohort"], m["oracle"], m["misjudge"], m["review"], m["cost"]
+    console.print("\nspec-to-test 验收测试口径（ADR-012）")
+    console.print("─" * 50)
+    if m.get("window_days"):
+        console.print(f"  窗口:              最近 {m['window_days']} 天")
+    console.print(f"  启用队列:          {c['tasks']} 任务（冻结 {c['frozen']}｜起草 {c['drafted']}｜"
+                  f"评测口径 {c['provided']}｜降级 {c['degraded']}）")
+    console.print(f"  ★ 首次验证通过率:   {_pct(o['first_attempt_pass_rate'])}"
+                  f"（{o['first_attempt_passed']}/{o['first_attempt_total']}，验收命令 attempt=1）")
+    console.print(f"    全部尝试通过率:   {_pct(o['all_attempts_pass_rate'])}"
+                  f"（{o['all_attempts_passed']}/{o['all_attempts_total']}）")
+    console.print(f"  ★ 误判信号率:       {_pct(mj['reject_rate'])}"
+                  f"（拒绝 {mj['rejected']}＋不可执行 {mj['not_executable_127']} / {mj['command_total']}）")
+    console.print(f"    advisory 冲突:    {mj['semantic_advisory']}（oracle 过而语义评估不过 → 降级记录）")
+    console.print(f"  护栏①拦截:         {o['restore_events']} 次 / 恢复 {o['restored_files']} 个文件")
+    ch = "、".join(f"{k}={v}" for k, v in sorted((rv.get("channel_counts") or {}).items())) or "—"
+    console.print(f"  人审:              {rv['reviewed_tasks']} 任务（渠道 {ch}）；编辑 {rv['edits_total']} 次；"
+                  f"采纳率 {_pct(rv.get('adoption_rate'))}（{rv['files_total'] - rv['files_edited']}/{rv['files_total']} 文件未改）")
+    console.print(f"  ★ 人审干预分钟数:   {rv['minutes_total']} min 合计 / "
+                  f"均值 {rv['minutes_mean'] if rv['minutes_mean'] is not None else '—'} / "
+                  f"中位 {rv['minutes_median'] if rv['minutes_median'] is not None else '—'}"
+                  f"（{rv['minutes_count']} 任务，起草→冻结）")
+    ac, bc = cost["acceptance_cohort"], cost["baseline_cohort"]
+    console.print(f"  ★ Cost per AD:     启用队列 ${ac['cost_per_ad'] if ac['cost_per_ad'] is not None else '—'}"
+                  f"（{ac['accepted']}/{ac['tasks']} 交付，${ac['cost_usd']}） vs "
+                  f"其余队列 ${bc['cost_per_ad'] if bc['cost_per_ad'] is not None else '—'}"
+                  f"（{bc['accepted']}/{bc['tasks']} 交付，${bc['cost_usd']}）")
+    _unavail = cost.get("draft_cost_unavailable_tasks") or 0
+    console.print(f"    起草差分成本:     ${cost['draft_cost_usd']}"
+                  + (f"（另有 {_unavail} 任务成本不可得：无 metering 通道）" if _unavail else ""))
 
 
 def _print_aggregate_quality(agg: Optional[dict[str, Any]]) -> None:

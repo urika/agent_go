@@ -721,7 +721,10 @@ async function renderAcceptancePanel(id, el) {
   if (m.drafted_at && m.frozen_at) trace.push('起草→冻结耗时 ' + esc(m.drafted_at) + ' → ' + esc(m.frozen_at));
   else if (m.drafted_at) trace.push('起草于 ' + esc(m.drafted_at));
   if (m.draft_model) trace.push('起草模型 ' + esc(m.draft_model));
-  if (m.draft_cost_usd) trace.push('起草成本 $' + Number(m.draft_cost_usd).toFixed(4));
+  if (m.draft_cost_usd !== null && m.draft_cost_usd !== undefined)
+    trace.push('起草成本 $' + Number(m.draft_cost_usd).toFixed(4) + (m.draft_cost_source === 'unavailable' ? '（估算口径不可得）' : ''));
+  else if (m.frozen_at) trace.push('起草成本 不可得（无 metering 通道）');
+  if (m.review_actor) trace.push('审批人 ' + esc(m.review_actor));
   if (d.adoption !== null && d.adoption !== undefined)
     trace.push('人审采纳率 ' + Math.round(d.adoption*100) + '%（未编辑文件占比）');
   if (trace.length) head += '<div class="h-line" style="color:var(--dim)">留痕: ' + trace.join('｜') + '</div>';

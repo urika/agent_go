@@ -148,6 +148,7 @@ DEFAULT_CONFIG = {
         "max_file_bytes": 20000,        # 单文件体量上限（安全面）
         "max_commands": 5,              # 验收命令条数上限
         "oracle_priority": True,        # 可执行 oracle 优先于语义评估（护栏③）
+        "mcp_review": "allow",          # MCP 代审策略：allow=宿主可代人工提交人审回执；deny=仅 CLI/web 人工通道
     },
     "fallback": {
         "local_model_url": "http://localhost:4000/v1/chat/completions",

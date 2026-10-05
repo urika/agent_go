@@ -293,7 +293,7 @@ def _build_parser():
 
     # eval 子命令
     eval_parser = subparsers.add_parser("eval", help="Quality/performance/cost evaluation")
-    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "recommend", "judge", "validate-schema", "metric-freeze", "batch-manifest", "calibrate-difficulty", "insight", "all"],
+    eval_parser.add_argument("subcommand", choices=["quality", "perf", "cost", "reliability", "ux", "gate", "bench", "baseline", "cost-baseline", "models", "recommend", "judge", "validate-schema", "metric-freeze", "batch-manifest", "calibrate-difficulty", "insight", "acceptance", "all"],
                              help="Evaluation type")
     eval_parser.add_argument("task_id", nargs="?", help="Task ID to evaluate")
     eval_parser.add_argument("--all", dest="eval_all", action="store_true", help="Evaluate all tasks")
@@ -305,6 +305,8 @@ def _build_parser():
     eval_parser.add_argument("--update-baseline", dest="update_baseline", action="store_true",
                              help="gate 强制更新历史基线为当前 rate（模型升级等场景重置基线）")
     # bench / models 子命令参数
+    eval_parser.add_argument("--window-days", dest="window_days", type=int, default=None,
+                             help="acceptance 子命令：只聚合最近 N 天创建的任务")
     eval_parser.add_argument("--tasks", dest="tasks", default="eval_suite",
                              help="任务集目录（bench 子命令，缺省 eval_suite/）")
     eval_parser.add_argument("--candidate-models", dest="candidate_models",

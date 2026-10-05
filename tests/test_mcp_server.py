@@ -784,3 +784,30 @@ class TestAcceptanceMcpSurface:
         assert "--accept-tests" in cmd and cmd[cmd.index("--confirm-mode") + 1] == "web"
         # --yes 仍随 _argv 基座携带（交互确认全跳过）；--json 保持顶层前置
         assert "--yes" in cmd and cmd[3] == "--json"
+
+    def test_acceptance_review_policy_deny(self, server, tmp_path, monkeypatch):
+        """spec_test.mcp_review=deny ⇒ 拒绝代审（只允许 CLI/web 人工通道），且不落盘。"""
+        td, task_id = self._mk_frozen_task(tmp_path)
+        (td / "pending_confirmation.json").write_text(
+            json.dumps({"stage": "plan", "payload": {}, "ts": "", "timeout_sec": 600}), encoding="utf-8")
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({"spec_test": {"mcp_review": "deny"}}), encoding="utf-8")
+        import agent_go.config as _cfg_mod
+        monkeypatch.setattr(_cfg_mod, "CONFIG_PATH", cfg_path)
+        with pytest.raises(MCPError) as ei:
+            server._tool_review({"task_id": task_id, "action": "acceptance_review",
+                                 "acceptance_decision": "approved"}, token="tok")
+        assert ei.value.code == "AGENT_GO_ACCEPTANCE_POLICY"
+        assert not (td / "confirmation_decision.json").exists()
+
+    def test_acceptance_review_records_actor(self, server, tmp_path):
+        """身份留痕：token 哈希前 8 位，不落明文。"""
+        td, task_id = self._mk_frozen_task(tmp_path)
+        (td / "pending_confirmation.json").write_text(
+            json.dumps({"stage": "plan", "payload": {}, "ts": "", "timeout_sec": 600}), encoding="utf-8")
+        server._tool_review({"task_id": task_id, "action": "acceptance_review",
+                             "acceptance_decision": "skipped"}, token="secret-token")
+        data = json.loads((td / "confirmation_decision.json").read_text(encoding="utf-8"))
+        import hashlib as _hl
+        assert data["review_actor"] == "mcp:" + _hl.sha256(b"secret-token").hexdigest()[:8]
+        assert "secret-token" not in json.dumps(data)

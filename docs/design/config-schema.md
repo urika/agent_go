@@ -196,6 +196,7 @@ LLM 语义评估器。验证命令通过后，调用 LLM 对 Claude 输出做语
 | `max_file_bytes` | int | `20000` | 单文件体量上限（安全面） |
 | `max_commands` | int | `5` | 验收命令条数上限 |
 | `oracle_priority` | bool | `true` | 护栏③：oracle 通过时语义评估失败降级 advisory（不阻断） |
+| `mcp_review` | str | `"allow"` | MCP 代审策略：`allow`=宿主可代人工提交人审回执（留痕 actor）；`deny`=仅 CLI/web 人工通道（独立性要求场景） |
 
 ---
 
